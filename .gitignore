@@ -1,0 +1,46 @@
+# Compiled source files
+*.class
+
+# Logs
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Python
+*.pyc
+*.pyo
+__pycache__/
+
+# Node.js
+node_modules/
+
+# Java
+*.jar
+*.war
+*.ear
+
+# C/C++
+*.obj
+*.o
+*.exe
+
+# Backup files
+*.bak
+*.tmp
+*.swp
+
+# IDEs and editors
+.vscode/
+.idea/
+*.iml
+
+# Build directories
+**/build/
+**/dist/
+**/output/
+
+# Environment files
+.env
+.venv

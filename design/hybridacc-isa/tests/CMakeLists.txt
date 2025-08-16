@@ -1,0 +1,3 @@
+add_executable(test_assembler test_assembler.cpp)
+target_link_libraries(test_assembler PRIVATE hybridacc_asm)
+add_test(NAME assembler COMMAND test_assembler)
