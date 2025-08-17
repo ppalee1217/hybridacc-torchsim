@@ -1,0 +1,126 @@
+# 我想要有一個python工具可以生成hybridacc-pe測試資料:
+# 1. 運算模式選擇:
+#    (a) conv1D, kernel size = 3, input channel=4, stride = 1, kernel 數量 (1~16 組自選), input width (3~800 可設定)
+#    (b) conv1D, kernel size = 5, input channel=2, stride = 1, kernel 數量 (1~16 組自選), input width (3~800 可設定)
+#    (c) conv1D, kernel size = 7, input channel=1, stride = 2, kernel 數量 (1~16 組自選), input width (3~800 可設定)
+# 2.  生成檔案:
+#    (a) .bin/.hex 二選一
+#    (b) 區分成 activatetion input / activation output / partial sum input / weight
+# 3. 資料格式: fp16
+# 4. 新增: 可選擇輸出資料 layout: channels_first (預設) 或 channels_last
+#    channels_first:
+#       activation_input: (C_in, W_in)
+#       activation_output / ps_input: (C_out, W_out)
+#       weight: (C_out, C_in, K)
+#    channels_last:
+#       activation_input: (W_in, C_in)
+#       activation_output / ps_input: (W_out, C_out)
+#       weight: (K, C_in, C_out)  (對應常見 NHWC / TF filter 佈局)
+
+import argparse
+import numpy as np
+from pathlib import Path
+from typing import Tuple
+import torch
+
+MODES = {
+    'a': dict(kernel_size=3, in_ch=4, stride=1),
+    'b': dict(kernel_size=5, in_ch=2, stride=1),
+    'c': dict(kernel_size=7, in_ch=1, stride=2),
+}
+
+def conv1d_valid(act: np.ndarray, weight: np.ndarray, stride: int) -> np.ndarray:
+    import torch.nn.functional as F
+
+    # act: (C_in, W_in), weight: (C_out, C_in, K)
+    act_torch = torch.tensor(act[None, :, :], dtype=torch.float32)  # Add batch dimension: (1, C_in, W_in)
+    weight_torch = torch.tensor(weight, dtype=torch.float32)  # (C_out, C_in, K)
+    out_torch = F.conv1d(act_torch, weight_torch, stride=stride)  # Perform 1D convolution
+    out = out_torch.numpy()[0]  # Remove batch dimension: (C_out, W_out)
+    return out
+
+def save_array(arr: np.ndarray, path: Path, fmt: str):
+    arr16 = arr.astype(np.float16)
+    if fmt == 'bin':
+        path.write_bytes(arr16.tobytes())
+    else:
+        # 轉成 uint16 bit pattern，小端視圖
+        u16 = arr16.view(np.uint16).reshape(-1)
+        with path.open('w') as f:
+            for v in u16:
+                f.write(f"{v:04x}\n")
+
+def generate(mode: str, out_ch: int, in_width: int, fmt: str, out_dir: Path, seed: int = 0, no_ps: bool = False, layout: str = 'channels_first'):
+    if mode not in MODES:
+        raise ValueError("mode 必須為 a/b/c")
+    if layout not in ('channels_first', 'channels_last'):
+        raise ValueError("layout 需為 channels_first 或 channels_last")
+    cfg = MODES[mode]
+    k, in_ch, stride = cfg['kernel_size'], cfg['in_ch'], cfg['stride']
+    if not (1 <= out_ch <= 16):
+        raise ValueError("out_ch 範圍 1~16")
+    if not (3 <= in_width <= 800):
+        raise ValueError("in_width 範圍 3~800")
+    if in_width < k:
+        raise ValueError("input width 需 >= kernel size")
+    np.random.seed(seed)
+    # 內部統一使用 channels_first 計算
+    act_in_cf = np.random.uniform(-1, 1, size=(in_ch, in_width)).astype(np.float32)
+    weight_cf = np.random.uniform(-1, 1, size=(out_ch, in_ch, k)).astype(np.float32)
+    conv_out_cf = conv1d_valid(act_in_cf, weight_cf, stride)
+    ps_shape_cf = conv_out_cf.shape  # (C_out, W_out)
+    ps_in_cf = np.zeros(ps_shape_cf, dtype=np.float32) if no_ps else np.random.uniform(-0.5, 0.5, size=ps_shape_cf).astype(np.float32)
+    act_out_cf = conv_out_cf + ps_in_cf
+
+    # 依 layout 轉換欲儲存的 tensor
+    if layout == 'channels_first':
+        act_in_save = act_in_cf            # (C_in, W_in)
+        weight_save = weight_cf            # (C_out, C_in, K)
+        ps_in_save = ps_in_cf              # (C_out, W_out)
+        act_out_save = act_out_cf          # (C_out, W_out)
+    else:  # channels_last
+        act_in_save = np.transpose(act_in_cf, (1, 0))          # (W_in, C_in)
+        # 轉成 (K, C_in, C_out)
+        weight_save = np.transpose(weight_cf, (0, 2, 1))       # (K, C_in, C_out)
+        ps_in_save = np.transpose(ps_in_cf, (1, 0))            # (W_out, C_out)
+        act_out_save = np.transpose(act_out_cf, (1, 0))        # (W_out, C_out)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    save_array(act_in_save, out_dir / f"activation_input.{fmt}", fmt)
+    save_array(weight_save, out_dir / f"weight.{fmt}", fmt)
+    save_array(ps_in_save, out_dir / f"ps_input.{fmt}", fmt)
+    save_array(act_out_save, out_dir / f"activation_output.{fmt}", fmt)
+    meta = {
+        "mode": mode, "kernel_size": k, "in_ch": in_ch, "stride": stride,
+        "out_ch": out_ch, "in_width": in_width,
+        "out_width": conv_out_cf.shape[1],
+        "format": fmt, "seed": seed, "partial_sum_zero": no_ps,
+        "layout": layout,
+        "activation_input_shape_saved": act_in_save.shape,
+        "activation_input_shape_internal_cf": act_in_cf.shape,
+        "weight_shape_saved": weight_save.shape,
+        "weight_shape_internal_cf": weight_cf.shape,
+        "ps_input_shape_saved": ps_in_save.shape,
+        "activation_output_shape_saved": act_out_save.shape,
+    }
+    (out_dir / "meta.txt").write_text("\n".join(f"{k}:{v}" for k, v in meta.items()), encoding='utf-8')
+    print("資料生成完成:", out_dir)
+
+def parse_args():
+    p = argparse.ArgumentParser(description="HybridAcc PE 測試資料生成工具 (fp16)")
+    p.add_argument('--mode', choices=['a','b','c'], required=True, help='a/b/c 對應題述三種配置')
+    p.add_argument('--out-ch', type=int, required=True, help='輸出 kernel(通道) 數 1~16')
+    p.add_argument('--in-width', type=int, required=True, help='輸入寬度 3~800')
+    p.add_argument('--fmt', choices=['bin','hex'], default='bin', help='輸出格式')
+    p.add_argument('--out-dir', type=Path, required=True, help='輸出資料夾')
+    p.add_argument('--seed', type=int, default=0, help='隨機種子')
+    p.add_argument('--no-ps', action='store_true', help='partial sum 改為全 0')
+    p.add_argument('--layout', choices=['channels_first','channels_last'], default='channels_last', help='輸出張量記憶體排布')
+    return p.parse_args()
+
+def main():
+    args = parse_args()
+    generate(args.mode, args.out_ch, args.in_width, args.fmt, args.out_dir, args.seed, args.no_ps, args.layout)
+
+if __name__ == "__main__":
+    main()

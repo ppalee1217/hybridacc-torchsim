@@ -77,6 +77,8 @@ calculate_psum:
     VPSUM vp0
     VPSUM vp1
     VPSUM vp2
+    VPSUM vp3
+    CLEAR.P # Clear the partial sum register
 
     TSHIFT K3
     LOOPEND

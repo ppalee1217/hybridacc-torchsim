@@ -79,5 +79,6 @@ psum:
     LOOPIN 24 # Loop for 24 partial sums
     VPSUMR 1
     LOOPEND # psum
+    CLEAR.P # Clear the partial sum register
 
     HALT  # End of program

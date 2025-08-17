@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <functional>
 #include <fstream>
+#include <filesystem> // 新增: 使用 PortIO::loadDir / savePOL 所需
 
 #include "component.hpp"
 #include "simulator.hpp"
@@ -66,12 +67,74 @@ std::vector<uint16_t> PortIO::getPD() const {
     return result;
 }
 
+// 新增: 從資料夾載入測試資料
+bool PortIO::loadDir(const std::string &dir){
+    namespace fs = std::filesystem;
+    // 先清空既有內容
+    PD = {}; PS = {}; PIL = {}; POL = {};
+
+    if(!fs::exists(dir) || !fs::is_directory(dir)){
+        std::cerr << "[PortIO] data directory not found: " << dir << "\n";
+        return false; // 目錄本身不存在才回傳 false
+    }
+
+    auto load_words16 = [&](const fs::path &p){
+        std::ifstream ifs(p, std::ios::binary);
+        if(!ifs){ std::cerr << "[PortIO] cannot open file: " << p << "\n"; return; }
+        uint16_t v; while(ifs.read(reinterpret_cast<char*>(&v), sizeof(v))){ PD.push(v); }
+        ifs.close();
+    };
+    auto load_words64_queue = [&](const fs::path &p, std::queue<uint64_t> &q){
+        std::ifstream ifs(p, std::ios::binary);
+        if(!ifs){ std::cerr << "[PortIO] cannot open file: " << p << "\n"; return; }
+        uint64_t v; while(ifs.read(reinterpret_cast<char*>(&v), sizeof(v))){ q.push(v); }
+        ifs.close();
+    };
+    auto load_words64_vec = [&](const fs::path &p, std::vector<uint64_t> &vec){
+        std::ifstream ifs(p, std::ios::binary);
+        if(!ifs){ std::cerr << "[PortIO] cannot open file: " << p << "\n"; return; }
+        uint64_t v; while(ifs.read(reinterpret_cast<char*>(&v), sizeof(v))){ vec.push_back(v); }
+        ifs.close();
+    };
+
+    fs::path base(dir);
+    fs::path f_act_in = base/"activation_input.bin";   // PD
+    fs::path f_weight = base/"weight.bin";              // PS
+    fs::path f_ps_in  = base/"ps_input.bin";            // PIL
+
+    bool missing=false;
+    if(fs::exists(f_act_in)) load_words16(f_act_in); else { std::cerr<<"[PortIO] warning: "<<f_act_in.filename()<<" missing\n"; missing=true; }
+    if(fs::exists(f_weight)) load_words64_queue(f_weight, PS); else { std::cerr<<"[PortIO] warning: "<<f_weight.filename()<<" missing\n"; missing=true; }
+    if(fs::exists(f_ps_in))  load_words64_queue(f_ps_in, PIL); else { std::cerr<<"[PortIO] warning: "<<f_ps_in.filename()<<" missing\n"; missing=true; }
+
+    std::cout << "[PortIO] loaded data from "<<dir << "\n";
+    std::cout  << "[PortIO] PD="<<PD.size() << " PS="<<PS.size()
+              << " PIL="<<PIL.size() << (missing?" (partial)":"") << "\n";
+    return true; // 只要目錄存在即視為成功
+}
+
+// 新增: 將 POL 內容輸出為 .bin
+bool PortIO::savePOL(const std::string &filepath) const {
+    std::ofstream ofs(filepath, std::ios::binary);
+    if(!ofs){
+        std::cerr << "[PortIO] cannot open output file: " << filepath << "\n";
+        return false;
+    }
+    auto tmp = POL; // 複製一份，避免改變原佇列
+    while(!tmp.empty()){
+        uint64_t v = tmp.front(); tmp.pop();
+        ofs.write(reinterpret_cast<const char*>(&v), sizeof(v));
+    }
+    ofs.close();
+    std::cout << "[PortIO] saved POL to " << filepath << " (words=" << getPOL().size() << ")\n";
+    return true;
+}
 
 // ----------------- 新增: PESimulator 基本介面實作 -----------------
 PESimulator::PESimulator(const PEConfig &cfg){
     state.cfg = cfg;
-    state.IM.resize(cfg.im_words);
-    state.DM.resize(cfg.dm_words);
+    state.IM.resize(cfg.im_size);
+    state.DM.resize(cfg.dm_size);
     state.DMA.init(&state.DM, &state.dmrv, &state.dmwv, cfg.dma_latency);
     state.TR.reset();
     state.PS.reset();
@@ -136,10 +199,16 @@ void PESimulator::execute(uint16_t w) {
     // DMA Stores (only SD simplified -> just advance base)
     if(opcode==0 && funct2==3){
         if(func3==3){
-            S.DMA.issue(DMARequestType::STORE_DWORD, 1, false); // SD
+            int stride = (w>>10)&0x7;
+            uint64_t ps_word = 0;
+            if (!port_io || !port_io->popPS(ps_word)) {
+                throw std::runtime_error("Blocking read failed: PS port is empty");
+            }
+            S.dmwv.fromUint64(ps_word); // 從 PS 佇列讀取值
+
+            S.DMA.issue(DMARequestType::STORE_DWORD, stride, false); // SD
             while (S.DMA.busy()) {
-                uint64_t ps_word = 0;
-                if (!port_io || !port_io->popPS(ps_word)) {
+                if (!port_io->popPS(ps_word)) {
                     throw std::runtime_error("Blocking read failed: PS port is empty");
                 }
                 S.dmwv.fromUint64(ps_word);
@@ -161,12 +230,12 @@ void PESimulator::execute(uint16_t w) {
             int code = (w>>10)&0x7; // kernel size code (0:K3 1:K5 2:K7)
             uint16_t maskBits = 0;
             switch(code){
-                case 0: // K3 -> 110110110110b
-                    maskBits = 0b110110110110; break;
-                case 1: // K5 -> 111101111000b
-                    maskBits = 0b111101111000; break;
-                case 2: // K7 -> 111111000000b
-                    maskBits = 0b111111000000; break;
+                case 0: // K3 -> 011011011011b (11 ~ 0)
+                    maskBits = 0b011011011011; break;
+                case 1: // K5 -> 000111101111b (11 ~ 0)
+                    maskBits = 0b000111101111; break;
+                case 2: // K7 -> 000000111111b (11 ~ 0)
+                    maskBits = 0b000000111111; break;
                 default: maskBits = 0; break; // 未定義 code 清空
             }
             state.TR.shift(maskBits); // 將 T registers 向右移動
@@ -218,6 +287,9 @@ void PESimulator::execute(uint16_t w) {
                     Element oldp = state.PS.getP(prd);
                     Element newp = state.valu.vmac(vt, state.dmrv, oldp);
                     state.PS.setP(prd, newp);
+
+                    // std::cerr << "[PESimulator] VMACR/VMACRN: P[" << prd << "] = 0x" << std::hex <<  newp << std::dec;
+                    // std::cerr << ", VT[" << vtrs << "] = " << std::hex << vt.toUint64() << ", DMRV = " << state.dmrv.toUint64() << std::dec << "\n";
 
                     // 更新動態計數器 P
                     if(pstride==31) state.PS.psum_cnt = 0;
@@ -275,8 +347,8 @@ void PESimulator::execute(uint16_t w) {
     // CLEAR
     if(opcode==2 && funct2==3){
         switch(func3){
-            case 0: state.TR.vtid_cnt = 0; break; // CLEAR.T
-            case 1: state.PS.psum_cnt = 0; break; // CLEAR.P
+            case 0: state.TR.clear(); break; // CLEAR.T
+            case 1: state.PS.clear(); break; // CLEAR.P
             default: break;
         }
         return;
@@ -341,14 +413,19 @@ int run_simulator_cli(int argc, char **argv){
     std::string progFile; // 可為 .asm / .hex / .bin
     std::string dumpPath; // --dump <file|->
     bool trace=false; uint64_t max_cycles=0;
+    std::string dataDir; // 新增: 資料夾
+    std::string jsonReportPath; // (預留, 目前未使用)
+    std::string polOutPath; // 新增: 輸出 POL 的檔案路徑
     for(int i=1;i<argc;i++){
         std::string a=argv[i];
         if(a=="-asm" && i+1<argc){ progFile=argv[++i]; }
         else if(a=="-trace"){ trace=true; }
         else if(a=="-max" && i+1<argc){ max_cycles=std::stoull(argv[++i]); }
         else if(a=="--dump" && i+1<argc){ dumpPath=argv[++i]; }
+        else if(a=="--data" && i+1<argc){ dataDir=argv[++i]; }
+        else if(a=="--pol" && i+1<argc){ polOutPath = argv[++i]; }
         else if(a=="-h"||a=="--help"){
-            std::cout << "Usage: ha-sim -asm program.(asm|hex|bin) [-trace] [-max N] [--dump out.txt|-]\n";
+            std::cout << "Usage: ha-sim -asm program.(asm|hex|bin) [-trace] [-max N] [--dump out.txt|-] [--data datadir] [--pol pol_output.bin]" << "\n";
             return 0;
         }
     }
@@ -376,16 +453,17 @@ int run_simulator_cli(int argc, char **argv){
         return 1;
     }
 
-    PEConfig cfg; cfg.enable_trace=trace;
-    if(prog.size() > (size_t)cfg.im_words){
-        std::cerr << "Program size "<<prog.size()<<" words exceeds IM capacity "<<cfg.im_words<<" words\n";
+    PEConfig cfg;
+    cfg.enable_trace=trace;
+    if(prog.size() * sizeof(uint16_t) > (size_t)cfg.im_size ){
+        std::cerr << "Program size "<<prog.size() << "(Bytes) exceeds IM capacity "<<cfg.im_size <<" (Bytes)\n";
         return 1;
     }
 
     // 新增: 印出 IM 使用率 (以位元組)
     {
         size_t used_bytes = prog.size() * sizeof(uint16_t); // 16-bit word = 2 bytes
-        size_t cap_bytes  = (size_t)cfg.im_words * sizeof(uint16_t);
+        size_t cap_bytes  = (size_t)cfg.im_size;
         double usage_pct = (cap_bytes==0)?0.0: (double)used_bytes * 100.0 / (double)cap_bytes;
         std::ios old_state(nullptr); old_state.copyfmt(std::cout);
         std::cout << "IM usage: " << used_bytes << "/" << cap_bytes
@@ -409,6 +487,12 @@ int run_simulator_cli(int argc, char **argv){
 
     // 新增: 設定 PortIO
     PortIO port_io;
+    if(!dataDir.empty()){
+        if(!port_io.loadDir(dataDir)){
+            std::cerr << "Failed to load data directory: "<<dataDir<<"\n";
+            return 1;
+        }
+    }
 
     PESimulator sim(cfg);
     sim.loadProgram(prog);
@@ -416,6 +500,13 @@ int run_simulator_cli(int argc, char **argv){
 
     std::cout << "Starting simulation...\n";
     sim.run(max_cycles);
+
+    // 新增: 若指定輸出 POL 則寫檔
+    if(!polOutPath.empty()){
+        if(!port_io.savePOL(polOutPath)){
+            std::cerr << "Failed to save POL to: " << polOutPath << "\n";
+        }
+    }
 
     auto &S = sim.getState();
     std::cout << "\n\nSimulation Halted\n";

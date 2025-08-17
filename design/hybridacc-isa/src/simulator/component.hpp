@@ -11,8 +11,8 @@
 namespace hybridacc {
 
 struct PEConfig {
-    int im_words = 256;      // Instruction memory capacity (16-bit words)
-    int dm_words = 256;      // Data memory capacity (16-bit words)
+    int im_size = 512;      // Instruction memory capacity (bytes)
+    int dm_size = 512;      // Data memory capacity (bytes)
     int dma_latency = 1;     // Cycles from issuing DMA load until data visible in DMRV
     bool enable_trace = false;
 };
@@ -50,17 +50,17 @@ class VALU {
         Element vmac(const Vector& a, const Vector& b, const Element& c);
         Vector vmul(const Vector& a, const Vector& b, const Vector& c);
         Vector vadd(const Vector& a, const Vector& b);
-    private:
         uint16_t fp16_mul(uint16_t a, uint16_t b);
         uint16_t fp16_add(uint16_t a, uint16_t b);
+    private:
         int latency; // cycles for operation
 };
 
 // Instruction Memory
 class InstructionMemory {
 public:
-    explicit InstructionMemory(int words = 256): mem(words, 0), program_size(0) {}
-    void resize(int words){ mem.assign(words, 0); program_size = 0; }
+    explicit InstructionMemory(int bytes = 512): mem(bytes / sizeof(uint16_t), 0), program_size(0) {}
+    void resize(int bytes){ mem.assign(bytes / sizeof(uint16_t), 0); program_size = 0; }
     void load(const std::vector<uint16_t>& prog);
     uint16_t fetch(int pc) const { return mem[pc / sizeof(uint16_t)]; }
     int size() const { return (int)mem.size() * sizeof(uint16_t); }
@@ -73,11 +73,11 @@ private:
 // Data Memory (element size 16-bit, bandwidth 64-bit)
 class DataMemory {
 public:
-    explicit DataMemory(int words = 256): mem(words*sizeof(uint16_t), 0) {} // 16bits
-    void resize(int words) { mem.resize(words*sizeof(uint16_t), 0); }
+    explicit DataMemory(int bytes = 512): mem(bytes / sizeof(uint8_t), 0) {} // 初始化為 512 bytes
+    void resize(int bytes) { mem.resize(bytes / sizeof(uint8_t), 0); }
     uint64_t readWord(int idx) const; // 加上 const
     void writeWord(int idx, uint64_t v, uint8_t mask);
-    int size() const { return (int)(mem.size()); }
+    int size() const { return (int)(mem.size() * sizeof(uint8_t)); }
     const std::vector<uint8_t>& raw() const { return mem; }
 private:
     std::vector<uint8_t> mem;
@@ -88,7 +88,8 @@ class TransformRegFile {
 public:
     int tid_cnt;
     int vtid_cnt;
-    void reset() {reg.fill(0); tid_cnt = 0; vtid_cnt = 0;}
+    void clear() { reg.fill(0); }
+    void reset() {clear(); tid_cnt = 0; vtid_cnt = 0;}
     void setT(int tid, Element v) { reg[tid] = v; }
     Element getT(int tid) const { return reg[tid]; }
     Vector getVT(int vtid) const {
@@ -109,9 +110,12 @@ public:
     int psum_cnt; // 32 partial sum registers
     int vpsum_cnt; // 8 vector partial sum registers (64-bit)
     std::array<Element,32> P{};    // Partial sum scalar
-    void reset() {
+    void clear() {
         P.fill(0);
         for(auto &v: VP64){ v = Vector(); }
+    }
+    void reset() {
+        clear();
         psum_cnt = 0; vpsum_cnt = 0;
     }
     void setP(int pid, Element v) { P[pid] = v; }
@@ -119,7 +123,7 @@ public:
     void setVP64(int vpid, const Vector& v) {
         if (vpid < 8){
             for (int i = 0; i < 4; ++i) {
-                P[vpid * 3 + i] = v.lanes[i]; // 4 scalar registers for vector lanes
+                P[vpid * 4 + i] = v.lanes[i]; // 4 scalar registers for vector lanes
             }
         } else {
             VP64[vpid - 8] = v; // 24 vector registers
@@ -129,7 +133,7 @@ public:
         if (vpid < 8) {
             Vector v;
             for (int i = 0; i < 4; ++i) {
-                v.lanes[i] = P[vpid * 3 + i];
+                v.lanes[i] = P[vpid * 4 + i];
             }
             return v;
         } else {
@@ -146,10 +150,10 @@ class LoopController {
 public:
     void loopIn(uint16_t start_pc, uint16_t count);
     void loopBreak();
-    bool empty() const { return stack.empty(); }
+    bool empty() const { return loopstack.empty(); }
     bool handleLoopEndFlag(uint16_t &pc_after_increment);
 private:
-    std::vector<LoopFrame> stack;
+    std::vector<LoopFrame> loopstack; // 使用 vector 來儲存 loop frames
 };
 
 enum class DMARequestType {

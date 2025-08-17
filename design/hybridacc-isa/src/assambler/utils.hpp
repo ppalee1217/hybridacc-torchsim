@@ -5,6 +5,7 @@
 #define FP16_ZERO 0x0000
 #define FP16_ONE  0x3C00
 #define FP16_INFINITY 0x7C00
+#define FP16_NAN 0x7E00
 
 namespace hybridacc {
 // I/O 公用函式：讀寫 16-bit 指令字序列 (host endian)
