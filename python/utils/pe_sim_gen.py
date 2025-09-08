@@ -80,7 +80,34 @@ def pack_weight_mode_b(weight_cf: np.ndarray, layout: str) -> np.ndarray:
 
     return np.stack(packed, axis=0).copy(order='C')
 
+def pack_weight_mode_c(weight_cf: np.ndarray, layout: str) -> np.ndarray:
+    C_out, C_in, K = weight_cf.shape
+    assert (C_in, K) == (1, 7), "mode c 預期 C_in=1 且 K=7"
+    
+    packed = []
+    for co in range(C_out):
+        seq = weight_cf[co].reshape(-1)   # 7 個
+        out12 = np.empty(12, dtype=seq.dtype)
+        out12[0] = seq[0]     # 0
+        out12[1] = seq[3]     # 3
+        out12[2] = seq[6]     # 6
+        out12[3] = 0.0        # 9
+        out12[4] = seq[1]     # 1
+        out12[5] = seq[4]     # 4
+        out12[6] = 0.0        # 7
+        out12[7] = 0.0        # 10
+        out12[8] = seq[2]     # 2
+        out12[9] = seq[5]     # 5
+        out12[10:] = 0.0
 
+        if layout == 'channels_last':
+            block = out12.reshape(12, 1)    # (12,1)
+        else:
+            block = out12.reshape(1, 12)    # (1,12)
+
+        packed.append(block)
+
+    return np.stack(packed, axis=0).copy(order='C')
 
 def generate(mode: str, out_ch: int, in_width: int, fmt: str, out_dir: Path, seed: int = 0, no_ps: bool = False, layout: str = 'channels_first'):
     if mode not in MODES:
@@ -111,6 +138,8 @@ def generate(mode: str, out_ch: int, in_width: int, fmt: str, out_dir: Path, see
         act_out_save = act_out_cf
         if mode == 'b':
             weight_save = pack_weight_mode_b(weight_cf, layout='channels_first')  # (C_out, C_in, 6)
+        elif mode == 'c':
+            weight_save = pack_weight_mode_c(weight_cf, layout='channels_first')  # (C_out, C_in, 12)
         else:
             weight_save = weight_cf  # (C_out, C_in, K)
 
@@ -122,6 +151,8 @@ def generate(mode: str, out_ch: int, in_width: int, fmt: str, out_dir: Path, see
 
         if mode == 'b':
             weight_save = pack_weight_mode_b(weight_cf, layout='channels_last')   # (C_out, 6, 2)
+        elif mode == 'c':
+            weight_save = pack_weight_mode_c(weight_cf, layout='channels_last')   # (C_out, 12, 1)
         else:
             weight_save = np.transpose(weight_cf, (0, 2, 1))  # (C_out, K, C_in)
 
