@@ -67,7 +67,7 @@ def pack_weight_mode_b(weight_cf: np.ndarray, layout: str) -> np.ndarray:
         out12[6] = seq[6]     # 7
         out12[7] = seq[9]     # 10
         out12[8] = seq[2]     # 2
-        out12[9] = seq[5]     # 5
+        out12[9] = 0.0        # 5
         out12[10] = seq[7]    # 8
         out12[11] = 0.0       # 11
 
@@ -147,7 +147,6 @@ def generate(mode: str, out_ch: int, in_width: int, fmt: str, out_dir: Path, see
         act_in_save = np.transpose(act_in_cf, (1, 0))      # (W_in, C_in)
         ps_in_save  = np.transpose(ps_in_cf, (1, 0))       # (W_out, C_out)
         act_out_save = np.transpose(act_out_cf, (1, 0))    # (W_out, C_out)
-        conv_out_save = np.transpose(conv_out_cf, (1, 0))  # (W_out, C_out)
 
         if mode == 'b':
             weight_save = pack_weight_mode_b(weight_cf, layout='channels_last')   # (C_out, 6, 2)
