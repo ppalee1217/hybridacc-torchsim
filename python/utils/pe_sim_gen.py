@@ -24,7 +24,7 @@ from typing import Tuple
 import torch
 
 MODES = {
-    'a': dict(kernel_size=3, in_ch=4, stride=1),
+    'a': dict(kernel_size=1, in_ch=12, stride=1),
     'b': dict(kernel_size=5, in_ch=2, stride=1),
     'c': dict(kernel_size=7, in_ch=1, stride=2),
 }
@@ -50,6 +50,38 @@ def save_array(arr: np.ndarray, path: Path, fmt: str):
             for v in u16:
                 f.write(f"{v:04x}\n")
 
+def pack_weight_mode_b(weight_cf: np.ndarray, layout: str) -> np.ndarray:
+    C_out, C_in, K = weight_cf.shape  # 這裡的 weight_cf 是 (C_out, C_in, K)
+    assert (C_in, K) == (2, 5), "mode b 預期 C_in=2 且 K=5"
+
+    packed = []
+    for co in range(C_out):
+        seq = weight_cf[co].reshape(-1)   
+        out12 = np.empty(12, dtype=seq.dtype)
+        out12[0] = seq[0]     # 0
+        out12[1] = seq[3]     # 3
+        out12[2] = seq[5]     # 6
+        out12[3] = seq[8]     # 9
+        out12[4] = seq[1]     # 1
+        out12[5] = seq[4]     # 4
+        out12[6] = seq[6]     # 7
+        out12[7] = seq[9]     # 10
+        out12[8] = seq[2]     # 2
+        out12[9] = seq[5]     # 5
+        out12[10] = seq[7]    # 8
+        out12[11] = 0.0       # 11
+
+        if layout == 'channels_last':
+            block = out12.reshape(6, 2)    # (6,2)
+        else:
+            block = out12.reshape(2, 6)    # (2,6)
+
+        packed.append(block)
+
+    return np.stack(packed, axis=0).copy(order='C')
+
+
+
 def generate(mode: str, out_ch: int, in_width: int, fmt: str, out_dir: Path, seed: int = 0, no_ps: bool = False, layout: str = 'channels_first'):
     if mode not in MODES:
         raise ValueError("mode 必須為 a/b/c")
@@ -74,16 +106,24 @@ def generate(mode: str, out_ch: int, in_width: int, fmt: str, out_dir: Path, see
 
     # 依 layout 轉換欲儲存的 tensor
     if layout == 'channels_first':
-        act_in_save = act_in_cf            # (C_in, W_in)
-        weight_save = weight_cf            # (C_out, C_in, K)
-        ps_in_save = ps_in_cf              # (C_out, W_out)
-        act_out_save = act_out_cf          # (C_out, W_out)
+        act_in_save = act_in_cf
+        ps_in_save = ps_in_cf
+        act_out_save = act_out_cf
+        if mode == 'b':
+            weight_save = pack_weight_mode_b(weight_cf, layout='channels_first')  # (C_out, C_in, 6)
+        else:
+            weight_save = weight_cf  # (C_out, C_in, K)
+
     else:  # channels_last
-        act_in_save = np.transpose(act_in_cf, (1, 0))          # (W_in, C_in)
-        # 轉成 (K, C_in, C_out)
-        weight_save = np.transpose(weight_cf, (0, 2, 1))       # (K, C_in, C_out)
-        ps_in_save = np.transpose(ps_in_cf, (1, 0))            # (W_out, C_out)
-        act_out_save = np.transpose(act_out_cf, (1, 0))        # (W_out, C_out)
+        act_in_save = np.transpose(act_in_cf, (1, 0))      # (W_in, C_in)
+        ps_in_save  = np.transpose(ps_in_cf, (1, 0))       # (W_out, C_out)
+        act_out_save = np.transpose(act_out_cf, (1, 0))    # (W_out, C_out)
+        conv_out_save = np.transpose(conv_out_cf, (1, 0))  # (W_out, C_out)
+
+        if mode == 'b':
+            weight_save = pack_weight_mode_b(weight_cf, layout='channels_last')   # (C_out, 6, 2)
+        else:
+            weight_save = np.transpose(weight_cf, (0, 2, 1))  # (C_out, K, C_in)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     save_array(act_in_save, out_dir / f"activation_input.{fmt}", fmt)
