@@ -232,8 +232,8 @@ void PESimulator::execute(uint16_t w) {
             switch(code){
                 case 0: // K3 -> 011011011011b (11 ~ 0)
                     maskBits = 0b011011011011; break;
-                case 1: // K5 -> 000111101111b (11 ~ 0)
-                    maskBits = 0b000111101111; break;
+                case 1: // K5 -> 001111001111b (11 ~ 0)
+                    maskBits = 0b001111001111; break;
                 case 2: // K7 -> 000000111111b (11 ~ 0)
                     maskBits = 0b000000111111; break;
                 default: maskBits = 0; break; // 未定義 code 清空
@@ -266,22 +266,21 @@ void PESimulator::execute(uint16_t w) {
             case 1: // VMACR / VMACRN : P[psum_cnt] += dot(VT[vtid_cnt], DMRV)
             case 3: { // VMULR / VMULRN : VP[vpsum_cnt] += mul(VT[vtid_cnt], DMRV)
                 int pstride = (w>>5)&0x1F;
-                int vpstride = (w>>5)&0x03;
+                int vpstride = (w>>5)&0x1F;
                 int vtstride = (w>>10)&0x3;
                 // 取得向量 VT
                 int prd = state.PS.psum_cnt; // 使用 psum_cnt 作為 P 索引
                 int vtrs = state.TR.vtid_cnt; // 使用 vtid_cnt 作為 VT 索引
-                int vprd = state.PS.vpsum_cnt; // 使用 vpsum_cnt 作為 VP 索引
+                // int vprd = state.PS.vpsum_cnt; // 使用 vpsum_cnt 作為 VP 索引
 
                 Vector vt = state.TR.getVT(vtrs);
-                if(func3==2){ // VMUL family => 向量輸出
-                    Vector oldv = state.PS.getVP64(vprd);
+                if(func3==3){ // VMUL family => 向量輸出
+                    Vector oldv = state.PS.getVP64(prd);
                     Vector newv = state.valu.vmul(vt, state.dmrv, oldv);
-                    state.PS.setVP64(vprd, newv);
-
+                    state.PS.setVP64(prd, newv);
                     // 更新動態計數器 VP
-                    if(vpstride=3) state.PS.vpsum_cnt = 0;
-                    else state.PS.vpsum_cnt = (state.PS.vpsum_cnt + vpstride) & 0x1F;
+                    if(vpstride==31) state.PS.psum_cnt = 0;
+                    else state.PS.psum_cnt = (state.PS.psum_cnt + vpstride) & 0x1F;
 
                 } else { // VMAC family => 累加到標量 P
                     Element oldp = state.PS.getP(prd);
@@ -314,7 +313,7 @@ void PESimulator::execute(uint16_t w) {
             } break;
             case 5: { // VPSUMR : PLO = PLI + P[psum_cnt] 並移動 psum_cnt
                 int vpstride = (w>>5)&0x1F;
-                int vprs = state.PS.vpsum_cnt; // 使用 vpsum_cnt 作為 VP 索引
+                int vprs = state.PS.psum_cnt; // 使用 vpsum_cnt 作為 VP 索引
 
                 Vector vt;
                 Vector psum = state.PS.getVP64(vprs);
@@ -325,8 +324,8 @@ void PESimulator::execute(uint16_t w) {
                 if(port_io) port_io->pushPOL(pout.toUint64());
 
                 // 更新動態計數器 VP
-                if(vpstride==3) state.PS.vpsum_cnt = 0;
-                else state.PS.vpsum_cnt = (state.PS.vpsum_cnt + vpstride) & 0x1F;
+                if(vpstride==31) state.PS.psum_cnt = 0;
+                else state.PS.psum_cnt = (state.PS.psum_cnt + vpstride) & 0x1F;
             } break;
             default: break;
         }
