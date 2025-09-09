@@ -3,6 +3,8 @@
 #    (a) conv1D, kernel size = 3, input channel=4, stride = 1, kernel 數量 (1~16 組自選), input width (3~800 可設定)
 #    (b) conv1D, kernel size = 5, input channel=2, stride = 1, kernel 數量 (1~16 組自選), input width (3~800 可設定)
 #    (c) conv1D, kernel size = 7, input channel=1, stride = 2, kernel 數量 (1~16 組自選), input width (3~800 可設定)
+#    (d) conv1D, kernel size = 1, input channel=12, stride = 1, kernel 數量 (1~16 組自選), input width (3~800 可設定)
+#    (e) GEMM,  output width (3~800), input width (3~800)
 # 2.  生成檔案:
 #    (a) .bin/.hex 二選一
 #    (b) 區分成 activatetion input / activation output / partial sum input / weight
@@ -24,9 +26,10 @@ from typing import Tuple
 import torch
 
 MODES = {
-    'a': dict(kernel_size=1, in_ch=12, stride=1),
+    'a': dict(kernel_size=3, in_ch=4, stride=1),
     'b': dict(kernel_size=5, in_ch=2, stride=1),
     'c': dict(kernel_size=7, in_ch=1, stride=2),
+    'd': dict(kernel_size=1, in_ch=12, stride=1),
 }
 
 def conv1d_valid(act: np.ndarray, weight: np.ndarray, stride: int) -> np.ndarray:
@@ -109,7 +112,7 @@ def pack_weight_mode_c(weight_cf: np.ndarray, layout: str) -> np.ndarray:
 
     return np.stack(packed, axis=0).copy(order='C')
 
-def generate(mode: str, out_ch: int, in_width: int, fmt: str, out_dir: Path, seed: int = 0, no_ps: bool = False, layout: str = 'channels_first'):
+def generate_conv(mode: str, out_ch: int, in_width: int, fmt: str, out_dir: Path, seed: int = 0, no_ps: bool = False, layout: str = 'channels_first'):
     if mode not in MODES:
         raise ValueError("mode 必須為 a/b/c")
     if layout not in ('channels_first', 'channels_last'):
@@ -176,21 +179,83 @@ def generate(mode: str, out_ch: int, in_width: int, fmt: str, out_dir: Path, see
     (out_dir / "meta.txt").write_text("\n".join(f"{k}:{v}" for k, v in meta.items()), encoding='utf-8')
     print("資料生成完成:", out_dir)
 
+def generate_gemm( out_width: int, in_width: int, dim: int, fmt: str, out_dir: Path,
+                  seed: int = 0, no_ps: bool = False):
+    
+    if not (1 <= out_width <= 800):
+        raise ValueError("out_width 範圍 3~800")
+    if not (3 <= in_width <= 800):
+        raise ValueError("in_width 範圍 3~800")
+
+    np.random.seed(seed)
+
+    A_cf = np.random.uniform(-1, 1, size=(dim, in_width)).astype(np.float32)   
+    W_cf = np.random.uniform(-1, 1, size=(out_width, dim)).astype(np.float32)   
+    # GEMM
+    C_cf = W_cf @ A_cf
+    ps_shape_cf = C_cf.shape                                          
+    PS_cf = np.zeros(ps_shape_cf, dtype=np.float32) if no_ps else \
+            np.random.uniform(-0.5, 0.5, size=ps_shape_cf).astype(np.float32)
+
+    C_out_cf = C_cf + PS_cf
+    
+    W_save  = np.transpose(W_cf, (1, 0))
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    save_array(A_cf,  out_dir / f"activation_input.{fmt}", fmt)   # (dim, in_width)
+    save_array(W_save,  out_dir / f"weight.{fmt}", fmt)             # (out_width, dim)
+    save_array(PS_cf, out_dir / f"ps_input.{fmt}", fmt)           # (out_width, in_width)
+    save_array(C_out_cf,  out_dir / f"activation_output.{fmt}", fmt)  # A_out (= C + PS) # (out_width, in_width)
+
+    meta = {
+        "task": "gemm",
+        "dim": dim, "out_width": out_width, "in_width": in_width,
+        "format": fmt, "seed": seed, "partial_sum_zero": no_ps,
+        "A_shape_saved":  A_cf.shape,
+        "W_shape_internal_cf": W_cf.shape,
+        "W_shape_saved":  W_save.shape,
+        "PS_shape_saved": PS_cf.shape,
+        "C_shape_saved":  C_out_cf.shape,
+    }
+    (out_dir / "meta.txt").write_text(
+        "\n".join(f"{k}:{v}" for k, v in meta.items()), encoding='utf-8'
+    )
+    print("GEMM 資料生成完成:", out_dir)
+
 def parse_args():
     p = argparse.ArgumentParser(description="HybridAcc PE 測試資料生成工具 (fp16)")
-    p.add_argument('--mode', choices=['a','b','c'], required=True, help='a/b/c 對應題述三種配置')
-    p.add_argument('--out-ch', type=int, required=True, help='輸出 kernel(通道) 數 1~16')
-    p.add_argument('--in-width', type=int, required=True, help='輸入寬度 3~800')
-    p.add_argument('--fmt', choices=['bin','hex'], default='bin', help='輸出格式')
-    p.add_argument('--out-dir', type=Path, required=True, help='輸出資料夾')
-    p.add_argument('--seed', type=int, default=0, help='隨機種子')
-    p.add_argument('--no-ps', action='store_true', help='partial sum 改為全 0')
-    p.add_argument('--layout', choices=['channels_first','channels_last'], default='channels_last', help='輸出張量記憶體排布')
+    sub = p.add_subparsers(dest="task", required=True)
+
+    # conv 子命令
+    pc = sub.add_parser("conv", help="產生 conv1D 測試資料")
+    pc.add_argument('--mode', choices=['a','b','c','d'], required=True)
+    pc.add_argument('--out-ch', type=int, required=True)
+    pc.add_argument('--in-width', type=int, required=True)
+    pc.add_argument('--fmt', choices=['bin','hex'], default='bin')
+    pc.add_argument('--out-dir', type=Path, required=True)
+    pc.add_argument('--seed', type=int, default=0)
+    pc.add_argument('--no-ps', action='store_true')
+    pc.add_argument('--layout', choices=['channels_first','channels_last'], default='channels_last')
+
+    # gemm 子命令
+    pg = sub.add_parser("gemm", help="產生 GEMM 測試資料")
+    pg.add_argument('--out-width', type=int, required=True)
+    pg.add_argument('--in-width', type=int, required=True)
+    pg.add_argument('--dim', type=int, required=True)
+    pg.add_argument('--fmt', choices=['bin','hex'], default='bin')
+    pg.add_argument('--out-dir', type=Path, required=True)
+    pg.add_argument('--seed', type=int, default=0)
+    pg.add_argument('--no-ps', action='store_true')
     return p.parse_args()
 
 def main():
     args = parse_args()
-    generate(args.mode, args.out_ch, args.in_width, args.fmt, args.out_dir, args.seed, args.no_ps, args.layout)
+    if args.task == 'gemm':
+        generate_gemm(args.out_width, args.in_width, args.dim,
+                      args.fmt, args.out_dir, args.seed, args.no_ps)
+    else:  # conv
+        generate_conv(args.mode, args.out_ch, args.in_width,
+                      args.fmt, args.out_dir, args.seed, args.no_ps, args.layout)
 
 if __name__ == "__main__":
     main()
