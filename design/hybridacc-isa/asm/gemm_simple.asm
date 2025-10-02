@@ -44,7 +44,7 @@ load_kernel:
 
     DMA.ADDR 0
     DMA.LEN 256 # LOAD 256 steps of input data (32dim * 8input)
-    DMA.LHB 2 # start DMA load operation (fp16, broadcasted to 4out)
+    DMA.LHB 1 # start DMA load operation (fp16, broadcasted to 4out)
 
 loop_in_dim:
     LOOPIN 32  # Loop for 32 input dimensions

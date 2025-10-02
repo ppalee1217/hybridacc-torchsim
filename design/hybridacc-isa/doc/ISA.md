@@ -59,7 +59,7 @@ LE = loop-end (僅由偽指令設定)
 |------|------|------|
 | NOP | opcode=10 f2=00 | 無動作 |
 | SETRID.P / T / PT | opcode=10 f2=10 func3=001/010/011 | 設定資源 ID |
-| CLEAR.T / CLEAR.P | opcode=10 f2=11 func3=000/001 | 清除 ID |
+| CLEAR.T / CLEAR.P | opcode=10 f2=11 func3=000/001 | 清除 Reg |
 | HALT | opcode=11 f2=11 | 停止 |
 
 ## C 語言解碼輔助巨集 (ha_format.h)

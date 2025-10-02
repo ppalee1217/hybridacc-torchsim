@@ -1,0 +1,17 @@
+{
+  "op": "conv2d",
+  "N": 1,
+  "Cin": 64,
+  "Cout": 128,
+  "Hin": 200,
+  "Win": 200,
+  "Kh": 3,
+  "Kw": 3,
+  "stride_h": 1,
+  "stride_w": 1,
+  "pad_h": 1,
+  "pad_w": 1,
+  "dilation_h": 1,
+  "dilation_w": 1,
+  "data_type": "fp16"
+}

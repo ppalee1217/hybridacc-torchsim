@@ -18,4 +18,5 @@ $VALGRIND_PREFIX \
     --dump "$OUTPUT_DIR/conv1d_simple_dump.txt" \
     --data "$data_DIR" \
     --pol "$OUTPUT_DIR/conv1d_pol.bin" \
+    -trace \
     2> "$OUTPUT_DIR/conv1d_simple.err"

@@ -85,7 +85,7 @@ ha-objdump <input.bin|input.hex>
 | Data | TSHIFT K3/K5/K7 | opcode=01 funct2=00 func3=001 code→[12:10] |
 | Arith | VMAC / VMACN prd,vtrs | opcode=10 funct2=01 func3=000 func1=0/1 |
 | Arith | VMACR / VMACRN pstride,vtstride | func3=001 |
-| Arith | VMUL / VMULN prd,vtrs | func3=010 |
+| Arith | VMUL / VMULN vprd,vtrs | func3=010 |
 | Arith | VMULR / VMULRN vpstride,vtstride | func3=011 |
 | Arith | VPSUM vprs | func3=100 |
 | Arith | VPSUMR vpstride | func3=101 |

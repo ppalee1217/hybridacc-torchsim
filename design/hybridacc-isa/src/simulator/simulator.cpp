@@ -168,6 +168,8 @@ void PESimulator::execute(uint16_t w) {
 
     auto &S = state;
 
+    state.cycles++; // 每執行一條指令就增加一個週期
+
     // HALT
     if(opcode==3 && funct2==3){ S.halted = true; return; }
     // NOP
@@ -208,6 +210,7 @@ void PESimulator::execute(uint16_t w) {
 
             S.DMA.issue(DMARequestType::STORE_DWORD, stride, false); // SD
             while (S.DMA.busy()) {
+                S.cycles++; // 每次 DMA 操作也計算週期
                 if (!port_io->popPS(ps_word)) {
                     throw std::runtime_error("Blocking read failed: PS port is empty");
                 }
@@ -405,8 +408,6 @@ void PESimulator::step(){
             state.pc = new_pc;
         }
     }
-
-    state.cycles++;
 }
 
 int run_simulator_cli(int argc, char **argv){

@@ -1,0 +1,91 @@
+# HybridAcc 分析模型範例設定檔
+# 可用: python -m python.analytical.main 或自寫腳本呼叫 run_analytical(config_path)
+# 結構: architecture / workload / options
+
+architecture:
+  pe:
+    mac_per_cycle: 4          # 單 PE 每 cycle MAC 數
+    local_buf_bytes: 512      # 本地緩衝 (B)
+    in_channels_per_tile: 4
+    out_channels_per_tile: 16
+  array:
+    rows: 7
+    cols: 4
+    clusters: 6               # cluster 數
+    # cluster_rows: 可省略自動推
+    # cluster_cols: 可省略自動推
+  memory:
+    global_mem_bytes: 65536   # 64KB 簡化
+    global_banks: 6
+    global_bandwidth_bytes_per_cycle: 64
+  noc:
+    topology: h_mesh
+    link_bytes: 16
+    router_latency: 2
+    serialization_latency: 1
+    avg_hops_data: 6
+    avg_hops_reduction: 4
+    multicast_efficiency: 0.5
+    reduction_tree_fanout: 2
+  clk:
+    freq_hz: 1.0e9            # 1 GHz
+    activity_factor: 0.5
+    energy_per_mac_pj: 2.0
+    energy_per_byte_global_pj: 20.0
+    energy_per_byte_noc_pj: 5.0
+    energy_per_byte_local_pj: 1.0
+
+workload:
+  # 卷積層列表示例 (典型 CNN 前兩層)
+  convs:
+    - name: conv1
+      N: 1
+      C_in: 3
+      H: 224
+      W: 224
+      C_out: 64
+      kernel: 7
+      stride: 2
+      padding: 3
+      groups: 1
+      dtype: fp16
+      # 額外可選屬性 (模型會以 getattr 取得): tile_h / tile_w
+      tile_h: 28   # 假設切成 28x28 輸出 tile (非必填, 僅示範 IFM NOC 因子調整)
+      tile_w: 28
+    - name: conv2
+      N: 1
+      C_in: 64
+      H: 112
+      W: 112
+      C_out: 128
+      kernel: 3
+      stride: 1
+      padding: 1
+      groups: 1
+      dtype: fp16
+      tile_h: 28
+      tile_w: 28
+
+  # GEMM (例如 MLP / FC 層)
+  gemms:
+    - name: fc1
+      M: 1024
+      N: 4096
+      K: 1024
+      batch: 1
+      dtype: fp16
+
+  # Attention (簡化 Transformer block 中一次 multi-head attention)
+  attentions:
+    - name: attn1
+      batch: 1
+      seq_len: 128
+      d_model: 512
+      n_heads: 8
+      dtype: fp16
+
+options:
+  # AnalyticalModel(arch, **options)
+  target_util: 0.75            # 預期平均計算利用率
+  link_parallel_factor: 0.6    # NoC 並行有效比例
+  use_dynamic_ifm_factor: true # 啟用動態 IFM NOC 流量估算

@@ -1,0 +1,9 @@
+{
+  "op": "gemm",
+  "M": 625,
+  "N": 2048,
+  "K": 256,
+  "layoutA": "row-major",
+  "layoutB": "col-major",
+  "data_type": "fp16"
+}
