@@ -1,0 +1,17 @@
+parameters:
+  simulation:
+    clock_frequency: 100MHz
+    reset_duration: 10ns
+    simulation_time: 100us
+  memory:
+    size: 1GB
+    latency: 10ns
+  accelerator:
+    num_units: 4
+    max_throughput: 1000
+  interconnect:
+    bandwidth: 1Gbps
+    protocol: AXI
+  debug:
+    enable: true
+    log_level: verbose

@@ -1,0 +1,30 @@
+{
+  "platform": "hybridacc",
+  "version": "1.0",
+  "description": "Platform configuration for hybridacc design using SystemC.",
+  "hardware": {
+    "modeling_library": "SystemC",
+    "components": [
+      {
+        "name": "Accelerator",
+        "type": "module",
+        "parameters": {
+          "clock_frequency": "100MHz",
+          "data_width": 32
+        }
+      },
+      {
+        "name": "Interconnect",
+        "type": "bus",
+        "parameters": {
+          "max_bandwidth": "1GB/s",
+          "latency": "10ns"
+        }
+      }
+    ]
+  },
+  "simulation": {
+    "time_resolution": "1ns",
+    "max_simulation_time": "100us"
+  }
+}
