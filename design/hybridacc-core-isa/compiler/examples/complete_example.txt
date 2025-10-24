@@ -1,0 +1,30 @@
+# Complete Core-ISA Compiler Example
+# This demonstrates all supported features
+
+# Variable declarations
+let x 10
+let y 20
+let result = x + y * 2
+
+# Vector operations
+let addr = 0x10000
+vector data = VLOAD(addr)
+VSTORE(addr, data)
+
+# For loops with nested operations
+for i from 0 to 5 step 1 do
+    let temp = i * 3
+    if temp > 10 then
+        vector output = VLOAD(temp)
+    end
+endfor
+
+# Complex conditional
+if result >= 50 then
+    let status = 1
+    for j from 0 to 3 step 1 do
+        let inner = j + result
+    endfor
+else
+    let status = 0
+end

@@ -1,0 +1,16 @@
+# Simple arithmetic example
+let a 10
+let b 20
+let result a + b * 2
+
+# Simple loop example
+for i from 0 to 5 step 1 do
+    let temp i * 3
+endfor
+
+# Conditional example
+if result > 50 then
+    let status 1
+else
+    let status 0
+end

@@ -1,0 +1,17 @@
+# Vector operations example
+let weight_addr 0x00000000
+let input_addr 0x00010000
+let output_addr 0x00020000
+
+# Load vector data
+vector weight_data = VLOAD(weight_addr)
+vector input_data = VLOAD(input_addr)
+
+# Store vector results
+VSTORE(output_addr, weight_data)
+
+# Loop with vector operations
+for addr from input_addr to input_addr + 1000 step 4 do
+    vector data = VLOAD(addr)
+    VSTORE(output_addr + addr - input_addr, data)
+endfor
