@@ -2,7 +2,7 @@
 #define HYBRIDACC_PE_LOOPSTACK_HPP
 
 // ============================================================================
-// File        : loopstack.hpp
+// File        : Loopstack.hpp
 // Description : Parameterized loop stack for managing nested hardware loops.
 //               Supports push (initialize new loop), jump/iterate (decrement
 //               remaining count and repeat PC while count > 0), and pop.
@@ -85,6 +85,11 @@ private:
 
     // Sequential process: updates stack & drives outputs
     void seq_proc() {
+        // Update outputs (registered)
+        empty_o.write(pc_stack_.empty());
+        pc_jump_o.write(pc_stack_.empty() ? 0 : pc_stack_.back());
+        top_count_o.write(pc_stack_.empty() ? 0 : count_stack_.back());
+
         if (!rst_n.read()) {
             pc_stack_.clear();
             count_stack_.clear();
@@ -111,10 +116,6 @@ private:
             }
         }
 
-        // Update outputs (registered)
-        empty_o.write(pc_stack_.empty());
-        pc_jump_o.write(pc_stack_.empty() ? 0 : pc_stack_.back());
-        top_count_o.write(pc_stack_.empty() ? 0 : count_stack_.back());
     }
 };
 

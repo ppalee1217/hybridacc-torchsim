@@ -47,7 +47,7 @@ SC_MODULE(PsumRegFile) {
     sc_in<sc_uint<5>> rs_idx_i{"rs_idx_i"};  // Read scalar index or vector index
     sc_in<sc_uint<5>> rd_idx_i{"rd_idx_i"};  // Write scalar index or vector index
 
-    sc_in<bool> we_i{"we_i"};        // Write enable
+    sc_in<bool> wen_i{"wen_i"};        // Write enable
     sc_in<bool> clear_i{"clear_i"};  // Clear all registers (independent of rst_n)
 
     sc_in<vector_t> vrd_data_i{"vrd_data_i"};   // Write data (vector input), scalar uses lower 16 bits
@@ -107,7 +107,7 @@ private:
         } else if (clear_i.read()) { // synchronous clear
             for (auto &v: P) v = 0;
             for (auto &v: VP64) v = 0;
-        } else if (we_i.read()) {
+        } else if (wen_i.read()) {
             if (mode_i.read() == false) { // scalar write
                 unsigned idx = rd_idx_i.read();
                 if (idx < 32) {

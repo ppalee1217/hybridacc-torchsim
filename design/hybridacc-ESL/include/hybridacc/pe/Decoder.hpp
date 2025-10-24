@@ -18,60 +18,72 @@
 
 namespace hybridacc { namespace pe {
 
+typedef struct{
+    bool               loopend;      // bit0
+    sc_uint<2>         opcode;        // [2:1]
+    sc_uint<2>         funct2;        // [4:3]
+    bool               func1;          // [12]
+    sc_uint<3>         func3;          // [15:13], dma_mode
+    bool               b11;              // [11]
+    sc_uint<6>         payload6;    // [10:5]
+
+    sc_uint<10>        imm10;          // 對 DMA.ADDR / DMA.LEN / LOOPIN 等
+    sc_uint<11>        j_imm11;      // 對 J 指令
+
+    sc_uint<5>         prd;              // [9:5] (psum/scalar reg id or stride)
+    sc_uint<2>         vtrs;            // [11:10] (vector sel / vt stride)
+    sc_uint<3>         trd;              // [7:5]  (TSTORE 的 trd)
+    sc_uint<3>         stride3;      // [12:10] (DMA L*/SD stride or TSHIFT kcode)
+
+    // One-hot DataLoader
+    bool dmloader_set_addr;
+    bool dmloader_set_len;
+
+    bool dmloader_wen;          // 1 => store (DMA.SD) 模式
+    bool dmloader_activate;
+    bool dmloader_next;
+
+    // One-hot Loopstack
+    bool loop_push;
+    bool loop_pop;
+    bool jump;
+
+    // One-hot Tregfile
+    bool idx_use_tcounter;
+    bool treg_clear;
+    bool treg_shift_en;
+    bool treg_wen;
+
+    // One-hot Tcounter
+    bool tcounter_clear;
+    bool tcounter_inc; // tcounter increment
+    bool tcounter_set; // tcounter set to payload6
+
+    // One-hot Pregfile
+    bool idx_use_pcounter;
+    bool preg_wen;
+    bool preg_clear;
+    bool preg_mode;
+
+    // One-hot Pcounter
+    bool pcounter_clear;
+    bool pcounter_inc; // pcounter
+    bool pcounter_set; // pcounter set to payload6
+
+    // One-hot VADD
+    bool vadd_mode;
+
+    // One-hot HALT
+    bool halt;
+
+} DECODED_FIELDS;
+
 SC_MODULE(Decoder) {
     // Inputs
     sc_in<sc_uint<INST_WIDTH>> inst_i{"inst_i"};
 
-    // Generic decoded fields
-    sc_out<bool>               loopend_o{"loopend_o"};      // bit0
-    sc_out<sc_uint<2>>         opcode_o{"opcode_o"};        // [2:1]
-    sc_out<sc_uint<2>>         funct2_o{"funct2_o"};        // [4:3]
-    sc_out<bool>               func1_o{"func1_o"};          // [12]
-    sc_out<sc_uint<3>>         func3_o{"func3_o"};          // [15:13]
-    sc_out<bool>               b11_o{"b11_o"};              // [11]
-    sc_out<sc_uint<6>>         payload6_o{"payload6_o"};    // [10:5]
-
-    // Reconstructed immediates
-    sc_out<sc_uint<10>>        imm10_o{"imm10_o"};          // 對 DMA.ADDR / DMA.LEN / LOOPIN 等
-    sc_out<sc_uint<11>>        j_imm11_o{"j_imm11_o"};      // 對 J 指令
-
-    // Frequently used operand slices
-    sc_out<sc_uint<5>>         prd_o{"prd_o"};              // [9:5] (psum/scalar reg id or stride)
-    sc_out<sc_uint<2>>         vtrs_o{"vtrs_o"};            // [11:10] (vector sel / vt stride)
-    sc_out<sc_uint<3>>         trd_o{"trd_o"};              // [7:5]  (TSTORE 的 trd)
-    sc_out<sc_uint<3>>         stride3_o{"stride3_o"};      // [12:10] (DMA L*/SD stride or TSHIFT kcode)
-
-    // One-hot decode (major instructions)
-    sc_out<bool> is_dma_addr_o{"is_dma_addr_o"};
-    sc_out<bool> is_dma_len_o{"is_dma_len_o"};
-    sc_out<bool> is_dma_ld_o{"is_dma_ld_o"};      // DMA.L* (以 funct3 區分種別，這裡僅提供總類)
-    sc_out<bool> is_dma_sd_o{"is_dma_sd_o"};      // DMA.SD
-
-    sc_out<bool> is_tstore_o{"is_tstore_o"};
-    sc_out<bool> is_tshift_o{"is_tshift_o"};
-
-    sc_out<bool> is_vmac_o{"is_vmac_o"};
-    sc_out<bool> is_vmacn_o{"is_vmacn_o"};
-    sc_out<bool> is_vmacr_o{"is_vmacr_o"};
-    sc_out<bool> is_vmacrn_o{"is_vmacrn_o"};
-    sc_out<bool> is_vmul_o{"is_vmul_o"};
-    sc_out<bool> is_vmuln_o{"is_vmuln_o"};
-    sc_out<bool> is_vmulr_o{"is_vmulr_o"};
-    sc_out<bool> is_vmulrn_o{"is_vmulrn_o"};
-    sc_out<bool> is_vpsum_o{"is_vpsum_o"};
-    sc_out<bool> is_vpsumr_o{"is_vpsumr_o"};
-
-    sc_out<bool> is_j_o{"is_j_o"};
-    sc_out<bool> is_loopin_o{"is_loopin_o"};
-    sc_out<bool> is_loopbreak_o{"is_loopbreak_o"};
-
-    sc_out<bool> is_nop_o{"is_nop_o"};
-    sc_out<bool> is_setrid_p_o{"is_setrid_p_o"};
-    sc_out<bool> is_setrid_t_o{"is_setrid_t_o"};
-    sc_out<bool> is_setrid_pt_o{"is_setrid_pt_o"};
-    sc_out<bool> is_clear_t_o{"is_clear_t_o"};
-    sc_out<bool> is_clear_p_o{"is_clear_p_o"};
-    sc_out<bool> is_halt_o{"is_halt_o"};
+    // Outputs
+    sc_out<DECODED_FIELDS>  decoded_o{"decoded_o"};
 
     SC_CTOR(Decoder) {
         SC_METHOD(comb_circuit);
@@ -80,129 +92,181 @@ SC_MODULE(Decoder) {
     }
 
 private:
+    DECODED_FIELDS decoded;
     void comb_circuit() {
-        sc_uint<16> w = inst_i.read();
+        sc_uint<16> w = inst_i.read(); // 16-bit instruction
 
-        // Base fields
-        bool le    = (w & 0x1);
-        sc_uint<2> opcode = (w >> 1) & 0x3;    // [2:1]
-        sc_uint<2> f2     = (w >> 3) & 0x3;    // [4:3]
-        sc_uint<6> pay6   = (w >> 5) & 0x3F;   // [10:5]
-        bool      b11     = ((w >> 11) & 0x1);
-        bool      f1      = ((w >> 12) & 0x1);
-        sc_uint<3> f3     = (w >> 13) & 0x7;   // [15:13]
+        // Extract basic fields
+        decoded.loopend = w[0];
+        decoded.opcode = w.range(2, 1);
+        decoded.funct2 = w.range(4, 3);
+        decoded.payload6 = w.range(10, 5);
+        decoded.b11 = w[11];
+        decoded.func1 = w[12];
+        decoded.func3 = w.range(15, 13);
 
-        // Write basic fields
-        loopend_o.write(le);
-        opcode_o.write(opcode);
-        funct2_o.write(f2);
-        func1_o.write(f1);
-        func3_o.write(f3);
-        b11_o.write(b11);
-        payload6_o.write(pay6);
+        // Reconstruct 10-bit immediate (for DMA.ADDR/LEN/LOOPIN)
+        // Format: func3[2:0] -> bits[9:7], b11 -> bit[0], payload6[5:0] -> bits[6:1]
+        decoded.imm10 = (decoded.func3 << 7) | (decoded.payload6 << 1) | decoded.b11;
 
-        // Common operand slices
-        sc_uint<5> prd = (w >> 5) & 0x1F;     // [9:5]
-        sc_uint<2> vtrs = (w >> 10) & 0x3;    // [11:10]
-        sc_uint<3> trd  = (w >> 5) & 0x7;     // [7:5]
-        sc_uint<3> stride3 = ((w >> 10) & 0x7); // [12:10] = {f1,b11,bit10}
-        prd_o.write(prd);
-        vtrs_o.write(vtrs);
-        trd_o.write(trd);
-        stride3_o.write(stride3);
+        // Reconstruct 11-bit immediate for J instruction
+        // Format: func3[2:0] -> bits[9:7], func1 -> bit[10], b11 -> bit[0], payload6[5:0] -> bits[6:1]
+        decoded.j_imm11 = (decoded.func3 << 7) | (decoded.func1 << 10) | (decoded.payload6 << 1) | decoded.b11;
 
-        // Reconstruct immediates
-        // 10-bit compressed: value[9:7]->f3, value[0]->b11, value[6:1]->pay6
-        sc_uint<10> imm10 = ( (sc_uint<10>)(f3) << 7 ) | ( (sc_uint<10>)(pay6) << 1 ) | (sc_uint<10>)(b11 ? 1 : 0);
-        imm10_o.write(imm10);
-        // 11-bit J immediate: (9:7|10|0|6:1) = (f3|f1|b11|pay6)
-        sc_uint<11> jimm = ( (sc_uint<11>)(f3) << 8 ) | ( (sc_uint<11>)(f1 ? 1:0) << 7 )
-                          | ( (sc_uint<11>)(b11 ? 1:0) << 6 ) | (sc_uint<11>)(pay6);
-        j_imm11_o.write(jimm);
+        // Extract frequently used operand slices
+        decoded.prd = w.range(9, 5);           // psum/scalar reg id
+        decoded.vtrs = w.range(11, 10);        // vector sel / vt stride
+        decoded.trd = w.range(7, 5);           // TSTORE trd
+        decoded.stride3 = w.range(12, 10);     // 3-bit stride
 
-        // Default clear all one-hot outputs
-        is_dma_addr_o = false; is_dma_len_o = false; is_dma_ld_o = false; is_dma_sd_o = false;
-        is_tstore_o = false; is_tshift_o = false;
-        is_vmac_o = false; is_vmacn_o = false; is_vmacr_o = false; is_vmacrn_o = false;
-        is_vmul_o = false; is_vmuln_o = false; is_vmulr_o = false; is_vmulrn_o = false;
-        is_vpsum_o = false; is_vpsumr_o = false;
-        is_j_o = false; is_loopin_o = false; is_loopbreak_o = false;
-        is_nop_o = false; is_setrid_p_o = false; is_setrid_t_o = false; is_setrid_pt_o = false;
-        is_clear_t_o = false; is_clear_p_o = false; is_halt_o = false;
+        // Initialize all control signals to false
+        decoded.dmloader_set_addr = false;
+        decoded.dmloader_set_len = false;
+        decoded.dmloader_wen = false;
+        decoded.dmloader_activate = false;
+        decoded.dmloader_next = false;
 
-        // Start decoding by classes
-        // Data Movement
-        // DMA.ADDR/LEN: opcode=00 f2=01 f1=0/1 (value => imm10)
-        if (opcode == 0x0 && f2 == 0x1) {
-            if (!f1) is_dma_addr_o = true; else is_dma_len_o = true;
-        }
-        // DMA.L*/SD: opcode=00 f2=11, func3 區分，stride -> [12:10]
-        if (opcode == 0x0 && f2 == 0x3) {
-            // func3=011 => SD；其他 (000..010,100..111) 為 L* 類 (依專案自定)
-            if (f3 == 0x3) is_dma_sd_o = true; else is_dma_ld_o = true;
+        decoded.loop_push = false;
+        decoded.loop_pop = false;
+        decoded.jump = false;
+
+        decoded.treg_clear = false;
+        decoded.treg_shift_en = false;
+        decoded.treg_wen = false;
+
+        decoded.idx_use_tcounter = false;
+        decoded.tcounter_clear = false;
+        decoded.tcounter_inc = false;
+        decoded.tcounter_set = false;
+
+        decoded.preg_wen = false;
+        decoded.preg_clear = false;
+        decoded.preg_mode = false;
+
+        decoded.idx_use_pcounter = false;
+        decoded.pcounter_clear = false;
+        decoded.pcounter_inc = false;
+        decoded.pcounter_set = false;
+
+        decoded.vadd_mode = false;
+        decoded.halt = false;
+
+        // Decode instructions based on opcode and funct2
+        switch (decoded.opcode) {
+            case 0b00: // Data Movement
+                if (decoded.funct2 == 0b01) {
+                    // DMA.ADDR/LEN (func1=0: ADDR, func1=1: LEN)
+                    if (decoded.func1 == 0) {
+                        decoded.dmloader_set_addr = true;
+                    } else {
+                        decoded.dmloader_set_len = true;
+                    }
+                } else if (decoded.funct2 == 0b11) {
+                    // DMA.L*/SD operations
+                    decoded.dmloader_activate = true;
+                    if (decoded.func3 == 0b011) {
+                        // DMA.SD - store mode
+                        decoded.dmloader_wen = true;
+                    }
+                    // For VMAC*N, VMUL*N instructions with next DMA
+                    decoded.dmloader_next = true;
+                }
+                break;
+
+            case 0b01: // Control/System
+                if (decoded.funct2 == 0b00) {
+                    if (decoded.func3 == 0b000) {
+                        // TSTORE
+                        decoded.treg_wen = true;
+                    } else if (decoded.func3 == 0b001) {
+                        // TSHIFT
+                        decoded.treg_shift_en = true;
+                    }
+                } else if (decoded.funct2 == 0b10) {
+                    // J (jump)
+                    decoded.jump = true;
+                } else if (decoded.funct2 == 0b11) {
+                    if (decoded.func1 == 0) {
+                        // LOOPIN
+                        decoded.loop_push = true;
+                    } else {
+                        // LOOPBREAK
+                        decoded.loop_pop = true;
+                    }
+                }
+                break;
+
+            case 0b10: // Arithmetic/System
+                if (decoded.funct2 == 0b00) {
+                    // NOP - no operation needed
+                } else if (decoded.funct2 == 0b01) {
+                    // Arithmetic operations (VMAC, VMUL, VPSUM, etc.)
+                    switch (decoded.func3) {
+                        case 0b000: // VMAC/VMACN
+                        case 0b001: // VMACR/VMACRN
+                        case 0b010: // VMUL/VMULN
+                        case 0b011: // VMULR/VMULRN
+                            // Enable processing element operations
+                            decoded.preg_wen = true;
+                            if (decoded.func1 == 1) {
+                                // *N variants - next DMA
+                                decoded.dmloader_next = true;
+                            }
+                            if (decoded.func3 == 0b001 || decoded.func3 == 0b011) {
+                                // *R variants - use tcounter and pcounter indices
+                                decoded.idx_use_tcounter = true;
+                                decoded.idx_use_pcounter = true;
+                            }
+                            break;
+                        case 0b100: // VPSUM
+                        case 0b101: // VPSUMR
+                            decoded.preg_wen = true;
+                            decoded.vadd_mode = true;
+                            if (decoded.func3 == 0b101) {
+                                // VPSUMR - use pcounter indices (only Pregfile is used)
+                                decoded.idx_use_pcounter = true;
+                            }
+                            break;
+                    }
+                } else if (decoded.funct2 == 0b10) {
+                    // SETRID operations
+                    switch (decoded.func3) {
+                        case 0b001: // SETRID.P
+                            decoded.pcounter_set = true;
+                            break;
+                        case 0b010: // SETRID.T
+                            decoded.tcounter_set = true;
+                            break;
+                        case 0b011: // SETRID.PT
+                            decoded.pcounter_set = true;
+                            decoded.tcounter_set = true;
+                            break;
+                    }
+                } else if (decoded.funct2 == 0b11) {
+                    // CLEAR operations
+                    switch (decoded.func3) {
+                        case 0b000: // CLEAR.T
+                            decoded.treg_clear = true;
+                            decoded.tcounter_clear = true;
+                            break;
+                        case 0b001: // CLEAR.P
+                            decoded.preg_clear = true;
+                            decoded.pcounter_clear = true;
+                            break;
+                    }
+                }
+                break;
+
+            case 0b11: // System
+                if (decoded.funct2 == 0b11) {
+                    // HALT - implementation dependent
+                    decoded.halt = true;
+                }
+                break;
         }
 
-        // TSTORE/TSHIFT: opcode=01 f2=00 func3=000/001
-        if (opcode == 0x1 && f2 == 0x0) {
-            if (f3 == 0x0) is_tstore_o = true;
-            else if (f3 == 0x1) is_tshift_o = true;
-        }
-
-        // Arithmetic: opcode=10 f2=01
-        if (opcode == 0x2 && f2 == 0x1) {
-            switch (f3.to_uint()) {
-                case 0x0: // VMAC / VMACN by func1
-                    if (f1) is_vmacn_o = true; else is_vmac_o = true;
-                    break;
-                case 0x1: // VMACR / VMACRN
-                    if (f1) is_vmacrn_o = true; else is_vmacr_o = true;
-                    break;
-                case 0x2: // VMUL / VMULN
-                    if (f1) is_vmuln_o = true; else is_vmul_o = true;
-                    break;
-                case 0x3: // VMULR / VMULRN
-                    if (f1) is_vmulrn_o = true; else is_vmulr_o = true;
-                    break;
-                case 0x4: // VPSUM (func1=0)
-                    if (!f1) is_vpsum_o = true; break;
-                case 0x5: // VPSUMR (func1=0)
-                    if (!f1) is_vpsumr_o = true; break;
-                default:
-                    break;
-            }
-        }
-
-        // Control
-        // J: opcode=01 f2=10
-        if (opcode == 0x1 && f2 == 0x2) {
-            is_j_o = true;
-        }
-        // LOOPIN/LOOPBREAK: opcode=01 f2=11 f1=0/1
-        if (opcode == 0x1 && f2 == 0x3) {
-            if (!f1) is_loopin_o = true; else is_loopbreak_o = true;
-        }
-
-        // System
-        // NOP: opcode=10 f2=00
-        if (opcode == 0x2 && f2 == 0x0) {
-            is_nop_o = true;
-        }
-        // SETRID / CLEAR / HALT (根據文件簡化判斷)
-        // SETRID.*: opcode=10 f2=10 func3=001/010/011 -> P/T/PT
-        if (opcode == 0x2 && f2 == 0x2) {
-            if (f3 == 0x1) is_setrid_p_o = true;
-            else if (f3 == 0x2) is_setrid_t_o = true;
-            else if (f3 == 0x3) is_setrid_pt_o = true;
-        }
-        // CLEAR.*: opcode=10 f2=11 func3=000/001 -> T/P
-        if (opcode == 0x2 && f2 == 0x3) {
-            if (f3 == 0x0) is_clear_t_o = true;
-            else if (f3 == 0x1) is_clear_p_o = true;
-        }
-        // HALT: opcode=11 f2=11
-        if (opcode == 0x3 && f2 == 0x3) {
-            is_halt_o = true;
-        }
+        // Output the complete decoded structure
+        decoded_o.write(decoded);
     }
 };
 

@@ -282,6 +282,30 @@ footer { margin-top:40px; font-size:12px; color:#555; }
     ]
   },
   {
+    "name": "Decoder",
+    "file": "Decoder.hpp",
+    "inputs": [
+      {
+        "name": "inst_i",
+        "label": "inst_i{INST_WIDTH}",
+        "type": "sc_uint<INST_WIDTH>",
+        "dir": "in",
+        "category": "Misc",
+        "width": "INST_WIDTH"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "decoded_o",
+        "label": "decoded_o",
+        "type": "DECODED_FIELDS",
+        "dir": "out",
+        "category": "Misc",
+        "width": 1
+      }
+    ]
+  },
+  {
     "name": "InstLoader",
     "file": "InstLoader.hpp",
     "inputs": [
@@ -454,6 +478,94 @@ footer { margin-top:40px; font-size:12px; color:#555; }
         "dir": "out",
         "category": "Data Out",
         "width": 16
+      }
+    ]
+  },
+  {
+    "name": "LoopStack",
+    "file": "Loopstack.hpp",
+    "inputs": [
+      {
+        "name": "clk",
+        "label": "clk",
+        "type": "bool",
+        "dir": "in",
+        "category": "Clock/Reset",
+        "width": 1
+      },
+      {
+        "name": "rst_n",
+        "label": "rst_n",
+        "type": "bool",
+        "dir": "in",
+        "category": "Clock/Reset",
+        "width": 1
+      },
+      {
+        "name": "pop_i",
+        "label": "pop_i",
+        "type": "bool",
+        "dir": "in",
+        "category": "Control",
+        "width": 1
+      },
+      {
+        "name": "push_i",
+        "label": "push_i",
+        "type": "bool",
+        "dir": "in",
+        "category": "Control",
+        "width": 1
+      },
+      {
+        "name": "jump_i",
+        "label": "jump_i",
+        "type": "bool",
+        "dir": "in",
+        "category": "Loop Control",
+        "width": 1
+      },
+      {
+        "name": "loop_count_i",
+        "label": "loop_count_i{LOOP_COUNT_BITS}",
+        "type": "sc_uint<LOOP_COUNT_BITS>",
+        "dir": "in",
+        "category": "Loop Control",
+        "width": "LOOP_COUNT_BITS"
+      },
+      {
+        "name": "pc_jump_i",
+        "label": "pc_jump_i{ADDR_BITS}",
+        "type": "sc_uint<ADDR_BITS>",
+        "dir": "in",
+        "category": "Loop Control",
+        "width": "ADDR_BITS"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "pc_jump_o",
+        "label": "pc_jump_o{ADDR_BITS}",
+        "type": "sc_uint<ADDR_BITS>",
+        "dir": "out",
+        "category": "Loop Control",
+        "width": "ADDR_BITS"
+      },
+      {
+        "name": "top_count_o",
+        "label": "top_count_o{LOOP_COUNT_BITS}",
+        "type": "sc_uint<LOOP_COUNT_BITS>",
+        "dir": "out",
+        "category": "Misc",
+        "width": "LOOP_COUNT_BITS"
+      },
+      {
+        "name": "empty_o",
+        "label": "empty_o",
+        "type": "bool",
+        "dir": "out",
+        "category": "Status",
+        "width": 1
       }
     ]
   },
@@ -710,6 +822,14 @@ footer { margin-top:40px; font-size:12px; color:#555; }
         "width": 1
       },
       {
+        "name": "wen_i",
+        "label": "wen_i",
+        "type": "bool",
+        "dir": "in",
+        "category": "Control",
+        "width": 1
+      },
+      {
         "name": "vrd_data_i",
         "label": "vrd_data_i",
         "type": "vector_t",
@@ -732,14 +852,6 @@ footer { margin-top:40px; font-size:12px; color:#555; }
         "dir": "in",
         "category": "Misc",
         "width": 5
-      },
-      {
-        "name": "we_i",
-        "label": "we_i",
-        "type": "bool",
-        "dir": "in",
-        "category": "Misc",
-        "width": 1
       }
     ],
     "outputs": [
@@ -842,17 +954,9 @@ footer { margin-top:40px; font-size:12px; color:#555; }
     ]
   },
   {
-    "name": "VALU",
-    "file": "VALU.hpp",
+    "name": "VADD",
+    "file": "VADD.hpp",
     "inputs": [
-      {
-        "name": "valumode_i",
-        "label": "valumode_i",
-        "type": "VALUMODE",
-        "dir": "in",
-        "category": "Config",
-        "width": 1
-      },
       {
         "name": "p_i",
         "label": "p_i{T_DATA_WIDTH}",
@@ -862,35 +966,19 @@ footer { margin-top:40px; font-size:12px; color:#555; }
         "width": "T_DATA_WIDTH"
       },
       {
-        "name": "vec_mul_a_i",
-        "label": "vec_mul_a_i{T_DATA_WIDTH*T_VECTOR_SIZE}",
+        "name": "va_i",
+        "label": "va_i{T_DATA_WIDTH*T_VECTOR_SIZE}",
         "type": "sc_uint<T_DATA_WIDTH*T_VECTOR_SIZE>",
         "dir": "in",
-        "category": "Data In",
+        "category": "Misc",
         "width": "T_DATA_WIDTH*T_VECTOR_SIZE"
       },
       {
-        "name": "vec_mul_b_i",
-        "label": "vec_mul_b_i{T_DATA_WIDTH*T_VECTOR_SIZE}",
+        "name": "vb_i",
+        "label": "vb_i{T_DATA_WIDTH*T_VECTOR_SIZE}",
         "type": "sc_uint<T_DATA_WIDTH*T_VECTOR_SIZE>",
         "dir": "in",
-        "category": "Data In",
-        "width": "T_DATA_WIDTH*T_VECTOR_SIZE"
-      },
-      {
-        "name": "vec_p_i",
-        "label": "vec_p_i{T_DATA_WIDTH*T_VECTOR_SIZE}",
-        "type": "sc_uint<T_DATA_WIDTH*T_VECTOR_SIZE>",
-        "dir": "in",
-        "category": "Data In",
-        "width": "T_DATA_WIDTH*T_VECTOR_SIZE"
-      },
-      {
-        "name": "vec_pli_i",
-        "label": "vec_pli_i{T_DATA_WIDTH*T_VECTOR_SIZE}",
-        "type": "sc_uint<T_DATA_WIDTH*T_VECTOR_SIZE>",
-        "dir": "in",
-        "category": "Data In",
+        "category": "Misc",
         "width": "T_DATA_WIDTH*T_VECTOR_SIZE"
       }
     ],
@@ -904,8 +992,8 @@ footer { margin-top:40px; font-size:12px; color:#555; }
         "width": "T_DATA_WIDTH"
       },
       {
-        "name": "out_vec_o",
-        "label": "out_vec_o{T_DATA_WIDTH*T_VECTOR_SIZE}",
+        "name": "vout_o",
+        "label": "vout_o{T_DATA_WIDTH*T_VECTOR_SIZE}",
         "type": "sc_uint<T_DATA_WIDTH*T_VECTOR_SIZE>",
         "dir": "out",
         "category": "Data Out",
@@ -914,450 +1002,34 @@ footer { margin-top:40px; font-size:12px; color:#555; }
     ]
   },
   {
-    "name": "PEController",
-    "file": "controller.hpp",
+    "name": "VALU",
+    "file": "VMUL.hpp",
     "inputs": [
       {
-        "name": "clk",
-        "label": "clk",
-        "type": "bool",
-        "dir": "in",
-        "category": "Clock/Reset",
-        "width": 1
-      },
-      {
-        "name": "rst_n",
-        "label": "rst_n",
-        "type": "bool",
-        "dir": "in",
-        "category": "Clock/Reset",
-        "width": 1
-      },
-      {
-        "name": "en_i",
-        "label": "en_i",
-        "type": "bool",
-        "dir": "in",
-        "category": "Control",
-        "width": 1
-      },
-      {
-        "name": "rd_data_i",
-        "label": "rd_data_i[15:0]",
-        "type": "sc_uint<16>",
-        "dir": "in",
-        "category": "Data In",
-        "width": 16
-      },
-      {
-        "name": "dm_busy_i",
-        "label": "dm_busy_i",
-        "type": "bool",
-        "dir": "in",
-        "category": "Data Memory IF",
-        "width": 1
-      },
-      {
-        "name": "dm_done_i",
-        "label": "dm_done_i",
-        "type": "bool",
-        "dir": "in",
-        "category": "Data Memory IF",
-        "width": 1
-      },
-      {
-        "name": "pd_valid_i",
-        "label": "pd_valid_i",
-        "type": "bool",
-        "dir": "in",
-        "category": "Dynamic Port",
-        "width": 1
-      },
-      {
-        "name": "pc_jump_i",
-        "label": "pc_jump_i{ADDR_BITS}",
-        "type": "sc_uint<ADDR_BITS>",
-        "dir": "in",
-        "category": "Loop Control",
-        "width": "ADDR_BITS"
-      },
-      {
-        "name": "top_count_i",
-        "label": "top_count_i{LOOP_COUNT_BITS}",
-        "type": "sc_uint<LOOP_COUNT_BITS>",
+        "name": "va_i",
+        "label": "va_i{T_DATA_WIDTH*T_VECTOR_SIZE}",
+        "type": "sc_uint<T_DATA_WIDTH*T_VECTOR_SIZE>",
         "dir": "in",
         "category": "Misc",
-        "width": "LOOP_COUNT_BITS"
+        "width": "T_DATA_WIDTH*T_VECTOR_SIZE"
       },
       {
-        "name": "pli_valid_i",
-        "label": "pli_valid_i",
-        "type": "bool",
+        "name": "vb_i",
+        "label": "vb_i{T_DATA_WIDTH*T_VECTOR_SIZE}",
+        "type": "sc_uint<T_DATA_WIDTH*T_VECTOR_SIZE>",
         "dir": "in",
-        "category": "Port Local In",
-        "width": 1
-      },
-      {
-        "name": "plo_ready_i",
-        "label": "plo_ready_i",
-        "type": "bool",
-        "dir": "in",
-        "category": "Port Local Out",
-        "width": 1
-      },
-      {
-        "name": "ps_valid_i",
-        "label": "ps_valid_i",
-        "type": "bool",
-        "dir": "in",
-        "category": "Static Port",
-        "width": 1
-      },
-      {
-        "name": "empty_i",
-        "label": "empty_i",
-        "type": "bool",
-        "dir": "in",
-        "category": "Status",
-        "width": 1
+        "category": "Misc",
+        "width": "T_DATA_WIDTH*T_VECTOR_SIZE"
       }
     ],
     "outputs": [
       {
-        "name": "p_mode_o",
-        "label": "p_mode_o",
-        "type": "bool",
+        "name": "vout_o",
+        "label": "vout_o{T_DATA_WIDTH*T_VECTOR_SIZE}",
+        "type": "sc_uint<T_DATA_WIDTH*T_VECTOR_SIZE>",
         "dir": "out",
-        "category": "Config",
-        "width": 1
-      },
-      {
-        "name": "t_shift_mode_o",
-        "label": "t_shift_mode_o[2:0]",
-        "type": "sc_uint<3>",
-        "dir": "out",
-        "category": "Config",
-        "width": 3
-      },
-      {
-        "name": "valumode_i",
-        "label": "valumode_i",
-        "type": "VALUMODE",
-        "dir": "out",
-        "category": "Config",
-        "width": 1
-      },
-      {
-        "name": "p_clear_o",
-        "label": "p_clear_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Control",
-        "width": 1
-      },
-      {
-        "name": "pop_o",
-        "label": "pop_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Control",
-        "width": 1
-      },
-      {
-        "name": "push_o",
-        "label": "push_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Control",
-        "width": 1
-      },
-      {
-        "name": "t_clear_o",
-        "label": "t_clear_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Control",
-        "width": 1
-      },
-      {
-        "name": "t_shift_en_o",
-        "label": "t_shift_en_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Control",
-        "width": 1
-      },
-      {
-        "name": "t_wen_o",
-        "label": "t_wen_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Control",
-        "width": 1
-      },
-      {
-        "name": "dm_activate_o",
-        "label": "dm_activate_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Data Memory IF",
-        "width": 1
-      },
-      {
-        "name": "dm_addr_len_o",
-        "label": "dm_addr_len_o[9:0]",
-        "type": "sc_uint<10>",
-        "dir": "out",
-        "category": "Data Memory IF",
-        "width": 10
-      },
-      {
-        "name": "dm_mode_o",
-        "label": "dm_mode_o[2:0]",
-        "type": "sc_uint<3>",
-        "dir": "out",
-        "category": "Data Memory IF",
-        "width": 3
-      },
-      {
-        "name": "dm_next_o",
-        "label": "dm_next_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Data Memory IF",
-        "width": 1
-      },
-      {
-        "name": "dm_set_addr_o",
-        "label": "dm_set_addr_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Data Memory IF",
-        "width": 1
-      },
-      {
-        "name": "dm_set_len_o",
-        "label": "dm_set_len_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Data Memory IF",
-        "width": 1
-      },
-      {
-        "name": "dm_stride_o",
-        "label": "dm_stride_o[2:0]",
-        "type": "sc_uint<3>",
-        "dir": "out",
-        "category": "Data Memory IF",
-        "width": 3
-      },
-      {
-        "name": "dm_wen_o",
-        "label": "dm_wen_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Data Memory IF",
-        "width": 1
-      },
-      {
-        "name": "pd_ready_o",
-        "label": "pd_ready_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Dynamic Port",
-        "width": 1
-      },
-      {
-        "name": "im_addr_o",
-        "label": "im_addr_o{ADDR_BITS}",
-        "type": "sc_uint<ADDR_BITS>",
-        "dir": "out",
-        "category": "Inst Memory IF",
-        "width": "ADDR_BITS"
-      },
-      {
-        "name": "jump_o",
-        "label": "jump_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Loop Control",
-        "width": 1
-      },
-      {
-        "name": "loop_count_o",
-        "label": "loop_count_o{LOOP_COUNT_BITS}",
-        "type": "sc_uint<LOOP_COUNT_BITS>",
-        "dir": "out",
-        "category": "Loop Control",
-        "width": "LOOP_COUNT_BITS"
-      },
-      {
-        "name": "pc_jump_o",
-        "label": "pc_jump_o{ADDR_BITS}",
-        "type": "sc_uint<ADDR_BITS>",
-        "dir": "out",
-        "category": "Loop Control",
-        "width": "ADDR_BITS"
-      },
-      {
-        "name": "p_rd_idx_o",
-        "label": "p_rd_idx_o[4:0]",
-        "type": "sc_uint<5>",
-        "dir": "out",
-        "category": "Misc",
-        "width": 5
-      },
-      {
-        "name": "p_rs_idx_o",
-        "label": "p_rs_idx_o[4:0]",
-        "type": "sc_uint<5>",
-        "dir": "out",
-        "category": "Misc",
-        "width": 5
-      },
-      {
-        "name": "p_we_o",
-        "label": "p_we_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Misc",
-        "width": 1
-      },
-      {
-        "name": "stall_o",
-        "label": "stall_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Misc",
-        "width": 1
-      },
-      {
-        "name": "t_rd_idx_o",
-        "label": "t_rd_idx_o[3:0]",
-        "type": "sc_uint<4>",
-        "dir": "out",
-        "category": "Misc",
-        "width": 4
-      },
-      {
-        "name": "t_vrs_idx_o",
-        "label": "t_vrs_idx_o[1:0]",
-        "type": "sc_uint<2>",
-        "dir": "out",
-        "category": "Misc",
-        "width": 2
-      },
-      {
-        "name": "pli_ready_o",
-        "label": "pli_ready_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Port Local In",
-        "width": 1
-      },
-      {
-        "name": "plo_valid_o",
-        "label": "plo_valid_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Port Local Out",
-        "width": 1
-      },
-      {
-        "name": "ps_ready_o",
-        "label": "ps_ready_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Static Port",
-        "width": 1
-      }
-    ]
-  },
-  {
-    "name": "LoopStack",
-    "file": "loopstack.hpp",
-    "inputs": [
-      {
-        "name": "clk",
-        "label": "clk",
-        "type": "bool",
-        "dir": "in",
-        "category": "Clock/Reset",
-        "width": 1
-      },
-      {
-        "name": "rst_n",
-        "label": "rst_n",
-        "type": "bool",
-        "dir": "in",
-        "category": "Clock/Reset",
-        "width": 1
-      },
-      {
-        "name": "pop_i",
-        "label": "pop_i",
-        "type": "bool",
-        "dir": "in",
-        "category": "Control",
-        "width": 1
-      },
-      {
-        "name": "push_i",
-        "label": "push_i",
-        "type": "bool",
-        "dir": "in",
-        "category": "Control",
-        "width": 1
-      },
-      {
-        "name": "jump_i",
-        "label": "jump_i",
-        "type": "bool",
-        "dir": "in",
-        "category": "Loop Control",
-        "width": 1
-      },
-      {
-        "name": "loop_count_i",
-        "label": "loop_count_i{LOOP_COUNT_BITS}",
-        "type": "sc_uint<LOOP_COUNT_BITS>",
-        "dir": "in",
-        "category": "Loop Control",
-        "width": "LOOP_COUNT_BITS"
-      },
-      {
-        "name": "pc_jump_i",
-        "label": "pc_jump_i{ADDR_BITS}",
-        "type": "sc_uint<ADDR_BITS>",
-        "dir": "in",
-        "category": "Loop Control",
-        "width": "ADDR_BITS"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "pc_jump_o",
-        "label": "pc_jump_o{ADDR_BITS}",
-        "type": "sc_uint<ADDR_BITS>",
-        "dir": "out",
-        "category": "Loop Control",
-        "width": "ADDR_BITS"
-      },
-      {
-        "name": "top_count_o",
-        "label": "top_count_o{LOOP_COUNT_BITS}",
-        "type": "sc_uint<LOOP_COUNT_BITS>",
-        "dir": "out",
-        "category": "Misc",
-        "width": "LOOP_COUNT_BITS"
-      },
-      {
-        "name": "empty_o",
-        "label": "empty_o",
-        "type": "bool",
-        "dir": "out",
-        "category": "Status",
-        "width": 1
+        "category": "Data Out",
+        "width": "T_DATA_WIDTH*T_VECTOR_SIZE"
       }
     ]
   },
@@ -1379,6 +1051,14 @@ footer { margin-top:40px; font-size:12px; color:#555; }
         "type": "bool",
         "dir": "in",
         "category": "Clock/Reset",
+        "width": 1
+      },
+      {
+        "name": "load_inst",
+        "label": "load_inst",
+        "type": "bool",
+        "dir": "in",
+        "category": "Misc",
         "width": 1
       }
     ],
@@ -1426,4 +1106,4 @@ function drawModule(m,idx){
 }
 const DATA=JSON.parse(document.getElementById('io_dataset').textContent);DATA.forEach((m,i)=>drawModule(m,i));
 </script>
-<footer>產生時間: 2025-10-09 22:44:17 | 來源: include/hybridacc/pe/*.hpp | 自動分類僅供參考</footer></body></html>
+<footer>產生時間: 2025-10-14 18:10:47 | 來源: include/hybridacc/pe/*.hpp | 自動分類僅供參考</footer></body></html>

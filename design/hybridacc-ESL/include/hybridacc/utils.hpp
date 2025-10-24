@@ -16,6 +16,11 @@ namespace hybridacc {
 #define BUS_WIDTH   64 // 64 bits
 #define LOOP_COUNT_BITS 10  // 新增: 迴圈計數位寬 (需與 LoopStack template 預設一致)
 
+#define TCOUNTER_BITS 2 // T counter 位寬 (0~3)
+#define PCOUNTER_BITS 5 // P counter 位寬 (0~31)
+
+typedef enum {VADD, REDUCTION} VADDMODE;
+
 // ---------------- Interface Width Configuration (可由外部覆寫) ----------------
 
 template <typename T>
