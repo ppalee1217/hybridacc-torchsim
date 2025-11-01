@@ -13,11 +13,15 @@ namespace hybridacc {
 #define PORT_STATIC_WIDTH 64   // 64 bits
 #define PORT_DYNAMIC_WIDTH 16  // 16 bits
 #define PORT_LOCAL_WIDTH 64  // 64 bits
-#define BUS_WIDTH   64 // 64 bits
+#define BUS_DATA_WIDTH   64 // 64 bits
+#define BUS_ADDR_WIDTH  9 // 9 bits
 #define LOOP_COUNT_BITS 10  // 新增: 迴圈計數位寬 (需與 LoopStack template 預設一致)
 
 #define TCOUNTER_BITS 2 // T counter 位寬 (0~3)
 #define PCOUNTER_BITS 5 // P counter 位寬 (0~31)
+
+#define PE_ID_BITS 6 // PE ID 位寬 (支援最多 64 個 PE)
+#define NOC_CHANNELS 4 // NoC 通道數量
 
 typedef enum {VADD, REDUCTION} VADDMODE;
 

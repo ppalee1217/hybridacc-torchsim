@@ -27,12 +27,18 @@ namespace hybridacc {
 namespace pe {
 
 template<int FIFO_DEPTH = 4>
-SC_MODULE(PortIO) {
+SC_MODULE(Router) {
     static_assert(FIFO_DEPTH > 0, "FIFO_DEPTH 必須 > 0");
 
     // Ports
     sc_in<bool> clk;      // Clock
     sc_in<bool> rst_n;    // Active-low synchronous reset (假設 FIFO 亦為 active-low)
+
+    // IDs
+    sc_in<sc_uint<PE_ID_BITS*NOC_CHANNELS>> pe_id_i;   // Input PE ID
+
+    // SuperMode
+    sc_in<bool> supermode_o; // SuperMode signal
 
     // ===================== 外部 (Outside of PE) =====================
     // PLI: 外部 -> 內部
@@ -45,15 +51,12 @@ SC_MODULE(PortIO) {
     sc_out<bool> plo_valid_o;
     sc_in<bool> plo_ready_i;
 
-    // PS: 外部 -> 內部
-    sc_in<sc_uint<PORT_STATIC_WIDTH>> ps_i;
-    sc_in<bool> ps_valid_i;
-    sc_out<bool> ps_ready_o;
+    // Bus slave
+    sc_in<sc_uint<BUS_DATA_WIDTH>> bus__data_i;
+    sc_in<bool> bus_valid_i;
+    sc_out<bool> bus_ready_o;
 
-    // PD: 外部 -> 內部
-    sc_in<sc_uint<PORT_DYNAMIC_WIDTH>> pd_i;
-    sc_in<bool> pd_valid_i;
-    sc_out<bool> pd_ready_o;
+
 
     // ===================== 內部 (Inside of PE) =====================
     // PLI: 外部 -> 內部 (此端為輸出給內部)
