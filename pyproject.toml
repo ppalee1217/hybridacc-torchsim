@@ -34,6 +34,7 @@ dependencies = [
     "protobuf==6.30.0",
     "ptyprocess==0.7.0",
     "pure-eval==0.2.3",
+    "pybind11>=3.0.1",
     "pydot==3.0.4",
     "pygments==2.19.1",
     "pyinstrument==5.0.1",
@@ -48,6 +49,7 @@ dependencies = [
     "tqdm==4.67.1",
     "traitlets==5.14.3",
     "triton==3.1.0",
+    "PyQt5>=5.15.0",
 ]
 
 [project.scripts]
