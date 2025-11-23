@@ -473,9 +473,8 @@ public:
         v_fp16_t pr_data = pr_vp_out_sig.read();
         vadd_op2_sig.write(pr_data);
 
-        vadd_enable_sig.write(true);
-
-        vadd_mode_sig.write((decode.vaddu_mode == 0) ? VADDU_Mode::ADD : VADDU_Mode::ACCUMULATE);
+        vadd_enable_sig.write(decode.vaddu_en);
+        vadd_mode_sig.write(static_cast<VADDU_Mode>(decode.vaddu_mode));
     }
 
     void update_pr_control_signals(const pe_decode_signals_t& signals, bool valid) {
@@ -492,7 +491,7 @@ public:
 
         pr_enable_sig.write(signals.pr_en);
         pr_pid_sig.write(signals.rid5);
-        pr_mode_sig.write(signals.vaddu_mode);
+        pr_mode_sig.write(signals.pr_mode);
         pr_vpid_write_en_sig.write(signals.pr_write);
         pr_clear_regs_sig.write(signals.pr_clear_regs);
         pr_use_pcounter_sig.write(signals.pr_use_vcounter);
@@ -527,6 +526,7 @@ public:
                       << " Inst=0x" << std::hex << decode_signals_reg.read().inst << std::dec
                       << " PLI_PLO_State=" << pli_plo_state_reg.read()
                       << " Stall=" << stage_stall_sig.read());
+
 
             wait(); // Wait for next clock edge
         }

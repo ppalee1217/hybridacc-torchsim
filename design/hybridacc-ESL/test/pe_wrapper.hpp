@@ -96,6 +96,13 @@ public:
     bool send_noc_request(uint64_t addr, uint64_t data);
 
     /**
+     * Send read request through NoC interface
+     * @param addr Target address
+     * @return true if accepted
+     */
+    bool send_noc_read_request(uint64_t addr);
+
+    /**
      * Read data from NoC response interface
      * @param data Reference to store received data
      * @return true if data available

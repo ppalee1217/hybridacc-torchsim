@@ -41,6 +41,7 @@ enum class State {
     LOAD_PRE,
     LOAD_WAIT,
     LOAD,
+    LOAD_PIPELINE,  // 新增: 流水線讀取狀態
     DONE
 };
 
@@ -53,6 +54,7 @@ inline std::ostream& operator<<(std::ostream& os, State state) {
         case State::LOAD_PRE: return os << "LOAD_PRE";
         case State::LOAD_WAIT: return os << "LOAD_WAIT";
         case State::LOAD: return os << "LOAD";
+        case State::LOAD_PIPELINE: return os << "LOAD_PIPELINE";  // 新增
         case State::DONE: return os << "DONE";
         default: return os << "UNKNOWN";
     }
@@ -83,7 +85,7 @@ public:
 
     sc_out<bool> busy;
     sc_out<bool> done;
-    sc_out<bool> dl_stall_out;  // Combinational stall signal (立即反映是否需要 stall)
+    sc_out<bool> dl_stall_out;
 
     // data ports
     sc_in<v_fp16_t> ps_data_in;
@@ -126,70 +128,81 @@ public:
           dm_write_mask("dm_write_mask"),
           dm_read_addr("dm_read_addr"),
           dm_read_data("dm_read_data"),
-          dmrv_out("dmrv_out"),
-          dmrv(),
-          dmwv(),
-          dma_base(0),
-          dma_offset(0),
-          dma_len(0),
-          dma_stride(0),
-          dma_broadcast(false)
+          dmrv_out("dmrv_out")
     {
         DEBUG_MSG("[Create] DataLoader");
 
-        // 在構造函數體中初始化 sc_signal
-        current_state.write(State::IDLE);
+        // 初始化暫存器
+        state_reg.write(State::IDLE);
+        dmrv_reg.write(v_fp16_t());
+        dmwv_reg.write(v_fp16_t());
+        dma_base_reg.write(0);
+        dma_offset_reg.write(0);
+        dma_len_reg.write(0);
+        dma_stride_reg.write(0);
+        dma_broadcast_reg.write(false);
+        request_type_reg.write(DMARequestType::LOAD_DWORD);
 
         SC_CTHREAD(sequential_process, clk.pos());
         reset_signal_is(reset_n, false);
 
         SC_METHOD(combinational_process);
-        sensitive << current_state << active << write_en;
+        sensitive << state_reg << active << write_en << ps_data_in_valid << next
+                  << ps_data_in << dm_read_data << addr_len << set_addr << set_len
+                  << dma_base_reg << dma_offset_reg << dma_len_reg << dma_stride_reg
+                  << dma_broadcast_reg << request_type_reg << dmwv_reg << dmrv_reg << stride << mode;
     }
 
+    // Registers (current state)
+    sc_signal<State> state_reg;
+    sc_signal<v_fp16_t> dmrv_reg;
+    sc_signal<v_fp16_t> dmwv_reg;
+    sc_signal<uint16_t> dma_base_reg;
+    sc_signal<uint16_t> dma_offset_reg;
+    sc_signal<uint16_t> dma_len_reg;
+    sc_signal<uint16_t> dma_stride_reg;
+    sc_signal<bool> dma_broadcast_reg;
+    sc_signal<DMARequestType> request_type_reg;
 
-    // Member variables
-    v_fp16_t dmrv;
-    v_fp16_t dmwv;
-    uint16_t dma_base;
-    uint16_t dma_offset;
-    uint16_t dma_len;
-    uint16_t dma_stride;
-    bool dma_broadcast;
-    DMARequestType request_type;
+    // Next state (combinational)
+    State state_next;
+    v_fp16_t dmrv_next;
+    v_fp16_t dmwv_next;
+    uint16_t dma_base_next;
+    uint16_t dma_offset_next;
+    uint16_t dma_len_next;
+    uint16_t dma_stride_next;
+    bool dma_broadcast_next;
+    DMARequestType request_type_next;
 
-    // State machine variables
-    sc_signal<State> current_state;
-    State next_state;
-
-    uint64_t mask_and_broadcast(uint64_t v, DMARequestType request_type, bool dma_broadcast) {  // 修正：移除 const&
+    uint64_t mask_and_broadcast(uint64_t v, DMARequestType request_type, bool dma_broadcast) {
         uint64_t broadcast_v = 0;
         switch (request_type) {
             case DMARequestType::LOAD_BYTE:
-                v = v & 0xFF; // 假設只讀取低位
+                v = v & 0xFF;
                 if(dma_broadcast) {
                     for(int i = 0; i < 4; ++i) {
                         broadcast_v |= v << (i * 16);
                     }
-                    v = broadcast_v; // 將所有 lane 設為相同值
+                    v = broadcast_v;
                 }
                 break;
             case DMARequestType::LOAD_HALF:
-                v = v & 0xFFFF; // 假設只讀取低位
+                v = v & 0xFFFF;
                 if(dma_broadcast) {
                     for(int i = 0; i < 4; ++i) {
                         broadcast_v |= v << (i * 16);
                     }
-                    v = broadcast_v; // 將所有 lane 設為相同值
+                    v = broadcast_v;
                 }
                 break;
             case DMARequestType::LOAD_WORD:
-                v = v & 0xFFFFFFFF; // 假設只讀取低位
+                v = v & 0xFFFFFFFF;
                 if(dma_broadcast) {
                     for(int i = 0; i < 2; ++i) {
                         broadcast_v |= v << (i * 32);
                     }
-                    v = broadcast_v; // 將所有 lane 設為相同值
+                    v = broadcast_v;
                 }
                 break;
             case DMARequestType::LOAD_DWORD:
@@ -197,14 +210,57 @@ public:
             default:
                 break;
         }
-
         return v;
     }
 
     // SystemC processes
     void sequential_process() {
         // Reset initialization
-        current_state.write(State::IDLE);
+        state_reg.write(State::IDLE);
+        dmrv_reg.write(v_fp16_t());
+        dmwv_reg.write(v_fp16_t());
+        dma_base_reg.write(0);
+        dma_offset_reg.write(0);
+        dma_len_reg.write(0);
+        dma_stride_reg.write(0);
+        dma_broadcast_reg.write(false);
+        request_type_reg.write(DMARequestType::LOAD_DWORD);
+        wait();
+
+        while (true) {
+            // Update all registers with next values
+            state_reg.write(state_next);
+            dmrv_reg.write(dmrv_next);
+            dmwv_reg.write(dmwv_next);
+            dma_base_reg.write(dma_base_next);
+            dma_offset_reg.write(dma_offset_next);
+            dma_len_reg.write(dma_len_next);
+            dma_stride_reg.write(dma_stride_next);
+            dma_broadcast_reg.write(dma_broadcast_next);
+            request_type_reg.write(request_type_next);
+
+            DEBUG_MSG("[DataLoader] State=" << state_reg.read()
+                      << " ps_valid=" << ps_data_in_valid.read()
+                      << " ready=" << ps_data_in_ready.read()
+                      << " len=" << dma_len_reg.read());
+
+            wait();
+        }
+    }
+
+    void combinational_process() {
+        // Default: hold current values
+        state_next = state_reg.read();
+        dmrv_next = dmrv_reg.read();
+        dmwv_next = dmwv_reg.read();
+        dma_base_next = dma_base_reg.read();
+        dma_offset_next = dma_offset_reg.read();
+        dma_len_next = dma_len_reg.read();
+        dma_stride_next = dma_stride_reg.read();
+        dma_broadcast_next = dma_broadcast_reg.read();
+        request_type_next = request_type_reg.read();
+
+        // Default outputs
         busy.write(false);
         done.write(false);
         ps_data_in_ready.write(false);
@@ -213,141 +269,144 @@ public:
         dm_write_data.write(0);
         dm_write_mask.write(0);
         dm_read_addr.write(0);
-        dmrv_out.write(v_fp16_t());
-        wait();
+        dmrv_out.write(dmrv_reg.read());
 
-        while (true) {
-            // Default next state
-            next_state = current_state.read();
+        uint64_t v;
 
-            // Default outputs (will be overridden in state machine)
-            busy.write(false);
-            done.write(false);
-            ps_data_in_ready.write(false);
-            dm_write_en.write(false);
-            dm_write_addr.write(0);
-            dm_write_data.write(0);
-            dm_write_mask.write(0);
-            dm_read_addr.write(0);
+        switch (state_reg.read()) {
+            case State::IDLE:
+                if (active.read()) {
+                    // Initialize DMA parameters
+                    dma_offset_next = 0;
+                    dma_stride_next = stride.read();
+                    state_next = write_en.read() ? State::STORE_PRE : State::LOAD_PRE;
 
-            switch (current_state.read()) {
-                case State::IDLE:
-                    if (active.read()) {
-                        // Initialize DMA parameters
-                        dma_offset = 0;
-                        dma_stride = stride.read();
-                        next_state = write_en.read() ? State::STORE_PRE : State::LOAD_PRE;
-                        switch (mode.read() & 0x7) {
-                            case 0: request_type = DMARequestType::LOAD_BYTE; dma_broadcast = false; break;
-                            case 1: request_type = DMARequestType::LOAD_HALF; dma_broadcast = false; break;
-                            case 2: request_type = DMARequestType::LOAD_WORD; dma_broadcast = false; break;
-                            case 3: request_type = DMARequestType::LOAD_DWORD; dma_broadcast = false; break;
-                            case 4: request_type = DMARequestType::LOAD_BYTE; dma_broadcast = true; break;
-                            case 5: request_type = DMARequestType::LOAD_HALF; dma_broadcast = true; break;
-                            case 6: request_type = DMARequestType::LOAD_WORD; dma_broadcast = true; break;
-                            default: request_type = DMARequestType::LOAD_DWORD; dma_broadcast = false; break;
-                        }
-                    } else if (set_addr.read()) {
-                        dma_base = addr_len.read();
-                    } else if (set_len.read()) {
-                        dma_len = addr_len.read();
+                    switch (mode.read() & 0x7) {
+                        case 0: request_type_next = DMARequestType::LOAD_BYTE; dma_broadcast_next = false; break;
+                        case 1: request_type_next = DMARequestType::LOAD_HALF; dma_broadcast_next = false; break;
+                        case 2: request_type_next = DMARequestType::LOAD_WORD; dma_broadcast_next = false; break;
+                        case 3: request_type_next = DMARequestType::LOAD_DWORD; dma_broadcast_next = false; break;
+                        case 4: request_type_next = DMARequestType::LOAD_BYTE; dma_broadcast_next = true; break;
+                        case 5: request_type_next = DMARequestType::LOAD_HALF; dma_broadcast_next = true; break;
+                        case 6: request_type_next = DMARequestType::LOAD_WORD; dma_broadcast_next = true; break;
+                        default: request_type_next = DMARequestType::LOAD_DWORD; dma_broadcast_next = false; break;
                     }
-                    break;
+                } else if (set_addr.read()) {
+                    dma_base_next = addr_len.read();
+                } else if (set_len.read()) {
+                    dma_len_next = addr_len.read();
+                }
+                break;
 
-                case State::STORE_PRE:
-                    busy.write(true);
-                    ps_data_in_ready.write(true);
-                    if (ps_data_in_valid.read()) {
-                        dmwv = ps_data_in.read();
-                        next_state = State::STORE;
-                    }
-                    break;
+            case State::STORE_PRE:
+                busy.write(true);
+                ps_data_in_ready.write(true);  // 準備好接收數據
+                if (ps_data_in_valid.read()) {
+                    // Valid-Ready 握手成功，採樣數據
+                    dmwv_next = ps_data_in.read();
+                    state_next = State::STORE;
+                    // 注意：ready 會在下一個 cycle 自然變為 false (因為進入 STORE 狀態)
+                }
+                break;
 
-                case State::STORE:
-                    busy.write(true);
-                    dm_write_en.write(true);
-                    dm_write_addr.write(dma_base + dma_offset);
-                    dm_write_data.write(dmwv.toUint64());
-                    dm_write_mask.write(0xFF);
+            case State::STORE:
+                busy.write(true);
+                ps_data_in_ready.write(false);  // 處理數據期間，ready 為 false
+                dm_write_en.write(true);
+                dm_write_addr.write(dma_base_reg.read() + dma_offset_reg.read());
+                dm_write_data.write(dmwv_reg.read().toUint64());
+                dm_write_mask.write(0xFF);
 
-                    dma_offset += dma_stride * sizeof(uint16_t);
-                    dma_len--;
-                    if (dma_len == 0) {
-                        next_state = State::DONE;
+                dma_offset_next = dma_offset_reg.read() + dma_stride_reg.read() * sizeof(uint16_t);
+                dma_len_next = dma_len_reg.read() - 1;
+
+                if (dma_len_next == 0) {
+                    state_next = State::DONE;
+                } else {
+                    state_next = State::STORE_PRE;
+                }
+                break;
+
+            case State::LOAD_PRE: // setup read address
+                busy.write(true);
+                dm_read_addr.write(dma_base_reg.read() + dma_offset_reg.read());
+                state_next = State::LOAD_WAIT;
+                break;
+
+            case State::LOAD_WAIT: // wait for read data
+                busy.write(true);
+                state_next = State::LOAD;
+
+                v = dm_read_data.read();
+                v = mask_and_broadcast(v, request_type_reg.read(), dma_broadcast_reg.read());
+                dmrv_next.fromUint64(v);
+                dmrv_out.write(dmrv_next);
+                break;
+
+            case State::LOAD: // data ready
+                busy.write(true);
+                dmrv_out.write(dmrv_reg.read());
+
+                if (next.read()) {
+                    dma_offset_next = dma_offset_reg.read() + dma_stride_reg.read() * sizeof(uint16_t);
+                    dma_len_next = dma_len_reg.read() - 1;
+
+                    if (dma_len_next == 0) {
+                        state_next = State::DONE;
                     } else {
-                        next_state = State::STORE_PRE;
+                        state_next = State::LOAD_PIPELINE;  // 修改: 進入流水線讀取狀態
+                        dm_read_addr.write(dma_base_reg.read() + dma_offset_next);
                     }
-                    break;
 
-                case State::LOAD_PRE:
-                    busy.write(true);
-                    dm_read_addr.write(dma_base + dma_offset);
-                    next_state = State::LOAD_WAIT;
-                    break;
-
-                case State::LOAD_WAIT: {
-                    busy.write(true);
-                    next_state = State::LOAD;
-                    uint64_t v = dm_read_data.read();
-                    v = mask_and_broadcast(v, request_type, dma_broadcast);
-                    dmrv.fromUint64(v);
-                    dmrv_out.write(dmrv);
-                    break;
+                    v = dm_read_data.read();
+                    v = mask_and_broadcast(v, request_type_reg.read(), dma_broadcast_reg.read());
+                    dmrv_next.fromUint64(v);
+                    dmrv_out.write(dmrv_next);
                 }
+                break;
 
-                case State::LOAD: {
-                    busy.write(true);
-                    if (next.read()) {
-                        dma_offset += dma_stride * sizeof(uint16_t);  //  修正語法錯誤
-                        dma_len--;
+            case State::LOAD_PIPELINE: // 新增: 流水線讀取狀態
+                busy.write(true);
+                dmrv_out.write(dmrv_reg.read());
 
-                        if (dma_len == 0) {
-                            next_state = State::DONE;
-                        } else {
-                            next_state = State::LOAD_PRE;
-                            dm_read_addr.write(dma_base + dma_offset);
-                        }
+                if (next.read()) {
+                    dma_offset_next = dma_offset_reg.read() + dma_stride_reg.read() * sizeof(uint16_t);
+                    dma_len_next = dma_len_reg.read() - 1;
 
-                        uint64_t v = dm_read_data.read();
-                        v = mask_and_broadcast(v, request_type, dma_broadcast);
-                        dmrv.fromUint64(v);
-                        dmrv_out.write(dmrv);
+                    if (dma_len_next == 0) {
+                        state_next = State::DONE;
+                    } else {
+                        state_next = State::LOAD_PIPELINE;
+                        dm_read_addr.write(dma_base_reg.read() + dma_offset_next);
                     }
-                    break;
+
+                    v = dm_read_data.read();
+                    v = mask_and_broadcast(v, request_type_reg.read(), dma_broadcast_reg.read());
+                    dmrv_next.fromUint64(v);
+                    dmrv_out.write(dmrv_next);
                 }
+                break;
 
-                case State::DONE:
-                    done.write(true);
-                    next_state = State::IDLE;
-                    break;
+            case State::DONE:
+                done.write(true);
+                state_next = State::IDLE;
+                break;
 
-                default:
-                    break;
-            }
-
-            current_state.write(next_state);
-            wait();
+            default:
+                break;
         }
-    }
 
-    void combinational_process() {
         // Combinational stall signal generation
-        // dl_stall_out 只基於 current_state（暫存器），不依賴輸入控制信號
-
         bool stall = false;
-        State cur_state = current_state.read();
+        State cur_state = state_reg.read();
 
-        // 檢查是否處於 busy 狀態
-        // STORE operations
         if (cur_state == State::STORE_PRE || cur_state == State::STORE) {
             stall = true;
         }
 
-
         if (cur_state == State::IDLE && active.read() && write_en.read()) {
             stall = true;
         }
-
 
         dl_stall_out.write(stall);
     }

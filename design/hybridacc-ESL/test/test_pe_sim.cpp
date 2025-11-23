@@ -52,6 +52,54 @@ std::vector<uint64_t> bytes_to_uint64(const std::vector<uint8_t>& bytes) {
     return values;
 }
 
+// Helper function to parse meta.txt file
+struct ConvParams {
+    int kernel_size;
+    int in_channels;
+    int out_channels;
+    int out_width;
+    int groups_per_output;
+};
+
+ConvParams parse_meta_file(const std::string& filename) {
+    ConvParams params = {0};
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open meta file: " << filename << std::endl;
+        return params;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        size_t colon_pos = line.find(':');
+        if (colon_pos == std::string::npos) continue;
+
+        std::string key = line.substr(0, colon_pos);
+        std::string value = line.substr(colon_pos + 1);
+
+        // Trim whitespace
+        key.erase(0, key.find_first_not_of(" \t"));
+        key.erase(key.find_last_not_of(" \t") + 1);
+        value.erase(0, value.find_first_not_of(" \t"));
+        value.erase(value.find_last_not_of(" \t") + 1);
+
+        if (key == "kernel_size") {
+            params.kernel_size = std::stoi(value);
+        } else if (key == "in_ch") {  // Changed from "in_channels"
+            params.in_channels = std::stoi(value);
+        } else if (key == "out_ch") {  // Changed from "out_channels"
+            params.out_channels = std::stoi(value);
+        } else if (key == "out_width") {
+            params.out_width = std::stoi(value);
+        }
+    }
+
+    // Calculate groups_per_output (out_channels / 4, since 4 fp16 per 64-bit)
+    params.groups_per_output = params.out_channels / 4;
+
+    return params;
+}
+
 // Main test runner
 int sc_main(int argc, char* argv[]) {
     sc_core::sc_report_handler::set_actions("/IEEE_Std_1666/deprecated",
@@ -72,6 +120,21 @@ int sc_main(int argc, char* argv[]) {
     const std::string activation_file = data_dir + "activation_input.bin";
     const std::string ps_input_file = data_dir + "ps_input.bin";
     const std::string expected_output_file = data_dir + "activation_output.bin";
+    const std::string meta_file = data_dir + "meta.txt";
+
+    // Parse convolution parameters from meta.txt
+    std::cout << "\n[Step 0] Parsing convolution parameters from meta.txt..." << std::endl;
+    ConvParams conv_params = parse_meta_file(meta_file);
+    if (conv_params.kernel_size == 0 || conv_params.out_width == 0) {
+        std::cerr << "Failed to parse meta.txt or invalid parameters" << std::endl;
+        return 1;
+    }
+    std::cout << "Convolution parameters:" << std::endl;
+    std::cout << "  kernel_size: " << conv_params.kernel_size << std::endl;
+    std::cout << "  in_channels: " << conv_params.in_channels << std::endl;
+    std::cout << "  out_channels: " << conv_params.out_channels << std::endl;
+    std::cout << "  out_width: " << conv_params.out_width << std::endl;
+    std::cout << "  groups_per_output: " << conv_params.groups_per_output << std::endl;
 
     // Step 1: Reset PE
     std::cout << "\n[Step 1] Resetting PE..." << std::endl;
@@ -150,7 +213,7 @@ int sc_main(int argc, char* argv[]) {
     std::cout << "All weights sent." << std::endl;
 
     // Step 6: Send activation data (PD channel) and partial sums (PLI channel)
-    std::cout << "\n[Step 6] Sending activation data and partial sums..." << std::endl;
+    std::cout << "\n[Step 6] Sending activation data and partial sums with proper convolution timing..." << std::endl;
 
     auto activation_bytes = read_binary_file(activation_file);
     auto ps_input_bytes = read_binary_file(ps_input_file);
@@ -168,63 +231,105 @@ int sc_main(int argc, char* argv[]) {
 
     const uint16_t PD_ADDR = 0x0040;  // Channel PD (01), ID 0
     const uint16_t PLI_ADDR = 0x0080; // Channel PLI (10), ID 0
-
-    // Send data in interleaved manner (simulating the processing pass)
-    size_t max_items = std::max(activations.size(), ps_inputs.size());
-
-    for (size_t i = 0; i < max_items; i++) {
-        // Send activation if available
-        if (i < activations.size()) {
-            if (!pe_wrapper.send_noc_request(PD_ADDR, activations[i])) {
-                std::cerr << "Failed to send activation " << i << std::endl;
-            }
-        }
-
-        // Send partial sum input if available
-        if (i < ps_inputs.size()) {
-            if (!pe_wrapper.send_noc_request(PLI_ADDR, ps_inputs[i])) {
-                std::cerr << "Failed to send partial sum " << i << std::endl;
-            }
-        }
-
-        // Give PE some cycles to process
-        if (i % 10 == 0) {
-            pe_wrapper.run_cycles(5);
-            std::cout << "Progress: " << i << " / " << max_items << std::endl;
-        }
-    }
-
-    std::cout << "All input data sent." << std::endl;
-
-    // Step 7: Run simulation and collect outputs
-    std::cout << "\n[Step 7] Running simulation and collecting outputs..." << std::endl;
-    std::vector<uint64_t> outputs;
-
-    // Run for a certain number of cycles and try to read PLO output
-    const int MAX_CYCLES = 100000;
     const uint16_t PLO_ADDR = 0x00C0; // Channel PLO (11), ID 0
 
-    for (int cycle = 0; cycle < MAX_CYCLES; cycle++) {
-        // Try to read PLO data via NoC response
-        uint64_t output_data;
-        if (pe_wrapper.read_noc_response(output_data)) {
-            outputs.push_back(output_data);
-            std::cout << "Received output " << outputs.size() << ": 0x"
-                     << std::hex << output_data << std::dec << std::endl;
+    // Use parameters from meta.txt
+    std::vector<uint64_t> outputs;
+    outputs.reserve(conv_params.out_width * conv_params.groups_per_output);
+
+    // For each output position
+    for (int out_pos = 0; out_pos < conv_params.out_width; out_pos++) {
+        // Step 6a: Send KERNEL_SIZE activation groups
+        // Each group contains in_channels fp16 values
+        for (int k = 0; k < conv_params.kernel_size; k++) {
+            int act_base_idx = (out_pos + k) * conv_params.in_channels;  // Base index for this kernel position
+
+            // Send in_channels fp16 activations (one group)
+            for (int c = 0; c < conv_params.in_channels; c++) {
+                int act_idx = act_base_idx + c;
+                if (act_idx < activations.size()) {
+                    if (!pe_wrapper.send_noc_request(PD_ADDR, activations[act_idx])) {
+                        std::cerr << "Failed to send activation at pos=" << out_pos
+                                  << " k=" << k << " c=" << c << std::endl;
+                    }
+                } else {
+                    std::cerr << "Warning: activation index " << act_idx << " out of range" << std::endl;
+                }
+            }
+
+            // Give PE time to process
+            pe_wrapper.run_cycles(5);
         }
 
-        pe_wrapper.run_cycles(1);
+        // Step 6b: Send partial sum inputs (groups_per_output groups)
+        int ps_base_idx = out_pos * conv_params.groups_per_output;
+        for (int g = 0; g < conv_params.groups_per_output; g++) {
+            int ps_idx = ps_base_idx + g;
+            if (ps_idx < ps_inputs.size()) {
+                if (!pe_wrapper.send_noc_request(PLI_ADDR, ps_inputs[ps_idx])) {
+                    std::cerr << "Failed to send ps_input at pos=" << out_pos
+                              << " group=" << g << std::endl;
+                }
+            } else {
+                std::cerr << "Warning: ps_input index " << ps_idx << " out of range" << std::endl;
+            }
+            pe_wrapper.run_cycles(5);
+        }
 
-        // Check if PE is halted
-        if (pe_wrapper.is_halted()) {
-            std::cout << "PE halted after " << cycle << " cycles" << std::endl;
-            break;
+        // Step 6c: Run computation and collect outputs
+        pe_wrapper.run_cycles(50);  // Give time for computation
+
+        for (int g = 0; g < conv_params.groups_per_output; g++) {
+            // 先發送讀取請求到 PLO 通道
+            if (!pe_wrapper.send_noc_read_request(PLO_ADDR)) {
+                std::cerr << "Failed to send PLO read request at pos=" << out_pos
+                          << " group=" << g << std::endl;
+                continue;
+            }
+
+            // 然後讀取響應
+            uint64_t output_data;
+            if (pe_wrapper.read_noc_response(output_data)) {
+                outputs.push_back(output_data);
+                if (outputs.size() % 100 == 0) {
+                    std::cout << "Received output " << outputs.size() << ": 0x"
+                              << std::hex << output_data << std::dec << std::endl;
+                }
+            } else {
+                std::cerr << "Warning: Failed to receive output at pos=" << out_pos
+                          << " group=" << g << " (total received: " << outputs.size() << ")" << std::endl;
+            }
         }
 
         // Progress indicator
+        if (out_pos % 100 == 0) {
+            std::cout << "Progress: " << out_pos << " / " << conv_params.out_width
+                      << " (outputs collected: " << outputs.size() << ")" << std::endl;
+        }
+    }
+
+    std::cout << "All input data sent and outputs collected: " << outputs.size() << std::endl;
+
+    // Step 7: Wait for PE to complete
+    std::cout << "\n[Step 7] Waiting for PE to complete..." << std::endl;
+    const int MAX_WAIT_CYCLES = 10000;
+    for (int cycle = 0; cycle < MAX_WAIT_CYCLES; cycle++) {
+        // Try to read any remaining PLO data
+        uint64_t output_data;
+        if (pe_wrapper.read_noc_response(output_data)) {
+            outputs.push_back(output_data);
+            std::cout << "Received additional output " << outputs.size() << ": 0x"
+                     << std::hex << output_data << std::dec << std::endl;
+        }
+
+        if (pe_wrapper.is_halted()) {
+            std::cout << "PE halted after " << cycle << " additional cycles" << std::endl;
+            break;
+        }
+        pe_wrapper.run_cycles(1);
+
         if (cycle % 1000 == 0 && cycle > 0) {
-            std::cout << "Cycle: " << cycle << ", Outputs collected: " << outputs.size() << std::endl;
-            pe_wrapper.dump_state();
+            std::cout << "Waiting... cycle: " << cycle << ", outputs: " << outputs.size() << std::endl;
         }
     }
 

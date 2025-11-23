@@ -396,7 +396,8 @@ public:
 
         if (exe_a_has_valid && !exe_a_stalled && !exe_a_downstream_stalled && pe_running_current) {
             instr_count_n = instr_count_current + 1;
-            DEBUG_MSG("[ProcessElement] Instruction completed: " << instr_count_n);
+            DEBUG_MSG("[ProcessElement] Instruction completed: " << instr_count_n
+                << " Inst: 0x" << std::hex << exe_m_to_exe_a_signals.read().inst << std::dec);
         }
 
         // Update cycle count

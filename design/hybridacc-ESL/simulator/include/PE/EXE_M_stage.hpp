@@ -103,6 +103,10 @@ public:
                   << tr_vtid_out_sig << dl_dmrv_out_sig
                   << pd_data_in_valid << pd_data_in;
 
+        // PS data type conversion process
+        SC_METHOD(ps_data_conversion_process);
+        sensitive << ps_data_in;
+
         // Bind submodules
         bind();
     }
@@ -124,6 +128,9 @@ public:
     sc_signal<bool> halted_next;
 
     // === Internal signals for submodules ===
+    // PS port type conversion (uint64_t -> v_fp16_t)
+    sc_signal<v_fp16_t> ps_data_in_converted_sig;
+
     // DataLoader signals
     sc_signal<uint16_t> dl_addr_len_sig;
     sc_signal<bool> dl_set_addr_sig;
@@ -133,8 +140,6 @@ public:
     sc_signal<bool> dl_write_en_sig;
     sc_signal<bool> dl_active_sig;
     sc_signal<bool> dl_next_sig;
-    sc_signal<v_fp16_t> dl_ps_data_in_sig;
-    sc_signal<bool> dl_ps_data_in_ready_sig;
     sc_signal<v_fp16_t> dl_dmrv_out_sig;
     sc_signal<bool> dl_busy_sig;
     sc_signal<bool> dl_done_sig;
@@ -215,7 +220,7 @@ public:
         DL.write_en(dl_write_en_sig);
         DL.active(dl_active_sig);
         DL.next(dl_next_sig);
-        DL.ps_data_in(dl_ps_data_in_sig);
+        DL.ps_data_in(ps_data_in_converted_sig);
         DL.ps_data_in_valid(ps_data_in_valid);
         DL.ps_data_in_ready(ps_data_in_ready);
         DL.dmrv_out(dl_dmrv_out_sig);
@@ -244,6 +249,13 @@ public:
     }
 
     // === Combinational Logic (Split by function) ===
+
+    // PS data type conversion: uint64_t -> v_fp16_t
+    void ps_data_conversion_process() {
+        v_fp16_t converted;
+        converted.fromUint64(ps_data_in.read());
+        ps_data_in_converted_sig.write(converted);
+    }
 
     // Stage 1: Calculate all stall conditions
     void stall_calculation_process() {

@@ -4,6 +4,7 @@
 #include "utils.hpp"
 #include <systemc>
 #include <cassert>
+#include "FIFO.hpp"
 
 // PE Router Command and ID field definitions
 #define PE_CMD_ADDRESS 0x100
@@ -207,15 +208,60 @@ public:
           pe_pli_ready("pe_pli_ready"),
           pe_plo("pe_plo"),
           pe_plo_valid("pe_plo_valid"),
-          pe_plo_ready("pe_plo_ready")
+          pe_plo_ready("pe_plo_ready"),
+          ps_fifo("ps_fifo", max_queue_size),
+          pd_fifo("pd_fifo", max_queue_size),
+          pli_fifo("pli_fifo", max_queue_size),
+          plo_fifo("plo_fifo", max_queue_size)
     {
         DEBUG_MSG("[Create] PErouter");
+
+        //  綁定 FIFO 的時鐘和 reset 信號
+        ps_fifo.clk(clk);
+        ps_fifo.reset_n(reset_n);
+        ps_fifo.data_in(ps_fifo_data_in_sig);
+        ps_fifo.push(ps_fifo_push_sig);
+        ps_fifo.data_out(ps_fifo_data_out_sig);
+        ps_fifo.pop(ps_fifo_pop_sig);
+        ps_fifo.empty(ps_fifo_empty_sig);
+        ps_fifo.full(ps_fifo_full_sig);
+
+        pd_fifo.clk(clk);
+        pd_fifo.reset_n(reset_n);
+        pd_fifo.data_in(pd_fifo_data_in_sig);
+        pd_fifo.push(pd_fifo_push_sig);
+        pd_fifo.data_out(pd_fifo_data_out_sig);
+        pd_fifo.pop(pd_fifo_pop_sig);
+        pd_fifo.empty(pd_fifo_empty_sig);
+        pd_fifo.full(pd_fifo_full_sig);
+
+        pli_fifo.clk(clk);
+        pli_fifo.reset_n(reset_n);
+        pli_fifo.data_in(pli_fifo_data_in_sig);
+        pli_fifo.push(pli_fifo_push_sig);
+        pli_fifo.data_out(pli_fifo_data_out_sig);
+        pli_fifo.pop(pli_fifo_pop_sig);
+        pli_fifo.empty(pli_fifo_empty_sig);
+        pli_fifo.full(pli_fifo_full_sig);
+
+        plo_fifo.clk(clk);
+        plo_fifo.reset_n(reset_n);
+        plo_fifo.data_in(plo_fifo_data_in_sig);
+        plo_fifo.push(plo_fifo_push_sig);
+        plo_fifo.data_out(plo_fifo_data_out_sig);
+        plo_fifo.pop(plo_fifo_pop_sig);
+        plo_fifo.empty(plo_fifo_empty_sig);
+        plo_fifo.full(plo_fifo_full_sig);
+
         SC_METHOD(combinational_process);
         sensitive << reset_n << state_reg << req_in_valid << req_in << enable << route_mode
                   << resp_out_ready << ln_pli_in_valid << ln_pli_in_data << ln_plo_out_ready
                   << pe_ps_ready << pe_pd_ready << pe_pli_ready << pe_plo_valid << pe_plo
                   << pending_noc_req_reg << current_noc_req_reg
-                  << ps_queue_full_reg << pd_queue_full_reg << pli_queue_full_reg << plo_queue_full_reg;
+                  << ps_fifo_empty_sig << ps_fifo_full_sig << ps_fifo_data_out_sig
+                  << pd_fifo_empty_sig << pd_fifo_full_sig << pd_fifo_data_out_sig
+                  << pli_fifo_empty_sig << pli_fifo_full_sig << pli_fifo_data_out_sig
+                  << plo_fifo_empty_sig << plo_fifo_full_sig << plo_fifo_data_out_sig;
         SC_CTHREAD(sequential_process, clk.pos());
         reset_signal_is(reset_n, false);
     }
@@ -231,19 +277,6 @@ public:
 
     sc_signal<noc_request_t> current_noc_req_reg;
     sc_signal<noc_request_t> current_noc_req_next;
-
-    // Queue status registers
-    sc_signal<bool> ps_queue_full_reg;
-    sc_signal<bool> ps_queue_full_next;
-
-    sc_signal<bool> pd_queue_full_reg;
-    sc_signal<bool> pd_queue_full_next;
-
-    sc_signal<bool> pli_queue_full_reg;
-    sc_signal<bool> pli_queue_full_next;
-
-    sc_signal<bool> plo_queue_full_reg;
-    sc_signal<bool> plo_queue_full_next;
 
     // Control signal registers
     sc_signal<bool> im_write_en_reg;
@@ -266,36 +299,55 @@ public:
 
     // Channel-specific data queues (these are not registers in HDL sense)
     const int max_queue_size = 4;
-    std::queue<uint64_t> ps_queue;   // PS channel: NoC -> PE (weights)
-    std::queue<uint16_t> pd_queue;   // PD channel: NoC -> PE (activations)
-    std::queue<uint64_t> pli_queue;  // PLI channel: NoC/LN -> PE (partial inputs)
-    std::queue<uint64_t> plo_queue;  // PLO channel: PE -> NoC/LN (partial outputs)
+
+    FIFO<uint64_t> ps_fifo;   // PS channel: NoC -> PE (weights)
+    FIFO<uint16_t> pd_fifo;   // PD channel: NoC -> PE (activations)
+    FIFO<uint64_t> pli_fifo;  // PLI channel: NoC/LN -> PE (partial inputs)
+    FIFO<uint64_t> plo_fifo;  // PLO channel: PE -> NoC/LN (partial outputs)
+
+    // PS FIFO signals
+    sc_signal<uint64_t> ps_fifo_data_in_sig;
+    sc_signal<bool> ps_fifo_push_sig;
+    sc_signal<uint64_t> ps_fifo_data_out_sig;
+    sc_signal<bool> ps_fifo_pop_sig;
+    sc_signal<bool> ps_fifo_empty_sig;
+    sc_signal<bool> ps_fifo_full_sig;
+
+    // PD FIFO signals
+    sc_signal<uint16_t> pd_fifo_data_in_sig;
+    sc_signal<bool> pd_fifo_push_sig;
+    sc_signal<uint16_t> pd_fifo_data_out_sig;
+    sc_signal<bool> pd_fifo_pop_sig;
+    sc_signal<bool> pd_fifo_empty_sig;
+    sc_signal<bool> pd_fifo_full_sig;
+
+    // PLI FIFO signals
+    sc_signal<uint64_t> pli_fifo_data_in_sig;
+    sc_signal<bool> pli_fifo_push_sig;
+    sc_signal<uint64_t> pli_fifo_data_out_sig;
+    sc_signal<bool> pli_fifo_pop_sig;
+    sc_signal<bool> pli_fifo_empty_sig;
+    sc_signal<bool> pli_fifo_full_sig;
+
+    // PLO FIFO signals
+    sc_signal<uint64_t> plo_fifo_data_in_sig;
+    sc_signal<bool> plo_fifo_push_sig;
+    sc_signal<uint64_t> plo_fifo_data_out_sig;
+    sc_signal<bool> plo_fifo_pop_sig;
+    sc_signal<bool> plo_fifo_empty_sig;
+    sc_signal<bool> plo_fifo_full_sig;
 
     // ========================= Helper functions =========================
-    void clear_router() {
-        // Clear all channel queues
-        ps_queue = std::queue<uint64_t>();
-        pd_queue = std::queue<uint16_t>();
-        pli_queue = std::queue<uint64_t>();
-        plo_queue = std::queue<uint64_t>();
-    }
 
-    void update_queue_status() {
-        ps_queue_full_next.write(ps_queue.size() >= max_queue_size);
-        pd_queue_full_next.write(pd_queue.size() >= max_queue_size);
-        pli_queue_full_next.write(pli_queue.size() >= max_queue_size);
-        plo_queue_full_next.write(plo_queue.size() >= max_queue_size);
-    }
+    bool can_accept_ps() { return !ps_fifo_full_sig.read(); }
+    bool can_accept_pd() { return !pd_fifo_full_sig.read(); }
+    bool can_accept_pli() { return !pli_fifo_full_sig.read(); }
+    bool can_accept_plo() { return !plo_fifo_full_sig.read(); }
 
-    bool can_accept_ps() { return ps_queue.size() < max_queue_size; }
-    bool can_accept_pd() { return pd_queue.size() < max_queue_size; }
-    bool can_accept_pli() { return pli_queue.size() < max_queue_size; }
-    bool can_accept_plo() { return plo_queue.size() < max_queue_size; }
-
-    bool has_ps_data() { return !ps_queue.empty(); }
-    bool has_pd_data() { return !pd_queue.empty(); }
-    bool has_pli_data() { return !pli_queue.empty(); }
-    bool has_plo_data() { return !plo_queue.empty(); }
+    bool has_ps_data() { return !ps_fifo_empty_sig.read(); }
+    bool has_pd_data() { return !pd_fifo_empty_sig.read(); }
+    bool has_pli_data() { return !pli_fifo_empty_sig.read(); }
+    bool has_plo_data() { return !plo_fifo_empty_sig.read(); }
 
     NOC_CHANNELS get_noc_channel(uint16_t addr) {
         int ch = (addr >> 6) & 0x3;
@@ -338,6 +390,16 @@ public:
 
     // ========================= Combinational Logic =========================
     void combinational_process() {
+        ps_fifo_pop_sig.write(false);
+        pd_fifo_pop_sig.write(false);
+        pli_fifo_pop_sig.write(false);
+        plo_fifo_pop_sig.write(false);
+
+        ps_fifo_push_sig.write(false);
+        pd_fifo_push_sig.write(false);
+        pli_fifo_push_sig.write(false);
+        plo_fifo_push_sig.write(false);
+
         // Default: hold current values (reg -> next)
         state_next.write(state_reg.read());
         pending_noc_req_next.write(pending_noc_req_reg.read());
@@ -416,25 +478,31 @@ public:
                         switch (channel) {
                             case NOC_CHANNEL_PS:
                                 can_accept = can_accept_ps();
+                                if (can_accept) {
+                                    ps_fifo_data_in_sig.write(req.data);
+                                    ps_fifo_push_sig.write(true);
+                                }
                                 break;
                             case NOC_CHANNEL_PD:
                                 can_accept = can_accept_pd();
+                                if (can_accept) {
+                                    pd_fifo_data_in_sig.write(static_cast<uint16_t>(req.data));
+                                    pd_fifo_push_sig.write(true);
+                                }
                                 break;
                             case NOC_CHANNEL_PLI:
                                 can_accept = can_route_to_bus(channel) && can_accept_pli();
+                                if (can_accept) {
+                                    pli_fifo_data_in_sig.write(req.data);
+                                    pli_fifo_push_sig.write(true);
+                                }
                                 break;
                             default:
                                 break;
                         }
 
-                        if (can_accept) {
-                            req_in_ready.write(true);
-                            state_next.write(PErouterState::IDLE);
-                        } else {
-                            // Queue full, stay in IDLE and reject
-                            req_in_ready.write(false);
-                            state_next.write(PErouterState::IDLE);
-                        }
+                        req_in_ready.write(can_accept);
+                        state_next.write(PErouterState::IDLE);
                     }
                     // Read requests - accept request, prepare for next cycle response
                     else if (enabled && !req.is_w) {
@@ -457,30 +525,49 @@ public:
                 // Handle LN PLI input
                 else if (enabled && ln_pli_in_valid.read() && can_route_from_ln(NOC_CHANNEL_PLI) && can_accept_pli()) {
                     ln_pli_in_ready.write(true);
+                    pli_fifo_data_in_sig.write(ln_pli_in_data.read());
+                    pli_fifo_push_sig.write(true);
                     state_next.write(PErouterState::IDLE);
                 }
 
-                // Data output to PE - provide data if available and PE ready
+                //  Data output to PE - 提供數據並在握手成功時 pop FIFO
                 if (enabled) {
-                    if (has_ps_data() && pe_ps_ready.read()) {
+                    // PS channel: NoC -> PE
+                    if (has_ps_data()) {
                         pe_ps_valid.write(true);
-                        pe_ps.write(ps_queue.front());
-                    }
-                    if (has_pd_data() && pe_pd_ready.read()) {
-                        pe_pd_valid.write(true);
-                        pe_pd.write(pd_queue.front());
-                    }
-                    if (has_pli_data() && pe_pli_ready.read()) {
-                        pe_pli_valid.write(true);
-                        pe_pli.write(pli_queue.front());
+                        pe_ps.write(ps_fifo_data_out_sig.read());
+                        //  如果握手成功，設定 pop 信號
+                        if (pe_ps_ready.read()) {
+                            ps_fifo_pop_sig.write(true);
+                        }
                     }
 
-                    // Accept PLO from PE
+                    // PD channel: NoC -> PE
+                    if (has_pd_data()) {
+                        pe_pd_valid.write(true);
+                        pe_pd.write(pd_fifo_data_out_sig.read());
+                        if (pe_pd_ready.read()) {
+                            pd_fifo_pop_sig.write(true);
+                        }
+                    }
+
+                    // PLI channel: NoC/LN -> PE
+                    if (has_pli_data()) {
+                        pe_pli_valid.write(true);
+                        pe_pli.write(pli_fifo_data_out_sig.read());
+                        if (pe_pli_ready.read()) {
+                            pli_fifo_pop_sig.write(true);
+                        }
+                    }
+
+                    // PLO channel: PE -> internal FIFO
                     if (pe_plo_valid.read() && can_accept_plo()) {
                         pe_plo_ready.write(true);
+                        plo_fifo_data_in_sig.write(pe_plo.read());
+                        plo_fifo_push_sig.write(true);
                     }
 
-                    // Output PLO data
+                    // PLO output
                     if (has_plo_data()) {
                         bool plo_to_ln = (mode == PERouterMode::PLI_FROM_LN_PLO_TO_LN) ||
                                          (mode == PERouterMode::PLI_FROM_BUS_PLO_TO_LN);
@@ -489,12 +576,14 @@ public:
 
                         if (plo_to_ln && ln_plo_out_ready.read()) {
                             ln_plo_out_valid.write(true);
-                            ln_plo_out_data.write(plo_queue.front());
+                            ln_plo_out_data.write(plo_fifo_data_out_sig.read());
+                            plo_fifo_pop_sig.write(true);
                         } else if (plo_to_noc && resp_out_ready.read()) {
                             resp_out_valid.write(true);
                             noc_response_t resp;
-                            resp.data = plo_queue.front();
+                            resp.data = plo_fifo_data_out_sig.read();
                             resp_out.write(resp);
+                            plo_fifo_pop_sig.write(true);
                         }
                     }
                 }
@@ -508,16 +597,17 @@ public:
                     resp_out_valid.write(true);
                     if (has_plo_data()) {
                         noc_response_t resp;
-                        resp.data = plo_queue.front();
+                        resp.data = plo_fifo_data_out_sig.read();
                         resp_out.write(resp);
-                    }
 
-                    // Check if acknowledged - state transition only, pop in sequential
-                    if (resp_out_ready.read()) {
-                        pending_noc_req_next.write(false);
-                        state_next.write(PErouterState::IDLE);
-                    } else {
-                        state_next.write(PErouterState::WAIT_RESP);
+                        //  如果握手成功，設定 pop 信號
+                        if (resp_out_ready.read()) {
+                            plo_fifo_pop_sig.write(true);
+                            pending_noc_req_next.write(false);
+                            state_next.write(PErouterState::IDLE);
+                        } else {
+                            state_next.write(PErouterState::WAIT_RESP);
+                        }
                     }
                 } else {
                     state_next.write(PErouterState::IDLE);
@@ -529,23 +619,14 @@ public:
                 state_next.write(PErouterState::IDLE);
                 break;
         }
-
-        // Update queue status flags
-        update_queue_status();
     }
 
     // ========================= Sequential Logic =========================
     void sequential_process() {
         // Reset
-        clear_router();
         state_reg.write(PErouterState::IDLE);
         pending_noc_req_reg.write(false);
         current_noc_req_reg.write(noc_request_t());
-
-        ps_queue_full_reg.write(false);
-        pd_queue_full_reg.write(false);
-        pli_queue_full_reg.write(false);
-        plo_queue_full_reg.write(false);
 
         im_write_en_reg.write(false);
         im_write_addr_reg.write(0);
@@ -562,11 +643,6 @@ public:
             pending_noc_req_reg.write(pending_noc_req_next.read());
             current_noc_req_reg.write(current_noc_req_next.read());
 
-            ps_queue_full_reg.write(ps_queue_full_next.read());
-            pd_queue_full_reg.write(pd_queue_full_next.read());
-            pli_queue_full_reg.write(pli_queue_full_next.read());
-            plo_queue_full_reg.write(plo_queue_full_next.read());
-
             im_write_en_reg.write(im_write_en_next.read());
             im_write_addr_reg.write(im_write_addr_next.read());
             im_write_data_reg.write(im_write_data_next.read());
@@ -582,67 +658,13 @@ public:
             pe_start.write(pe_start_reg.read());
             pe_program.write(pe_program_reg.read());
 
-            // ========== Queue operations (based on handshakes) ==========
-            // Handle command reset
-            if (pe_reset_reg.read()) {
-                clear_router();
-            }
+            //  時序邏輯只負責更新暫存器，不再處理 FIFO 操作
+            // FIFO 的 push/pop 信號已經在組合邏輯中設定
 
-            // Enqueue operations (write to queues)
-            if (req_in_valid.read() && req_in_ready.read()) {
-                noc_request_t req = req_in.read();
-                if (req.is_w && req.addr != PE_CMD_ADDRESS && enable.read()) {
-                    NOC_CHANNELS channel = get_noc_channel(req.addr);
-                    DEBUG_MSG("[PErouter] Enqueueing data to channel " << channel << ": 0x" << std::hex << req.data << std::dec);
-                    switch (channel) {
-                        case NOC_CHANNEL_PS:
-                            if (can_accept_ps()) ps_queue.push(req.data);
-                            break;
-                        case NOC_CHANNEL_PD:
-                            if (can_accept_pd()) pd_queue.push(static_cast<uint16_t>(req.data));
-                            break;
-                        case NOC_CHANNEL_PLI:
-                            if (can_route_to_bus(channel) && can_accept_pli()) pli_queue.push(req.data);
-                            break;
-                        default:
-                            break;
-                    }
-                }
-            }
-
-            // LN PLI input
-            if (ln_pli_in_valid.read() && ln_pli_in_ready.read()) {
-                if (can_accept_pli()) pli_queue.push(ln_pli_in_data.read());
-            }
-
-            // Dequeue operations (pop from queues when data is consumed)
-            if (pe_ps_valid.read() && pe_ps_ready.read() && has_ps_data()) {
-                ps_queue.pop();
-            }
-            if (pe_pd_valid.read() && pe_pd_ready.read() && has_pd_data()) {
-                pd_queue.pop();
-            }
-            if (pe_pli_valid.read() && pe_pli_ready.read() && has_pli_data()) {
-                pli_queue.pop();
-            }
-
-            // Enqueue PLO from PE
-            if (pe_plo_valid.read() && pe_plo_ready.read() && can_accept_plo()) {
-                plo_queue.push(pe_plo.read());
-            }
-
-            // Dequeue PLO to LN
-            if (ln_plo_out_valid.read() && ln_plo_out_ready.read() && has_plo_data()) {
-                plo_queue.pop();
-            }
-
-            // Dequeue PLO for NoC read (in WAIT_RESP state)
-            if (state_reg.read() == PErouterState::WAIT_RESP &&
-                resp_out_valid.read() && resp_out_ready.read() && has_plo_data()) {
-                plo_queue.pop();
-            }
-
-            DEBUG_MSG("[PErouter] State: " << state_reg.read());
+            DEBUG_MSG("[PErouter] State: " << state_reg.read()
+                      << " PS_empty=" << ps_fifo_empty_sig.read()
+                      << " PS_full=" << ps_fifo_full_sig.read()
+                      << " ps_pop=" << ps_fifo_pop_sig.read());
             wait();
         }
     }

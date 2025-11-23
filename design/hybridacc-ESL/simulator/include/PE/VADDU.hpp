@@ -27,14 +27,14 @@ inline void sc_trace(sc_core::sc_trace_file* tf, const VADDU_State& state, const
 
 // -----------------------------------------------------------------------------
 enum class VADDU_Mode {
-    ADD,
-    ACCUMULATE
+    ACCUMULATE,
+    ADD
 };
 
 inline std::ostream& operator<<(std::ostream& os, VADDU_Mode mode) {
     switch(mode) {
-        case VADDU_Mode::ADD: return os << "ADD";
         case VADDU_Mode::ACCUMULATE: return os << "ACCUMULATE";
+        case VADDU_Mode::ADD: return os << "ADD";
         default: return os << "UNKNOWN";
     }
 }
@@ -81,11 +81,12 @@ SC_MODULE(VADDU) {
         }
 
 
-        sc_signal<VADDU_State> state;  // 添加缺少的分號
+        sc_signal<VADDU_State> state;
         VADDU_State state_next;
         sc_signal<fp16_t> acc_stage_0_0;
         sc_signal<fp16_t> acc_stage_0_1;
         sc_signal<fp16_t> acc_stage_1;
+        sc_signal<bool> done_reg;  // 新增: 保持 done 狀態的暫存器
 
         void sequential_process() {
             // Reset state
@@ -93,15 +94,19 @@ SC_MODULE(VADDU) {
             result.write(v_fp16_t());
             acc_out.write(0);
             done.write(false);
+            done_reg.write(false);
             wait();
 
             while (true) {
-                v_fp16_t res;
-                fp16_t acc_result = 0;
+                v_fp16_t res = result.read();
+                fp16_t acc_result = acc_out.read();
                 state_next = state.read();
-                bool done_signal = false;
+                bool done_signal = done_reg.read();
 
                 if (enable.read()) {
+                    // 新的運算開始,清除 done 信號
+                    done_signal = false;
+
                     if(mode.read() == VADDU_Mode::ADD) {
                         // parallel add
                         for (size_t i = 0; i < 4; ++i) {
@@ -128,16 +133,25 @@ SC_MODULE(VADDU) {
                         }
                     }
                 }
+                // 如果沒有 enable,保持當前的 done 狀態
 
                 state.write(state_next);
                 acc_out.write(acc_result);
                 result.write(res);
                 done.write(done_signal);
+                done_reg.write(done_signal);
+
+                // debug output
+                if (done_signal) {
+                    DEBUG_MSG("[VADDU] Operation done. Mode: " << mode.read()
+                              << ", Result: " << res
+                              << ", Acc_out: " << acc_result);
+                }
                 wait();
             }
         }
 
-};  // 添加缺少的分號
+};
 
 
 } // namespace pe

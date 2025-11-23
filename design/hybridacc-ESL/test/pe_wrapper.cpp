@@ -215,14 +215,17 @@ bool PEWrapper::send_noc_request(uint64_t addr, uint64_t data) {
     noc_request_t req;
     req.addr = addr;
     req.data = data;
-    req.is_w = true;  // 假設是寫入操作
+    req.is_w = true;  // 寫入操作
 
     // 發送請求：設置數據和 valid 信號
     noc_req_in.write(req);
     noc_req_in_valid.write(true);
 
+    //  等待握手成功（在同一個 cycle 內檢查 ready）
+    sc_start(SC_ZERO_TIME);  // 讓組合邏輯穩定
+
     // 等待接收方的 ready 信號
-    int timeout = 500;  // 最多等待 100 個週期
+    int timeout = 500;
     while (!noc_req_in_ready.read() && timeout > 0) {
         sc_start(clock_period);
         timeout--;
@@ -236,11 +239,48 @@ bool PEWrapper::send_noc_request(uint64_t addr, uint64_t data) {
         return false;
     }
 
-    // 握手成功，等待一個週期完成傳輸
+    //  握手成功：立即拉低 valid（在下一個時鐘邊緣之前）
+    noc_req_in_valid.write(false);
+
+    //  等待一個週期完成時序邏輯更新
     sc_start(clock_period);
 
-    // 清除 valid 信號
+    return true;
+}
+
+bool PEWrapper::send_noc_read_request(uint64_t addr) {
+    // 準備讀取請求
+    noc_request_t req;
+    req.addr = addr;
+    req.data = 0;  // 讀取時 data 不重要
+    req.is_w = false;  // 讀取操作
+
+    // 發送請求：設置數據和 valid 信號
+    noc_req_in.write(req);
+    noc_req_in_valid.write(true);
+
+    //  等待握手成功
+    sc_start(SC_ZERO_TIME);  // 讓組合邏輯穩定
+
+    // 等待接收方的 ready 信號
+    int timeout = 500;
+    while (!noc_req_in_ready.read() && timeout > 0) {
+        sc_start(clock_period);
+        timeout--;
+    }
+
+    if (timeout == 0) {
+        // 清除 valid 信號
+        noc_req_in_valid.write(false);
+        log_debug("NoC read request timeout - ready signal not received");
+        return false;
+    }
+
+    //  握手成功：立即拉低 valid
     noc_req_in_valid.write(false);
+
+    //  等待一個週期完成時序邏輯更新
+    sc_start(clock_period);
 
     return true;
 }

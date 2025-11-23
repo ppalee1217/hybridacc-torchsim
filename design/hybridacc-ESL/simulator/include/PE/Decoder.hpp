@@ -155,10 +155,10 @@ public:
             switch(func3){
                 case 0: // VMAC / VMACN : P[prd] += dot(VT, DMRV)
                 case 2: { // VMUL / VMULN : VP64[prd] = VT * DMRV + VP64[prd]
-                    signals.pr_mode = (func3==2) ? 1 : 0;
+                    signals.pr_mode = (func3==2) ? 1 : 0; // 0: scalar(VMAC), 1: vector64(VMUL)
                     signals.DL_next = func1; // N 變形: 允許下一個 DMA
                     signals.vaddu_en = true;
-                    signals.vaddu_mode = (func3==2) ? 1 : 0;
+                    signals.vaddu_mode = (func3==2) ? 1 : 0; // 0: ACCUMUATE(VMAC), 1: ADD(VMUL)
                 } break;
                 case 1: // VMACR / VMACRN : P[psum_cnt] += dot(VT[vtid_cnt], DMRV)
                 case 3: { // VMULR / VMULRN : VP[vpsum_cnt] += mul(VT[vtid_cnt], DMRV)
@@ -168,9 +168,9 @@ public:
                     signals.pr_en = true;
                     signals.pr_write = true;
                     signals.DL_next = func1; // N 變形: 允許下一個 DMA
-                    signals.pr_mode = (func3==3) ? 1 : 0;
+                    signals.pr_mode = (func3==3) ? 1 : 0; // 0: scalar(VMAC), 1: vector64(VMUL)
                     signals.vaddu_en = true;
-                    signals.vaddu_mode = (func3==3) ? 1 : 0;
+                    signals.vaddu_mode = (func3==3) ? 1 : 0; // 0: ACCUMUATE(VMAC), 1: ADD(VMUL)
 
                     if(pstride==31) signals.pr_clear_vcounter = true;
                     else signals.pr_incr_vcounter = true;
@@ -183,7 +183,7 @@ public:
                     signals.pr_en = true;
                     signals.pr_mode = 1; // vector 64-bit
                     signals.vaddu_en = true;
-                    signals.vaddu_mode = 1;
+                    signals.vaddu_mode = 1; // ADD
                 } break;
                 case 5: { // VPSUMR : PLO = PLI + P[psum_cnt] 並移動 psum_cnt
                     signals.pli_plo_operation = true;
@@ -191,7 +191,7 @@ public:
                     signals.pr_en = true;
                     signals.pr_mode = 1; // vector 64-bit
                     signals.vaddu_en = true;
-                    signals.vaddu_mode = 1;
+                    signals.vaddu_mode = 1; // ADD
 
                     if(pstride==31) signals.pr_clear_vcounter = true;
                     else signals.pr_incr_vcounter = true;
