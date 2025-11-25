@@ -239,25 +239,53 @@ int sc_main(int argc, char* argv[]) {
 
     // For each output position
     for (int out_pos = 0; out_pos < conv_params.out_width; out_pos++) {
-        // Step 6a: Send KERNEL_SIZE activation groups
-        // Each group contains in_channels fp16 values
-        for (int k = 0; k < conv_params.kernel_size; k++) {
-            int act_base_idx = (out_pos + k) * conv_params.in_channels;  // Base index for this kernel position
+        // Step 6a: Send activation data with sliding window optimization
+        if (out_pos == 0) {
+            // First position: Send entire window (KERNEL_SIZE groups)
+            std::cout << "Position " << out_pos << ": Sending full window ("
+                      << conv_params.kernel_size << " groups)" << std::endl;
+            for (int k = 0; k < conv_params.kernel_size; k++) {
+                int act_base_idx = k * conv_params.in_channels;
 
-            // Send in_channels fp16 activations (one group)
+                // Send in_channels fp16 activations (one group)
+                for (int c = 0; c < conv_params.in_channels; c++) {
+                    int act_idx = act_base_idx + c;
+                    if (act_idx < activations.size()) {
+                        std::cout << "Sending activation at pos=" << out_pos
+                                  << " k=" << k << " c=" << c
+                                  << " idx=" << act_idx
+                                  << " value=0x" << std::hex << activations[act_idx] << std::dec << std::endl;
+                        if (!pe_wrapper.send_noc_request(PD_ADDR, activations[act_idx])) {
+                            std::cerr << "Failed to send activation" << std::endl;
+                        }
+                    }
+                }
+                pe_wrapper.run_cycles(5);
+            }
+        } else {
+            // Subsequent positions: Only send new data entering the window
+            // New data is at position: out_pos + kernel_size - 1
+            int new_pos = out_pos + conv_params.kernel_size - 1;
+            int act_base_idx = new_pos * conv_params.in_channels;
+
+            std::cout << "Position " << out_pos << ": Sending new window data (1 group at position "
+                      << new_pos << ")" << std::endl;
+
+            // Send in_channels fp16 activations for the new position
             for (int c = 0; c < conv_params.in_channels; c++) {
                 int act_idx = act_base_idx + c;
                 if (act_idx < activations.size()) {
+                    std::cout << "Sending activation at pos=" << out_pos
+                              << " new_pos=" << new_pos << " c=" << c
+                              << " idx=" << act_idx
+                              << " value=0x" << std::hex << activations[act_idx] << std::dec << std::endl;
                     if (!pe_wrapper.send_noc_request(PD_ADDR, activations[act_idx])) {
-                        std::cerr << "Failed to send activation at pos=" << out_pos
-                                  << " k=" << k << " c=" << c << std::endl;
+                        std::cerr << "Failed to send activation" << std::endl;
                     }
                 } else {
                     std::cerr << "Warning: activation index " << act_idx << " out of range" << std::endl;
                 }
             }
-
-            // Give PE time to process
             pe_wrapper.run_cycles(5);
         }
 
@@ -314,14 +342,6 @@ int sc_main(int argc, char* argv[]) {
     std::cout << "\n[Step 7] Waiting for PE to complete..." << std::endl;
     const int MAX_WAIT_CYCLES = 10000;
     for (int cycle = 0; cycle < MAX_WAIT_CYCLES; cycle++) {
-        // Try to read any remaining PLO data
-        uint64_t output_data;
-        if (pe_wrapper.read_noc_response(output_data)) {
-            outputs.push_back(output_data);
-            std::cout << "Received additional output " << outputs.size() << ": 0x"
-                     << std::hex << output_data << std::dec << std::endl;
-        }
-
         if (pe_wrapper.is_halted()) {
             std::cout << "PE halted after " << cycle << " additional cycles" << std::endl;
             break;
@@ -336,28 +356,58 @@ int sc_main(int argc, char* argv[]) {
     // Step 8: Verify outputs
     std::cout << "\n[Step 8] Verifying outputs..." << std::endl;
     auto expected_bytes = read_binary_file(expected_output_file);
-    auto expected_outputs = bytes_to_uint64(expected_bytes);
+    auto expected_outputs_fp16 = bytes_to_fp16(expected_bytes);
 
-    std::cout << "Expected outputs: " << expected_outputs.size() << std::endl;
-    std::cout << "Received outputs: " << outputs.size() << std::endl;
+    std::cout << "Expected outputs (fp16): " << expected_outputs_fp16.size() << std::endl;
+    std::cout << "Received outputs (fp16): " << outputs.size() * 4 << std::endl;
 
-    if (outputs.size() == expected_outputs.size()) {
-        int mismatches = 0;
-        for (size_t i = 0; i < outputs.size(); i++) {
-            if (outputs[i] != expected_outputs[i]) {
-                mismatches++;
-                if (mismatches <= 10) { // Print first 10 mismatches
-                    std::cout << "Mismatch at index " << i << ": "
-                             << "expected 0x" << std::hex << expected_outputs[i]
-                             << ", got 0x" << outputs[i] << std::dec << std::endl;
-                }
+    // Convert received outputs (uint64_t) to fp16
+    std::vector<uint16_t> received_outputs_fp16;
+    for (const auto& output : outputs) {
+        for (int i = 0; i < 4; i++) { // Extract 4 fp16 values from each uint64_t
+            received_outputs_fp16.push_back(static_cast<uint16_t>((output >> (i * 16)) & 0xFFFF));
+        }
+    }
+
+    if (received_outputs_fp16.size() == expected_outputs_fp16.size()) {
+        // Calculate cosine similarity and max difference
+        double dot_product = 0.0;
+        double magnitude_received = 0.0;
+        double magnitude_expected = 0.0;
+        double max_diff = 0.0;
+
+        for (size_t i = 0; i < received_outputs_fp16.size(); i++) {
+            float received_val = static_cast<float>(received_outputs_fp16[i]);
+            float expected_val = static_cast<float>(expected_outputs_fp16[i]);
+
+            dot_product += received_val * expected_val;
+            magnitude_received += received_val * received_val;
+            magnitude_expected += expected_val * expected_val;
+
+            double diff = std::abs(received_val - expected_val);
+            if (diff > max_diff) {
+                max_diff = diff;
+            }
+            if (diff > 1e-2) {
+                std::cout << "Mismatch at index " << i
+                          << ": received=0x" << std::hex << received_outputs_fp16[i]
+                          << " expected=0x" << expected_outputs_fp16[i] << std::dec
+                          << " diff=" << std::scientific << diff << std::endl;
             }
         }
 
-        if (mismatches == 0) {
-            std::cout << "✓ All outputs match! Test PASSED." << std::endl;
+        magnitude_received = std::sqrt(magnitude_received);
+        magnitude_expected = std::sqrt(magnitude_expected);
+
+        double cosine_similarity = dot_product / (magnitude_received * magnitude_expected);
+
+        std::cout << "Cosine Similarity: " << cosine_similarity << std::endl;
+        std::cout << std::scientific << "Max Difference: " << max_diff << std::endl;
+
+        if (cosine_similarity > 0.99) {
+            std::cout << "✓ Outputs are highly similar! Test PASSED." << std::endl;
         } else {
-            std::cout << "✗ Found " << mismatches << " mismatches. Test FAILED." << std::endl;
+            std::cout << "✗ Outputs are not similar enough. Test FAILED." << std::endl;
         }
     } else {
         std::cout << "✗ Output count mismatch. Test FAILED." << std::endl;

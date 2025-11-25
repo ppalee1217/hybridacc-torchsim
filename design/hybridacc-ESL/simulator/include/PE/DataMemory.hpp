@@ -87,8 +87,8 @@ SC_MODULE(DataMemory) {
 
                 // Write operation
                 if (dm_write_en.read()) {
-                    DEBUG_MSG("[Write] Address: " << dm_write_addr.read() <<
-                               " Data: 0x" << std::hex << dm_write_data.read() << std::dec);
+                    // DEBUG_MSG("[Write] Address: " << dm_write_addr.read() <<
+                    //            " Data: 0x" << std::hex << dm_write_data.read() << std::dec);
                     writeWord(dm_write_addr.read(), dm_write_data.read(), dm_write_mask.read());
                 }
                 wait();

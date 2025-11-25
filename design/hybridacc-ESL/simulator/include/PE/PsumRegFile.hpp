@@ -54,11 +54,11 @@ SC_MODULE(PsumRegFile) {
             SC_CTHREAD(sequential_process, clk.pos());
             reset_signal_is(reset_n, false);
             SC_METHOD(combinational_process);
-            sensitive << pid << p_in << vp_in << vpid_write_en << mode << reset_n << vp_out << p_out;
+            sensitive << pid << p_in << vp_in << vpid_write_en << mode << reset_n << vp_out << p_out << pcounter;
         }
 
 
-        int pcounter;
+        sc_signal<int> pcounter;
 
         std::array<fp16_t,32> P{};    // Partial sum scalar
         std::array<v_fp16_t, 24> VP64{}; // v_fp16_t partial sum (64-bit)
@@ -69,7 +69,7 @@ SC_MODULE(PsumRegFile) {
         }
         void reset() {
             clear();
-            pcounter = 0;
+            pcounter.write(0);
         }
         void setP(int pid, fp16_t v) { P[pid] = v; }
         fp16_t getP(int pid) const { return P[pid]; }
@@ -97,7 +97,7 @@ SC_MODULE(PsumRegFile) {
         void sequential_process() {
             // Reset initialization
             clear();
-            pcounter = 0;
+            pcounter.write(0);
             wait();
 
             while (true) {
@@ -105,20 +105,22 @@ SC_MODULE(PsumRegFile) {
                     clear();
                 } else {
                     if (vpid_write_en.read()) {
-                        int write_pid = (use_pcounter.read()) ? pcounter : pid.read();
+                        int write_pid = (use_pcounter.read()) ? pcounter.read() : pid.read();
                         if (mode.read() == 0) { // scalar mode
+                            DEBUG_MSG("[PsumRegFile] Write P[" << write_pid << "] = " << std::hex << p_in.read() << std::dec);
                             setP(write_pid, p_in.read());
                         } else if (mode.read() == 1) { // vector 64-bit mode
+                            DEBUG_MSG("[PsumRegFile] Write VP64[" << write_pid << "] = " << std::hex << vp_in.read() << std::dec);
                             setVP64(write_pid, vp_in.read());
                         }
                     }
 
                     if (set_pcounter.read()) {
-                        pcounter = pid.read();
+                        pcounter.write(pid.read());
                     } else if (clear_pcounter.read()) {
-                        pcounter = 0;
+                        pcounter.write(0);
                     } else if (incr_pcounter.read()) {
-                        pcounter += pid.read();
+                        pcounter.write(pcounter.read() + pid.read());
                     }
                 }
                 wait();
@@ -138,9 +140,10 @@ SC_MODULE(PsumRegFile) {
                 return;
             }
 
-            int read_pid = use_pcounter.read() ? pcounter : pid.read();
+            int read_pid = use_pcounter.read() ? pcounter.read() : pid.read();
 
             if (mode.read() == 0){
+                DEBUG_MSG("[PsumRegFile] Read P[" << read_pid << "] = " << std::hex << getP(read_pid) << std::dec);
                 p_out.write(getP(read_pid));  // 修正：添加缺少的參數
                 vp_out.write(v_fp16_t()); // clear vector output in scalar mode
             } else if (mode.read() == 1){

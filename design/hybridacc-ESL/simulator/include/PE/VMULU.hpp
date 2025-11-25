@@ -32,6 +32,9 @@ SC_MODULE(VMULU) {
                 res[i] = fp16_mul(op1.read()[i], op2.read()[i]);
             }
             result.write(res);
+            DEBUG_MSG("[VMULU] op1=" << op1.read()
+                      << " op2=" << op2.read()
+                      << " result=" << res );
         }
 };
 

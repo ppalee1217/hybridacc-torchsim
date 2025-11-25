@@ -59,10 +59,19 @@ public:
         DEBUG_MSG("[Create] IF_ID_Stage");
         SC_CTHREAD(main_thread, clk.pos());
         reset_signal_is(reset_n, false);
-        SC_METHOD(combinational_process);
-        sensitive << pc_reg << halted_reg << pe_running << stage_reset
-                  << stall_from_downstream << im_read_data_sig
-                  << decoder_decode_signals_out_sig << loops_jump_sig << loops_pc_out_sig;
+
+        // 🔧 PC 計算邏輯 - 需要對 decoder 和 loop controller 輸出敏感
+        SC_METHOD(pc_calculation_process);
+        sensitive << pc_reg << halted_reg
+                  << stage_reset << pe_running << stall_from_downstream
+                  << decoder_decode_signals_out_sig
+                  << loops_jump_sig << loops_pc_out_sig;
+
+        // 🔧 輸出控制邏輯 - 只對控制信號和 register 敏感
+        SC_METHOD(output_control_process);
+        sensitive << pc_reg << halted_reg << valid_reg
+                  << stage_reset << pe_running << stall_from_downstream
+                  << decoder_decode_signals_out_sig;
 
         // Bind submodules
         bind();
@@ -82,10 +91,7 @@ public:
     sc_signal<bool> halted_reg;
     sc_signal<bool> halted_next;
 
-    // Pipeline registers
-    sc_signal<pe_decode_signals_t> decode_signals_reg;
-    sc_signal<pe_decode_signals_t> decode_signals_next;
-
+    // Valid signal register (控制 pipeline 流動)
     sc_signal<bool> valid_reg;
     sc_signal<bool> valid_next;
 
@@ -134,22 +140,18 @@ public:
     }
 
     // === Combinational Logic ===
-    void combinational_process() {
+    void pc_calculation_process() {
         // Read current register values
         uint16_t pc_current = pc_reg.read();
         bool halted_current = halted_reg.read();
-        bool valid_current = valid_reg.read();
-        pe_decode_signals_t decode_current_reg = decode_signals_reg.read();
         pe_decode_signals_t decode_from_decoder = decoder_decode_signals_out_sig.read();
 
         // Default: hold current values
         uint16_t pc_n = pc_current;
         bool halted_n = halted_current;
-        pe_decode_signals_t decode_n = decode_current_reg;
-        bool valid_n = valid_current;
 
         // Update loop_end_en signal
-        loops_loop_end_en_sig.write(decode_from_decoder.loop_end);
+        loops_loop_end_en_sig.write(decode_from_decoder.loop_end && !stall_from_downstream.read());
 
         // === PC Calculation ===
         uint16_t next_pc_calc = pc_current + sizeof(uint16_t); // Default: next instruction
@@ -171,7 +173,7 @@ public:
         }
 
         // Handle loop_end instruction
-        if (decode_from_decoder.loop_end) {
+        if (decode_from_decoder.loop_end && !stall_from_downstream.read()) {
             if (loops_jump_sig.read()) {
                 next_pc_calc = loops_pc_out_sig.read();
             }
@@ -187,36 +189,24 @@ public:
         if (stage_reset.read()) {
             pc_n = pc_init_value.read();
             halted_n = false;
-            decode_n = pe_decode_signals_t();
-            valid_n = false;
         }
         // If PE not running, hold state but output invalid
         else if (!pe_running.read()) {
             pc_n = pc_current;
             halted_n = halted_current;
-            decode_n = decode_current_reg;
-            valid_n = false;  // PE 停止時輸出 invalid
         }
         // If halted, hold state and output invalid
         else if (halted_current) {
             pc_n = pc_current;
             halted_n = true;
-            decode_n = decode_current_reg;
-            valid_n = false;  // Halted 時輸出 invalid
         }
-        // If stalled, hold ALL state including valid
+        // 🔧 修復: If stalled, hold PC but keep fetching the same instruction
         else if (stall_from_downstream.read()) {
-            pc_n = pc_current;
+            pc_n = pc_current;  // PC 不前進
             halted_n = halted_current;
-            decode_n = decode_current_reg;
-            valid_n = valid_current;  // ✅ 修改: 保持當前 valid 狀態,不清零!
         }
         // Normal operation: fetch and decode
         else {
-            // Fetch instruction from IM (combinational read)
-            decode_n = decode_from_decoder;
-            valid_n = true;
-
             // Check for halt instruction
             if (decode_from_decoder.halt) {
                 halted_n = true;
@@ -225,22 +215,61 @@ public:
 
             // Update PC
             pc_n = next_pc_calc;
-
-            DEBUG_MSG("[IF_ID_Stage] Fetch PC=" << pc_current
-                      << " Inst=0x" << std::hex << decode_from_decoder.inst << std::dec
-                      << " Next_PC=" << next_pc_calc);
         }
 
         // Write next values to signals
         pc_next.write(pc_n);
         halted_next.write(halted_n);
-        decode_signals_next.write(decode_n);
+    }
+
+    void output_control_process() {
+        // Read current register values
+        uint16_t pc_current = pc_reg.read();
+        bool halted_current = halted_reg.read();
+        bool valid_current = valid_reg.read();
+        pe_decode_signals_t decode_from_decoder = decoder_decode_signals_out_sig.read();
+
+        // Calculate valid signal for next cycle
+        bool valid_n = valid_current;
+
+        // === State Machine Logic ===
+        // Check for stage_reset (highest priority)
+        if (stage_reset.read()) {
+            valid_n = false;
+        }
+        // If PE not running, output invalid
+        else if (!pe_running.read()) {
+            valid_n = false;
+        }
+        // If halted, output invalid
+        else if (halted_current) {
+            valid_n = false;
+        }
+        // If stalled, keep valid
+        else if (stall_from_downstream.read()) {
+            valid_n = true;
+        }
+        // Normal operation
+        else {
+            valid_n = true;
+        }
+
+        // Write next valid signal
         valid_next.write(valid_n);
 
-        // Output to pipeline (combinational)
-        // 統一使用 register 值,確保每個 cycle 只輸出一次,避免重複執行
-        ID_decode_signals_out.write(decode_current_reg);
-        signal_valid_out.write(valid_current);
+        // === Pipeline Outputs (Combinational) ===
+        // 直接輸出當前 decoder 的結果，與 PC 同步
+        pe_decode_signals_t output_decode = decode_from_decoder;
+        bool output_valid = valid_current;
+
+        // 特殊情況：reset、PE 停止或 halted 時輸出無效信號
+        if (stage_reset.read() || !pe_running.read() || halted_current) {
+            output_decode = pe_decode_signals_t();
+            output_valid = false;
+        }
+
+        ID_decode_signals_out.write(output_decode);
+        signal_valid_out.write(output_valid);
         pc_out.write(pc_current);
         halted_out.write(halted_current);
     }
@@ -250,21 +279,23 @@ public:
         // Reset initialization
         pc_reg.write(0);
         halted_reg.write(false);
-        decode_signals_reg.write(pe_decode_signals_t());
         valid_reg.write(false);
 
         wait(); // Wait for first clock edge
 
         while (true) {
+            // 🔧 修正：顯示當前 cycle 的 PC 和對應的 decoder 輸出
+            pe_decode_signals_t current_decode = decoder_decode_signals_out_sig.read();
+            DEBUG_MSG("[IF_ID_Stage] Clocked: PC=0x" << std::hex << pc_reg.read()
+                      << " Inst=0x" << current_decode.inst << std::dec
+                      << " Halted=" << halted_reg.read()
+                      << " Valid=" << valid_reg.read()
+                      << (stall_from_downstream.read() ? " (Stalled)" : ""));
+
             // On each clock edge, update registers with next values
             pc_reg.write(pc_next.read());
             halted_reg.write(halted_next.read());
-            decode_signals_reg.write(decode_signals_next.read());
             valid_reg.write(valid_next.read());
-
-            DEBUG_MSG("[IF_ID_Stage] Clocked: PC=" << pc_reg.read()
-                      << " Halted=" << halted_reg.read()
-                      << " Valid=" << valid_reg.read());
 
             wait(); // Wait for next clock edge
         }

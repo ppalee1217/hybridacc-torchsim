@@ -44,115 +44,191 @@ inline void sc_trace(sc_core::sc_trace_file* tf, const VADDU_Mode& mode, const s
 }
 
 // -----------------------------------------------------------------------------
-// Multiply Unit
+// Vector Adder Unit
 SC_MODULE(VADDU) {
-    public:
-        // Ports
-        sc_in<bool> clk;
-        sc_in<bool> reset_n;
+public:
+    // Ports
+    sc_in<bool> clk;
+    sc_in<bool> reset_n;
 
-        sc_in<v_fp16_t> op1;
-        sc_in<v_fp16_t> op2;
-        sc_out<v_fp16_t> result;
+    sc_in<v_fp16_t> op1;
+    sc_in<v_fp16_t> op2;
+    sc_out<v_fp16_t> result;
 
-        sc_in<fp16_t> acc_in;
-        sc_out<fp16_t> acc_out;
+    sc_in<fp16_t> acc_in;
+    sc_out<fp16_t> acc_out;
 
-        sc_in<bool> enable;
-        sc_in<VADDU_Mode> mode;
-        sc_out<bool> done;
+    sc_in<bool> start;
+    sc_in<VADDU_Mode> mode;
+    sc_out<bool> done;
 
-        // Constructor
-        SC_CTOR(VADDU)
-            : clk("clk"),
-              reset_n("reset_n"),
-              op1("op1"),
-              op2("op2"),
-              result("result"),
-              acc_in("acc_in"),
-              acc_out("acc_out"),
-              enable("enable"),
-              mode("mode"),
-              done("done")
-        {
-            DEBUG_MSG("[Create] VADDU");
-            SC_CTHREAD(sequential_process, clk.pos());
-            reset_signal_is(reset_n, false);
-        }
+    // Constructor
+    SC_CTOR(VADDU)
+        : clk("clk"),
+          reset_n("reset_n"),
+          op1("op1"),
+          op2("op2"),
+          result("result"),
+          acc_in("acc_in"),
+          acc_out("acc_out"),
+          start("start"),
+          mode("mode"),
+          done("done")
+    {
+        DEBUG_MSG("[Create] VADDU");
 
+        // Sequential process
+        SC_CTHREAD(seq_process, clk.pos());
+        reset_signal_is(reset_n, false);
 
-        sc_signal<VADDU_State> state;
-        VADDU_State state_next;
-        sc_signal<fp16_t> acc_stage_0_0;
-        sc_signal<fp16_t> acc_stage_0_1;
-        sc_signal<fp16_t> acc_stage_1;
-        sc_signal<bool> done_reg;  // 新增: 保持 done 狀態的暫存器
+        // Combinational process
+        SC_METHOD(comb_next_state);
+        sensitive << state_reg << start << mode << op1 << op2 << acc_in
+                  << acc_stage_0_0_reg << acc_stage_0_1_reg << acc_stage_1_reg;
+    }
 
-        void sequential_process() {
-            // Reset state
-            state.write(VADDU_State::IDLE);
-            result.write(v_fp16_t());
-            acc_out.write(0);
-            done.write(false);
-            done_reg.write(false);
+private:
+    // ========================= Pipeline Registers =========================
+    sc_signal<VADDU_State> state_reg;
+    sc_signal<v_fp16_t> result_reg;
+    sc_signal<fp16_t> acc_out_reg;
+    sc_signal<bool> done_reg;
+    sc_signal<fp16_t> acc_stage_0_0_reg;
+    sc_signal<fp16_t> acc_stage_0_1_reg;
+    sc_signal<fp16_t> acc_stage_1_reg;
+
+    // ========================= Next-State Signals =========================
+    sc_signal<VADDU_State> state_reg_next;
+    sc_signal<v_fp16_t> result_reg_next;
+    sc_signal<fp16_t> acc_out_reg_next;
+    sc_signal<bool> done_reg_next;
+    sc_signal<fp16_t> acc_stage_0_0_reg_next;
+    sc_signal<fp16_t> acc_stage_0_1_reg_next;
+    sc_signal<fp16_t> acc_stage_1_reg_next;
+
+    // ========================= Sequential Process =========================
+    void seq_process() {
+        // Reset
+        state_reg.write(VADDU_State::IDLE);
+        result_reg.write(v_fp16_t());
+        acc_out_reg.write(0);
+        done_reg.write(false);
+        acc_stage_0_0_reg.write(0);
+        acc_stage_0_1_reg.write(0);
+        acc_stage_1_reg.write(0);
+
+        result.write(v_fp16_t());
+        acc_out.write(0);
+        done.write(false);
+        wait();
+
+        while (true) {
+            // Update all registers from their _next signals
+            state_reg.write(state_reg_next.read());
+            result_reg.write(result_reg_next.read());
+            acc_out_reg.write(acc_out_reg_next.read());
+            done_reg.write(done_reg_next.read());
+            acc_stage_0_0_reg.write(acc_stage_0_0_reg_next.read());
+            acc_stage_0_1_reg.write(acc_stage_0_1_reg_next.read());
+            acc_stage_1_reg.write(acc_stage_1_reg_next.read());
+
+            // Update outputs
+            result.write(result_reg_next.read());
+            acc_out.write(acc_out_reg_next.read());
+            done.write(done_reg_next.read());
+
             wait();
+        }
+    }
 
-            while (true) {
-                v_fp16_t res = result.read();
-                fp16_t acc_result = acc_out.read();
-                state_next = state.read();
-                bool done_signal = done_reg.read();
+    // ========================= Combinational Process =========================
+    void comb_next_state() {
+        VADDU_State state = state_reg.read();
+        v_fp16_t res = result_reg.read();
+        fp16_t acc_result = acc_out_reg.read();
+        bool done_signal = done_reg.read();
+        fp16_t acc_stage_0_0 = acc_stage_0_0_reg.read();
+        fp16_t acc_stage_0_1 = acc_stage_0_1_reg.read();
+        fp16_t acc_stage_1 = acc_stage_1_reg.read();
 
-                if (enable.read()) {
-                    // 新的運算開始,清除 done 信號
-                    done_signal = false;
+        // Default: keep current values
+        VADDU_State next_state = state;
+        v_fp16_t next_result = res;
+        fp16_t next_acc_out = acc_result;
+        bool next_done = done_signal;
+        fp16_t next_acc_stage_0_0 = acc_stage_0_0;
+        fp16_t next_acc_stage_0_1 = acc_stage_0_1;
+        fp16_t next_acc_stage_1 = acc_stage_1;
 
-                    if(mode.read() == VADDU_Mode::ADD) {
-                        // parallel add
-                        for (size_t i = 0; i < 4; ++i) {
-                            res[i] = fp16_add(op1.read()[i], op2.read()[i]);
-                        }
-                        done_signal = true;
-                    } else if(mode.read() == VADDU_Mode::ACCUMULATE) {
-                        switch(state.read()) {
-                            case VADDU_State::IDLE:
-                                acc_stage_0_0 = fp16_add(op1.read().lanes[0], op1.read().lanes[1]);
-                                acc_stage_0_1 = fp16_add(op1.read().lanes[2], op1.read().lanes[3]);
-                                state_next = VADDU_State::ACC0;
-                                break;
-                            case VADDU_State::ACC0:
-                                acc_stage_1 = fp16_add(acc_stage_0_0, acc_stage_0_1);
-                                state_next = VADDU_State::ACC1;
-                                break;
-                            case VADDU_State::ACC1:
-                                // 完成累加
-                                acc_result = fp16_add(acc_stage_1, acc_in.read());
-                                state_next = VADDU_State::IDLE;
-                                done_signal = true;
-                                break;
-                        }
-                    }
+        // State machine logic
+        if (start.read() && state == VADDU_State::IDLE) {
+            // 新的運算開始,清除 done 信號
+            next_done = false;
+
+            if (mode.read() == VADDU_Mode::ADD) {
+                // Parallel add - 單週期完成
+                for (size_t i = 0; i < 4; ++i) {
+                    next_result[i] = fp16_add(op1.read()[i], op2.read()[i]);
                 }
-                // 如果沒有 enable,保持當前的 done 狀態
-
-                state.write(state_next);
-                acc_out.write(acc_result);
-                result.write(res);
-                done.write(done_signal);
-                done_reg.write(done_signal);
-
-                // debug output
-                if (done_signal) {
-                    DEBUG_MSG("[VADDU] Operation done. Mode: " << mode.read()
-                              << ", Result: " << res
-                              << ", Acc_out: " << acc_result);
-                }
-                wait();
+                next_done = true;
+                next_state = VADDU_State::IDLE;
+                DEBUG_MSG("[VADDU] ADD: op1=" << op1.read()
+                         << " op2=" << op2.read()
+                         << " result=" << next_result );
+            } else if (mode.read() == VADDU_Mode::ACCUMULATE) {
+                // 開始累加的第一階段
+                next_acc_stage_0_0 = fp16_add(op1.read().lanes[0], op1.read().lanes[1]);
+                next_acc_stage_0_1 = fp16_add(op1.read().lanes[2], op1.read().lanes[3]);
+                next_state = VADDU_State::ACC0;
+                DEBUG_MSG("[VADDU] ACCUMULATE Start: op1 = " << op1.read() );
             }
+        } else if (state != VADDU_State::IDLE) {
+            // 繼續執行進行中的 ACCUMULATE pipeline
+            switch (state) {
+                case VADDU_State::ACC0:
+                    next_acc_stage_1 = fp16_add(acc_stage_0_0, acc_stage_0_1);
+                    next_state = VADDU_State::ACC1;
+                    DEBUG_MSG("[VADDU] ACCUMULATE ACC0 -> ACC1" );
+                    break;
+
+                case VADDU_State::ACC1:
+                    // 完成累加
+                    next_acc_out = fp16_add(acc_stage_1, acc_in.read());
+                    next_state = VADDU_State::IDLE;
+                    next_done = true;
+                    DEBUG_MSG("[VADDU] ACCUMULATE Done: acc_stage_1=" << std::hex << acc_stage_1
+                             << " acc_in=" << acc_in.read()
+                             << " acc_out=" << next_acc_out << std::dec );
+                    break;
+
+                default:
+                    break;
+            }
+        } else if (state == VADDU_State::IDLE && !start.read()) {
+            // IDLE 且沒有 start 脈衝時,清除 done
+            next_done = false;
         }
 
-};
+        // Debug output when operation completes
+        if (next_done && !done_signal) {
+            DEBUG_MSG("[VADDU] Operation done. Mode: " << mode.read()
+                     << ", Op1: " << op1.read()
+                     << ", Op2: " << op2.read()
+                     << ", Result: " << next_result
+                     << ", Acc_in: " << acc_in.read()
+                     << ", Acc_out: " << next_acc_out );
+        }
 
+        // Write to _next signals
+        state_reg_next.write(next_state);
+        result_reg_next.write(next_result);
+        acc_out_reg_next.write(next_acc_out);
+        done_reg_next.write(next_done);
+        acc_stage_0_0_reg_next.write(next_acc_stage_0_0);
+        acc_stage_0_1_reg_next.write(next_acc_stage_0_1);
+        acc_stage_1_reg_next.write(next_acc_stage_1);
+    }
+};
 
 } // namespace pe
 } // namespace hybridacc

@@ -141,6 +141,7 @@ public:
             else if(func3==1){ // TSHIFT k
                 int code = (w>>10)&0x7; // kernel size code (0:K3 1:K5 2:K7)
                 signals.imm = code;
+                signals.tr_en = true;
                 signals.tr_shift = true;
             }
             return;

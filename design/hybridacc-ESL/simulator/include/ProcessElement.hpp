@@ -324,14 +324,14 @@ public:
 
         // EXE_A stage stall (internal + downstream)
         bool exe_a_internal_stall = exe_a_stall_adder.read() || exe_a_stall_port_io.read();
-        bool exe_a_total_stall = exe_a_internal_stall || downstream_stall.read();
+        bool exe_a_total_stall = exe_a_internal_stall || external_stall;
         exe_a_stage_stall.write(exe_a_total_stall);
 
         // EXE_M stage stall (internal + from EXE_A)
         bool exe_m_internal_stall = exe_m_stall_dl.read() ||
                                     exe_m_stall_ps.read() ||
                                     exe_m_stall_pd.read();
-        bool exe_m_total_stall = exe_m_internal_stall || exe_a_stage_stall.read();
+        bool exe_m_total_stall = exe_m_internal_stall || exe_a_total_stall;
         exe_m_stage_stall.write(exe_m_total_stall);
 
         // Monitor stalls for debugging

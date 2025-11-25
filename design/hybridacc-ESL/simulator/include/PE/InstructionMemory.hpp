@@ -56,10 +56,10 @@ SC_MODULE(InstructionMemory) {
 
         void combinational_process() {
             if (!reset_n.read()) {
-                DEBUG_MSG("[InstructionMemory] Reset active, read data set to 0");
+                //DEBUG_MSG("[InstructionMemory] Reset active, read data set to 0");
                 im_read_data.write(0);
             } else {
-                DEBUG_MSG("[InstructionMemory] Read from address " << im_read_addr.read());
+                //DEBUG_MSG("[InstructionMemory] Read from address " << im_read_addr.read());
                 im_read_data.write(mem[im_read_addr.read() / sizeof(uint16_t)]);
             }
         }

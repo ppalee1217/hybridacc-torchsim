@@ -93,8 +93,7 @@ public:
         sensitive << decode_signals_reg << valid_reg << halted_reg
                   << pe_running << stage_reset
                   << ID_decode_signals_in << signal_valid_in
-                  << dl_stall_internal << ps_stall_internal << pd_stall_internal << stage_stall_internal
-                  << vmul_result_sig;
+                  << dl_stall_internal << ps_stall_internal << pd_stall_internal << stage_stall_internal;
 
         // Stage 3: Submodule control (drives control signals based on CURRENT register state)
         SC_METHOD(submodule_control_process);
@@ -162,7 +161,6 @@ public:
     // VMULU signals
     sc_signal<v_fp16_t> vmul_op1_sig;
     sc_signal<v_fp16_t> vmul_op2_sig;
-    sc_signal<v_fp16_t> vmul_result_sig;
 
     // DataMemory <-> DataLoader signals
     sc_signal<bool> dm_write_en_sig;
@@ -245,7 +243,7 @@ public:
         // VMULU
         vmul.op1(vmul_op1_sig);
         vmul.op2(vmul_op2_sig);
-        vmul.result(vmul_result_sig);
+        vmul.result(vmul_out_out);
     }
 
     // === Combinational Logic (Split by function) ===
@@ -329,7 +327,6 @@ public:
         bool stage_stall = stage_stall_internal.read();
 
         // Output defaults
-        v_fp16_t vmul_out = v_fp16_t();
         pe_decode_signals_t exe_a_out = pe_decode_signals_t();
         bool valid_out = false;
 
@@ -352,8 +349,6 @@ public:
             halted_n = halted_current;
 
             // 當 stall 時,向下游傳遞 NOP (valid_out=false)
-            // 不要輸出有效指令,以防止下游 stage 錯誤地執行指令
-            vmul_out = v_fp16_t();
             exe_a_out = pe_decode_signals_t();
             valid_out = false;  // 插入 bubble
         }
@@ -366,17 +361,12 @@ public:
             // Check for halt instruction
             if (valid_n && decode_n.halt) {
                 halted_n = true;
-                DEBUG_MSG("[EXE_M_Stage] HALT instruction detected");
             }
 
             // Execute current instruction
             if (valid_current) {
-                vmul_out = vmul_result_sig.read();
                 exe_a_out = decode_current;
                 valid_out = true;
-
-                DEBUG_MSG("[EXE_M_Stage] Execute: Inst=0x" << std::hex
-                          << decode_current.inst << std::dec);
             }
         }
 
@@ -386,7 +376,6 @@ public:
         halted_next.write(halted_n);
 
         // Drive output ports
-        vmul_out_out.write(vmul_out);
         EXE_A_decode_signals_out.write(exe_a_out);
         signal_valid_out.write(valid_out);
         halted_out.write(halted_n);
@@ -437,7 +426,7 @@ public:
             // TransformRegFile control
             tr_enable_sig.write(signals.tr_en);
             tr_shift_en_sig.write(signals.tr_shift);
-            tr_shift_mode_sig.write(signals.func3);
+            tr_shift_mode_sig.write(signals.imm & 0x3); // 取低2位作為shift_mode
             tr_tid_sig.write(signals.rid3);
             tr_tid_write_en_sig.write(signals.tr_write);
             tr_clear_regs_sig.write(signals.tr_clear_regs);
@@ -482,7 +471,10 @@ public:
             DEBUG_MSG("[EXE_M_Stage] Clocked: Valid=" << valid_reg.read()
                       << " Halted=" << halted_reg.read()
                       << " Inst=0x" << std::hex << decode_signals_reg.read().inst << std::dec
-                      << " Stall=" << stage_stall_internal.read());
+                      << " Stall=" << stage_stall_internal.read()
+                      << " TR.inc= " << tr_incr_vcounter_sig.read()
+                      << " DL.next= " << dl_next_sig.read()
+                      << " VMUL.result= " << vmul_out_out.read());
 
             wait(); // Wait for next clock edge
         }

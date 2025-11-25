@@ -234,7 +234,9 @@ bool PEWrapper::send_noc_request(uint64_t addr, uint64_t data) {
     if (timeout == 0) {
         // 清除 valid 信號
         noc_req_in_valid.write(false);
-        log_debug("NoC request timeout - ready signal not received");
+        std::stringstream ss;
+        ss << "NoC request timeout for addr: 0x" << std::hex << addr << ", data: 0x" << data << std::dec;
+        log_debug(ss.str());
         assert(false && "NoC request timeout");
         return false;
     }

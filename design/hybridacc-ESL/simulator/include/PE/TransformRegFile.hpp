@@ -50,14 +50,14 @@ SC_MODULE(TransformRegFile) {
             SC_CTHREAD(sequential_process, clk.pos());
             reset_signal_is(reset_n, false);
             SC_METHOD(combinational_process);
-            sensitive << tid << tid << tid_write_en << tid_in << shift_en << shift_mode << reset_n;
+            sensitive << tid << tid << tid_write_en << tid_in << shift_en << shift_mode << reset_n << vcounter;
         }
 
 
 
-        int vcounter;
+        sc_signal<int> vcounter;
         void clear() { reg.fill(0); }
-        void reset() { clear(); vcounter = 0; }  // 修正：使用 vcounter 而不是未定義的變數
+        void reset() { clear(); vcounter.write(0); }  // 修正：使用 vcounter 而不是未定義的變數
         void setT(int tid, fp16_t v) { reg[tid] = v; }
         v_fp16_t getVT(int tid) const {
             v_fp16_t vt;
@@ -67,6 +67,7 @@ SC_MODULE(TransformRegFile) {
             return vt;
         }
         void shift(int shift_mode){  // 修正：移除多餘的類名限定符
+            DEBUG_MSG("[TransformRegFile] Shift operation with mode " << shift_mode);
             int maskBits = 0;
             switch(shift_mode){
                 case 0: // K3 -> 011011011011b (11 ~ 0)
@@ -87,13 +88,25 @@ SC_MODULE(TransformRegFile) {
                 }
             }
             reg[11] = 0; // 最後一個寄存器清零
+
+            // dump after shift
+            // std::cout << "[TransformRegFile] After shift (mode " << shift_mode << "): " << std::endl;
+            // for (int lane = 0; lane < 4; ++lane) {
+            //     std::cout << "Lane " << lane << ": ";
+            //     for (int i = 0; i < 3; ++i) {
+            //         int idx = lane * 3 + i;
+            //         std::cout << "T[" << idx << "]=0x" << std::hex << reg[idx] << " ";
+            //     }
+            //     std::cout << "|" << std::endl;
+            // }
+            // std::cout << std::dec << std::endl;
         }
         std::array<fp16_t, 12> reg{}; // 4x3 = 12 registers (3 for each vector lane)
 
         void sequential_process() {
             // Reset initialization
             clear();
-            vcounter = 0;
+            vcounter.write(0);
             wait();
 
             while (true) {
@@ -103,11 +116,11 @@ SC_MODULE(TransformRegFile) {
                     } else if (tid_write_en.read()) {
                         setT(tid.read(), tid_in.read());
                     } else if (incr_vcounter.read()) {
-                        vcounter += tid.read();
+                        vcounter.write(vcounter.read() + tid.read());
                     } else if (set_vcounter.read()) {
-                        vcounter = tid.read();
+                        vcounter.write(tid.read());
                     } else if (clear_vcounter.read()) {
-                        vcounter = 0;
+                        vcounter.write(0);
                     } else if (clear_regs.read()) {
                         clear();
                     }
@@ -126,7 +139,7 @@ SC_MODULE(TransformRegFile) {
             }
 
             if (use_vcounter.read()) {
-                vtid_out.write(getVT(vcounter));
+                vtid_out.write(getVT(vcounter.read()));
             } else {
                 vtid_out.write(getVT(tid.read()));
             }

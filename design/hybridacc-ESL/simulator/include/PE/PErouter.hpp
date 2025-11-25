@@ -664,7 +664,16 @@ public:
             DEBUG_MSG("[PErouter] State: " << state_reg.read()
                       << " PS_empty=" << ps_fifo_empty_sig.read()
                       << " PS_full=" << ps_fifo_full_sig.read()
-                      << " ps_pop=" << ps_fifo_pop_sig.read());
+                      << " ps_pop=" << ps_fifo_pop_sig.read()
+                      << " PD_empty=" << pd_fifo_empty_sig.read()
+                      << " PD_full=" << pd_fifo_full_sig.read()
+                      << " pd_pop=" << pd_fifo_pop_sig.read()
+                      << " PLI_empty=" << pli_fifo_empty_sig.read()
+                      << " PLI_full=" << pli_fifo_full_sig.read()
+                      << " pli_pop=" << pli_fifo_pop_sig.read()
+                      << " PLO_empty=" << plo_fifo_empty_sig.read()
+                      << " PLO_full=" << plo_fifo_full_sig.read()
+                      << " plo_pop=" << plo_fifo_pop_sig.read());
             wait();
         }
     }
