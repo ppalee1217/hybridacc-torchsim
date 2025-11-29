@@ -7,7 +7,11 @@ namespace hybridacc {
 namespace test {
 
 PEWrapper::PEWrapper(const std::string& name, sc_time clock_period)
-    : clock_period(clock_period), debug_enabled(false), stall_cycle_count(0) {
+    : clock_period(clock_period), debug_enabled(false), stall_cycle_count(0),
+      noc_req_out_if("noc_req_out_if"),
+      noc_resp_in_if("noc_resp_in_if"),
+      ln_pli_out_if("ln_pli_out_if"),
+      ln_plo_in_if("ln_plo_in_if") {
 
     // Create clock
     clk = std::make_unique<sc_clock>("clk", clock_period);
@@ -31,38 +35,30 @@ void PEWrapper::connect_signals() {
     pe->reset_n(reset_n);
 
     // Connect control signals
-    // Note: pe_start is removed - controlled by router through NoC commands
     pe->pe_busy(pe_busy);
 
     // Connect router control signals
     pe->router_enable(router_enable);
     pe->router_mode(router_mode);
 
-    // Connect NoC interface
-    pe->noc_req_in(noc_req_in);
-    pe->noc_req_in_valid(noc_req_in_valid);
-    pe->noc_req_in_ready(noc_req_in_ready);
-    pe->noc_resp_out(noc_resp_out);
-    pe->noc_resp_out_valid(noc_resp_out_valid);
-    pe->noc_resp_out_ready(noc_resp_out_ready);
+    // Connect NoC interface using connect_vr_signals
+    connect_vr_signals(pe->noc_req, noc_req_out_if);
+    connect_vr_signals(pe->noc_resp, noc_resp_in_if);
 
-    // Connect Local Network interface
-    pe->ln_pli_in_data(ln_pli_in_data);
-    pe->ln_pli_in_valid(ln_pli_in_valid);
-    pe->ln_pli_in_ready(ln_pli_in_ready);
-    pe->ln_plo_out_data(ln_plo_out_data);
-    pe->ln_plo_out_valid(ln_plo_out_valid);
-    pe->ln_plo_out_ready(ln_plo_out_ready);
+    // Connect Local Network interface using connect_vr_signals
+    connect_vr_signals(pe->ln_pli, ln_pli_out_if);
+    connect_vr_signals(pe->ln_plo, ln_plo_in_if);
 
     // Initialize signals
     reset_n.write(false);
-    // pe_start signal removed
     router_enable.write(false);
     router_mode.write(hybridacc::pe::PERouterMode::PLI_FROM_LN_PLO_TO_LN);
-    noc_req_in_valid.write(false);
-    noc_resp_out_ready.write(false);
-    ln_pli_in_valid.write(false);
-    ln_plo_out_ready.write(true);
+
+    // Initialize VRDIF/VRDOF signals
+    noc_req_out_if.valid_sig.write(false);
+    noc_resp_in_if.ready_sig.write(false);
+    ln_pli_out_if.valid_sig.write(false);
+    ln_plo_in_if.ready_sig.write(true);
 }
 
 void PEWrapper::reset(int reset_cycles) {
@@ -70,7 +66,6 @@ void PEWrapper::reset(int reset_cycles) {
 
     // Assert reset
     reset_n.write(false);
-    // pe_start signal removed - reset is controlled by router
 
     // Run reset cycles
     for (int i = 0; i < reset_cycles; i++) {
@@ -218,22 +213,22 @@ bool PEWrapper::send_noc_request(uint64_t addr, uint64_t data) {
     req.is_w = true;  // 寫入操作
 
     // 發送請求：設置數據和 valid 信號
-    noc_req_in.write(req);
-    noc_req_in_valid.write(true);
+    noc_req_out_if.data_sig.write(req);
+    noc_req_out_if.valid_sig.write(true);
 
     //  等待握手成功（在同一個 cycle 內檢查 ready）
     sc_start(SC_ZERO_TIME);  // 讓組合邏輯穩定
 
     // 等待接收方的 ready 信號
     int timeout = 500;
-    while (!noc_req_in_ready.read() && timeout > 0) {
+    while (!noc_req_out_if.ready_sig.read() && timeout > 0) {
         sc_start(clock_period);
         timeout--;
     }
 
     if (timeout == 0) {
         // 清除 valid 信號
-        noc_req_in_valid.write(false);
+        noc_req_out_if.valid_sig.write(false);
         std::stringstream ss;
         ss << "NoC request timeout for addr: 0x" << std::hex << addr << ", data: 0x" << data << std::dec;
         log_debug(ss.str());
@@ -242,7 +237,7 @@ bool PEWrapper::send_noc_request(uint64_t addr, uint64_t data) {
     }
 
     //  握手成功：立即拉低 valid（在下一個時鐘邊緣之前）
-    noc_req_in_valid.write(false);
+    noc_req_out_if.valid_sig.write(false);
 
     //  等待一個週期完成時序邏輯更新
     sc_start(clock_period);
@@ -258,28 +253,28 @@ bool PEWrapper::send_noc_read_request(uint64_t addr) {
     req.is_w = false;  // 讀取操作
 
     // 發送請求：設置數據和 valid 信號
-    noc_req_in.write(req);
-    noc_req_in_valid.write(true);
+    noc_req_out_if.data_sig.write(req);
+    noc_req_out_if.valid_sig.write(true);
 
     //  等待握手成功
     sc_start(SC_ZERO_TIME);  // 讓組合邏輯穩定
 
     // 等待接收方的 ready 信號
     int timeout = 500;
-    while (!noc_req_in_ready.read() && timeout > 0) {
+    while (!noc_req_out_if.ready_sig.read() && timeout > 0) {
         sc_start(clock_period);
         timeout--;
     }
 
     if (timeout == 0) {
         // 清除 valid 信號
-        noc_req_in_valid.write(false);
+        noc_req_out_if.valid_sig.write(false);
         log_debug("NoC read request timeout - ready signal not received");
         return false;
     }
 
     //  握手成功：立即拉低 valid
-    noc_req_in_valid.write(false);
+    noc_req_out_if.valid_sig.write(false);
 
     //  等待一個週期完成時序邏輯更新
     sc_start(clock_period);
@@ -289,55 +284,55 @@ bool PEWrapper::send_noc_read_request(uint64_t addr) {
 
 bool PEWrapper::read_noc_response(uint64_t& data) {
     // 設置 ready 信號，表示我們準備接收數據
-    noc_resp_out_ready.write(true);
+    noc_resp_in_if.ready_sig.write(true);
 
     // 等待 valid 信號
-    int timeout = 500;  // 最多等待 100 個週期
-    while (!noc_resp_out_valid.read() && timeout > 0) {
+    int timeout = 500;  // 最多等待 500 個週期
+    while (!noc_resp_in_if.valid_sig.read() && timeout > 0) {
         sc_start(clock_period);
         timeout--;
     }
 
     if (timeout == 0) {
-        noc_resp_out_ready.write(false);
+        noc_resp_in_if.ready_sig.write(false);
         log_debug("NoC response timeout - valid signal not received");
         assert(false && "NoC response timeout");
         return false;
     }
 
     // 讀取數據
-    noc_response_t resp = noc_resp_out.read();
+    noc_response_t resp = noc_resp_in_if.data_sig.read();
     data = resp.data;
 
     // 等待一個週期完成握手
     sc_start(clock_period);
 
     // 可選：清除 ready 信號（或保持為 true 表示持續接收）
-    noc_resp_out_ready.write(false);
+    noc_resp_in_if.ready_sig.write(false);
 
     return true;
 }
 
 bool PEWrapper::send_pli_data(uint64_t data) {
-    if (!ln_pli_in_ready.read()) {
+    if (!ln_pli_out_if.ready_sig.read()) {
         return false;
     }
 
-    ln_pli_in_data.write(data);
-    ln_pli_in_valid.write(true);
+    ln_pli_out_if.data_sig.write(data);
+    ln_pli_out_if.valid_sig.write(true);
 
     sc_start(clock_period);
 
-    ln_pli_in_valid.write(false);
+    ln_pli_out_if.valid_sig.write(false);
     return true;
 }
 
 bool PEWrapper::read_plo_data(uint64_t& data) {
-    if (!ln_plo_out_valid.read()) {
+    if (!ln_plo_in_if.valid_sig.read()) {
         return false;
     }
 
-    data = ln_plo_out_data.read();
+    data = ln_plo_in_if.data_sig.read();
     return true;
 }
 

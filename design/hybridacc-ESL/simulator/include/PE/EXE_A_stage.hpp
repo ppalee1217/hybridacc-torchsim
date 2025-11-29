@@ -71,13 +71,9 @@ public:
     // Status outputs
     sc_out<bool> halted_out;
 
-    // Local Network ports (PLI/PLO)
-    sc_in<uint64_t> pli_in_data;
-    sc_in<bool> pli_in_valid;
-    sc_out<bool> pli_in_ready;
-    sc_out<uint64_t> plo_out_data;
-    sc_out<bool> plo_out_valid;
-    sc_in<bool> plo_out_ready;
+    // Local Network ports (PLI/PLO) - using VRDIF/VRDOF
+    VRDIF<uint64_t> pli;
+    VRDOF<uint64_t> plo;
 
     // ========================= Sub-modules =========================
     VADDU vadd;
@@ -91,9 +87,7 @@ public:
           signal_valid_in("signal_valid_in"),
           stall_from_downstream("stall_from_downstream"),
           stall_adder("stall_adder"), stall_port_io("stall_port_io"),
-          pli_in_data("pli_in_data"), pli_in_valid("pli_in_valid"),
-          pli_in_ready("pli_in_ready"), plo_out_data("plo_out_data"),
-          plo_out_valid("plo_out_valid"), plo_out_ready("plo_out_ready"),
+          pli("pli"), plo("plo"),
           vadd("vadd"), PR("PR")
     {
         DEBUG_MSG("[Create] EXE_A_Stage");
@@ -107,7 +101,7 @@ public:
         sensitive << state_reg << decode_reg << vmul_data_reg << pli_data_reg << vaddu_started_reg
                   << signal_valid_in << EXE_M_decode_signals_in << vmul_out_in
                   << stall_from_downstream << stage_reset << pe_running << halted_reg
-                  << pli_in_valid << pli_in_data << plo_out_ready << vadd_done_sig << vadd_result_sig << vadd_start_sig;
+                  << pli.valid_in << pli.data_in << plo.ready_in << vadd_done_sig << vadd_result_sig << vadd_start_sig;
 
         SC_METHOD(comb_vaddu_control);
         sensitive << state_reg << decode_reg << vmul_data_reg << pli_data_reg
@@ -121,7 +115,7 @@ public:
 
         SC_METHOD(comb_pli_handshake);
         sensitive << state_reg << signal_valid_in << EXE_M_decode_signals_in
-                  << stall_from_downstream << pli_in_valid;
+                  << stall_from_downstream << pli.valid_in;
 
         bind_submodules();
     }
@@ -250,9 +244,9 @@ private:
             }
             // PLI-PLO 操作
             else if (result.next_decode.pli_plo_operation) {
-                if(pli_in_valid.read()) {
+                if(pli.valid_in.read()) {
                     v_fp16_t captured_pli_data;
-                    captured_pli_data.fromUint64(pli_in_data.read());
+                    captured_pli_data.fromUint64(pli.data_in.read());
                     result.next_pli_data = captured_pli_data;
                     result.next_state = EXE_A_State::EXEC_PLI_VADDU;
                 }else{
@@ -291,12 +285,12 @@ private:
 
     // 處理 WAIT_PLI 狀態的轉換
     void handle_wait_pli_state(StateTransitionResult& result) {
-        if (pli_in_valid.read()) {
+        if (pli.valid_in.read()) {
             v_fp16_t captured_pli_data;
-            captured_pli_data.fromUint64(pli_in_data.read());
+            captured_pli_data.fromUint64(pli.data_in.read());
             result.next_pli_data = captured_pli_data;
             result.next_state = EXE_A_State::EXEC_PLI_VADDU;
-            DEBUG_MSG("[EXE_A_stage] PLI data captured: 0x" << std::hex << pli_in_data.read());
+            DEBUG_MSG("[EXE_A_stage] PLI data captured: 0x" << std::hex << pli.data_in.read());
         }
     }
 
@@ -319,7 +313,7 @@ private:
 
     // 處理 WAIT_PLO 狀態的轉換
     void handle_wait_plo_state(StateTransitionResult& result) {
-        if (plo_out_ready.read()) {
+        if (plo.ready_in.read()) {
             result.next_state = EXE_A_State::IDLE;
             DEBUG_MSG("[EXE_A_stage] PLO handshake done");
         }
@@ -478,8 +472,8 @@ private:
         // PLO handshake
         bool plo_valid = (state == EXE_A_State::WAIT_PLO);
         uint64_t plo_data = vaddu_result_reg.read().toUint64();
-        plo_out_valid.write(plo_valid);
-        plo_out_data.write(plo_data);
+        plo.valid_out.write(plo_valid);
+        plo.data_out.write(plo_data);
 
         // Halted status
         halted_out.write(halted);
@@ -495,7 +489,7 @@ private:
                                EXE_M_decode_signals_in.read().pli_plo_operation &&
                                !stalled);
         bool pli_ready = (state == EXE_A_State::WAIT_PLI) || need_pli_early;
-        pli_in_ready.write(pli_ready);
+        pli.ready_out.write(pli_ready);
     }
 };
 

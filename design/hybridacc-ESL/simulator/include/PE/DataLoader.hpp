@@ -85,10 +85,8 @@ public:
     sc_out<bool> done;
     sc_out<bool> dl_stall_out;
 
-    // data ports
-    sc_in<v_fp16_t> ps_data_in;
-    sc_in<bool> ps_data_in_valid;
-    sc_out<bool> ps_data_in_ready;
+    // data ports - using VRDIF
+    VRDIF<v_fp16_t> ps_data;
 
     // DM-related ports
     sc_out<bool> dm_write_en;
@@ -117,9 +115,7 @@ public:
           busy("busy"),
           done("done"),
           dl_stall_out("dl_stall_out"),
-          ps_data_in("ps_data_in"),
-          ps_data_in_valid("ps_data_in_valid"),
-          ps_data_in_ready("ps_data_in_ready"),
+          ps_data("ps_data"),
           dm_write_en("dm_write_en"),
           dm_write_addr("dm_write_addr"),
           dm_write_data("dm_write_data"),
@@ -147,7 +143,7 @@ public:
         // 拆分成多個組合邏輯方法
         SC_METHOD(next_state_logic);
         sensitive << state_reg << active << write_en << next << set_addr << set_len
-                  << ps_data_in_valid << ps_data_in << dm_read_data
+                  << ps_data.valid_in << ps_data.data_in << dm_read_data
                   << addr_len << mode << stride
                   << dma_base_reg << dma_offset_reg << dma_len_reg << dma_stride_reg
                   << dma_broadcast_reg << request_type_reg << dmwv_reg << dmrv_reg;
@@ -251,8 +247,8 @@ public:
             request_type_reg.write(request_type_next.read());
 
             DEBUG_MSG("[DataLoader] State=" << state_reg.read()
-                      << " ps_valid=" << ps_data_in_valid.read()
-                      << " ready=" << ps_data_in_ready.read()
+                      << " ps_valid=" << ps_data.valid_in.read()
+                      << " ready=" << ps_data.ready_out.read()
                       << " len=" << dma_len_reg.read()
                       << " dmrv=" << dmrv_out.read()
                       << " addr=" << dm_read_addr.read()
@@ -304,8 +300,8 @@ public:
                 break;
 
             case State::STORE_PRE:
-                if (ps_data_in_valid.read()) {
-                    dmwv_next.write(ps_data_in.read());
+                if (ps_data.valid_in.read()) {
+                    dmwv_next.write(ps_data.data_in.read());
                     state_next.write(State::STORE);
                 }
                 break;
@@ -420,8 +416,8 @@ public:
     }
 
     void ready_logic() {
-        // ps_data_in_ready 只在 STORE_PRE 狀態時為 true
-        ps_data_in_ready.write(state_reg.read() == State::STORE_PRE);
+        // ps_data.ready_out 只在 STORE_PRE 狀態時為 true
+        ps_data.ready_out.write(state_reg.read() == State::STORE_PRE);
     }
 
     void stall_logic() {

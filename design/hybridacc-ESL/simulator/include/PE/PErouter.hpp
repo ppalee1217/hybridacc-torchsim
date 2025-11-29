@@ -122,25 +122,17 @@ public:
     sc_in<PERouterMode> route_mode;
 
     // NoC input ports
-    sc_in<noc_request_t> req_in;
-    sc_in<bool> req_in_valid;
-    sc_out<bool> req_in_ready;
+    VRDIF<noc_request_t> noc_req_in_if;
 
     // NoC output ports
-    sc_out<noc_response_t> resp_out;
-    sc_out<bool> resp_out_valid;
-    sc_in<bool> resp_out_ready;
+    VRDOF<noc_response_t> noc_resp_out_if;
 
     //======= LN Ports =======//
-    // LN input ports
-    sc_in<uint64_t> ln_pli_in_data;
-    sc_in<bool> ln_pli_in_valid;
-    sc_out<bool> ln_pli_in_ready;
+    // LN input ports - using VRDIF
+    VRDIF<uint64_t> ln_pli_in_if;
 
-    // LN output ports
-    sc_out<uint64_t> ln_plo_out_data;
-    sc_out<bool> ln_plo_out_valid;
-    sc_in<bool> ln_plo_out_ready;
+    // LN output ports - using VRDOF
+    VRDOF<uint64_t> ln_plo_out_if;
 
     //======= Internal Ports =======//
     // Internal port - top controller
@@ -153,25 +145,17 @@ public:
     sc_out<uint16_t> im_write_addr;
     sc_out<pe_inst_t> im_write_data;
 
-    // port static
-    sc_out<uint64_t> pe_ps;
-    sc_out<bool> pe_ps_valid;
-    sc_in<bool> pe_ps_ready;
+    // port static - using VRDOF
+    VRDOF<uint64_t> pe_ps_out_if;
 
-    // port dynamic
-    sc_out<uint16_t> pe_pd;
-    sc_out<bool> pe_pd_valid;
-    sc_in<bool> pe_pd_ready;
+    // port dynamic - using VRDOF
+    VRDOF<uint16_t> pe_pd_out_if;
 
-    // port local input
-    sc_out<uint64_t> pe_pli;
-    sc_out<bool> pe_pli_valid;
-    sc_in<bool> pe_pli_ready;
+    // port local input - using VRDOF
+    VRDOF<uint64_t> pe_pli_out_if;
 
-    // port local output
-    sc_in<uint64_t> pe_plo;
-    sc_in<bool> pe_plo_valid;
-    sc_out<bool> pe_plo_ready;
+    // port local output - using VRDIF
+    VRDIF<uint64_t> pe_plo_in_if;
 
     // methods
     SC_CTOR(PErouter)
@@ -179,36 +163,20 @@ public:
           reset_n("reset_n"),
           enable("enable"),
           route_mode("route_mode"),
-          req_in("req_in"),
-          req_in_valid("req_in_valid"),
-          req_in_ready("req_in_ready"),
-          resp_out("resp_out"),
-          resp_out_valid("resp_out_valid"),
-          resp_out_ready("resp_out_ready"),
-          ln_pli_in_data("ln_pli_in_data"),
-          ln_pli_in_valid("ln_pli_in_valid"),
-          ln_pli_in_ready("ln_pli_in_ready"),
-          ln_plo_out_data("ln_plo_out_data"),
-          ln_plo_out_valid("ln_plo_out_valid"),
-          ln_plo_out_ready("ln_plo_out_ready"),
+          noc_req_in_if("noc_req_in_if"),
+          noc_resp_out_if("noc_resp_out_if"),
+          ln_pli_in_if("ln_pli_in_if"),
+          ln_plo_out_if("ln_plo_out_if"),
           pe_reset("pe_reset"),
           pe_start("pe_start"),
           pe_program("pe_program"),
           im_write_en("im_write_en"),
           im_write_addr("im_write_addr"),
           im_write_data("im_write_data"),
-          pe_ps("pe_ps"),
-          pe_ps_valid("pe_ps_valid"),
-          pe_ps_ready("pe_ps_ready"),
-          pe_pd("pe_pd"),
-          pe_pd_valid("pe_pd_valid"),
-          pe_pd_ready("pe_pd_ready"),
-          pe_pli("pe_pli"),
-          pe_pli_valid("pe_pli_valid"),
-          pe_pli_ready("pe_pli_ready"),
-          pe_plo("pe_plo"),
-          pe_plo_valid("pe_plo_valid"),
-          pe_plo_ready("pe_plo_ready"),
+          pe_ps_out_if("pe_ps_out_if"),
+          pe_pd_out_if("pe_pd_out_if"),
+          pe_pli_out_if("pe_pli_out_if"),
+          pe_plo_in_if("pe_plo_in_if"),
           ps_fifo("ps_fifo", max_queue_size),
           pd_fifo("pd_fifo", max_queue_size),
           pli_fifo("pli_fifo", max_queue_size),
@@ -254,9 +222,9 @@ public:
         plo_fifo.full(plo_fifo_full_sig);
 
         SC_METHOD(combinational_process);
-        sensitive << reset_n << state_reg << req_in_valid << req_in << enable << route_mode
-                  << resp_out_ready << ln_pli_in_valid << ln_pli_in_data << ln_plo_out_ready
-                  << pe_ps_ready << pe_pd_ready << pe_pli_ready << pe_plo_valid << pe_plo
+        sensitive << reset_n << state_reg << noc_req_in_if.valid_in << noc_req_in_if.data_in << enable << route_mode
+                  << noc_resp_out_if.ready_in << ln_pli_in_if.valid_in << ln_pli_in_if.data_in << ln_plo_out_if.ready_in
+                  << pe_ps_out_if.ready_in << pe_pd_out_if.ready_in << pe_pli_out_if.ready_in << pe_plo_in_if.valid_in << pe_plo_in_if.data_in
                   << pending_noc_req_reg << current_noc_req_reg
                   << ps_fifo_empty_sig << ps_fifo_full_sig << ps_fifo_data_out_sig
                   << pd_fifo_empty_sig << pd_fifo_full_sig << pd_fifo_data_out_sig
@@ -414,21 +382,21 @@ public:
         pe_program_next.write(false);   // Single-cycle pulse
 
         // Default outputs
-        req_in_ready.write(false);
-        resp_out_valid.write(false);
-        resp_out.write(noc_response_t());
+        noc_req_in_if.ready_out.write(false);
+        noc_resp_out_if.valid_out.write(false);
+        noc_resp_out_if.data_out.write(noc_response_t());
 
-        ln_pli_in_ready.write(false);
-        ln_plo_out_valid.write(false);
-        ln_plo_out_data.write(0);
+        ln_pli_in_if.ready_out.write(false);
+        ln_plo_out_if.valid_out.write(false);
+        ln_plo_out_if.data_out.write(0);
 
-        pe_ps_valid.write(false);
-        pe_ps.write(0);
-        pe_pd_valid.write(false);
-        pe_pd.write(0);
-        pe_pli_valid.write(false);
-        pe_pli.write(0);
-        pe_plo_ready.write(false);
+        pe_ps_out_if.valid_out.write(false);
+        pe_ps_out_if.data_out.write(0);
+        pe_pd_out_if.valid_out.write(false);
+        pe_pd_out_if.data_out.write(0);
+        pe_pli_out_if.valid_out.write(false);
+        pe_pli_out_if.data_out.write(0);
+        pe_plo_in_if.ready_out.write(false);
 
         if (!reset_n.read()) {
             return;
@@ -443,12 +411,12 @@ public:
             case PErouterState::IDLE:
             {
                 // Handle incoming NoC requests
-                if (req_in_valid.read()) {
-                    noc_request_t req = req_in.read();
+                if (noc_req_in_if.valid_in.read()) {
+                    noc_request_t req = noc_req_in_if.data_in.read();
 
                     // Command requests - always accepted
                     if (req.addr == PE_CMD_ADDRESS && req.is_w) {
-                        req_in_ready.write(true);
+                        noc_req_in_if.ready_out.write(true);
 
                         // Process command
                         message_command_t cmd = static_cast<message_command_t>(req.data & 0xF);
@@ -501,7 +469,7 @@ public:
                                 break;
                         }
 
-                        req_in_ready.write(can_accept);
+                        noc_req_in_if.ready_out.write(can_accept);
                         state_next.write(PErouterState::IDLE);
                     }
                     // Read requests - accept request, prepare for next cycle response
@@ -510,22 +478,22 @@ public:
                         if (channel == NOC_CHANNEL_PLO) {
                             // Accept request if data is available
                             if (has_plo_data()) {
-                                req_in_ready.write(true);
+                                noc_req_in_if.ready_out.write(true);
                                 current_noc_req_next.write(req);
                                 pending_noc_req_next.write(true);
                                 state_next.write(PErouterState::WAIT_RESP);
                             } else {
                                 // Data not ready, reject request
-                                req_in_ready.write(false);
+                                noc_req_in_if.ready_out.write(false);
                                 state_next.write(PErouterState::IDLE);
                             }
                         }
                     }
                 }
                 // Handle LN PLI input
-                else if (enabled && ln_pli_in_valid.read() && can_route_from_ln(NOC_CHANNEL_PLI) && can_accept_pli()) {
-                    ln_pli_in_ready.write(true);
-                    pli_fifo_data_in_sig.write(ln_pli_in_data.read());
+                else if (enabled && ln_pli_in_if.valid_in.read() && can_route_from_ln(NOC_CHANNEL_PLI) && can_accept_pli()) {
+                    ln_pli_in_if.ready_out.write(true);
+                    pli_fifo_data_in_sig.write(ln_pli_in_if.data_in.read());
                     pli_fifo_push_sig.write(true);
                     state_next.write(PErouterState::IDLE);
                 }
@@ -534,36 +502,36 @@ public:
                 if (enabled) {
                     // PS channel: NoC -> PE
                     if (has_ps_data()) {
-                        pe_ps_valid.write(true);
-                        pe_ps.write(ps_fifo_data_out_sig.read());
+                        pe_ps_out_if.valid_out.write(true);
+                        pe_ps_out_if.data_out.write(ps_fifo_data_out_sig.read());
                         //  如果握手成功，設定 pop 信號
-                        if (pe_ps_ready.read()) {
+                        if (pe_ps_out_if.ready_in.read()) {
                             ps_fifo_pop_sig.write(true);
                         }
                     }
 
                     // PD channel: NoC -> PE
                     if (has_pd_data()) {
-                        pe_pd_valid.write(true);
-                        pe_pd.write(pd_fifo_data_out_sig.read());
-                        if (pe_pd_ready.read()) {
+                        pe_pd_out_if.valid_out.write(true);
+                        pe_pd_out_if.data_out.write(pd_fifo_data_out_sig.read());
+                        if (pe_pd_out_if.ready_in.read()) {
                             pd_fifo_pop_sig.write(true);
                         }
                     }
 
                     // PLI channel: NoC/LN -> PE
                     if (has_pli_data()) {
-                        pe_pli_valid.write(true);
-                        pe_pli.write(pli_fifo_data_out_sig.read());
-                        if (pe_pli_ready.read()) {
+                        pe_pli_out_if.valid_out.write(true);
+                        pe_pli_out_if.data_out.write(pli_fifo_data_out_sig.read());
+                        if (pe_pli_out_if.ready_in.read()) {
                             pli_fifo_pop_sig.write(true);
                         }
                     }
 
                     // PLO channel: PE -> internal FIFO
-                    if (pe_plo_valid.read() && can_accept_plo()) {
-                        pe_plo_ready.write(true);
-                        plo_fifo_data_in_sig.write(pe_plo.read());
+                    if (pe_plo_in_if.valid_in.read() && can_accept_plo()) {
+                        pe_plo_in_if.ready_out.write(true);
+                        plo_fifo_data_in_sig.write(pe_plo_in_if.data_in.read());
                         plo_fifo_push_sig.write(true);
                     }
 
@@ -574,15 +542,15 @@ public:
                         bool plo_to_noc = (mode == PERouterMode::PLI_FROM_LN_PLO_TO_BUS) ||
                                           (mode == PERouterMode::PLI_FROM_BUS_PLO_TO_BUS);
 
-                        if (plo_to_ln && ln_plo_out_ready.read()) {
-                            ln_plo_out_valid.write(true);
-                            ln_plo_out_data.write(plo_fifo_data_out_sig.read());
+                        if (plo_to_ln && ln_plo_out_if.ready_in.read()) {
+                            ln_plo_out_if.valid_out.write(true);
+                            ln_plo_out_if.data_out.write(plo_fifo_data_out_sig.read());
                             plo_fifo_pop_sig.write(true);
-                        } else if (plo_to_noc && resp_out_ready.read()) {
-                            resp_out_valid.write(true);
+                        } else if (plo_to_noc && noc_resp_out_if.ready_in.read()) {
+                            noc_resp_out_if.valid_out.write(true);
                             noc_response_t resp;
                             resp.data = plo_fifo_data_out_sig.read();
-                            resp_out.write(resp);
+                            noc_resp_out_if.data_out.write(resp);
                             plo_fifo_pop_sig.write(true);
                         }
                     }
@@ -594,14 +562,14 @@ public:
             {
                 if (pending_noc_req_reg.read()) {
                     // Send response
-                    resp_out_valid.write(true);
+                    noc_resp_out_if.valid_out.write(true);
                     if (has_plo_data()) {
                         noc_response_t resp;
                         resp.data = plo_fifo_data_out_sig.read();
-                        resp_out.write(resp);
+                        noc_resp_out_if.data_out.write(resp);
 
                         //  如果握手成功，設定 pop 信號
-                        if (resp_out_ready.read()) {
+                        if (noc_resp_out_if.ready_in.read()) {
                             plo_fifo_pop_sig.write(true);
                             pending_noc_req_next.write(false);
                             state_next.write(PErouterState::IDLE);

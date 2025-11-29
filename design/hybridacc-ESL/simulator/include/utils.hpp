@@ -301,3 +301,80 @@ inline void sc_trace(sc_core::sc_trace_file* tf, const pe_decode_signals_t& sig,
     sc_core::sc_trace(tf, sig.vaddu_en, name + ".vaddu_en");
     sc_core::sc_trace(tf, sig.vaddu_mode, name + ".vaddu_mode");
 }
+
+
+// -----------------------------------------------------------------------------
+// valid-ready IF template
+
+// valid-ready data in interface
+template <typename T>
+struct VRDIF : public sc_core::sc_module {
+    sc_core::sc_in<T> data_in;
+    sc_core::sc_in<bool> valid_in;
+    sc_core::sc_out<bool> ready_out;
+
+    SC_CTOR(VRDIF)
+        : data_in("data_in"),
+          valid_in("valid_in"),
+          ready_out("ready_out") {}
+};
+
+// valid-ready data out interface
+template <typename T>
+struct VRDOF : public sc_core::sc_module {
+    sc_core::sc_out<T> data_out;
+    sc_core::sc_out<bool> valid_out;
+    sc_core::sc_in<bool> ready_in;
+
+    SC_CTOR(VRDOF)
+        : data_out("data_out"),
+          valid_out("valid_out"),
+          ready_in("ready_in") {}
+};
+
+// valid-ready data connect signals
+template <typename T>
+struct VRDSIG : public sc_core::sc_module {
+    sc_core::sc_signal<T> data_sig;
+    sc_core::sc_signal<bool> valid_sig;
+    sc_core::sc_signal<bool> ready_sig;
+
+    SC_CTOR(VRDSIG)
+        : data_sig("data_sig"),
+          valid_sig("valid_sig"),
+          ready_sig("ready_sig") {}
+};
+
+// binding function for VRDIF inner to VRDIF outer
+template <typename T>
+void bind_vr_interface(VRDIF<T>& vrdif_inner, VRDIF<T>& vrdif_outer) {
+    vrdif_inner.ready_out(vrdif_outer.ready_out);
+    vrdif_inner.valid_in(vrdif_outer.valid_in);
+    vrdif_inner.data_in(vrdif_outer.data_in);
+}
+
+// binding function for VRDOF outer to VRDOF inner
+template <typename T>
+void bind_vr_interface(VRDOF<T>& vrdof_outer, VRDOF<T>& vrdof_inner) {
+    vrdof_inner.ready_in(vrdof_outer.ready_in);
+    vrdof_inner.valid_out(vrdof_outer.valid_out);
+    vrdof_inner.data_out(vrdof_outer.data_out);
+}
+
+// connect VRDIF to signals
+template <typename T>
+void connect_vr_signals(VRDIF<T>& vrdif, VRDSIG<T>& sig) {
+    vrdif.data_in(sig.data_sig);
+    vrdif.valid_in(sig.valid_sig);
+    vrdif.ready_out(sig.ready_sig);
+}
+
+// connect signals to VRDOF
+template <typename T>
+void connect_vr_signals(VRDOF<T>& vrdof, VRDSIG<T>& sig) {
+    vrdof.data_out(sig.data_sig);
+    vrdof.valid_out(sig.valid_sig);
+    vrdof.ready_in(sig.ready_sig);
+}
+
+// -----------------------------------------------------------------------------

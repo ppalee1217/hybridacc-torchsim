@@ -38,15 +38,11 @@ public:
     sc_out<bool> stall_PS;
     sc_out<bool> stall_PD;
 
-    // PS port (Port Static)
-    sc_in<uint64_t> ps_data_in;
-    sc_in<bool> ps_data_in_valid;
-    sc_out<bool> ps_data_in_ready;
+    // PS port (Port Static) - using VRDIF
+    VRDIF<uint64_t> ps_data;
 
-    // PD port (Port Dynamic)
-    sc_in<uint16_t> pd_data_in;
-    sc_in<bool> pd_data_in_valid;
-    sc_out<bool> pd_data_in_ready;
+    // PD port (Port Dynamic) - using VRDIF
+    VRDIF<uint16_t> pd_data;
 
     SC_CTOR(EXE_M_Stage)
         : clk("clk"),
@@ -63,12 +59,8 @@ public:
           stall_DL("stall_DL"),
           stall_PS("stall_PS"),
           stall_PD("stall_PD"),
-          ps_data_in("ps_data_in"),
-          ps_data_in_valid("ps_data_in_valid"),
-          ps_data_in_ready("ps_data_in_ready"),
-          pd_data_in("pd_data_in"),
-          pd_data_in_valid("pd_data_in_valid"),
-          pd_data_in_ready("pd_data_in_ready"),
+          ps_data("ps_data"),
+          pd_data("pd_data"),
           TR("TR"),
           vmul("vmul"),
           DL("DL"),
@@ -85,7 +77,7 @@ public:
         sensitive << decode_signals_reg << valid_reg
                   << signal_valid_in << ID_decode_signals_in
                   << dl_stall_sig  // DataLoader stall output
-                  << ps_data_in_valid << pd_data_in_valid
+                  << ps_data.valid_in << pd_data.valid_in
                   << stall_from_downstream;
 
         // Stage 2: Pipeline control (calculates next state based on stalls)
@@ -100,11 +92,11 @@ public:
         sensitive << decode_signals_reg << valid_reg  // 使用暫存器而非 _next
                   << stall_from_downstream  // 只需要外部 stall
                   << tr_vtid_out_sig << dl_dmrv_out_sig
-                  << pd_data_in_valid << pd_data_in;
+                  << pd_data.valid_in << pd_data.data_in;
 
         // PS data type conversion process
         SC_METHOD(ps_data_conversion_process);
-        sensitive << ps_data_in;
+        sensitive << ps_data.data_in;
 
         // Bind submodules
         bind();
@@ -209,7 +201,7 @@ public:
         DM.dm_read_addr(dm_read_addr_sig);
         DM.dm_read_data(dm_read_data_sig);
 
-        // DataLoader
+        // DataLoader - binding VRDIF interface
         DL.addr_len(dl_addr_len_sig);
         DL.set_addr(dl_set_addr_sig);
         DL.set_len(dl_set_len_sig);
@@ -218,9 +210,9 @@ public:
         DL.write_en(dl_write_en_sig);
         DL.active(dl_active_sig);
         DL.next(dl_next_sig);
-        DL.ps_data_in(ps_data_in_converted_sig);
-        DL.ps_data_in_valid(ps_data_in_valid);
-        DL.ps_data_in_ready(ps_data_in_ready);
+        DL.ps_data.data_in(ps_data_in_converted_sig);
+        DL.ps_data.valid_in(ps_data.valid_in);
+        DL.ps_data.ready_out(ps_data.ready_out);
         DL.dmrv_out(dl_dmrv_out_sig);
         DL.busy(dl_busy_sig);
         DL.done(dl_done_sig);
@@ -251,7 +243,7 @@ public:
     // PS data type conversion: uint64_t -> v_fp16_t
     void ps_data_conversion_process() {
         v_fp16_t converted;
-        converted.fromUint64(ps_data_in.read());
+        converted.fromUint64(ps_data.data_in.read());
         ps_data_in_converted_sig.write(converted);
     }
 
@@ -269,13 +261,13 @@ public:
             // PS stall: check if PS operation needs data
             bool ps_operation = decode_current.DL_active &&
                                (decode_current.func3 == 0 || decode_current.func3 == 1);
-            if (ps_operation && !ps_data_in_valid.read()) {
+            if (ps_operation && !ps_data.valid_in.read()) {
                 ps_stall = true;
             }
 
             // PD stall: check if PD operation needs data
             bool pd_operation = decode_current.pd_load;
-            if (pd_operation && !pd_data_in_valid.read()) {
+            if (pd_operation && !pd_data.valid_in.read()) {
                 pd_stall = true;
             }
         }
@@ -288,12 +280,12 @@ public:
             // Check if new instruction will stall
             bool next_ps_operation = next_signals.DL_active &&
                                     (next_signals.func3 == 0 || next_signals.func3 == 1);
-            if (next_ps_operation && !ps_data_in_valid.read()) {
+            if (next_ps_operation && !ps_data.valid_in.read()) {
                 ps_stall = true;
             }
 
             bool next_pd_operation = next_signals.pd_load;
-            if (next_pd_operation && !pd_data_in_valid.read()) {
+            if (next_pd_operation && !pd_data.valid_in.read()) {
                 pd_stall = true;
             }
         }
@@ -448,8 +440,8 @@ public:
 
             // PD control (Port Dynamic)
             bool pd_operation = signals.pd_load;
-            if (pd_operation && pd_data_in_valid.read()) {
-                tr_tid_in_sig.write(pd_data_in.read());
+            if (pd_operation && pd_data.valid_in.read()) {
+                tr_tid_in_sig.write(pd_data.data_in.read());
                 pd_ready = true;
             } else {
                 pd_ready = false;
@@ -457,7 +449,7 @@ public:
         }
 
         // Drive PD ready output
-        pd_data_in_ready.write(pd_ready);
+        pd_data.ready_out.write(pd_ready);
     }
 
     // === Sequential Logic (Register Updates) ===

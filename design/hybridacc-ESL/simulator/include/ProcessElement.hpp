@@ -22,26 +22,16 @@ public:
     sc_in<bool> router_enable;
     sc_in<PERouterMode> router_mode;
 
-    // NoC interface ports
-    sc_in<noc_request_t> noc_req_in;
-    sc_in<bool> noc_req_in_valid;
-    sc_out<bool> noc_req_in_ready;
-
-    sc_out<noc_response_t> noc_resp_out;
-    sc_out<bool> noc_resp_out_valid;
-    sc_in<bool> noc_resp_out_ready;
+    // NoC interface ports - using VRDIF/VRDOF
+    VRDIF<noc_request_t> noc_req;
+    VRDOF<noc_response_t> noc_resp;
 
     // Control ports
     sc_out<bool> pe_busy;
 
-    // Local Network ports
-    sc_in<uint64_t> ln_pli_in_data;
-    sc_in<bool> ln_pli_in_valid;
-    sc_out<bool> ln_pli_in_ready;
-
-    sc_out<uint64_t> ln_plo_out_data;
-    sc_out<bool> ln_plo_out_valid;
-    sc_in<bool> ln_plo_out_ready;
+    // Local Network ports - using VRDIF/VRDOF
+    VRDIF<uint64_t> ln_pli;
+    VRDOF<uint64_t> ln_plo;
 
     // Constructor
     SC_CTOR(ProcessElement)
@@ -49,23 +39,19 @@ public:
           reset_n("reset_n"),
           router_enable("router_enable"),
           router_mode("router_mode"),
-          noc_req_in("noc_req_in"),
-          noc_req_in_valid("noc_req_in_valid"),
-          noc_req_in_ready("noc_req_in_ready"),
-          noc_resp_out("noc_resp_out"),
-          noc_resp_out_valid("noc_resp_out_valid"),
-          noc_resp_out_ready("noc_resp_out_ready"),
+          noc_req("noc_req"),
+          noc_resp("noc_resp"),
           pe_busy("pe_busy"),
-          ln_pli_in_data("ln_pli_in_data"),
-          ln_pli_in_valid("ln_pli_in_valid"),
-          ln_pli_in_ready("ln_pli_in_ready"),
-          ln_plo_out_data("ln_plo_out_data"),
-          ln_plo_out_valid("ln_plo_out_valid"),
-          ln_plo_out_ready("ln_plo_out_ready"),
+          ln_pli("ln_pli"),
+          ln_plo("ln_plo"),
           router("PE_Router"),
           if_id_stage("IF_ID_Stage"),
           exe_m_stage("EXE_M_Stage"),
-          exe_a_stage("EXE_A_Stage")
+          exe_a_stage("EXE_A_Stage"),
+          router_pe_ps_sig("router_pe_ps_sig"),
+          router_pe_pd_sig("router_pe_pd_sig"),
+          router_pe_pli_sig("router_pe_pli_sig"),
+          router_pe_plo_sig("router_pe_plo_sig")
     {
         DEBUG_MSG("[Create] ProcessElement");
 
@@ -150,21 +136,10 @@ public:
     sc_signal<pe_inst_t> router_im_write_data_sig;
 
     // PE pipeline data signals - Router <-> EXE stages
-    sc_signal<uint64_t> router_pe_ps_sig;
-    sc_signal<bool> router_pe_ps_valid_sig;
-    sc_signal<bool> router_pe_ps_ready_sig;
-
-    sc_signal<uint16_t> router_pe_pd_sig;
-    sc_signal<bool> router_pe_pd_valid_sig;
-    sc_signal<bool> router_pe_pd_ready_sig;
-
-    sc_signal<uint64_t> router_pe_pli_sig;
-    sc_signal<bool> router_pe_pli_valid_sig;
-    sc_signal<bool> router_pe_pli_ready_sig;
-
-    sc_signal<uint64_t> router_pe_plo_sig;
-    sc_signal<bool> router_pe_plo_valid_sig;
-    sc_signal<bool> router_pe_plo_ready_sig;
+    VRDSIG<uint64_t> router_pe_ps_sig;
+    VRDSIG<uint16_t> router_pe_pd_sig;
+    VRDSIG<uint64_t> router_pe_pli_sig;
+    VRDSIG<uint64_t> router_pe_plo_sig;
 
     void bind() {
         // === Router Connections ===
@@ -175,23 +150,13 @@ public:
         router.enable(router_enable);
         router.route_mode(router_mode);
 
-        // NoC interface
-        router.req_in(noc_req_in);
-        router.req_in_valid(noc_req_in_valid);
-        router.req_in_ready(noc_req_in_ready);
+        // NoC interface - using bind_vr_interface
+        bind_vr_interface(router.noc_req_in_if, noc_req);
+        bind_vr_interface(noc_resp, router.noc_resp_out_if);
 
-        router.resp_out(noc_resp_out);
-        router.resp_out_valid(noc_resp_out_valid);
-        router.resp_out_ready(noc_resp_out_ready);
-
-        // Local Network interface
-        router.ln_pli_in_data(ln_pli_in_data);
-        router.ln_pli_in_valid(ln_pli_in_valid);
-        router.ln_pli_in_ready(ln_pli_in_ready);
-
-        router.ln_plo_out_data(ln_plo_out_data);
-        router.ln_plo_out_valid(ln_plo_out_valid);
-        router.ln_plo_out_ready(ln_plo_out_ready);
+        // Local Network interface - using bind_vr_interface
+        bind_vr_interface(router.ln_pli_in_if, ln_pli);
+        bind_vr_interface(ln_plo, router.ln_plo_out_if);
 
         router.pe_reset(router_pe_reset);
         router.pe_start(router_pe_start);
@@ -255,23 +220,13 @@ public:
         // Stall input
         exe_m_stage.stall_from_downstream(exe_a_stage_stall);
 
-        // PS port (Port Static)
-        router.pe_ps(router_pe_ps_sig);
-        router.pe_ps_valid(router_pe_ps_valid_sig);
-        router.pe_ps_ready(router_pe_ps_ready_sig);
+        // PS port (Port Static) - using connect_vr_signals
+        connect_vr_signals(exe_m_stage.ps_data, router_pe_ps_sig);
+        connect_vr_signals(router.pe_ps_out_if, router_pe_ps_sig);
 
-        exe_m_stage.ps_data_in(router_pe_ps_sig);
-        exe_m_stage.ps_data_in_valid(router_pe_ps_valid_sig);
-        exe_m_stage.ps_data_in_ready(router_pe_ps_ready_sig);
-
-        // PD port (Port Dynamic)
-        router.pe_pd(router_pe_pd_sig);
-        router.pe_pd_valid(router_pe_pd_valid_sig);
-        router.pe_pd_ready(router_pe_pd_ready_sig);
-
-        exe_m_stage.pd_data_in(router_pe_pd_sig);
-        exe_m_stage.pd_data_in_valid(router_pe_pd_valid_sig);
-        exe_m_stage.pd_data_in_ready(router_pe_pd_ready_sig);
+        // PD port (Port Dynamic) - using connect_vr_signals
+        connect_vr_signals(exe_m_stage.pd_data, router_pe_pd_sig);
+        connect_vr_signals(router.pe_pd_out_if, router_pe_pd_sig);
 
         // === EXE_A Stage Connections ===
         exe_a_stage.clk(clk);
@@ -296,22 +251,13 @@ public:
         // Stall input
         exe_a_stage.stall_from_downstream(downstream_stall);
 
-        // Local Network ports
-        router.pe_pli(router_pe_pli_sig);
-        router.pe_pli_valid(router_pe_pli_valid_sig);
-        router.pe_pli_ready(router_pe_pli_ready_sig);
+        // PLI port (Port Local Input) - using connect_vr_signals
+        connect_vr_signals(exe_a_stage.pli, router_pe_pli_sig);
+        connect_vr_signals(router.pe_pli_out_if, router_pe_pli_sig);
 
-        exe_a_stage.pli_in_data(router_pe_pli_sig);
-        exe_a_stage.pli_in_valid(router_pe_pli_valid_sig);
-        exe_a_stage.pli_in_ready(router_pe_pli_ready_sig);
-
-        router.pe_plo(router_pe_plo_sig);
-        router.pe_plo_valid(router_pe_plo_valid_sig);
-        router.pe_plo_ready(router_pe_plo_ready_sig);
-
-        exe_a_stage.plo_out_data(router_pe_plo_sig);
-        exe_a_stage.plo_out_valid(router_pe_plo_valid_sig);
-        exe_a_stage.plo_out_ready(router_pe_plo_ready_sig);
+        // PLO port (Port Local Output) - using connect_vr_signals
+        connect_vr_signals(router.pe_plo_in_if, router_pe_plo_sig);
+        connect_vr_signals(exe_a_stage.plo, router_pe_plo_sig);
     }
 
     // === Combinational Logic ===

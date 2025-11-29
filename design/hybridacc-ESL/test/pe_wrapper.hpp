@@ -250,21 +250,13 @@ private:
     sc_signal<bool> router_enable;
     sc_signal<hybridacc::pe::PERouterMode> router_mode;
 
-    // NoC interface signals
-    sc_signal<noc_request_t> noc_req_in;
-    sc_signal<bool> noc_req_in_valid;
-    sc_signal<bool> noc_req_in_ready;
-    sc_signal<noc_response_t> noc_resp_out;
-    sc_signal<bool> noc_resp_out_valid;
-    sc_signal<bool> noc_resp_out_ready;
+    // NoC interface - using VRDOF/VRDIF wrappers for external connection
+    VRDSIG<noc_request_t> noc_req_out_if;
+    VRDSIG<noc_response_t> noc_resp_in_if;
 
-    // Local Network signals
-    sc_signal<uint64_t> ln_pli_in_data;
-    sc_signal<bool> ln_pli_in_valid;
-    sc_signal<bool> ln_pli_in_ready;
-    sc_signal<uint64_t> ln_plo_out_data;
-    sc_signal<bool> ln_plo_out_valid;
-    sc_signal<bool> ln_plo_out_ready;
+    // Local Network - using VRDOF/VRDIF wrappers for external connection
+    VRDSIG<uint64_t> ln_pli_out_if;
+    VRDSIG<uint64_t> ln_plo_in_if;
 
     // Test state
     sc_time clock_period;
