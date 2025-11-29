@@ -384,6 +384,12 @@ void PEWrapper::set_debug(bool enable) {
     log_debug("Debug mode " + std::string(enable ? "enabled" : "disabled"));
 }
 
+void PEWrapper::check_halted() const {
+    std::cout << "[IF_ID] halted = " << pe->if_id_halted_sig.read() << std::endl;
+    std::cout << "[EXE_M] halted = " << pe->exe_m_halted_sig.read() << std::endl;
+    std::cout << "[EXE_A] halted = " << pe->exe_a_halted_sig.read() << std::endl;
+}
+
 void PEWrapper::dump_state() const {
     std::cout << "=== PE State Dump ===" << std::endl;
     std::cout << "Running: " << (is_running() ? "Yes" : "No") << std::endl;

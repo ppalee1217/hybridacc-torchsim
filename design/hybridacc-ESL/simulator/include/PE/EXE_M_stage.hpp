@@ -337,10 +337,17 @@ public:
             halted_n = false;
         }
         // If PE not running or halted, hold state
-        else if (!pe_running.read() || halted_current) {
+        else if (!pe_running.read()) {
+            decode_n = decode_current;
+            valid_n = valid_current;
+        }
+        else if (halted_current) {
             decode_n = decode_current;
             valid_n = valid_current;
             halted_n = halted_current;
+
+            exe_a_out = decode_current;
+            valid_out = true;
         }
         // If stalled, hold state and insert bubble (NOP) to downstream
         else if (stage_stall) {

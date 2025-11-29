@@ -46,3 +46,4 @@ node_modules/
 .venv
 
 design/**/data/
+libs/

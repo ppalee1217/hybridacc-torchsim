@@ -119,6 +119,10 @@ public:
         SC_METHOD(comb_outputs);
         sensitive << state_reg << halted_reg << vaddu_result_reg;
 
+        SC_METHOD(comb_pli_handshake);
+        sensitive << state_reg << signal_valid_in << EXE_M_decode_signals_in
+                  << stall_from_downstream << pli_in_valid;
+
         bind_submodules();
     }
 
@@ -246,7 +250,14 @@ private:
             }
             // PLI-PLO 操作
             else if (result.next_decode.pli_plo_operation) {
-                result.next_state = EXE_A_State::WAIT_PLI;
+                if(pli_in_valid.read()) {
+                    v_fp16_t captured_pli_data;
+                    captured_pli_data.fromUint64(pli_in_data.read());
+                    result.next_pli_data = captured_pli_data;
+                    result.next_state = EXE_A_State::EXEC_PLI_VADDU;
+                }else{
+                    result.next_state = EXE_A_State::WAIT_PLI;
+                }
                 DEBUG_MSG("[EXE_A_stage] Start PLI-PLO operation");
             }
             // 一般 VADDU 操作 (VMAC/VMUL)
@@ -464,10 +475,6 @@ private:
         stall_adder.write(stall_adder_val);
         stall_port_io.write(stall_port_io_val);
 
-        // PLI handshake
-        bool pli_ready = (state == EXE_A_State::WAIT_PLI);
-        pli_in_ready.write(pli_ready);
-
         // PLO handshake
         bool plo_valid = (state == EXE_A_State::WAIT_PLO);
         uint64_t plo_data = vaddu_result_reg.read().toUint64();
@@ -476,6 +483,19 @@ private:
 
         // Halted status
         halted_out.write(halted);
+    }
+
+    // ========================= Comb: PLI Handshake =========================
+    void comb_pli_handshake() {
+        EXE_A_State state = state_reg.read();
+        bool stalled = stall_from_downstream.read();
+
+        // PLI handshake
+        bool need_pli_early = (state == EXE_A_State::IDLE && signal_valid_in.read() &&
+                               EXE_M_decode_signals_in.read().pli_plo_operation &&
+                               !stalled);
+        bool pli_ready = (state == EXE_A_State::WAIT_PLI) || need_pli_early;
+        pli_in_ready.write(pli_ready);
     }
 };
 

@@ -172,6 +172,11 @@ public:
     void set_debug(bool enable);
 
     /**
+     * Check and print halted status of each stage
+     */
+    void check_halted() const;
+
+    /**
      * Dump current PE state to console
      */
     void dump_state() const;

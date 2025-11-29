@@ -8,6 +8,36 @@
 
 using namespace hybridacc::test;
 
+const int PE_GAP_CYCLES = 1;
+
+// Helper function to convert fp16 to float
+float fp16_to_float(uint16_t fp16_val) {
+    uint32_t sign = (fp16_val >> 15) & 0x1;
+    uint32_t exponent = (fp16_val >> 10) & 0x1F;
+    uint32_t fraction = fp16_val & 0x3FF;
+
+    if (exponent == 0 && fraction == 0) {
+        return sign ? -0.0f : 0.0f; // Zero
+    } else if (exponent == 0x1F) {
+        if (fraction == 0) {
+            return sign ? -INFINITY : INFINITY; // Infinity
+        } else {
+            return NAN; // NaN
+        }
+    }
+
+    // Normalize exponent
+    int32_t exp_unbiased = static_cast<int32_t>(exponent) - 15 + 127; // Adjust bias from 15 to 127
+
+    // Normalize fraction
+    uint32_t mantissa = fraction << 13; // Shift to align with float mantissa
+
+    uint32_t float_bits = (sign << 31) | (exp_unbiased << 23) | mantissa;
+    float result;
+    std::memcpy(&result, &float_bits, sizeof(float));
+    return result;
+}
+
 // Helper function to read binary file
 std::vector<uint8_t> read_binary_file(const std::string& filename) {
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
@@ -169,7 +199,7 @@ int sc_main(int argc, char* argv[]) {
         std::cerr << "Failed to send INIT command" << std::endl;
         return 1;
     }
-    pe_wrapper.run_cycles(5);
+    pe_wrapper.run_cycles(PE_GAP_CYCLES);
     std::cout << "PE Router initialized with:" << std::endl;
     std::cout << "  - ps_id=0, pd_id=0, pli_id=0, plo_id=0" << std::endl;
     std::cout << "  - mode=PLI_FROM_BUS_PLO_TO_BUS (0b11)" << std::endl;
@@ -260,7 +290,7 @@ int sc_main(int argc, char* argv[]) {
                         }
                     }
                 }
-                pe_wrapper.run_cycles(5);
+                pe_wrapper.run_cycles(PE_GAP_CYCLES);
             }
         } else {
             // Subsequent positions: Only send new data entering the window
@@ -286,7 +316,7 @@ int sc_main(int argc, char* argv[]) {
                     std::cerr << "Warning: activation index " << act_idx << " out of range" << std::endl;
                 }
             }
-            pe_wrapper.run_cycles(5);
+            pe_wrapper.run_cycles(PE_GAP_CYCLES);
         }
 
         // Step 6b: Send partial sum inputs (groups_per_output groups)
@@ -301,11 +331,11 @@ int sc_main(int argc, char* argv[]) {
             } else {
                 std::cerr << "Warning: ps_input index " << ps_idx << " out of range" << std::endl;
             }
-            pe_wrapper.run_cycles(5);
+            pe_wrapper.run_cycles(PE_GAP_CYCLES);
         }
 
         // Step 6c: Run computation and collect outputs
-        pe_wrapper.run_cycles(50);  // Give time for computation
+        pe_wrapper.run_cycles(PE_GAP_CYCLES);  // Give time for computation
 
         for (int g = 0; g < conv_params.groups_per_output; g++) {
             // 先發送讀取請求到 PLO 通道
@@ -353,6 +383,8 @@ int sc_main(int argc, char* argv[]) {
         }
     }
 
+    pe_wrapper.check_halted();
+
     // Step 8: Verify outputs
     std::cout << "\n[Step 8] Verifying outputs..." << std::endl;
     auto expected_bytes = read_binary_file(expected_output_file);
@@ -377,8 +409,8 @@ int sc_main(int argc, char* argv[]) {
         double max_diff = 0.0;
 
         for (size_t i = 0; i < received_outputs_fp16.size(); i++) {
-            float received_val = static_cast<float>(received_outputs_fp16[i]);
-            float expected_val = static_cast<float>(expected_outputs_fp16[i]);
+            float received_val = fp16_to_float(received_outputs_fp16[i]);
+            float expected_val = fp16_to_float(expected_outputs_fp16[i]);
 
             dot_product += received_val * expected_val;
             magnitude_received += received_val * received_val;
