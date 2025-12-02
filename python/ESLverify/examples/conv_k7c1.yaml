@@ -1,0 +1,9 @@
+task: conv
+mode: k7c1
+out_ch: 16
+in_width: 256
+fmt: bin
+seed: 888
+no_ps: true
+layout: channels_last
+out_dir: ./output/conv_k7c1

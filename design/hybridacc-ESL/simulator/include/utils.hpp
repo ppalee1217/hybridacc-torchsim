@@ -378,3 +378,78 @@ void connect_vr_signals(VRDOF<T>& vrdof, VRDSIG<T>& sig) {
 }
 
 // -----------------------------------------------------------------------------
+enum class PERouterMode {
+    PLI_FROM_LN_PLO_TO_LN = 0b00,  // PLI from LN, PLO to LN
+    PLI_FROM_BUS_PLO_TO_LN = 0b01, // PLI from bus, PLO to LN
+    PLI_FROM_LN_PLO_TO_BUS = 0b10, // PLI from LN, PLO to Bus
+    PLI_FROM_BUS_PLO_TO_BUS = 0b11  // PLI from bus, PLO to Bus
+};
+
+// Add operator<< support for PERouterMode
+inline std::ostream& operator<<(std::ostream& os, PERouterMode mode) {
+    switch (mode) {
+        case PERouterMode::PLI_FROM_LN_PLO_TO_LN: return os << "PLI_FROM_LN_PLO_TO_LN";
+        case PERouterMode::PLI_FROM_BUS_PLO_TO_LN: return os << "PLI_FROM_BUS_PLO_TO_LN";
+        case PERouterMode::PLI_FROM_LN_PLO_TO_BUS: return os << "PLI_FROM_LN_PLO_TO_BUS";
+        case PERouterMode::PLI_FROM_BUS_PLO_TO_BUS: return os << "PLI_FROM_BUS_PLO_TO_BUS";
+        default: return os << "UNKNOWN";
+    }
+}
+
+// sc_trace support for PERouterMode
+inline void sc_trace(sc_core::sc_trace_file* tf, const PERouterMode& mode, const std::string& name) {
+    sc_core::sc_trace(tf, static_cast<int>(mode), name);
+}
+
+// -----------------------------------------------------------------------------
+enum class message_command_t {
+    CMD_RESET = 0, // clear reg
+    CMD_INIT = 1, // setting ids, mode, enable
+    CMD_LOAD_PROGRAM = 2, // load program to IM
+    CMD_STOP_PE = 3, // stop PE operation
+    CMD_START_PE = 4, // start PE operation
+
+    CMD_NOC_SCAN_CHAIN = 8 // scan-chain operation
+};
+
+// Add operator<< support for message_command_t
+inline std::ostream& operator<<(std::ostream& os, message_command_t command) {
+    switch (command) {
+        case message_command_t::CMD_RESET: return os << "CMD_RESET";
+        case message_command_t::CMD_INIT: return os << "CMD_INIT";
+        case message_command_t::CMD_LOAD_PROGRAM: return os << "CMD_LOAD_PROGRAM";
+        case message_command_t::CMD_STOP_PE: return os << "CMD_STOP_PE";
+        case message_command_t::CMD_START_PE: return os << "CMD_START_PE";
+        case message_command_t::CMD_NOC_SCAN_CHAIN: return os << "CMD_NOC_SCAN_CHAIN";
+        default: return os << "UNKNOWN";
+    }
+}
+
+// sc_trace support for message_command_t
+inline void sc_trace(sc_core::sc_trace_file* tf, const message_command_t& command, const std::string& name) {
+    sc_core::sc_trace(tf, static_cast<int>(command), name);
+}
+
+// -----------------------------------------------------------------------------
+
+// scan-chain utilities
+struct ScanChainFormat{
+    uint8_t ps_id;
+    uint8_t pd_id;
+    uint8_t pli_id;
+    uint8_t plo_id;
+    PERouterMode route_mode;
+    bool enable;
+};
+
+// parse scan-chain data from uint32_t
+inline ScanChainFormat parse_scan_chain_data(uint32_t data) {
+    ScanChainFormat format;
+    format.ps_id = (data >> 4) & 0x3F;
+    format.pd_id = (data >> 10) & 0x3F;
+    format.pli_id = (data >> 16) & 0x3F;
+    format.plo_id = (data >> 22) & 0x3F;
+    format.route_mode = static_cast<PERouterMode>((data >> 28) & 0x03);
+    format.enable = ((data >> 30) & 0x01) != 0;
+    return format;
+}

@@ -12,21 +12,6 @@
 #define PE_CMD_OFFSET 0
 #define PE_CMD_BITS 4
 
-// Command - Initialize
-#define PE_ROUTER_PS_ID_OFFSET 4
-#define PE_ROUTER_PD_ID_OFFSET 10
-#define PE_ROUTER_PLI_ID_OFFSET 16
-#define PE_ROUTER_PLO_ID_OFFSET 22
-#define PE_ROUTER_MODE_ID_OFFSET 28
-#define PE_ROUTER_EN_ID_OFFSET 30
-
-#define PE_ROUTER_PS_ID_MASK 0x3F // 6 bits
-#define PE_ROUTER_PD_ID_MASK 0x3F // 6 bits
-#define PE_ROUTER_PLI_ID_MASK 0x3F // 6 bits
-#define PE_ROUTER_PLO_ID_MASK 0x3F // 6 bits
-#define PE_ROUTER_MODE_ID_MASK 0x03 // 2 bits
-#define PE_ROUTER_EN_ID_MASK 0x01 // 6 bits
-
 // Command - Load Program
 #define PE_ROUTER_IM_ADDR_OFFSET 4
 #define PE_ROUTER_IM_DATA_OFFSET 20
@@ -36,56 +21,6 @@
 
 namespace hybridacc {
 namespace pe {
-
-// -----------------------------------------------------------------------------
-enum class PERouterMode {
-    PLI_FROM_LN_PLO_TO_LN = 0b00,  // PLI from LN, PLO to LN
-    PLI_FROM_BUS_PLO_TO_LN = 0b01, // PLI from bus, PLO to LN
-    PLI_FROM_LN_PLO_TO_BUS = 0b10, // PLI from LN, PLO to Bus
-    PLI_FROM_BUS_PLO_TO_BUS = 0b11  // PLI from bus, PLO to Bus
-};
-
-// Add operator<< support for PERouterMode
-inline std::ostream& operator<<(std::ostream& os, PERouterMode mode) {
-    switch (mode) {
-        case PERouterMode::PLI_FROM_LN_PLO_TO_LN: return os << "PLI_FROM_LN_PLO_TO_LN";
-        case PERouterMode::PLI_FROM_BUS_PLO_TO_LN: return os << "PLI_FROM_BUS_PLO_TO_LN";
-        case PERouterMode::PLI_FROM_LN_PLO_TO_BUS: return os << "PLI_FROM_LN_PLO_TO_BUS";
-        case PERouterMode::PLI_FROM_BUS_PLO_TO_BUS: return os << "PLI_FROM_BUS_PLO_TO_BUS";
-        default: return os << "UNKNOWN";
-    }
-}
-
-// sc_trace support for PERouterMode
-inline void sc_trace(sc_core::sc_trace_file* tf, const PERouterMode& mode, const std::string& name) {
-    sc_core::sc_trace(tf, static_cast<int>(mode), name);
-}
-
-// -----------------------------------------------------------------------------
-enum class message_command_t {
-    CMD_RESET = 0, // clear reg
-    CMD_INIT = 1, // setting ids, mode, enable
-    CMD_LOAD_PROGRAM = 2, // load program to IM
-    CMD_STOP_PE = 3, // stop PE operation
-    CMD_START_PE = 4, // start PE operation
-};
-
-// Add operator<< support for message_command_t
-inline std::ostream& operator<<(std::ostream& os, message_command_t command) {
-    switch (command) {
-        case message_command_t::CMD_RESET: return os << "CMD_RESET";
-        case message_command_t::CMD_INIT: return os << "CMD_INIT";
-        case message_command_t::CMD_LOAD_PROGRAM: return os << "CMD_LOAD_PROGRAM";
-        case message_command_t::CMD_STOP_PE: return os << "CMD_STOP_PE";
-        case message_command_t::CMD_START_PE: return os << "CMD_START_PE";
-        default: return os << "UNKNOWN";
-    }
-}
-
-// sc_trace support for message_command_t
-inline void sc_trace(sc_core::sc_trace_file* tf, const message_command_t& command, const std::string& name) {
-    sc_core::sc_trace(tf, static_cast<int>(command), name);
-}
 
 // -----------------------------------------------------------------------------
 // state enumeration - redesigned for hardware implementation

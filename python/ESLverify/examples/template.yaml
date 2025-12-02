@@ -1,0 +1,20 @@
+# Conv1D 配置範本
+task: conv
+mode: a
+out_ch: 8
+in_width: 128
+fmt: bin
+seed: 0
+no_ps: false
+layout: channels_last
+out_dir: ./output/my_test
+
+# GEMM 配置範本（取消註解使用）
+# task: gemm
+# out_width: 64
+# in_width: 128
+# dim: 32
+# fmt: bin
+# seed: 0
+# no_ps: false
+# out_dir: ./output/gemm_test
