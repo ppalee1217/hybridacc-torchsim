@@ -274,6 +274,194 @@ Assembler::Assembler(){
 }
 
 /*
+    Parse template header line: template_name(param1=default1, param2, ...)
+    Returns true if successfully parsed, fills in templateName and params
+*/
+bool Assembler::parseTemplateHeader(const std::string &line, std::string &templateName, std::vector<TemplateParam> &params) {
+    // Format: template_name(param1=default1, param2=default2, ...):
+    size_t openParen = line.find('(');
+    size_t closeParen = line.rfind(')');
+    size_t colon = line.rfind(':');
+
+    if (openParen == std::string::npos || closeParen == std::string::npos || colon == std::string::npos) {
+        return false;
+    }
+
+    templateName = trim(line.substr(0, openParen));
+    std::string paramsStr = trim(line.substr(openParen + 1, closeParen - openParen - 1));
+
+    if (paramsStr.empty()) {
+        return true; // No parameters
+    }
+
+    // Parse parameters
+    std::vector<std::string> paramTokens = splitOperands(paramsStr);
+    for (const auto &token : paramTokens) {
+        size_t eqPos = token.find('=');
+        if (eqPos != std::string::npos) {
+            // Has default value
+            std::string name = trim(token.substr(0, eqPos));
+            std::string valueStr = trim(token.substr(eqPos + 1));
+            int value = parseInt(valueStr);
+            params.push_back(TemplateParam(name, value, true));
+        } else {
+            // No default value, default to 0
+            std::string name = trim(token);
+            params.push_back(TemplateParam(name, 0, false));
+        }
+    }
+
+    return true;
+}
+
+/*
+    Extract template parameter from operand string like $(PARAM_NAME)
+    Returns the parameter index if found, std::nullopt otherwise
+*/
+std::optional<int> Assembler::extractTemplateParam(const std::string &operand) {
+    if (operand.size() < 4 || operand[0] != '$' || operand[1] != '(' || operand.back() != ')') {
+        return std::nullopt;
+    }
+
+    std::string paramName = operand.substr(2, operand.size() - 3);
+    auto it = templateParams.find(paramName);
+    if (it == templateParams.end()) {
+        throw AsmError("Undefined template parameter: " + paramName);
+    }
+
+    return it->second;
+}
+
+/*
+    Assemble template code
+    Returns TemplateResult with parameter definitions, patches, and instructions
+*/
+TemplateResult Assembler::assembleTemplate(const std::string &source, bool verbose) {
+    if (verbose) std::cout << "Assembling template code...\n";
+
+    TemplateResult result;
+    result.isTemplate = false;
+
+    EncoderCtx ctx;
+    std::istringstream iss(source);
+    std::string line;
+    int lineno = 0;
+    int instrIndex = 0;
+
+    labels.clear();
+    patches.clear();
+    templateParams.clear();
+    templatePatches.clear();
+
+    bool inTemplate = false;
+
+    while (std::getline(iss, line)) {
+        ++lineno;
+        auto posHash = line.find('#');
+        if (posHash != std::string::npos) line = line.substr(0, posHash);
+        line = trim(line);
+        if (line.empty()) continue;
+
+        // Check for .template directive
+        if (line == ".template") {
+            inTemplate = true;
+            result.isTemplate = true;
+            if (verbose) std::cout << "Found .template directive\n";
+            continue;
+        }
+
+        // Parse template header
+        if (inTemplate && result.name.empty()) {
+            if (parseTemplateHeader(line, result.name, result.params)) {
+                // Build parameter map
+                for (size_t i = 0; i < result.params.size(); ++i) {
+                    templateParams[result.params[i].name] = i;
+                }
+                if (verbose) {
+                    std::cout << "Template: " << result.name << " with " << result.params.size() << " parameters:\n";
+                    for (const auto &p : result.params) {
+                        std::cout << "  - " << p.name;
+                        if (p.hasDefault) std::cout << " = " << p.defaultValue;
+                        std::cout << "\n";
+                    }
+                }
+                continue;
+            }
+        }
+
+        // Handle labels
+        if (line.back() == ':') {
+            std::string label = trim(line.substr(0, line.size() - 1));
+            if (labels.count(label)) throw AsmError("Duplicate label: " + label);
+            labels[label] = instrIndex;
+            if (verbose) std::cout << "Label '" << label << "' at index " << instrIndex << "\n";
+            continue;
+        }
+
+        // Parse instruction
+        std::string mn;
+        std::string rest;
+        size_t sp = line.find_first_of(" \t");
+        if (sp == std::string::npos) {
+            mn = line;
+        } else {
+            mn = line.substr(0, sp);
+            rest = trim(line.substr(sp + 1));
+        }
+
+        std::string u = mn;
+        std::transform(u.begin(), u.end(), u.begin(), ::toupper);
+        auto it = table.find(u);
+        if (it == table.end()) throw AsmError("Unknown mnemonic '" + mn + "' at line " + std::to_string(lineno));
+
+        auto operands = splitOperands(rest);
+
+        // Check for template parameters in operands (only for DMA.ADDR, DMA.LEN, LOOPIN)
+        if (inTemplate && (u == "DMA.ADDR" || u == "DMA.LEN" || u == "LOOPIN")) {
+            if (operands.size() == 1) {
+                auto paramIdx = extractTemplateParam(operands[0]);
+                if (paramIdx.has_value()) {
+                    // Record patch location
+                    templatePatches.push_back(TemplatePatch(instrIndex, paramIdx.value()));
+                    // Use default value or 0 for now
+                    int defaultVal = result.params[paramIdx.value()].hasDefault
+                                   ? result.params[paramIdx.value()].defaultValue
+                                   : 0;
+                    operands[0] = std::to_string(defaultVal);
+                    if (verbose) {
+                        std::cout << "  Template param at instruction " << instrIndex
+                                  << ", param index " << paramIdx.value() << "\n";
+                    }
+                }
+            }
+        }
+
+        try {
+            it->second.fn(operands, ctx);
+        } catch (const AsmError &e) {
+            throw AsmError(std::string("Line ") + std::to_string(lineno) + ": " + e.what());
+        }
+
+        instrIndex = ctx.words.size();
+        if (verbose) std::cout << "Instruction [" << instrIndex - 1 << "] '" << mn << " " << rest << "'\n";
+    }
+
+    // Apply label patches
+    applyPatches(ctx.words);
+
+    result.instructions = ctx.words;
+    result.patches = templatePatches;
+
+    if (verbose) {
+        std::cout << "Template compilation completed.\n";
+        std::cout << "  Instructions: " << result.instructions.size() << "\n";
+        std::cout << "  Patches: " << result.patches.size() << "\n";
+    }
+
+    return result;
+}
+
+/*
     將操作數字串分割為單獨的 token
     支援逗號分隔和空格分隔
     返回一個字符串向量

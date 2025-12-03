@@ -10,6 +10,7 @@
 #include <sstream>
 #include <algorithm>
 #include <map>
+#include <optional>
 
 namespace hybridacc {
 
@@ -56,6 +57,36 @@ struct MnemonicDef { std::string name; EncodeFn fn; };
 
 struct Patch { enum Type{JUMP} type; int index; std::string label; };
 // Patch 用於 JUMP 指令，記錄目標 label 及其 index
+
+// Template parameter definition
+struct TemplateParam {
+    std::string name;
+    int defaultValue;
+    bool hasDefault;
+
+    TemplateParam() : name(""), defaultValue(0), hasDefault(false) {}
+    TemplateParam(const std::string& n, int v, bool hd)
+        : name(n), defaultValue(v), hasDefault(hd) {}
+};
+
+// Template parameter patch information
+struct TemplatePatch {
+    int offset;        // instruction offset in template code
+    int paramIndex;    // parameter index in template definition
+
+    TemplatePatch(int o, int pi) : offset(o), paramIndex(pi) {}
+};
+
+// Template compilation result
+struct TemplateResult {
+    std::string name;
+    std::vector<TemplateParam> params;
+    std::vector<TemplatePatch> patches;
+    std::vector<uint16_t> instructions;
+    bool isTemplate;
+
+    TemplateResult() : name(""), isTemplate(false) {}
+};
 
 // 寫入通用欄位 helper
 inline uint16_t makeBase(uint8_t opcode, uint8_t funct2){
@@ -116,11 +147,19 @@ class Assembler {
 public:
     Assembler();
     std::vector<uint16_t> assemble(const std::string &source, bool verbose);
+    TemplateResult assembleTemplate(const std::string &source, bool verbose);
 private:
     std::unordered_map<std::string, MnemonicDef> table;
     std::map<std::string,int> labels; // label -> instruction index
     std::vector<Patch> patches;
+
+    // Template support
+    std::map<std::string, int> templateParams; // param name -> index during parsing
+    std::vector<TemplatePatch> templatePatches; // patches for template parameters
+
     void applyPatches(std::vector<uint16_t> &words);
+    bool parseTemplateHeader(const std::string &line, std::string &templateName, std::vector<TemplateParam> &params);
+    std::optional<int> extractTemplateParam(const std::string &operand);
 };
 
 class Disassembler {
