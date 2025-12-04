@@ -1,137 +1,410 @@
-# HybridAcc ISA 工具套件
+# HybridAcc PE-ISA 工具套件
 
-本目錄提供 HybridAcc PE 16-bit ISA 的：
-- C++ 組譯器 ha-asm
-- C++ 反組譯器 ha-objdump
-- 靜態函式庫 (hybridacc_asm) 內含 Assembler / Disassembler 類別
-- 基礎單元測試 (tests/test_assembler.cpp)
+本目錄提供 HybridAcc PE 16-bit ISA 的完整工具鏈：
+- **C++ 組譯器 (ha-asm)**: 組合語言轉機器碼，支援 Template 模板系統
+- **C++ 反組譯器 (ha-objdump)**: 機器碼還原為組合語言
+- **靜態函式庫 (hybridacc_asm)**: 包含 Assembler / Disassembler 類別，可供其他程式使用
+- **單元測試**: 基礎測試案例 (tests/test_assembler.cpp)
 
-參考文件：doc/Hybridacc PE.md （快速概要：doc/ISA.md）
+---
 
-## 建置
-```
+## 📚 文檔導覽
+
+| 文檔 | 說明 | 適用對象 |
+|------|------|----------|
+| **[ToolUsage.md](doc/ToolUsage.md)** | 🔧 **工具鏈使用手冊** - 詳細的編譯、Template、撰寫限制與實例 | 組合語言開發者 |
+| **[ISA.md](doc/ISA.md)** | 📋 **指令集快速參考** - 簡化的指令編碼與欄位說明 | 需要快速查詢指令格式 |
+| **[Hybridacc PE.md](doc/Hybridacc%20PE.md)** | 📖 **完整規格文件** - PE 架構與指令集完整說明 | 硬體設計者、架構師 |
+
+**推薦閱讀順序**:
+1. 本 README (快速上手)
+2. [ToolUsage.md](doc/ToolUsage.md) (詳細使用說明)
+3. [ISA.md](doc/ISA.md) 或 [Hybridacc PE.md](doc/Hybridacc%20PE.md) (深入了解指令集)
+
+---
+
+## 🚀 快速開始
+
+### 建置工具鏈
+
+```bash
 mkdir -p build && cd build
 cmake .. -DBUILD_TESTS=ON
 cmake --build . -j
 ctest --output-on-failure  # 執行測試 (可選)
 ```
-產生的執行檔位於 build/src/assambler/：
-- ha-asm
-- ha-objdump
 
-可使用 install：
-```
-cmake --install . --prefix <prefix>
+產生的執行檔位於 `build/src/assambler/`:
+- **ha-asm** - 組譯器
+- **ha-objdump** - 反組譯器
+
+### 安裝 (可選)
+
+```bash
+cmake --install . --prefix <安裝路徑>
+# 例如:
+# cmake --install . --prefix /usr/local
+# cmake --install . --prefix $HOME/.local
 ```
 
-## ha-asm 使用方式
-```
-ha-asm <input.asm> [-o output.bin] [--hex output.hex] [--json out.json|-]
-```
-選項說明：
-- -o output.bin : 以 little-endian 寫出 16-bit 機器碼串流
-- --hex output.hex : 每行一個 0xXXXX
-- --json out.json : 產出 JSON 陣列；使用 - 代表輸出到 stdout
-- 若未指定任何輸出，預設輸出 .hex 檔
+---
 
-JSON 格式範例：
+## 🔨 基本使用
+
+### 組譯器 (ha-asm)
+
+```bash
+# 基本編譯 (自動生成 .hex)
+ha-asm input.asm
+
+# 指定輸出格式
+ha-asm input.asm -o output.bin          # 二進制
+ha-asm input.asm --hex output.hex       # 十六進制
+ha-asm input.asm --json output.json     # JSON 格式
+ha-asm input.asm --verbose              # 詳細模式
+
+# 多種輸出
+ha-asm input.asm -o output.bin --hex output.hex --json output.json
+```
+
+**輸出格式說明**:
+- **Binary (.bin)**: Little-endian 16-bit words，可直接載入硬體/模擬器
+- **Hex (.hex)**: 每行一個 `0xXXXX`，人類可讀
+- **JSON (.json)**: 結構化格式，包含機器碼、反組譯、索引等資訊
+
+**JSON 格式範例**:
 ```json
 [
   {"index":0, "word":"0x0002", "dec":2, "disasm":"NOP"},
   {"index":1, "word":"0xE00E", "dec":57358, "disasm":"HALT"}
 ]
 ```
-欄位：
-- index : 指令序號 (以 16-bit word 為單位)
-- word  : 16-bit 機器碼 (十六進位字串)
-- dec   : 十進位整數值
-- disasm: 反組譯字串 (若 bit0=1 會附加 ; LOOPEND)
 
-## ha-objdump 使用方式
-```
+**JSON 欄位說明**:
+- `index`: 指令序號 (以 16-bit word 為單位)
+- `word`: 16-bit 機器碼 (十六進位字串)
+- `dec`: 十進制整數值
+- `disasm`: 反組譯字串 (若 bit0=1 會附加 `; LOOPEND`)
+
+### 反組譯器 (ha-objdump)
+
+```bash
 ha-objdump <input.bin|input.hex>
 ```
-- .bin : 逐 16-bit 讀取
-- 其他：視為 hex 列表 (可含 0x 前綴)
-輸出格式：
+
+- **.bin**: 以 little-endian 16-bit 讀取
+- **其他**: 視為 hex 列表 (可含 0x 前綴)
+
+**輸出格式**:
 ```
 <index>: <disasm>
 ```
 
-## 組語特性
-- 大小寫不敏感 (mnemonic/寄存器)
-- 標籤：以 `label:` 宣告，僅支援 J 指令 (絕對目標 = 指令 index)
-- 偽指令 LOOPEND：將前一條指令 bit0 設為 1
-- 特殊 Token：
-  - VTRST -> 對應 vtrs / vtstride = 3 (2-bit 最大值，用於 reset)
-  - K3 / K5 / K7 -> TSHIFT kernel size
+範例:
+```
+0: DMA.ADDR 0
+1: DMA.LEN 48
+2: DMA.SD 4
+3: TSTORE 0
+```
 
-## 指令摘要 (依最新調整)
-(完整欄位請参照 doc/Hybridacc PE.md) 重要差異：
-- DMA.ADDR / DMA.LEN 皆為 10-bit 參數，opcode=00 funct2=01，以 func1=0/1 區分。
-  - 編碼：value[9:7]→bits[15:13]、value[0]→bit11、value[6:1]→bits[10:5]、func1=0/1。
-- TSTORE / TSHIFT : opcode=01 funct2=00，func3=000 / 001
-- 算術 VMAC/VMUL/… 全部 funct2=01，VMULR 與 VMULRN 亦使用 funct2=01
-- vtstride 目前硬體欄位僅 2 bits (0..3)，reset 條件使用 vtstride==3
-- pstride / vpstride 使用 5 bits (0..31)，reset 條件使用 =31
+---
 
-| 類別 | 指令 | 說明 |
+## 📝 組合語言特性
+
+### 基本語法
+
+- **大小寫不敏感** (mnemonic/暫存器)
+- **標籤**: 以 `label:` 宣告，僅支援 J 指令 (絕對目標 = 指令 index)
+- **註解**: 以 `#` 開頭
+- **偽指令 LOOPEND**: 將前一條指令 bit0 設為 1
+
+**範例**:
+```asm
+# 1D Convolution example
+conv1d_k3:
+    CLEAR.P              # 清除暫存器
+
+load_kernel:
+    DMA.ADDR 0           # 設定 DMA 位址
+    DMA.LEN 48           # 載入 48 個資料
+    DMA.SD 4
+
+loop_start:
+    LOOPIN 16            # 迴圈 16 次
+    VMACRN 0, 1
+    VMACRN 1, VTRST      # VTRST = 3 (reset)
+    LOOPEND              # 標記迴圈結束
+
+    HALT
+```
+
+### 特殊 Token
+
+| Token | 值 | 用途 |
+|-------|-----|------|
+| `VTRST` | 3 | Vector transform stride reset (2-bit 最大值) |
+| `PRST` / `VPRST` | 31 | Partial sum stride reset (5-bit 最大值) |
+| `K3` / `K5` / `K7` | 3/5/7 | TSHIFT kernel size |
+
+---
+
+## 🎯 Template 模板系統
+
+Template 支援**參數化組合語言**，便於批量生成不同配置的程式碼。
+
+### Template 語法
+
+```asm
+.template
+template_name(PARAM1=default1, PARAM2=default2, ...):
+    # 使用 $(PARAM) 引用參數
+    DMA.LEN $(PARAM1)
+    LOOPIN $(PARAM2)
+    # ... 其他指令
+```
+
+### 範例
+
+```asm
+.template
+conv1d_k3s1_template(KERNEL_DMA_LEN=48, OUTPUT_WINDOW_CNT=798, KERNEL_COUNT=16):
+    CLEAR.P
+
+load_kernel:
+    DMA.ADDR 0
+    DMA.LEN $(KERNEL_DMA_LEN)  # 使用參數
+    DMA.SD 4
+
+loop_window:
+    LOOPIN $(OUTPUT_WINDOW_CNT)  # 使用參數
+    # ... 處理邏輯
+    LOOPEND
+
+    HALT
+```
+
+### Template 編譯
+
+```bash
+ha-asm template/my_template.asm \
+    -o output_temp.bin \
+    --hex output_temp.hex \
+    --json output_temp.json \
+    --disasm output_temp.disasm
+```
+
+**Template 輸出包含**:
+- 參數定義 (名稱、預設值)
+- Patch 位置 (哪些指令需要參數替換)
+- 機器碼指令
+
+**詳細 Template 使用說明請參閱**: [ToolUsage.md](doc/ToolUsage.md) 的 "Template 模板系統" 章節
+
+---
+
+## 📋 指令集摘要
+
+### 資料搬移 (Data Movement)
+
+| 指令 | 說明 | 範圍 |
 |------|------|------|
-| Data | DMA.ADDR start_addr | 10-bit start_addr 編碼 value[9:7]|[0]|[6:1] -> bits[15:13|11|10:5] func1=0 |
-| Data | DMA.LEN len | 10-bit len 編碼 同上 func1=1 |
-| Data | DMA.L[ B/H/W/D/BB/HB/WB ] stride | opcode=00 funct2=11 func3 區分型別 stride→[12:10] |
-| Data | DMA.SD stride | opcode=00 funct2=11 func3=011 stride→[12:10] |
-| Data | TSTORE trd | opcode=01 funct2=00 func3=000 trd→[7:5] |
-| Data | TSHIFT K3/K5/K7 | opcode=01 funct2=00 func3=001 code→[12:10] |
-| Arith | VMAC / VMACN prd,vtrs | opcode=10 funct2=01 func3=000 func1=0/1 |
-| Arith | VMACR / VMACRN pstride,vtstride | func3=001 |
-| Arith | VMUL / VMULN prd,vtrs | func3=010 |
-| Arith | VMULR / VMULRN vpstride,vtstride | func3=011 |
-| Arith | VPSUM vprs | func3=100 |
-| Arith | VPSUMR vpstride | func3=101 |
-| Ctrl | J imm/label | immediate 11 bits 重排 (9:7|10|0|6:1) |
-| Ctrl | LOOPIN count | opcode=01 funct2=11 func1=0 |
-| Ctrl | LOOPBREAK | opcode=01 funct2=11 func1=1 |
-| Pseudo | LOOPEND | 設定前一機器碼 bit0 |
-| System | NOP | opcode=10 funct2=00 |
-| System | CLEAR.T / CLEAR.P | opcode=10 funct2=11 func3=000/001 |
-| System | SETRID.P / T / PT | opcode=10 funct2=10 func3=001/010/011 |
-| System | HALT | opcode=11 funct2=11 |
+| `DMA.ADDR start_addr` | 設定 DMA 起始位址 | 0..1023 (10-bit) |
+| `DMA.LEN len` | 設定 DMA 長度 | 0..1023 (10-bit) |
+| `DMA.L[B/H/W/D/BB/HB/WB] stride` | 載入資料 (各種型別/廣播) | stride: 0..7 |
+| `DMA.SD stride` | 儲存 double-word | stride: 0..7 |
+| `TSTORE trd` | 儲存到 Transform 暫存器 | trd: 0..11 |
+| `TSHIFT K3/K5/K7` | Kernel shift | 3, 5, 7 |
 
-## 限制 / TODO
-1. J 目標為絕對指令 index，未提供相對位移。
-2. DMA.ADDR / DMA.LEN 目前僅支援 10-bit 值 (0..1023)。
-3. 未實作更進階排錯或多重輸出格式 (如 ELF)。
-4. 反組譯對未知 pattern 以 .word 0xXXXX 顯示。
-5. vtstride >3 直接報錯 (與 2-bit 編碼一致)。
+**編碼細節**: DMA.ADDR / DMA.LEN 使用 10-bit 壓縮編碼
+- `value[9:7]` → bits[15:13]
+- `value[0]` → bit[11]
+- `value[6:1]` → bits[10:5]
+- func1 (bit[12]): 0=ADDR, 1=LEN
 
-## 測試
-執行：
-```
-ctest -R assembler
-```
-(或直接執行 build/tests/test_assembler)
+### 算術運算 (Arithmetic)
 
-## 貢獻流程
-1. 修改/新增指令先更新 doc/Hybridacc PE.md / doc/ISA.md
-2. 調整 instruction.cpp 中 encode / disasm 對應
-3. 補測試案例
-4. 建議提交 PR 前跑 ctest 全通過
+所有算術指令使用 `opcode=10 funct2=01`
 
-## JSON 介面整合建議
-- 工具鏈腳本可用 `ha-asm prog.asm --json -` 直接讀取 stdout JSON，以便後續載入模擬器或可視化。
+| 指令 | 說明 | 操作數 |
+|------|------|--------|
+| `VMAC / VMACN prd, vtrs` | MAC 運算 (N=觸發下一次 DMA) | prd: 0..31, vtrs: 0..2 |
+| `VMACR / VMACRN pstride, vtstride` | MAC + stride 控制 | pstride: 0..31, vtstride: 0..3 |
+| `VMUL / VMULN prd, vtrs` | 乘法 | 同上 |
+| `VMULR / VMULRN vpstride, vtstride` | 乘法 + stride 控制 | 同上 |
+| `VPSUM vprs` | 部分和累加 | vprs: 0..31 |
+| `VPSUMR vpstride` | 部分和累加 + stride | vpstride: 0..31 |
 
-## 常見錯誤訊息
-| 訊息 | 說明 |
+**Reset 條件**:
+- `pstride == 31` 或 `vpstride == 31`: 重置 PID
+- `vtstride == 3`: 重置 VTID (2-bit 編碼最大值)
+
+### 控制流程 (Control Flow)
+
+| 指令 | 說明 | 範圍 |
+|------|------|------|
+| `J imm / label` | 絕對位址跳轉 | imm: 0..2047 (11-bit, 必須 2-byte 對齊) |
+| `LOOPIN count` | 推入迴圈計數 | count: 0..1023 (10-bit) |
+| `LOOPBREAK` | 結束迴圈 | - |
+| `LOOPEND` (偽指令) | 標記前一指令為迴圈結尾 | - |
+
+### 系統指令 (System)
+
+| 指令 | 說明 |
 |------|------|
-| Unknown mnemonic | 指令名稱錯誤或未實作 |
-| Duplicate label | 重複標籤定義 |
-| Undefined label | J 指向不存在標籤 |
-| * out of range | 操作數超過欄位可表達範圍 |
-| LOOPEND without previous instruction | 檔案第一行或連續 LOOPEND |
+| `NOP` | 無操作 |
+| `SETRID.P / T / PT` | 設定資源 ID |
+| `CLEAR.T / CLEAR.P` | 清除 ID |
+| `HALT` | 停止執行 |
 
-## 授權 / 版權
+**完整指令編碼請參考**: [ISA.md](doc/ISA.md) 或 [Hybridacc PE.md](doc/Hybridacc%20PE.md)
+
+---
+
+## ⚠️ 撰寫限制與注意事項
+
+### 重要限制
+
+1. **DMA.ADDR / DMA.LEN**: 僅支援 10-bit 值 (0..1023)
+2. **J 指令**: 使用絕對位址 (指令 index)，未提供相對位移
+3. **vtstride**: 僅 2 bits (0..3)，使用 3 作為 reset 條件
+4. **標籤**: 僅支援 J 指令，不支援 LOOPIN 等
+5. **Template 參數**: 僅支援 `DMA.ADDR`, `DMA.LEN`, `LOOPIN` 指令
+
+### 常見錯誤
+
+| 錯誤訊息 | 說明 |
+|---------|------|
+| `Unknown mnemonic` | 指令名稱錯誤或未實作 |
+| `Duplicate label` | 重複標籤定義 |
+| `Undefined label` | J 指向不存在標籤 |
+| `* out of range` | 操作數超過欄位可表達範圍 |
+| `LOOPEND without previous instruction` | 檔案第一行或連續 LOOPEND |
+| `J immediate must be even` | J 位址未對齊 |
+
+**詳細限制與最佳實踐請參閱**: [ToolUsage.md](doc/ToolUsage.md)
+
+---
+
+## 🧪 測試
+
+執行單元測試:
+```bash
+cd build
+ctest --output-on-failure
+
+# 或只測試組譯器
+ctest -R assembler
+
+# 直接執行測試程式
+./tests/test_assembler
+```
+
+---
+
+## 📁 專案結構
+
+```
+hybridacc-pe-isa/
+├── README.md                 # 本文件 (快速入口)
+├── CMakeLists.txt            # 建置設定
+├── asm/                      # 組合語言範例
+│   ├── conv1d_k1.asm
+│   ├── conv1d_k3.asm
+│   ├── conv1d_k5.asm
+│   ├── conv1d_k7.asm
+│   ├── gemv.asm
+│   └── template/             # Template 範例
+│       ├── conv1d_k3s1.asm
+│       ├── conv1d_k5s1.asm
+│       ├── conv1d_k7s1.asm
+│       └── gemv_template.asm
+├── src/
+│   └── assambler/            # 組譯器源碼
+│       ├── ha_asm.cpp        # 組譯器主程式
+│       ├── ha_objdump.cpp    # 反組譯器主程式
+│       ├── instruction.cpp   # 指令編碼/解碼邏輯
+│       ├── instruction.hpp   # 指令定義
+│       ├── utils.cpp         # I/O 工具函式
+│       └── utils.hpp
+├── doc/                      # 文檔
+│   ├── ToolUsage.md          # 工具鏈使用手冊 (詳細)
+│   ├── ISA.md                # 指令集快速參考
+│   └── Hybridacc PE.md       # 完整 PE 架構與指令集文件
+├── output/                   # 編譯輸出目錄
+├── tests/                    # 單元測試
+│   └── test_assembler.cpp
+└── build/                    # 建置目錄 (由 CMake 生成)
+```
+
+---
+
+## 🔗 整合建議
+
+### JSON 介面整合
+
+工具鏈腳本可用 `ha-asm prog.asm --json -` 直接讀取 stdout JSON，以便後續載入模擬器或可視化:
+
+```bash
+# 輸出到 stdout (使用 jq 處理)
+ha-asm program.asm --json - | jq .
+
+# Python 整合範例
+json_output=$(ha-asm program.asm --json -)
+python simulator.py --input "$json_output"
+```
+
+### C++ 函式庫整合
+
+可以直接使用靜態函式庫 `libhybridacc_asm.a`:
+
+```cpp
+#include "instruction.hpp"
+
+using namespace hybridacc;
+
+// 組譯
+Assembler asm;
+auto words = asm.assemble(source_code, verbose);
+
+// 反組譯
+Disassembler disasm;
+std::string disasm_str = disasm.disasmWord(word);
+```
+
+---
+
+## 🛠️ 開發與貢獻
+
+### 新增指令流程
+
+1. 更新 `doc/Hybridacc PE.md` / `doc/ISA.md`
+2. 在 `src/assambler/instruction.cpp` 中新增編碼/解碼邏輯
+3. 補充測試案例 (`tests/test_assembler.cpp`)
+4. 執行 `ctest` 確保測試通過
+
+### 編譯要求
+
+- **CMake**: 3.15+
+- **C++ 編譯器**: 支援 C++17 標準
+- **建議**: GCC 7+, Clang 5+, MSVC 2019+
+
+---
+
+## 📞 支援與回饋
+
+如有問題或建議:
+- 查閱 [ToolUsage.md](doc/ToolUsage.md) 詳細說明
+- 查閱 [ISA.md](doc/ISA.md) 或 [Hybridacc PE.md](doc/Hybridacc%20PE.md) 指令集文件
+- 提交 Issue 或 Pull Request
+- 聯絡專案維護者
+
+---
+
+## 📜 授權
+
 (依專案主專案授權規範填寫)
 
 ---
-如需擴充請提出需求或直接提交變更。
+
+**祝您使用愉快！如需詳細使用說明，請參閱 [ToolUsage.md](doc/ToolUsage.md)**
