@@ -3,6 +3,8 @@
 #include "utils.hpp"
 #include <systemc>
 
+using namespace sc_core;
+
 namespace hybridacc {
 namespace pe {
 
@@ -20,7 +22,7 @@ SC_MODULE(VMULU) {
               op2("op2"),
               result("result")
         {
-            DEBUG_MSG("[Create] VMULU");
+            DEBUG_PE_MSG("[Create] VMULU");
             SC_METHOD(combinational_process);
             sensitive << op1 << op2;
         }
@@ -32,7 +34,7 @@ SC_MODULE(VMULU) {
                 res[i] = fp16_mul(op1.read()[i], op2.read()[i]);
             }
             result.write(res);
-            DEBUG_MSG("[VMULU] op1=" << op1.read()
+            DEBUG_PE_MSG("[VMULU] op1=" << op1.read()
                       << " op2=" << op2.read()
                       << " result=" << res );
         }

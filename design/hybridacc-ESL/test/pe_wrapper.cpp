@@ -52,7 +52,7 @@ void PEWrapper::connect_signals() {
     // Initialize signals
     reset_n.write(false);
     router_enable.write(false);
-    router_mode.write(hybridacc::pe::PERouterMode::PLI_FROM_LN_PLO_TO_LN);
+    router_mode.write(PERouterMode::PLI_FROM_LN_PLO_TO_LN);
 
     // Initialize VRDIF/VRDOF signals
     noc_req_out_if.valid_sig.write(false);
@@ -458,7 +458,7 @@ void PEWrapper::assert_performance(double min_ipc, const std::string& message) {
     }
 }
 
-void PEWrapper::set_router_mode(hybridacc::pe::PERouterMode mode) {
+void PEWrapper::set_router_mode(PERouterMode mode) {
     router_mode.write(mode);
     log_debug("Router mode set to: " + std::to_string(static_cast<int>(mode)));
 }

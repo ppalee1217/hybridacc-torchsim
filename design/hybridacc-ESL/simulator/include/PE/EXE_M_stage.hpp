@@ -7,6 +7,8 @@
 #include "DataLoader.hpp"
 #include "DataMemory.hpp"
 
+using namespace sc_core;  // Add this to use SystemC types without prefix
+
 namespace hybridacc {
 namespace pe {
 
@@ -66,7 +68,7 @@ public:
           DL("DL"),
           DM("DM")
     {
-        DEBUG_MSG("[Create] EXE_M_Stage");
+        DEBUG_PE_MSG("[Create] EXE_M_Stage");
         SC_CTHREAD(main_thread, clk.pos());
         reset_signal_is(reset_n, false);
 
@@ -467,7 +469,7 @@ public:
             valid_reg.write(valid_next.read());
             halted_reg.write(halted_next.read());
 
-            DEBUG_MSG("[EXE_M_Stage] Clocked: Valid=" << valid_reg.read()
+            DEBUG_PE_MSG("[EXE_M_Stage] Clocked: Valid=" << valid_reg.read()
                       << " Halted=" << halted_reg.read()
                       << " Inst=0x" << std::hex << decode_signals_reg.read().inst << std::dec
                       << " Stall=" << stage_stall_internal.read()

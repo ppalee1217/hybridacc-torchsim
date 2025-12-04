@@ -228,7 +228,7 @@ public:
      * Set router mode
      * @param mode Router mode (PLI/PLO routing configuration)
      */
-    void set_router_mode(hybridacc::pe::PERouterMode mode);
+    void set_router_mode(PERouterMode mode);
 
     /**
      * Set router enable
@@ -248,7 +248,7 @@ private:
 
     // Router control signals
     sc_signal<bool> router_enable;
-    sc_signal<hybridacc::pe::PERouterMode> router_mode;
+    sc_signal<PERouterMode> router_mode;
 
     // NoC interface - using VRDOF/VRDIF wrappers for external connection
     VRDSIG<noc_request_t> noc_req_out_if;

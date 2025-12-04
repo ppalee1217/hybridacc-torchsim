@@ -3,6 +3,8 @@
 #include "utils.hpp"
 #include <systemc>
 
+using namespace sc_core;
+
 namespace hybridacc {
 namespace pe {
 
@@ -31,7 +33,7 @@ SC_MODULE(InstructionMemory) {
               im_read_data("im_read_data"),
               mem(512 / sizeof(uint16_t), 0)
         {
-            DEBUG_MSG("[Create] InstructionMemory");
+            DEBUG_PE_MSG("[Create] InstructionMemory");
             SC_CTHREAD(sequential_process, clk.pos());
             reset_signal_is(reset_n, false);
             SC_METHOD(combinational_process);
@@ -47,7 +49,7 @@ SC_MODULE(InstructionMemory) {
         void clear() { mem.clear(); }
         void dump() const {
             for (size_t i = 0; i < mem.size(); ++i) {
-                DEBUG_MSG("IM[" << (i * sizeof(uint16_t)) << "] = " << std::hex << mem[i]);
+                DEBUG_PE_MSG("IM[" << (i * sizeof(uint16_t)) << "] = " << std::hex << mem[i]);
             }
         }
 
@@ -56,10 +58,10 @@ SC_MODULE(InstructionMemory) {
 
         void combinational_process() {
             if (!reset_n.read()) {
-                //DEBUG_MSG("[InstructionMemory] Reset active, read data set to 0");
+                //DEBUG_PE_MSG("[InstructionMemory] Reset active, read data set to 0");
                 im_read_data.write(0);
             } else {
-                //DEBUG_MSG("[InstructionMemory] Read from address " << im_read_addr.read());
+                //DEBUG_PE_MSG("[InstructionMemory] Read from address " << im_read_addr.read());
                 im_read_data.write(mem[im_read_addr.read() / sizeof(uint16_t)]);
             }
         }

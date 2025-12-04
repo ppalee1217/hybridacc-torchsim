@@ -6,6 +6,8 @@
 #include <cassert>
 #include "FIFO.hpp"
 
+using namespace sc_core;
+
 // PE Router Command and ID field definitions
 #define PE_CMD_ADDRESS 0x100
 
@@ -117,7 +119,7 @@ public:
           pli_fifo("pli_fifo", max_queue_size),
           plo_fifo("plo_fifo", max_queue_size)
     {
-        DEBUG_MSG("[Create] PErouter");
+        DEBUG_PE_MSG("[Create] PErouter");
 
         //  綁定 FIFO 的時鐘和 reset 信號
         ps_fifo.clk(clk);
@@ -564,7 +566,7 @@ public:
             //  時序邏輯只負責更新暫存器，不再處理 FIFO 操作
             // FIFO 的 push/pop 信號已經在組合邏輯中設定
 
-            DEBUG_MSG("[PErouter] State: " << state_reg.read()
+            DEBUG_PE_MSG("[PErouter] State: " << state_reg.read()
                       << " PS_empty=" << ps_fifo_empty_sig.read()
                       << " PS_full=" << ps_fifo_full_sig.read()
                       << " ps_pop=" << ps_fifo_pop_sig.read()

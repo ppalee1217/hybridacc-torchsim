@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Debug options
 option(ENABLE_DEBUG_UTILS "Enable DEBUG_UTILS debug messages" OFF)
+option(ENABLE_DEBUG_PE "Enable DEBUG_PE debug messages for PE modules" OFF)
+option(ENABLE_DEBUG_NOC "Enable DEBUG_NOC debug messages for NoC modules" OFF)
 
 # SystemC library path
 set(SYSTEMC_HOME "/home/yoyo/work/MasterResearch/HybridAcc/libs/systemc")
@@ -44,6 +46,20 @@ if(ENABLE_DEBUG_UTILS)
     message(STATUS "DEBUG_UTILS: Enabled")
 else()
     message(STATUS "DEBUG_UTILS: Disabled")
+endif()
+
+if(ENABLE_DEBUG_PE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE DEBUG_PE)
+    message(STATUS "DEBUG_PE: Enabled")
+else()
+    message(STATUS "DEBUG_PE: Disabled")
+endif()
+
+if(ENABLE_DEBUG_NOC)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE DEBUG_NOC)
+    message(STATUS "DEBUG_NOC: Enabled")
+else()
+    message(STATUS "DEBUG_NOC: Disabled")
 endif()
 
 # Link SystemC library

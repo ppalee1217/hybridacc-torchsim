@@ -3,6 +3,8 @@
 #include "utils.hpp"
 #include <systemc>
 
+using namespace sc_core;
+
 namespace hybridacc {
 namespace pe {
 
@@ -36,7 +38,7 @@ public:
           pc_out("pc_out"),
           jump("jump")
     {
-        DEBUG_MSG("[Create] LoopController");
+        DEBUG_PE_MSG("[Create] LoopController");
         SC_CTHREAD(sequential_process, clk.pos());
         reset_signal_is(reset_n, false);
         SC_METHOD(combinational_process);
@@ -79,7 +81,7 @@ public:
             } else {
                 jump.write(false);
             }
-            DEBUG_MSG("[LoopController] COMB: LOOPEND detected. Remaining=" << remaining_sig.read()
+            DEBUG_PE_MSG("[LoopController] COMB: LOOPEND detected. Remaining=" << remaining_sig.read()
                       << ", Jump=" << (jump.read() ? "Yes" : "No"));
         } else {
             jump.write(false);

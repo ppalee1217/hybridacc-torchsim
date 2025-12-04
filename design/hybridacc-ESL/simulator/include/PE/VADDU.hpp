@@ -3,6 +3,8 @@
 #include "utils.hpp"
 #include <systemc>
 
+using namespace sc_core;  // Add this to use SystemC types without prefix
+
 namespace hybridacc {
 namespace pe {
 // -----------------------------------------------------------------------------
@@ -75,7 +77,7 @@ public:
           mode("mode"),
           done("done")
     {
-        DEBUG_MSG("[Create] VADDU");
+        DEBUG_PE_MSG("[Create] VADDU");
 
         // Sequential process
         SC_CTHREAD(seq_process, clk.pos());
@@ -172,7 +174,7 @@ private:
                 }
                 next_done = true;
                 next_state = VADDU_State::IDLE;
-                DEBUG_MSG("[VADDU] ADD: op1=" << op1.read()
+                DEBUG_PE_MSG("[VADDU] ADD: op1=" << op1.read()
                          << " op2=" << op2.read()
                          << " result=" << next_result );
             } else if (mode.read() == VADDU_Mode::ACCUMULATE) {
@@ -180,7 +182,7 @@ private:
                 next_acc_stage_0_0 = fp16_add(op1.read().lanes[0], op1.read().lanes[1]);
                 next_acc_stage_0_1 = fp16_add(op1.read().lanes[2], op1.read().lanes[3]);
                 next_state = VADDU_State::ACC0;
-                DEBUG_MSG("[VADDU] ACCUMULATE Start: op1 = " << op1.read() );
+                DEBUG_PE_MSG("[VADDU] ACCUMULATE Start: op1 = " << op1.read() );
             }
         } else if (state != VADDU_State::IDLE) {
             // 繼續執行進行中的 ACCUMULATE pipeline
@@ -188,7 +190,7 @@ private:
                 case VADDU_State::ACC0:
                     next_acc_stage_1 = fp16_add(acc_stage_0_0, acc_stage_0_1);
                     next_state = VADDU_State::ACC1;
-                    DEBUG_MSG("[VADDU] ACCUMULATE ACC0 -> ACC1" );
+                    DEBUG_PE_MSG("[VADDU] ACCUMULATE ACC0 -> ACC1" );
                     break;
 
                 case VADDU_State::ACC1:
@@ -196,7 +198,7 @@ private:
                     next_acc_out = fp16_add(acc_stage_1, acc_in.read());
                     next_state = VADDU_State::IDLE;
                     next_done = true;
-                    DEBUG_MSG("[VADDU] ACCUMULATE Done: acc_stage_1=" << std::hex << acc_stage_1
+                    DEBUG_PE_MSG("[VADDU] ACCUMULATE Done: acc_stage_1=" << std::hex << acc_stage_1
                              << " acc_in=" << acc_in.read()
                              << " acc_out=" << next_acc_out << std::dec );
                     break;
@@ -211,7 +213,7 @@ private:
 
         // Debug output when operation completes
         if (next_done && !done_signal) {
-            DEBUG_MSG("[VADDU] Operation done. Mode: " << mode.read()
+            DEBUG_PE_MSG("[VADDU] Operation done. Mode: " << mode.read()
                      << ", Op1: " << op1.read()
                      << ", Op2: " << op2.read()
                      << ", Result: " << next_result

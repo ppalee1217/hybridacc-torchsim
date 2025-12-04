@@ -18,6 +18,21 @@
     #define DEBUG_MSG(msg) do {} while(0)
 #endif
 
+// PE 專用的調試宏
+#ifdef DEBUG_PE
+    #define DEBUG_PE_MSG(msg) \
+        std::cout << "[Debug-PE] " << msg << std::endl;
+#else
+    #define DEBUG_PE_MSG(msg) do {} while(0)
+#endif
+
+// NoC 專用的調試宏
+#ifdef DEBUG_NOC
+    #define DEBUG_NOC_MSG(msg) \
+        std::cout << "[Debug-NoC] " << msg << std::endl;
+#else
+    #define DEBUG_NOC_MSG(msg) do {} while(0)
+#endif
 
 // -----------------------------------------------------------------------------
 typedef uint16_t fp16_t; // 元素類型 (16-bit half precision)
@@ -440,6 +455,37 @@ struct ScanChainFormat{
     uint8_t plo_id;
     PERouterMode route_mode;
     bool enable;
+
+    // Add equality operator for SystemC signals
+    bool operator==(const ScanChainFormat& other) const {
+        return ps_id == other.ps_id &&
+               pd_id == other.pd_id &&
+               pli_id == other.pli_id &&
+               plo_id == other.plo_id &&
+               route_mode == other.route_mode &&
+               enable == other.enable;
+    }
+
+    // Add output operator for debugging
+    friend std::ostream& operator<<(std::ostream& os, const ScanChainFormat& fmt) {
+        os << "ScanChainFormat{ps_id=" << (int)fmt.ps_id
+           << ", pd_id=" << (int)fmt.pd_id
+           << ", pli_id=" << (int)fmt.pli_id
+           << ", plo_id=" << (int)fmt.plo_id
+           << ", route_mode=" << fmt.route_mode
+           << ", enable=" << fmt.enable << "}";
+        return os;
+    }
+
+    // Add sc_trace for SystemC tracing
+    friend void sc_trace(sc_core::sc_trace_file* tf, const ScanChainFormat& fmt, const std::string& name) {
+        sc_core::sc_trace(tf, fmt.ps_id, name + ".ps_id");
+        sc_core::sc_trace(tf, fmt.pd_id, name + ".pd_id");
+        sc_core::sc_trace(tf, fmt.pli_id, name + ".pli_id");
+        sc_core::sc_trace(tf, fmt.plo_id, name + ".plo_id");
+        sc_core::sc_trace(tf, static_cast<int>(fmt.route_mode), name + ".route_mode");
+        sc_core::sc_trace(tf, fmt.enable, name + ".enable");
+    }
 };
 
 // parse scan-chain data from uint32_t

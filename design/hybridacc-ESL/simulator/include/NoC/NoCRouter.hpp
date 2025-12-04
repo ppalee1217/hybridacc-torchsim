@@ -4,6 +4,9 @@
 #include <systemc>
 #include "utils.hpp"
 
+using namespace sc_core;
+using namespace sc_dt;
+
 namespace hybridacc {
 namespace noc {
 
@@ -24,8 +27,8 @@ public:
     sc_in<bool> en;
     sc_in<bool> wen;
     sc_in<sc_uint<10>> addr; // [9] cmd, [8] SIMD, [7:6] channel, [5:0] tag
-    sc_in<sc_uint<256>> data_in;
-    sc_out<sc_uint<256>> data_out;
+    sc_in<sc_biguint<256>> data_in;
+    sc_out<sc_biguint<256>> data_out;
 
     // ===  NoC MBUS interface ports ===
     // NoC interface ports - using VRDIF/VRDOF
@@ -39,37 +42,40 @@ public:
 
     size_t num_ports;
 
-    NoCRouter(sc_core::sc_module_name name, size_t num_ports)
-        : sc_core::sc_module(name),
-            clk("clk"),
-            reset_n("reset_n"),
-            command_mode("command_mode"),
-            command_data("command_data"),
-            en("en"),
-            wen("wen"),
-            addr("addr"),
-            data_in("data_in"),
-            data_out("data_out"),
-            noc_to_bus_req("noc_to_bus_req", num_ports),
-            bus_to_noc_resp("bus_to_noc_resp", num_ports),
-            scan_chain_enable("scan_chain_enable"),
-            scan_chain_in("scan_chain_in", num_ports),
-            scan_chain_out("scan_chain_out", num_ports),
-            num_ports(num_ports),
-            scan_chain_data_reg("scan_chain_data_reg"),
-            scan_chain_data_next("scan_chain_data_next"),
-            scan_chain_enable_reg("scan_chain_enable_reg"),
-            scan_chain_enable_next("scan_chain_enable_next"),
-            pending_read_reg("pending_read_reg"),
-            pending_read_next("pending_read_next"),
-            is_simd_read_reg("is_simd_read_reg"),
-            is_simd_read_next("is_simd_read_next"),
-            collected_data_reg("collected_data_reg"),
-            collected_data_next("collected_data_next"),
-            response_mask_reg("response_mask_reg"),
-            response_mask_next("response_mask_next") {
+    SC_HAS_PROCESS(NoCRouter);
+    NoCRouter(sc_module_name name, size_t num_ports)
+        : sc_module(name),
+          clk("clk"),
+          reset_n("reset_n"),
+          command_mode("command_mode"),
+          command_data("command_data"),
+          en("en"),
+          wen("wen"),
+          addr("addr"),
+          data_in("data_in"),
+          data_out("data_out"),
+          noc_to_bus_req("noc_to_bus_req", num_ports),
+          bus_to_noc_resp("bus_to_noc_resp", num_ports),
+          scan_chain_enable("scan_chain_enable"),
+          scan_chain_in("scan_chain_in", num_ports),
+          scan_chain_out("scan_chain_out", num_ports),
+          num_ports(num_ports),
+          scan_chain_data_reg("scan_chain_data_reg"),
+          scan_chain_data_next("scan_chain_data_next"),
+          scan_chain_enable_reg("scan_chain_enable_reg"),
+          scan_chain_enable_next("scan_chain_enable_next"),
+          pending_read_reg("pending_read_reg"),
+          pending_read_next("pending_read_next"),
+          is_simd_read_reg("is_simd_read_reg"),
+          is_simd_read_next("is_simd_read_next"),
+          collected_data_reg("collected_data_reg"),
+          collected_data_next("collected_data_next"),
+          response_mask_reg("response_mask_reg"),
+          response_mask_next("response_mask_next") {
 
-        DEBUG_MSG("[Create] NoCRouter with " << num_ports << " ports");
+        DEBUG_NOC_MSG("[Create] NoCRouter with " << num_ports << " ports");
+
+        std::cout << "NoCRouter: Initializing with " << num_ports << " ports" << std::endl;
 
         // Register sequential process
         SC_CTHREAD(seq_process, clk.pos());
@@ -104,7 +110,7 @@ public:
     }
 
     // Overloaded constructor with default number of PEs
-    NoCRouter(sc_core::sc_module_name name)
+    NoCRouter(sc_module_name name)
         : NoCRouter(name, NUM_PORTS_DEFAULT) // Default to 4 PEs
     {}
 
@@ -120,8 +126,8 @@ private:
     sc_signal<bool> pending_read_next;
     sc_signal<bool> is_simd_read_reg;
     sc_signal<bool> is_simd_read_next;
-    sc_signal<sc_uint<256>> collected_data_reg;
-    sc_signal<sc_uint<256>> collected_data_next;
+    sc_signal<sc_biguint<256>> collected_data_reg;
+    sc_signal<sc_biguint<256>> collected_data_next;
     sc_signal<uint8_t> response_mask_reg;  // Track which ports have responded
     sc_signal<uint8_t> response_mask_next;
 
@@ -171,7 +177,7 @@ private:
                 scan_chain_data_next.write(sc_format);
                 scan_chain_enable_next.write(true);
 
-                DEBUG_MSG("[NoCRouter] Scan-chain command received: "
+                DEBUG_NOC_MSG("[NoCRouter] Scan-chain command received: "
                          << "ps_id=" << (int)sc_format.ps_id
                          << ", pd_id=" << (int)sc_format.pd_id
                          << ", pli_id=" << (int)sc_format.pli_id
@@ -197,7 +203,7 @@ private:
         bool enable = en.read();
         bool write_en = wen.read();
         sc_uint<10> address = addr.read();
-        sc_uint<256> data_256 = data_in.read();
+        sc_biguint<256> data_256 = data_in.read();
         bool scan_en = scan_chain_enable_reg.read();
 
         if (cmd_mode) {
@@ -211,14 +217,7 @@ private:
                 }
             } else {
                 // PE command: broadcast to all MBUS with addr=0x100
-                bool all_ready = true;
-                for (size_t i = 0; i < num_ports; ++i) {
-                    if (!noc_to_bus_req[i].ready_in.read()) {
-                        all_ready = false;
-                        break;
-                    }
-                }
-
+                // Don't wait for ready - always send valid for command broadcast
                 noc_request_t cmd_req;
                 cmd_req.addr = 0x100; // PE command address
                 cmd_req.data = cmd_data.to_uint64();
@@ -226,10 +225,10 @@ private:
 
                 for (size_t i = 0; i < num_ports; ++i) {
                     noc_to_bus_req[i].data_out.write(cmd_req);
-                    noc_to_bus_req[i].valid_out.write(all_ready);
+                    noc_to_bus_req[i].valid_out.write(true);  // Always send valid for commands
                 }
 
-                DEBUG_MSG("[NoCRouter] PE command broadcast: cmd=" << cmd_type
+                DEBUG_NOC_MSG("[NoCRouter] PE command broadcast: cmd=" << cmd_type
                          << ", data=0x" << std::hex << cmd_data.to_uint());
             }
         } else if (enable && !scan_en) {
@@ -237,15 +236,6 @@ private:
             bool is_simd = address.bit(8); // addr[8]
             bool is_cmd = address.bit(9);  // addr[9]
             sc_uint<8> base_addr = address.range(7, 0);
-
-            // Check if all ports are ready
-            bool all_ready = true;
-            for (size_t i = 0; i < num_ports; ++i) {
-                if (!noc_to_bus_req[i].ready_in.read()) {
-                    all_ready = false;
-                    break;
-                }
-            }
 
             if (is_simd) {
                 // SIMD mode: 0x100~0x1ff, split 256bits into 4x64bits
@@ -256,7 +246,7 @@ private:
                     req.is_w = write_en;
 
                     noc_to_bus_req[i].data_out.write(req);
-                    noc_to_bus_req[i].valid_out.write(all_ready);
+                    noc_to_bus_req[i].valid_out.write(true);  // Always send valid
                 }
                 // Additional ports beyond 4 get no request
                 for (size_t i = 4; i < num_ports; ++i) {
@@ -272,9 +262,16 @@ private:
 
                 for (size_t i = 0; i < num_ports; ++i) {
                     noc_to_bus_req[i].data_out.write(req);
-                    noc_to_bus_req[i].valid_out.write(all_ready);
+                    noc_to_bus_req[i].valid_out.write(true);  // Always send valid
                 }
             }
+
+            DEBUG_NOC_MSG("[NoCRouter] Normal "
+                     << (write_en ? "WRITE" : "READ")
+                     << (is_simd ? " SIMD" : " Broadcast")
+                     << " request: addr=0x" << std::hex << base_addr.to_uint()
+                     << ", data=0x" << data_256.range(63, 0).to_uint64());
+
         } else {
             // Disabled or scan mode: no request
             for (size_t i = 0; i < num_ports; ++i) {
@@ -294,7 +291,7 @@ private:
 
         bool pending = pending_read_reg.read();
         bool is_simd = is_simd_read_reg.read();
-        sc_uint<256> collected = collected_data_reg.read();
+        sc_biguint<256> collected = collected_data_reg.read();
         uint8_t resp_mask = response_mask_reg.read();
 
         // Default: keep state
@@ -321,7 +318,7 @@ private:
 
         } else if (pending) {
             // Pending read: collect responses
-            sc_uint<256> new_collected = collected;
+            sc_biguint<256> new_collected = collected;
             uint8_t new_resp_mask = resp_mask;
             bool error_occurred = false;
 
@@ -373,7 +370,7 @@ private:
                     // Multiple responses: ID conflict error
                     error_occurred = true;
                     collection_complete = true;
-                    DEBUG_MSG("[NoCRouter] Broadcast read ERROR: multiple responses ("
+                    DEBUG_NOC_MSG("[NoCRouter] Broadcast read ERROR: multiple responses ("
                              << resp_count << ") - ID scan-chain misconfiguration");
                 }
             }
@@ -384,7 +381,7 @@ private:
                 pending_read_next.write(false);
                 response_mask_next.write(0);
                 collected_data_next.write(0);
-                DEBUG_MSG("[NoCRouter] Read ERROR occurred");
+                DEBUG_NOC_MSG("[NoCRouter] Read ERROR occurred");
 
             } else if (collection_complete) {
                 // All expected responses collected: output result
@@ -392,7 +389,7 @@ private:
                 pending_read_next.write(false);
                 response_mask_next.write(0);
                 collected_data_next.write(0);
-                DEBUG_MSG("[NoCRouter] Read completed: data=0x"
+                DEBUG_NOC_MSG("[NoCRouter] Read completed: data=0x"
                          << std::hex << new_collected.to_uint64());
 
             } else {

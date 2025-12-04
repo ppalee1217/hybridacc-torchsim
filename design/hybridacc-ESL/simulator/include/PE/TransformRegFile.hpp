@@ -3,6 +3,8 @@
 #include "utils.hpp"
 #include <systemc>
 
+using namespace sc_core;  // Add this to use SystemC types without prefix
+
 namespace hybridacc {
 namespace pe {
 
@@ -46,7 +48,7 @@ SC_MODULE(TransformRegFile) {
               incr_vcounter("incr_vcounter"),
               vcounter(0)
         {
-            DEBUG_MSG("[Create] TransformRegFile");
+            DEBUG_PE_MSG("[Create] TransformRegFile");
             SC_CTHREAD(sequential_process, clk.pos());
             reset_signal_is(reset_n, false);
             SC_METHOD(combinational_process);
@@ -67,7 +69,7 @@ SC_MODULE(TransformRegFile) {
             return vt;
         }
         void shift(int shift_mode){  // 修正：移除多餘的類名限定符
-            DEBUG_MSG("[TransformRegFile] Shift operation with mode " << shift_mode);
+            DEBUG_PE_MSG("[TransformRegFile] Shift operation with mode " << shift_mode);
             int maskBits = 0;
             switch(shift_mode){
                 case 0: // K3 -> 011011011011b (11 ~ 0)

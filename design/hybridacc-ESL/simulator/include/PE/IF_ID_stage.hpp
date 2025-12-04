@@ -6,6 +6,8 @@
 #include "Decoder.hpp"
 #include "LoopController.hpp"
 
+using namespace sc_core;  // Add this to use SystemC types without prefix
+
 namespace hybridacc {
 namespace pe {
 
@@ -56,7 +58,7 @@ public:
           decoder("decoder"),
           loops("loops")
     {
-        DEBUG_MSG("[Create] IF_ID_Stage");
+        DEBUG_PE_MSG("[Create] IF_ID_Stage");
         SC_CTHREAD(main_thread, clk.pos());
         reset_signal_is(reset_n, false);
 
@@ -210,7 +212,7 @@ public:
             // Check for halt instruction
             if (decode_from_decoder.halt) {
                 halted_n = true;
-                DEBUG_MSG("[IF_ID_Stage] HALT instruction detected at PC=" << pc_current);
+                DEBUG_PE_MSG("[IF_ID_Stage] HALT instruction detected at PC=" << pc_current);
             }
 
             // Update PC
@@ -286,7 +288,7 @@ public:
         while (true) {
             // 🔧 修正：顯示當前 cycle 的 PC 和對應的 decoder 輸出
             pe_decode_signals_t current_decode = decoder_decode_signals_out_sig.read();
-            DEBUG_MSG("[IF_ID_Stage] Clocked: PC=0x" << std::hex << pc_reg.read()
+            DEBUG_PE_MSG("[IF_ID_Stage] Clocked: PC=0x" << std::hex << pc_reg.read()
                       << " Inst=0x" << current_decode.inst << std::dec
                       << " Halted=" << halted_reg.read()
                       << " Valid=" << valid_reg.read()

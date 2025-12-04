@@ -5,6 +5,8 @@
 #include <array>
 #include <cstdint>
 
+using namespace sc_core;
+
 namespace hybridacc {
 namespace pe {
 
@@ -24,7 +26,7 @@ public:
         inst_in("inst_in"),
         decode_signals_out("decode_signals_out")
     {
-        DEBUG_MSG("[Create] Decoder");
+        DEBUG_PE_MSG("[Create] Decoder");
         SC_METHOD(combinational_process);
         sensitive << inst_in;
     }

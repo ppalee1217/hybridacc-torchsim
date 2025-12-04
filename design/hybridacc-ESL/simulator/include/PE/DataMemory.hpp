@@ -2,6 +2,9 @@
 
 #include "utils.hpp"
 #include <systemc>
+#include <array>
+
+using namespace sc_core;  // Add this to use SystemC types without prefix
 
 namespace hybridacc {
 namespace pe {
@@ -32,7 +35,7 @@ SC_MODULE(DataMemory) {
               dm_read_data("dm_read_data"),
               mem(512 / sizeof(uint8_t), 0)
         {
-            DEBUG_MSG("[Create] DataMemory");
+            DEBUG_PE_MSG("[Create] DataMemory");
             SC_CTHREAD(sequential_process, clk.pos());
             reset_signal_is(reset_n, false);
             SC_METHOD(combinational_process);
@@ -87,7 +90,7 @@ SC_MODULE(DataMemory) {
 
                 // Write operation
                 if (dm_write_en.read()) {
-                    // DEBUG_MSG("[Write] Address: " << dm_write_addr.read() <<
+                    // DEBUG_PE_MSG("[Write] Address: " << dm_write_addr.read() <<
                     //            " Data: 0x" << std::hex << dm_write_data.read() << std::dec);
                     writeWord(dm_write_addr.read(), dm_write_data.read(), dm_write_mask.read());
                 }

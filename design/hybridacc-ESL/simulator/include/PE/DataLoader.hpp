@@ -2,6 +2,9 @@
 
 #include "utils.hpp"
 #include <systemc>
+#include <array>
+
+using namespace sc_core;  // Add this to use SystemC types without prefix
 
 namespace hybridacc {
 namespace pe {
@@ -124,7 +127,7 @@ public:
           dm_read_data("dm_read_data"),
           dmrv_out("dmrv_out")
     {
-        DEBUG_MSG("[Create] DataLoader");
+        DEBUG_PE_MSG("[Create] DataLoader");
 
         // 初始化暫存器
         state_reg.write(State::IDLE);
@@ -246,7 +249,7 @@ public:
             dma_broadcast_reg.write(dma_broadcast_next.read());
             request_type_reg.write(request_type_next.read());
 
-            DEBUG_MSG("[DataLoader] State=" << state_reg.read()
+            DEBUG_PE_MSG("[DataLoader] State=" << state_reg.read()
                       << " ps_valid=" << ps_data.valid_in.read()
                       << " ready=" << ps_data.ready_out.read()
                       << " len=" << dma_len_reg.read()
@@ -360,7 +363,7 @@ public:
                 break;
         }
 
-        DEBUG_MSG("[DataLoader] NextStateLogic: State=" << state_reg.read()
+        DEBUG_PE_MSG("[DataLoader] NextStateLogic: State=" << state_reg.read()
                   << " Next=" << state_next.read());
     }
 

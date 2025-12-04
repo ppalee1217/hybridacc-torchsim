@@ -5,6 +5,8 @@
 #include "VADDU.hpp"
 #include "PsumRegFile.hpp"
 
+using namespace sc_core;  // Add this to use SystemC types without prefix
+
 namespace hybridacc {
 namespace pe {
 
@@ -90,7 +92,7 @@ public:
           pli("pli"), plo("plo"),
           vadd("vadd"), PR("PR")
     {
-        DEBUG_MSG("[Create] EXE_A_Stage");
+        DEBUG_PE_MSG("[Create] EXE_A_Stage");
 
         // Sequential process
         SC_CTHREAD(seq_process, clk.pos());
@@ -215,7 +217,7 @@ private:
             halted_reg.write(halted_reg_next.read());
             vaddu_started_reg.write(vaddu_started_reg_next.read());
 
-            DEBUG_MSG("[EXE_A_Stage] Clocked: State=" << state_reg.read()
+            DEBUG_PE_MSG("[EXE_A_Stage] Clocked: State=" << state_reg.read()
                 << " -> " << state_reg_next.read()
                 << " VadduStarted=" << vaddu_started_reg.read()
                 << " Inst=0x" << std::hex << decode_reg.read().inst << std::dec
@@ -234,13 +236,13 @@ private:
             result.next_vmul_data = vmul_out_in.read();
             result.next_vaddu_started = false;  // 立即清除
 
-            DEBUG_MSG("[EXE_A_stage] New instruction, vmul_data = " << vmul_out_in.read() );
+            DEBUG_PE_MSG("[EXE_A_stage] New instruction, vmul_data = " << vmul_out_in.read() );
 
             // 檢查 HALT
             if (result.next_decode.halt) {
                 result.next_halted = true;
                 result.next_state = EXE_A_State::IDLE;
-                DEBUG_MSG("[EXE_A_stage] HALT detected");
+                DEBUG_PE_MSG("[EXE_A_stage] HALT detected");
             }
             // PLI-PLO 操作
             else if (result.next_decode.pli_plo_operation) {
@@ -252,17 +254,17 @@ private:
                 }else{
                     result.next_state = EXE_A_State::WAIT_PLI;
                 }
-                DEBUG_MSG("[EXE_A_stage] Start PLI-PLO operation");
+                DEBUG_PE_MSG("[EXE_A_stage] Start PLI-PLO operation");
             }
             // 一般 VADDU 操作 (VMAC/VMUL)
             else if (result.next_decode.vaddu_en) {
                 result.next_state = EXE_A_State::EXEC_VADDU;
-                DEBUG_MSG("[EXE_A_stage] Start VADDU operation, mode=" << result.next_decode.vaddu_mode);
+                DEBUG_PE_MSG("[EXE_A_stage] Start VADDU operation, mode=" << result.next_decode.vaddu_mode);
             }
             // 其他指令 (只操作 PR,不需要 VADDU)
             else {
                 result.next_state = EXE_A_State::IDLE;
-                DEBUG_MSG("[EXE_A_stage] Execute PR-only operation");
+                DEBUG_PE_MSG("[EXE_A_stage] Execute PR-only operation");
             }
         } else {
             // 在 IDLE 且沒有新指令時,也清除 vaddu_started
@@ -273,13 +275,13 @@ private:
     // 處理 EXEC_VADDU 狀態的轉換
     void handle_exec_vaddu_state(StateTransitionResult& result) {
         if (vadd_start_sig.read()) {
-            DEBUG_MSG("[EXE_A_stage] VADDU started" );
+            DEBUG_PE_MSG("[EXE_A_stage] VADDU started" );
             result.next_vaddu_started = true;
         }
 
         if (vadd_done_sig.read() && !stall_from_downstream.read()) {
             result.next_state = EXE_A_State::IDLE;
-            DEBUG_MSG("[EXE_A_stage] VADDU complete, returning to IDLE");
+            DEBUG_PE_MSG("[EXE_A_stage] VADDU complete, returning to IDLE");
         }
     }
 
@@ -290,14 +292,14 @@ private:
             captured_pli_data.fromUint64(pli.data_in.read());
             result.next_pli_data = captured_pli_data;
             result.next_state = EXE_A_State::EXEC_PLI_VADDU;
-            DEBUG_MSG("[EXE_A_stage] PLI data captured: 0x" << std::hex << pli.data_in.read());
+            DEBUG_PE_MSG("[EXE_A_stage] PLI data captured: 0x" << std::hex << pli.data_in.read());
         }
     }
 
     // 處理 EXEC_PLI_VADDU 狀態的轉換
     void handle_exec_pli_vaddu_state(StateTransitionResult& result) {
         if (vadd_start_sig.read()) {
-            DEBUG_MSG("[EXE_A_stage] VADDU started" );
+            DEBUG_PE_MSG("[EXE_A_stage] VADDU started" );
             result.next_vaddu_started = true;
         }
 
@@ -306,7 +308,7 @@ private:
 
             if (!stall_from_downstream.read()) {
                 result.next_state = EXE_A_State::WAIT_PLO;
-                DEBUG_MSG("[EXE_A_stage] PLI VADDU complete");
+                DEBUG_PE_MSG("[EXE_A_stage] PLI VADDU complete");
             }
         }
     }
@@ -315,7 +317,7 @@ private:
     void handle_wait_plo_state(StateTransitionResult& result) {
         if (plo.ready_in.read()) {
             result.next_state = EXE_A_State::IDLE;
-            DEBUG_MSG("[EXE_A_stage] PLO handshake done");
+            DEBUG_PE_MSG("[EXE_A_stage] PLO handshake done");
         }
     }
 
@@ -403,7 +405,7 @@ private:
 
                 if (decode.vaddu_en && !vaddu_started) {
                     vadd_start_sig.write(true);
-                    DEBUG_MSG("[EXE_A_stage] Generate VADDU start pulse" );
+                    DEBUG_PE_MSG("[EXE_A_stage] Generate VADDU start pulse" );
                 }
                 break;
 

@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Debug options
 option(ENABLE_DEBUG_UTILS "Enable DEBUG_UTILS debug messages" OFF)
+option(ENABLE_DEBUG_PE "Enable DEBUG_PE debug messages for PE modules" OFF)
+option(ENABLE_DEBUG_NOC "Enable DEBUG_NOC debug messages for NoC modules" OFF)
 
 # Find SystemC
 find_package(PkgConfig REQUIRED)
@@ -36,6 +38,20 @@ else()
     message(STATUS "DEBUG_UTILS: Disabled (PE Simulator)")
 endif()
 
+if(ENABLE_DEBUG_PE)
+    target_compile_definitions(pe_simulator PRIVATE DEBUG_PE)
+    message(STATUS "DEBUG_PE: Enabled (PE Simulator)")
+else()
+    message(STATUS "DEBUG_PE: Disabled (PE Simulator)")
+endif()
+
+if(ENABLE_DEBUG_NOC)
+    target_compile_definitions(pe_simulator PRIVATE DEBUG_NOC)
+    message(STATUS "DEBUG_NOC: Enabled (PE Simulator)")
+else()
+    message(STATUS "DEBUG_NOC: Disabled (PE Simulator)")
+endif()
+
 target_include_directories(pe_simulator PUBLIC
     ../simulator/include
     ${SYSTEMC_ROOT}/include
@@ -54,6 +70,14 @@ add_library(pe_wrapper
 # Conditional compile definitions for pe_wrapper
 if(ENABLE_DEBUG_UTILS)
     target_compile_definitions(pe_wrapper PRIVATE DEBUG_UTILS)
+endif()
+
+if(ENABLE_DEBUG_PE)
+    target_compile_definitions(pe_wrapper PRIVATE DEBUG_PE)
+endif()
+
+if(ENABLE_DEBUG_NOC)
+    target_compile_definitions(pe_wrapper PRIVATE DEBUG_NOC)
 endif()
 
 target_include_directories(pe_wrapper PUBLIC
@@ -78,6 +102,14 @@ if(ENABLE_DEBUG_UTILS)
     target_compile_definitions(test_pe_unit PRIVATE DEBUG_UTILS)
 endif()
 
+if(ENABLE_DEBUG_PE)
+    target_compile_definitions(test_pe_unit PRIVATE DEBUG_PE)
+endif()
+
+if(ENABLE_DEBUG_NOC)
+    target_compile_definitions(test_pe_unit PRIVATE DEBUG_NOC)
+endif()
+
 target_link_libraries(test_pe_unit
     pe_wrapper
     systemc
@@ -94,8 +126,40 @@ if(ENABLE_DEBUG_UTILS)
     target_compile_definitions(test_pe_sim PRIVATE DEBUG_UTILS)
 endif()
 
+if(ENABLE_DEBUG_PE)
+    target_compile_definitions(test_pe_sim PRIVATE DEBUG_PE)
+endif()
+
+if(ENABLE_DEBUG_NOC)
+    target_compile_definitions(test_pe_sim PRIVATE DEBUG_NOC)
+endif()
+
 target_link_libraries(test_pe_sim
     pe_wrapper
+    systemc
+    pthread
+)
+
+# NoC Unit Tests
+add_executable(test_noc_unit
+    test_noc_unit.cpp
+)
+
+# Conditional compile definitions for test_noc_unit
+if(ENABLE_DEBUG_UTILS)
+    target_compile_definitions(test_noc_unit PRIVATE DEBUG_UTILS)
+endif()
+
+if(ENABLE_DEBUG_PE)
+    target_compile_definitions(test_noc_unit PRIVATE DEBUG_PE)
+endif()
+
+if(ENABLE_DEBUG_NOC)
+    target_compile_definitions(test_noc_unit PRIVATE DEBUG_NOC)
+endif()
+
+target_link_libraries(test_noc_unit
+    pe_simulator
     systemc
     pthread
 )
@@ -116,8 +180,24 @@ add_custom_target(run_sim
     COMMENT "Running PE simulation test (Conv3x3)"
 )
 
+# Test runner for NoC
+add_custom_target(run_noc_test
+    COMMAND ./test_noc_unit
+    DEPENDS test_noc_unit
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running NetworkOnChip unit tests"
+)
+
+# Run all tests
+add_custom_target(run_all_tests
+    COMMAND ./test_pe_unit && ./test_noc_unit
+    DEPENDS test_pe_unit test_noc_unit
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running all unit tests"
+)
+
 # Installation
-install(TARGETS pe_wrapper test_pe_unit test_pe_sim
+install(TARGETS pe_wrapper test_pe_unit test_pe_sim test_noc_unit
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
@@ -127,3 +207,4 @@ install(TARGETS pe_wrapper test_pe_unit test_pe_sim
 enable_testing()
 add_test(NAME PE_Unit_Tests COMMAND test_pe_unit)
 add_test(NAME PE_Simulation_Conv3x3 COMMAND test_pe_sim)
+add_test(NAME NoC_Unit_Tests COMMAND test_noc_unit)

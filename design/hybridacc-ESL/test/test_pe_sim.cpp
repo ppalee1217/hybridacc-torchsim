@@ -184,7 +184,7 @@ int sc_main(int argc, char* argv[]) {
 
     // Note: With the new router_enable and router_mode ports,
     // we also need to set these signals directly
-    pe_wrapper.set_router_mode(hybridacc::pe::PERouterMode::PLI_FROM_BUS_PLO_TO_BUS);
+    pe_wrapper.set_router_mode(PERouterMode::PLI_FROM_BUS_PLO_TO_BUS);
     pe_wrapper.set_router_enable(true);
 
     uint64_t init_cmd = 1; // CMD_INIT
