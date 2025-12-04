@@ -3,6 +3,7 @@
 本目錄提供 HybridAcc PE 16-bit ISA 的完整工具鏈：
 - **C++ 組譯器 (ha-asm)**: 組合語言轉機器碼，支援 Template 模板系統
 - **C++ 反組譯器 (ha-objdump)**: 機器碼還原為組合語言
+- **C++ 打包工具 (ha-package)**: 將多個 Template 打包成 Package Binary，並生成 C API Header
 - **靜態函式庫 (hybridacc_asm)**: 包含 Assembler / Disassembler 類別，可供其他程式使用
 - **單元測試**: 基礎測試案例 (tests/test_assembler.cpp)
 
@@ -34,9 +35,10 @@ cmake --build . -j
 ctest --output-on-failure  # 執行測試 (可選)
 ```
 
-產生的執行檔位於 `build/src/assambler/`:
-- **ha-asm** - 組譯器
-- **ha-objdump** - 反組譯器
+產生的執行檔：
+- `build/src/assambler/ha-asm` - 組譯器
+- `build/src/assambler/ha-objdump` - 反組譯器
+- `build/src/packager/ha-package` - 打包工具
 
 ### 安裝 (可選)
 
@@ -107,6 +109,89 @@ ha-objdump <input.bin|input.hex>
 2: DMA.SD 4
 3: TSTORE 0
 ```
+
+### 打包工具 (ha-package)
+
+將多個 Template 打包成單一 Package Binary，並生成 JSON 資訊和 C Header API。
+
+```bash
+# 基本用法
+ha-package [options] <input1.asm> <input2.json> ...
+
+# 完整範例
+ha-package \
+    -o output/kernel.pkg \
+    --json output/kernel.json \
+    --header output/kernel.h \
+    --verbose \
+    asm/template/*.asm
+
+# 使用 shell script
+tools/script/package.sh
+```
+
+**命令列選項**:
+- `-o <file.pkg>`: 輸出 package binary 檔案
+- `--json <file.json>`: 輸出 package 資訊 JSON
+- `--header <file.h>`: 輸出 C API header 檔案
+- `--verbose`: 顯示詳細打包過程
+
+**輸入格式**:
+- `.asm` 檔案: Template 組合語言 (自動編譯)
+- `.json` 檔案: 已編譯的 Template JSON (由 ha-asm 產生)
+
+**Package Binary 格式**:
+```
+Header:
+  [package version,  8 bits]
+  [num of templates, 8 bits]
+  [offset vector 0,  16 bits]
+  [offset vector 1,  16 bits]
+  ...
+Body:
+  [template binary 0]
+  [template binary 1]
+  ...
+```
+
+**生成的 C Header 包含**:
+- 每個 Template 的專屬參數結構體 (類型安全)
+- Package 資訊 (版本、Template 數量、總大小)
+- Template 索引定義
+- Template 資訊表
+- Helper 函數 (取得 Template 資訊、參數等)
+
+**C Header 範例**:
+```c
+// Template-specific parameter struct
+typedef struct {
+    uint16_t KERNEL_DMA_LEN;       // default: 48
+    uint16_t OUTPUT_WINDOW_CNT;    // default: 798
+    uint16_t KERNEL_COUNT;         // default: 16
+} ha_params_conv1d_k3s1_template_t;
+
+// Template metadata
+typedef struct {
+    const char* name;
+    uint88_t template_index;
+    uint16_t offset;
+    uint16_t binary_size;
+    uint8_t num_params;
+    uint8_t num_patches;
+    uint8_t num_instructions;
+    const ha_template_patch_t* patches;
+    const void* default_params;
+} ha_template_t;
+
+// Template table
+static const ha_template_t ha_template_table[] = { ... };
+
+// Helper functions
+const ha_template_t* ha_get_template_info(uint8_t template_index);
+uint16_t ha_get_template_offset(uint8_t template_index);
+```
+
+**詳細 Package 使用說明請參閱**: [ToolUsage.md](doc/ToolUsage.md) 的 "Package 打包系統" 章節
 
 ---
 
@@ -315,23 +400,37 @@ hybridacc-pe-isa/
 │   ├── conv1d_k7.asm
 │   ├── gemv.asm
 │   └── template/             # Template 範例
+│       ├── conv1d_k1s1.asm
 │       ├── conv1d_k3s1.asm
 │       ├── conv1d_k5s1.asm
 │       ├── conv1d_k7s1.asm
 │       └── gemv_template.asm
 ├── src/
-│   └── assambler/            # 組譯器源碼
-│       ├── ha_asm.cpp        # 組譯器主程式
-│       ├── ha_objdump.cpp    # 反組譯器主程式
-│       ├── instruction.cpp   # 指令編碼/解碼邏輯
-│       ├── instruction.hpp   # 指令定義
-│       ├── utils.cpp         # I/O 工具函式
-│       └── utils.hpp
+│   ├── assambler/            # 組譯器源碼
+│   │   ├── ha_asm.cpp        # 組譯器主程式
+│   │   ├── ha_objdump.cpp    # 反組譯器主程式
+│   │   ├── instruction.cpp   # 指令編碼/解碼邏輯
+│   │   ├── instruction.hpp   # 指令定義
+│   │   ├── utils.cpp         # I/O 工具函式
+│   │   └── utils.hpp
+│   ├── packager/             # 打包工具源碼
+│   │   ├── ha-package.cpp    # 打包工具主程式
+│   │   ├── package.cpp       # Package 邏輯實作
+│   │   └── package.hpp       # Package 資料結構
+│   └── simulator/            # PE 模擬器
 ├── doc/                      # 文檔
 │   ├── ToolUsage.md          # 工具鏈使用手冊 (詳細)
 │   ├── ISA.md                # 指令集快速參考
 │   └── Hybridacc PE.md       # 完整 PE 架構與指令集文件
+├── tools/
+│   ├── bin/                  # 工具連結 (由安裝腳本建立)
+│   └── script/
+│       └── package.sh        # Package 打包腳本
 ├── output/                   # 編譯輸出目錄
+│   └── package/              # Package 輸出
+│       ├── kernel.pkg        # Package binary
+│       ├── kernel.json       # Package 資訊
+│       └── kernel.h          # C API header
 ├── tests/                    # 單元測試
 │   └── test_assembler.cpp
 └── build/                    # 建置目錄 (由 CMake 生成)

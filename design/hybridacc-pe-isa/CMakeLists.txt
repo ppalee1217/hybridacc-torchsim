@@ -12,6 +12,9 @@ add_subdirectory(src/assambler)
 # 啟用 PE 模擬器 (原本被註解)
 add_subdirectory(src/simulator)
 
+# 啟用 packager
+add_subdirectory(src/packager)
+
 if(BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)

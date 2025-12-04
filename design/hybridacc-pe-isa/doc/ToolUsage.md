@@ -5,12 +5,13 @@
 2. [工具鏈架構](#工具鏈架構)
 3. [組譯器 (ha-asm)](#組譯器-ha-asm)
 4. [反組譯器 (ha-objdump)](#反組譯器-ha-objdump)
-5. [組合語言語法](#組合語言語法)
-6. [Template 模板系統](#template-模板系統)
-7. [撰寫限制與注意事項](#撰寫限制與注意事項)
-8. [輸出格式說明](#輸出格式說明)
-9. [常見錯誤與排除](#常見錯誤與排除)
-10. [實例演練](#實例演練)
+5. [打包工具 (ha-package)](#打包工具-ha-package)
+6. [組合語言語法](#組合語言語法)
+7. [Template 模板系統](#template-模板系統)
+8. [撰寫限制與注意事項](#撰寫限制與注意事項)
+9. [輸出格式說明](#輸出格式說明)
+10. [常見錯誤與排除](#常見錯誤與排除)
+11. [實例演練](#實例演練)
 
 ---
 
@@ -19,6 +20,7 @@
 HybridAcc PE-ISA 工具鏈提供完整的組合語言開發環境，包含：
 - **ha-asm**: 組譯器，將 `.asm` 組合語言轉換為機器碼
 - **ha-objdump**: 反組譯器，將機器碼還原為可讀的組合語言
+- **ha-package**: 打包工具，將多個 Template 打包成 Package Binary 並生成 C API
 - **Template 系統**: 支援參數化組合語言模板，便於批量生成程式碼
 - **多種輸出格式**: 支援 Binary (.bin)、Hex (.hex)、JSON (.json)、Disassembly (.disasm)
 
@@ -44,6 +46,9 @@ cmake --build . -j
 編譯完成後，工具位於 `build/src/assambler/`:
 - `ha-asm` - 組譯器
 - `ha-objdump` - 反組譯器
+
+以及 `build/src/packager/`:
+- `ha-package` - 打包工具
 
 ### 安裝工具 (可選)
 
@@ -167,6 +172,533 @@ ha-objdump output.hex
 
 # 將反組譯結果導向檔案
 ha-objdump output.bin > disasm.txt
+```
+
+---
+
+## 打包工具 (ha-package)
+
+### 概述
+
+`ha-package` 是一個專門用於將多個 Template 打包成單一 Package Binary 的工具。它可以：
+- 接受多個 `.asm` 或 `.json` 格式的 Template 作為輸入
+- 自動編譯 `.asm` Template 文件
+- 生成緊湊的 Package Binary 格式
+- 產生包含完整資訊的 JSON 文件
+- 生成類型安全的 C API Header 文件
+
+### 基本用法
+
+```bash
+ha-package [options] <input1> <input2> ...
+```
+
+### 命令列選項
+
+| 選項 | 說明 | 範例 |
+|------|------|------|
+| `-o <file.pkg>` | 輸出 Package Binary 檔案 | `-o kernels.pkg` |
+| `--json <file.json>` | 輸出 Package 資訊 JSON | `--json kernels.json` |
+| `--header <file.h>` | 輸出 C API Header 檔案 | `--header kernels.h` |
+| `--verbose` | 顯示詳細打包過程 | `--verbose` |
+| `-h, --help` | 顯示幫助訊息 | `-h` |
+
+**注意**: 至少需要指定一個輸出選項 (`-o`, `--json`, 或 `--header`)
+
+### 輸入格式
+
+ha-package 支援兩種輸入格式：
+
+1. **Template Assembly (.asm)**
+   - 包含 `.template` 指令的組合語言文件
+   - 工具會自動調用 assembler 進行編譯
+   - 適合直接從源碼打包
+
+2. **Template JSON (.json)**
+   - 由 `ha-asm` 預先編譯產生的 JSON 文件
+   - 可直接打包，無需重新編譯
+   - 適合已編譯好的 Template
+
+### Package Binary 格式
+
+Package Binary 採用緊湊的二進制格式：
+
+```
++-------------------+
+| Package Header    |
++-------------------+
+| Version (8 bits)  |  ← Package 版本號
+| Num Templates     |  ← Template 數量 (8 bits)
+| Offset 0 (16 bits)|  ← Template 0 在 Binary 中的偏移量
+| Offset 1 (16 bits)|  ← Template 1 在 Binary 中的偏移量
+| ...               |
++-------------------+
+| Template Binary 0 |
++-------------------+
+| Template Binary 1 |
++-------------------+
+| ...               |
++-------------------+
+```
+
+**Header 詳細說明**:
+- **Version**: 8-bit，目前版本為 1
+- **Num Templates**: 8-bit，支援最多 255 個 Template
+- **Offset Vector**: 每個 16-bit，指向對應 Template 在整個 Package 中的位元組偏移量
+
+**Template Binary 格式** (每個 Template 的內部格式):
+```
++-------------------+
+| Num Patches (8)   |  ← Patch 數量
+| Num Instrs (8)    |  ← 指令數量
++-------------------+
+| Patch 0           |  ← [offset:8][param_idx:8]
+| Patch 1           |
+| ...               |
++-------------------+
+| Instruction 0     |  ← 16-bit 機器碼 (little-endian)
+| Instruction 1     |
+| ...               |
++-------------------+
+```
+
+### 使用範例
+
+#### 範例 1: 打包單一 Template
+
+```bash
+ha-package \
+    -o output/my_kernel.pkg \
+    --json output/my_kernel.json \
+    --header output/my_kernel.h \
+    asm/template/conv1d_k3s1.asm
+```
+
+#### 範例 2: 打包多個 Template
+
+```bash
+ha-package \
+    -o output/kernels.pkg \
+    --json output/kernels.json \
+    --header output/kernels.h \
+    asm/template/conv1d_k1s1.asm \
+    asm/template/conv1d_k3s1.asm \
+    asm/template/conv1d_k5s1.asm \
+    asm/template/conv1d_k7s1.asm \
+    asm/template/gemv_template.asm
+```
+
+#### 範例 3: 混合 ASM 和 JSON 輸入
+
+```bash
+# 先編譯一些 template
+ha-asm asm/template/conv1d_k3s1.asm --json output/conv1d_k3.json
+
+# 混合已編譯和未編譯的 template
+ha-package \
+    -o output/mixed.pkg \
+    --header output/mixed.h \
+    output/conv1d_k3.json \
+    asm/template/conv1d_k5s1.asm \
+    asm/template/gemv_template.asm
+```
+
+#### 範例 4: 使用 Shell Script
+
+專案提供了便利的 shell script (`tools/script/package.sh`)：
+
+```bash
+# 直接執行腳本
+cd /path/to/hybridacc-pe-isa
+./tools/script/package.sh
+
+# 腳本會自動打包 asm/template/ 目錄下的所有 template
+# 輸出到 output/package/ 目錄
+```
+
+#### 範例 5: Verbose 模式查看詳細資訊
+
+```bash
+ha-package --verbose \
+    -o output/kernels.pkg \
+    --json output/kernels.json \
+    --header output/kernels.h \
+    asm/template/*.asm
+```
+
+**輸出範例**:
+```
+HybridAcc Package Tool
+======================
+
+Loading: asm/template/conv1d_k1s1.asm ... OK (assembled)
+Loading: asm/template/conv1d_k3s1.asm ... OK (assembled)
+Loading: asm/template/conv1d_k5s1.asm ... OK (assembled)
+Loading: asm/template/gemv_template.asm ... OK (assembled)
+
+Creating package...
+  Package version: 1
+  Number of templates: 4
+  Total binary size: 256 bytes
+
+  Template 0: conv1d_k1s1_template
+    Offset: 10 bytes
+    Parameters: 3
+    Patches: 3
+    Instructions: 28
+  Template 1: conv1d_k3s1_template
+    Offset: 72 bytes
+    Parameters: 3
+    Patches: 4
+    Instructions: 32
+  ...
+
+Writing binary: output/kernels.pkg ... OK
+Writing JSON: output/kernels.json ... OK
+Writing header: output/kernels.h ... OK
+
+Package created successfully!
+```
+
+### Package JSON 輸出
+
+Package JSON 包含完整的打包資訊，適合程式化處理：
+
+```json
+{
+  "package_version": 1,
+  "num_templates": 4,
+  "total_binary_size": 256,
+  "templates": [
+    {
+      "index": 0,
+      "name": "conv1d_k3s1_template",
+      "offset": 10,
+      "binary_size": 74,
+      "source": "asm/template/conv1d_k3s1.asm",
+      "parameters": [
+        {
+          "index": 0,
+          "name": "KERNEL_DMA_LEN",
+          "default": 48
+        },
+        {
+          "index": 1,
+          "name": "OUTPUT_WINDOW_CNT",
+          "default": 798
+        },
+        {
+          "index": 2,
+          "name": "KERNEL_COUNT",
+          "default": 16
+        }
+      ],
+      "patches": [
+        {
+          "offset": 2,
+          "param_index": 0
+        },
+        {
+          "offset": 12,
+          "param_index": 1
+        }
+      ],
+      "num_instructions": 32
+    },
+    ...
+  ]
+}
+```
+
+**JSON 欄位說明**:
+- `package_version`: Package 格式版本
+- `num_templates`: Package 中包含的 Template 數量
+- `total_binary_size`: Package Binary 總大小 (bytes)
+- `templates[]`: Template 陣列
+  - `index`: Template 索引 (0-based)
+  - `name`: Template 名稱
+  - `offset`: 在 Package Binary 中的位元組偏移量
+  - `binary_size`: 該 Template Binary 的大小
+  - `source`: 源文件路徑
+  - `parameters[]`: 參數定義
+  - `patches[]`: Patch 資訊
+  - `num_instructions`: 指令數量
+
+### C API Header 輸出
+
+ha-package 生成的 C Header 提供類型安全的 API，包含：
+
+#### 1. 基礎資料結構
+
+```c
+// Template patch information
+typedef struct {
+    uint8_t offset;        // Instruction offset to patch
+    uint8_t param_index;   // Parameter index
+} ha_template_patch_t;
+
+// Package header structure
+typedef struct {
+    uint8_t version;        // Package version
+    uint8_t num_templates;  // Number of templates
+} ha_package_header_t;
+```
+
+#### 2. Template 專屬參數結構體
+
+為每個 Template 生成專屬的參數結構體，提供類型安全：
+
+```c
+// Parameters for template: conv1d_k3s1_template
+typedef struct {
+    uint16_t KERNEL_DMA_LEN;       // default: 48
+    uint16_t OUTPUT_WINDOW_CNT;    // default: 798
+    uint16_t KERNEL_COUNT;         // default: 16
+} ha_params_conv1d_k3s1_template_t;
+
+// Parameters for template: gemv_template
+typedef struct {
+    uint16_t KERNEL_DMA_STORE_LEN; // default: 64
+    uint16_t KERNEL_DMA_LOAD_LEN;  // default: 256
+    uint16_t INPUT_DIM;            // default: 32
+    uint16_t OUTPUT_DIM;           // default: 8
+    uint16_t PSUM_COUNT;           // default: 24
+} ha_params_gemv_template_t;
+```
+
+#### 3. Template 資訊結構
+
+```c
+// Template metadata
+typedef struct {
+    const char* name;              // Template name
+    uint8_t template_index;        // Template index in package
+    uint16_t offset;               // Offset in package binary
+    uint16_t binary_size;          // Size in bytes
+    uint8_t num_params;            // Number of parameters
+    uint8_t num_patches;           // Number of patches
+    uint8_t num_instructions;      // Number of instructions
+    const ha_template_patch_t* patches;  // Patch array
+    const void* default_params;    // Pointer to default parameters
+} ha_template_t;
+```
+
+#### 4. Package 資訊定義
+
+```c
+// Package information
+#define HA_PACKAGE_VERSION 1
+#define HA_NUM_TEMPLATES 4
+#define HA_TOTAL_BINARY_SIZE 256
+
+// Template indices
+#define HA_TEMPLATE_CONV1D_K1S1_TEMPLATE 0
+#define HA_TEMPLATE_CONV1D_K3S1_TEMPLATE 1
+#define HA_TEMPLATE_CONV1D_K5S1_TEMPLATE 2
+#define HA_TEMPLATE_GEMV_TEMPLATE 3
+```
+
+#### 5. 預設參數實例
+
+```c
+// Default parameters for conv1d_k3s1_template
+static const ha_params_conv1d_k3s1_template_t ha_default_params_conv1d_k3s1_template = {
+    .KERNEL_DMA_LEN = 48,
+    .OUTPUT_WINDOW_CNT = 798,
+    .KERNEL_COUNT = 16
+};
+```
+
+#### 6. Template 資訊表
+
+```c
+// Template information table
+static const ha_template_t ha_template_table[] = {
+    {
+        .name = "conv1d_k3s1_template",
+        .template_index = 0,
+        .offset = 10,
+        .binary_size = 74,
+        .num_params = 3,
+        .num_patches = 4,
+        .num_instructions = 32,
+        .patches = ha_patches_conv1d_k3s1_template,
+        .default_params = &ha_default_params_conv1d_k3s1_template
+    },
+    ...
+};
+```
+
+#### 7. Helper 函數
+
+```c
+// Get template information by index
+static inline const ha_template_t* ha_get_template_info(uint8_t template_index);
+
+// Get template offset in package binary
+static inline uint16_t ha_get_template_offset(uint8_t template_index);
+
+// Get template binary size
+static inline uint16_t ha_get_template_size(uint8_t template_index);
+
+// Template-specific accessors
+static inline const ha_params_conv1d_k3s1_template_t* ha_get_default_params_conv1d_k3s1_template();
+static inline const ha_template_t* ha_get_conv1d_k3s1_template_info();
+```
+
+### C API 使用範例
+
+#### 範例 1: 取得 Template 資訊
+
+```c
+#include "kernels.h"
+
+int main() {
+    // 取得 template 資訊
+    const ha_template_t* info = ha_get_template_info(HA_TEMPLATE_CONV1D_K3S1_TEMPLATE);
+
+    printf("Template: %s\n", info->name);
+    printf("Offset: %u bytes\n", info->offset);
+    printf("Size: %u bytes\n", info->binary_size);
+    printf("Parameters: %u\n", info->num_params);
+    printf("Instructions: %u\n", info->num_instructions);
+
+    return 0;
+}
+```
+
+#### 範例 2: 使用專屬參數結構體
+
+```c
+#include "kernels.h"
+
+void configure_conv1d_kernel() {
+    // 使用預設參數
+    const ha_params_conv1d_k3s1_template_t* default_params =
+        ha_get_default_params_conv1d_k3s1_template();
+
+    printf("Default KERNEL_DMA_LEN: %u\n", default_params->KERNEL_DMA_LEN);
+    printf("Default OUTPUT_WINDOW_CNT: %u\n", default_params->OUTPUT_WINDOW_CNT);
+
+    // 或創建自訂參數
+    ha_params_conv1d_k3s1_template_t custom_params = {
+        .KERNEL_DMA_LEN = 64,
+        .OUTPUT_WINDOW_CNT = 1024,
+        .KERNEL_COUNT = 32
+    };
+
+    // 使用 custom_params 配置硬體...
+}
+```
+
+#### 範例 3: 載入並解析 Package Binary
+
+```c
+#include "kernels.h"
+#include <stdio.h>
+#include <stdint.h>
+
+void load_package(const char* pkg_path) {
+    FILE* f = fopen(pkg_path, "rb");
+
+    // 讀取 package header
+    ha_package_header_t header;
+    fread(&header, sizeof(header), 1, f);
+
+    printf("Package version: %u\n", header.version);
+    printf("Number of templates: %u\n", header.num_templates);
+
+    // 讀取 offset vector
+    uint16_t offsets[HA_NUM_TEMPLATES];
+    for (int i = 0; i < header.num_templates; i++) {
+        fread(&offsets[i], sizeof(uint16_t), 1, f);
+        printf("Template %d offset: %u\n", i, offsets[i]);
+    }
+
+    // 跳轉到特定 template
+    const ha_template_t* info = ha_get_template_info(HA_TEMPLATE_CONV1D_K3S1_TEMPLATE);
+    fseek(f, info->offset, SEEK_SET);
+
+    // 讀取 template binary...
+    uint8_t template_data[info->binary_size];
+    fread(template_data, 1, info->binary_size, f);
+
+    fclose(f);
+}
+```
+
+### 整合工作流程
+
+完整的 Template 到 Package 工作流程：
+
+```bash
+# 步驟 1: 撰寫 Template 源碼
+vim asm/template/my_kernel.asm
+
+# 步驟 2: (可選) 單獨編譯測試
+ha-asm asm/template/my_kernel.asm --json output/my_kernel.json --verbose
+
+# 步驟 3: 打包所有 Templates
+ha-package \
+    -o output/package/kernels.pkg \
+    --json output/package/kernels.json \
+    --header output/package/kernels.h \
+    asm/template/*.asm
+
+# 步驟 4: 在 C 程式中使用
+gcc my_program.c -I output/package -o my_program
+./my_program output/package/kernels.pkg
+```
+
+### 最佳實踐
+
+1. **命名規範**
+   - Package 文件使用有意義的名稱 (如 `conv_kernels.pkg`, `gemm_kernels.pkg`)
+   - Header 文件與 Package 同名 (如 `conv_kernels.h`)
+
+2. **版本管理**
+   - 在 JSON 中記錄 source 文件路徑，便於追溯
+   - 使用版本控制系統管理 Template 源碼
+
+3. **參數設計**
+   - 為 Template 參數提供合理的預設值
+   - 在 C Header 中使用語意化的結構體名稱
+
+4. **錯誤處理**
+   - 使用 `--verbose` 選項排查打包問題
+   - 檢查 JSON 輸出確認 Template 資訊正確
+
+5. **性能優化**
+   - 預先編譯常用 Template 為 JSON，避免重複編譯
+   - 將相關 Template 打包在同一個 Package 中
+
+### 與其他工具整合
+
+#### Python 整合範例
+
+```python
+import json
+import struct
+
+# 讀取 Package JSON
+with open('output/package/kernels.json', 'r') as f:
+    pkg_info = json.load(f)
+
+# 讀取 Package Binary
+with open('output/package/kernels.pkg', 'rb') as f:
+    # 讀取 header
+    version, num_templates = struct.unpack('BB', f.read(2))
+
+    # 讀取 offsets
+    offsets = []
+    for i in range(num_templates):
+        offset, = struct.unpack('<H', f.read(2))
+        offsets.append(offset)
+
+    # 載入特定 template
+    template_idx = 1
+    f.seek(offsets[template_idx])
+    # 處理 template binary...
 ```
 
 ---
