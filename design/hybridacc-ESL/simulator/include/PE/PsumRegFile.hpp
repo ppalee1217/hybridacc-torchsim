@@ -53,11 +53,12 @@ SC_MODULE(PsumRegFile) {
             SC_CTHREAD(sequential_process, clk.pos());
             reset_signal_is(reset_n, false);
             SC_METHOD(combinational_process);
-            sensitive << pid << p_in << vp_in << vpid_write_en << mode << reset_n << vp_out << p_out << pcounter;
+            sensitive << pid << write << mode << reset_n << pcounter;
         }
 
 
         sc_signal<int> pcounter;
+        sc_signal<bool> write;
 
         std::array<fp16_t,32> P{};    // Partial sum scalar
         std::array<v_fp16_t, 24> VP64{}; // v_fp16_t partial sum (64-bit)
@@ -97,6 +98,7 @@ SC_MODULE(PsumRegFile) {
             // Reset initialization
             clear();
             pcounter.write(0);
+            write.write(false);
             wait();
 
             while (true) {
@@ -104,6 +106,7 @@ SC_MODULE(PsumRegFile) {
                     clear();
                 } else {
                     if (vpid_write_en.read()) {
+                        write.write(!write.read());
                         int write_pid = (use_pcounter.read()) ? pcounter.read() : pid.read();
                         if (mode.read() == 0) { // scalar mode
                             DEBUG_PE_MSG("[PsumRegFile] Write P[" << write_pid << "] = " << std::hex << p_in.read() << std::dec);

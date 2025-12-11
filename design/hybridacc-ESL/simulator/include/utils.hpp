@@ -12,7 +12,7 @@
 // DEBUG_UTILS 現在由 CMake 控制
 #ifdef DEBUG_UTILS
     #define DEBUG_MSG(msg) \
-        std::cout << "[Debug] " << msg << std::endl;
+        std::cout << "[Time]" <<  sc_time_stamp() << "[Debug] " << msg << std::endl;
         //std::cout << "[" << __FILE__ << ":" << __LINE__ << "] " << msg << std::endl;
 #else
     #define DEBUG_MSG(msg) do {} while(0)
@@ -21,7 +21,7 @@
 // PE 專用的調試宏
 #ifdef DEBUG_PE
     #define DEBUG_PE_MSG(msg) \
-        std::cout << "[Debug-PE] " << msg << std::endl;
+        std::cout << "[Time]" <<  sc_time_stamp() << "[Debug-PE] " << msg << std::endl;
 #else
     #define DEBUG_PE_MSG(msg) do {} while(0)
 #endif
@@ -29,7 +29,7 @@
 // NoC 專用的調試宏
 #ifdef DEBUG_NOC
     #define DEBUG_NOC_MSG(msg) \
-        std::cout << "[Debug-NoC] " << msg << std::endl;
+        std::cout << "[Time]" <<  sc_time_stamp() << "[Debug-NoC] " << msg << std::endl;
 #else
     #define DEBUG_NOC_MSG(msg) do {} while(0)
 #endif
