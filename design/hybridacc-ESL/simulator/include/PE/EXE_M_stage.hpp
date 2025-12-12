@@ -343,15 +343,29 @@ public:
             exe_a_out = decode_current;
             valid_out = true;
         }
-        // If stalled, hold state and insert bubble (NOP) to downstream
+        // If stalled, hold state
         else if (stage_stall) {
             decode_n = decode_current;
             valid_n = valid_current;
             halted_n = halted_current;
 
-            // 當 stall 時,向下游傳遞 NOP (valid_out=false)
-            exe_a_out = pe_decode_signals_t();
-            valid_out = false;  // 插入 bubble
+            // Determine output based on stall source
+            bool internal_stall = dl_stall_internal.read() || ps_stall_internal.read() || pd_stall_internal.read();
+
+            if (internal_stall) {
+                // If stalled internally (e.g. waiting for memory), output bubble
+                exe_a_out = pe_decode_signals_t();
+                valid_out = false;
+            } else {
+                // If stalled only by downstream, hold the valid output
+                if (valid_current) {
+                    exe_a_out = decode_current;
+                    valid_out = true;
+                } else {
+                    exe_a_out = pe_decode_signals_t();
+                    valid_out = false;
+                }
+            }
         }
         // Normal operation: advance pipeline
         else {
