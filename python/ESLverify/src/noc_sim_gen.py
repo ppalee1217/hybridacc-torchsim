@@ -48,25 +48,32 @@ class TestData:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save tensors as .npy
+        # Save tensors as .bin (raw float32)
         for name, data in self.inputs.items():
-            np.save(output_dir / f"input_{name}.npy", data)
+            data.astype(np.float32).tofile(output_dir / f"input_{name}.bin")
         for name, data in self.outputs.items():
-            np.save(output_dir / f"output_{name}.npy", data)
+            data.astype(np.float32).tofile(output_dir / f"output_{name}.bin")
 
-        # Save metadata and scan chain
-        meta = {
-            "name": self.name,
-            "description": self.description,
-            "scan_chain": self.scan_chain,
-            "config": self.config,
-            "tensor_shapes": {
-                "inputs": {k: v.shape for k, v in self.inputs.items()},
-                "outputs": {k: v.shape for k, v in self.outputs.items()}
-            }
-        }
-        with open(output_dir / "test_config.json", "w") as f:
-            json.dump(meta, f, indent=2)
+        # Save scan chain as .bin (int32)
+        np.array(self.scan_chain, dtype=np.int32).tofile(output_dir / "scan_chain.bin")
+
+        # Save config.txt
+        with open(output_dir / "config.txt", "w") as f:
+            # Write config items
+            for k, v in self.config.items():
+                f.write(f"{k}:{v}\n")
+
+            f.write("format:bin\n")
+            f.write("layout:channels_last\n")
+
+            # Write shapes
+            for name, data in self.inputs.items():
+                f.write(f"input_{name}_shape:{str(data.shape)}\n")
+            for name, data in self.outputs.items():
+                f.write(f"output_{name}_shape:{str(data.shape)}\n")
+
+            f.write(f"scan_chain_length:{len(self.scan_chain)}\n")
+
         print(f"Test case '{self.name}' saved to {output_dir}")
 
 def generate_conv2d_test(num_pes: int = 64) -> TestData:
@@ -85,11 +92,10 @@ def generate_conv2d_test(num_pes: int = 64) -> TestData:
     N, H, W, C = 1, 18, 200, 4
     OC, KH, KW, _ = 16, 3, 3, 4
 
-    # Generate random data (float32 for calculation, will need conversion for simulator)
-    # Using integers to make verification easier/exact if needed, or small floats
+    # Generate random data
     input_act = torch.randn(N, H, W, C)
     weight = torch.randn(OC, KH, KW, C)
-    input_ps = torch.randn(1, 16, 198, 16) # Spec says (1, 16, 198, 16) which is (N, H_out, W_out, OC)
+    input_ps = torch.randn(1, 16, 198, 16)
 
     # PyTorch expects NCHW for input and (OC, C, KH, KW) for weight
     input_nchw = input_act.permute(0, 3, 1, 2) # (N, C, H, W)
@@ -97,7 +103,6 @@ def generate_conv2d_test(num_pes: int = 64) -> TestData:
     input_ps_nchw = input_ps.permute(0, 3, 1, 2) # (N, OC, H_out, W_out)
 
     # Calculate Conv2d
-    # stride=1, padding=0
     output_conv = F.conv2d(input_nchw, weight_nchw, stride=1, padding=0)
 
     # Add input partial sum
@@ -116,38 +121,35 @@ def generate_conv2d_test(num_pes: int = 64) -> TestData:
         "partial_sum": output_final_nhwc.numpy()
     }
 
-    # Generate Scan Chain Configuration
-    # Assumption: 64 PEs available.
-    # We have 16 Output Channels.
-    # Mapping: Assign 1 PE per Output Channel? Or distribute?
-    # For simplicity, let's assign PE[i] to handle OC[i] for i in 0..15.
-    # The other PEs (16..63) are unused or can duplicate work.
-
     scan_chain = []
     for i in range(num_pes):
-        # Default config
         cfg = ScanChainConfig(
-            ps_id=i,      # Unique PS ID
-            pd_id=i,      # Unique PD ID
-            pli_id=i,     # Unique PLI ID
-            plo_id=i,     # Unique PLO ID
-            route_mode=PERouterMode.PLI_FROM_BUS_PLO_TO_BUS, # Independent PEs
-            enable=True
+            ps_id=i, pd_id=i, pli_id=i, plo_id=i,
+            route_mode=PERouterMode.PLI_FROM_BUS_PLO_TO_BUS, enable=True
         )
-
-        # For the first 16 PEs, we might want a specific mapping
-        # But for now, unique IDs allow full flexibility in the testbench
-        # to send packets to specific PEs.
-
         scan_chain.append(cfg.pack())
+
+    config = {
+        "mode": "conv2d",
+        "kernel_size": KH,
+        "in_ch": C,
+        "stride": 1,
+        "out_ch": OC,
+        "in_height": H,
+        "in_width": W,
+        "out_height": output_final_nhwc.shape[1],
+        "out_width": output_final_nhwc.shape[2],
+        "partial_sum_zero": False,
+        "seed": 123
+    }
 
     return TestData(
         name="conv2d_3x3",
-        description="Conv2d 3x3, stride 1, padding 0. Input (1,18,200,4), OC=16.",
+        description="Conv2d 3x3, stride 1, padding 0",
         inputs=inputs,
         outputs=outputs,
         scan_chain=scan_chain,
-        config={"N": N, "H": H, "W": W, "C": C, "OC": OC, "KH": KH, "KW": KW}
+        config=config
     )
 
 def generate_gemm_test(num_pes: int = 64) -> TestData:
@@ -177,24 +179,22 @@ def generate_gemm_test(num_pes: int = 64) -> TestData:
         "C": C.numpy()
     }
 
-    # Scan Chain Config
-    # For GEMM, we might use a systolic array configuration?
-    # Or just independent PEs computing blocks?
-    # For this data generation, we just provide the data and a default scan chain.
-    # The mapping logic (how A/B are split) depends on the simulator/compiler.
-    # We provide unique IDs so the testbench can load data to any PE.
-
     scan_chain = []
     for i in range(num_pes):
         cfg = ScanChainConfig(
-            ps_id=i,
-            pd_id=i,
-            pli_id=i,
-            plo_id=i,
-            route_mode=PERouterMode.PLI_FROM_BUS_PLO_TO_BUS,
-            enable=True
+            ps_id=i, pd_id=i, pli_id=i, plo_id=i,
+            route_mode=PERouterMode.PLI_FROM_BUS_PLO_TO_BUS, enable=True
         )
         scan_chain.append(cfg.pack())
+
+    config = {
+        "mode": "gemm",
+        "M": M,
+        "N": N,
+        "K": K,
+        "partial_sum_zero": False,
+        "seed": 123
+    }
 
     return TestData(
         name="gemm_32x32x32",
@@ -202,14 +202,18 @@ def generate_gemm_test(num_pes: int = 64) -> TestData:
         inputs=inputs,
         outputs=outputs,
         scan_chain=scan_chain,
-        config={"M": M, "N": N, "K": K}
+        config=config
     )
 
 def main():
     parser = argparse.ArgumentParser(description="Generate NoC/PE simulation test data")
     parser.add_argument("--output-dir", type=str, default="output/noc_test_data", help="Directory to save test data")
     parser.add_argument("--num-pes", type=int, default=64, help="Total number of PEs")
+    parser.add_argument("--seed", type=int, default=123, help="Random seed")
     args = parser.parse_args()
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
 
     output_path = Path(args.output_dir)
 
