@@ -47,3 +47,4 @@ node_modules/
 
 design/**/data/
 libs/
+**/__pycache__/
