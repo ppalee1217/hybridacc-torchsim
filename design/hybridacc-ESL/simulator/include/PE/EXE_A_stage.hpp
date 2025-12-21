@@ -103,7 +103,7 @@ public:
           pli("pli"), plo("plo"),
           vaddu("vaddu"), PR("PR")
     {
-        DEBUG_PE_MSG("[Create] EXE_A_Stage");
+        DEBUG_MSG("[Create] EXE_A_Stage", DEBUG_LEVEL_PE_STAGE);
 
         // Sequential process
         SC_CTHREAD(seq_process, clk.pos());
@@ -275,10 +275,10 @@ private:
             s1_reg1.write(s1_reg1_next.read());
             s2_reg.write(s2_reg_next.read());
 
-            DEBUG_PE_MSG("[EXE_A_Stage] Clocked: State=" << state_reg.read()
+            DEBUG_MSG("[EXE_A_Stage] Clocked: State=" << state_reg.read()
                 << " -> " << state_reg_next.read()
                 << " Inst=0x" << std::hex << decode_reg.read().inst << std::dec
-                );
+                , DEBUG_LEVEL_PE_STAGE);
 
             wait();
         }
@@ -296,13 +296,13 @@ private:
             result.next_decode_s1 = pe_decode_signals_t();
             result.next_decode_s2 = pe_decode_signals_t();
 
-            DEBUG_PE_MSG("[EXE_A_stage] New instruction, vmul_data = " << vmul_out_in.read() );
+            DEBUG_MSG("[EXE_A_stage] New instruction, vmul_data = " << vmul_out_in.read(), DEBUG_LEVEL_PE_STAGE);
 
             // 檢查 HALT
             if (result.next_decode.halt) {
                 result.next_halted = true;
                 result.next_state = EXE_A_State::IDLE;
-                DEBUG_PE_MSG("[EXE_A_stage] HALT detected");
+                DEBUG_MSG("[EXE_A_stage] HALT detected", DEBUG_LEVEL_PE_STAGE);
             }
             // PLI-PLO 操作 (VPSUM/VPSUMR)
             else if (result.next_decode.pli_plo_operation) {
@@ -314,22 +314,22 @@ private:
                 }else{
                     result.next_state = EXE_A_State::WAIT_PLI;
                 }
-                DEBUG_PE_MSG("[EXE_A_stage] Start PLI-PLO operation");
+                DEBUG_MSG("[EXE_A_stage] Start PLI-PLO operation", DEBUG_LEVEL_PE_STAGE);
             }
             // VMAC 模式 (vaddu_mode==0 表示 ACCUMULATE)
             else if (result.next_decode.vaddu_en && result.next_decode.vaddu_mode == 0) {
                 result.next_state = EXE_A_State::VMAC_S1;
-                DEBUG_PE_MSG("[EXE_A_stage] Start VMAC mode (Pipeline Active)");
+                DEBUG_MSG("[EXE_A_stage] Start VMAC mode (Pipeline Active)", DEBUG_LEVEL_PE_STAGE);
             }
             // Normal 模式 (VMUL/VMULR 等, vaddu_mode==1 表示 ADD)
             else if (result.next_decode.vaddu_en) {
                 result.next_state = EXE_A_State::NORMAL_MODE;
-                DEBUG_PE_MSG("[EXE_A_stage] Start Normal mode (1-stage)");
+                DEBUG_MSG("[EXE_A_stage] Start Normal mode (1-stage)", DEBUG_LEVEL_PE_STAGE);
             }
             // 其他指令 (只操作 PR,不需要運算)
             else {
                 result.next_state = EXE_A_State::IDLE;
-                DEBUG_PE_MSG("[EXE_A_stage] Execute PR-only operation");
+                DEBUG_MSG("[EXE_A_stage] Execute PR-only operation", DEBUG_LEVEL_PE_STAGE);
             }
         }
     }
@@ -355,18 +355,18 @@ private:
                     result.next_decode = next_decode;
                     result.next_vmul_data = vmul_out_in.read();
                     result.next_state = EXE_A_State::VMAC_S1;
-                    DEBUG_PE_MSG("[EXE_A_stage] Pipeline: Accept new VMAC");
+                    DEBUG_MSG("[EXE_A_stage] Pipeline: Accept new VMAC", DEBUG_LEVEL_PE_STAGE);
                 } else {
                     // Next is NOT VMAC, start draining
                     result.next_decode = pe_decode_signals_t(); // Bubble
                     result.next_state = EXE_A_State::VMAC_S2;
-                    DEBUG_PE_MSG("[EXE_A_stage] Pipeline: Next not VMAC, drain (Go to S2)");
+                    DEBUG_MSG("[EXE_A_stage] Pipeline: Next not VMAC, drain (Go to S2)", DEBUG_LEVEL_PE_STAGE);
                 }
             } else {
                 // No valid input, start draining
                 result.next_decode = pe_decode_signals_t(); // Bubble
                 result.next_state = EXE_A_State::VMAC_S2;
-                DEBUG_PE_MSG("[EXE_A_stage] Pipeline: No input, drain (Go to S2)");
+                DEBUG_MSG("[EXE_A_stage] Pipeline: No input, drain (Go to S2)", DEBUG_LEVEL_PE_STAGE);
             }
         }
     }
@@ -389,7 +389,7 @@ private:
             result.next_decode = pe_decode_signals_t();
 
             result.next_state = EXE_A_State::VMAC_S3;
-            DEBUG_PE_MSG("[EXE_A_stage] VMAC S2: Draining...");
+            DEBUG_MSG("[EXE_A_stage] VMAC S2: Draining...", DEBUG_LEVEL_PE_STAGE);
         }
     }
 
@@ -404,7 +404,7 @@ private:
             result.next_decode_s2 = decode_s1_reg.read(); // Should be bubble
 
             result.next_state = EXE_A_State::IDLE;
-            DEBUG_PE_MSG("[EXE_A_stage] VMAC S3: Draining complete, go IDLE");
+            DEBUG_MSG("[EXE_A_stage] VMAC S3: Draining complete, go IDLE", DEBUG_LEVEL_PE_STAGE);
         }
     }
 
@@ -414,7 +414,7 @@ private:
             // Normal mode 只需要一個週期 (vector add 是 combinational)
             // 結果會在 PR control 中處理
             result.next_state = EXE_A_State::IDLE;
-            DEBUG_PE_MSG("[EXE_A_stage] Normal mode complete");
+            DEBUG_MSG("[EXE_A_stage] Normal mode complete", DEBUG_LEVEL_PE_STAGE);
         }
     }
 
@@ -425,7 +425,7 @@ private:
             captured_pli_data.fromUint64(pli.data_in.read());
             result.next_pli_data = captured_pli_data;
             result.next_state = EXE_A_State::EXEC_PLI_VADDU;
-            DEBUG_PE_MSG("[EXE_A_stage] PLI data captured: 0x" << std::hex << pli.data_in.read());
+            DEBUG_MSG("[EXE_A_stage] PLI data captured: 0x" << std::hex << pli.data_in.read(), DEBUG_LEVEL_PE_STAGE);
         }
     }
 
@@ -436,7 +436,7 @@ private:
             v_fp16_t vaddu_out = vaddu_result_sig.read();
             result.next_vaddu_result = vaddu_out;
             result.next_state = EXE_A_State::WAIT_PLO;
-            DEBUG_PE_MSG("[EXE_A_stage] PLI VADDU complete: " << vaddu_out);
+            DEBUG_MSG("[EXE_A_stage] PLI VADDU complete: " << vaddu_out, DEBUG_LEVEL_PE_STAGE);
         }
     }
 
@@ -444,7 +444,7 @@ private:
     void handle_wait_plo_state(StateTransitionResult& result) {
         if (plo.ready_in.read()) {
             result.next_state = EXE_A_State::IDLE;
-            DEBUG_PE_MSG("[EXE_A_stage] PLO handshake done");
+            DEBUG_MSG("[EXE_A_stage] PLO handshake done", DEBUG_LEVEL_PE_STAGE);
         }
     }
 

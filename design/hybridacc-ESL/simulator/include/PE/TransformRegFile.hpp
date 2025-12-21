@@ -48,7 +48,7 @@ SC_MODULE(TransformRegFile) {
               incr_vcounter("incr_vcounter"),
               vcounter(0)
         {
-            DEBUG_PE_MSG("[Create] TransformRegFile");
+            DEBUG_MSG("[Create] TransformRegFile", DEBUG_LEVEL_PE_COMPONENTS);
             SC_CTHREAD(sequential_process, clk.pos());
             reset_signal_is(reset_n, false);
             SC_METHOD(combinational_process);
@@ -69,7 +69,7 @@ SC_MODULE(TransformRegFile) {
             return vt;
         }
         void shift(int shift_mode){  // 修正：移除多餘的類名限定符
-            DEBUG_PE_MSG("[TransformRegFile] Shift operation with mode " << shift_mode);
+            DEBUG_MSG("[TransformRegFile] Shift operation with mode " << shift_mode, DEBUG_LEVEL_PE_COMPONENTS);
             int maskBits = 0;
             switch(shift_mode){
                 case 0: // K3 -> 011011011011b (11 ~ 0)

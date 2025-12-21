@@ -38,7 +38,7 @@ public:
           pc_out("pc_out"),
           jump("jump")
     {
-        DEBUG_PE_MSG("[Create] LoopController");
+        DEBUG_MSG("[Create] LoopController", DEBUG_LEVEL_PE_COMPONENTS);
         SC_CTHREAD(sequential_process, clk.pos());
         reset_signal_is(reset_n, false);
         SC_METHOD(combinational_process);
@@ -81,8 +81,8 @@ public:
             } else {
                 jump.write(false);
             }
-            DEBUG_PE_MSG("[LoopController] COMB: LOOPEND detected. Remaining=" << remaining_sig.read()
-                      << ", Jump=" << (jump.read() ? "Yes" : "No"));
+            DEBUG_MSG("[LoopController] COMB: LOOPEND detected. Remaining=" << remaining_sig.read()
+                      << ", Jump=" << (jump.read() ? "Yes" : "No"), DEBUG_LEVEL_PE_COMPONENTS);
         } else {
             jump.write(false);
         }

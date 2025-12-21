@@ -43,16 +43,17 @@ class TestData:
     outputs: Dict[str, np.ndarray]
     scan_chain: List[int]  # Packed scan chain data for each PE
     config: Dict[str, Any] = field(default_factory=dict)
+    datatype: np.dtype = np.float16
 
     def save(self, output_dir: Path):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save tensors as .bin (raw float32)
+        # Save tensors as .bin (raw float16)
         for name, data in self.inputs.items():
-            data.astype(np.float32).tofile(output_dir / f"input_{name}.bin")
+            data.astype(self.datatype).tofile(output_dir / f"input_{name}.bin")
         for name, data in self.outputs.items():
-            data.astype(np.float32).tofile(output_dir / f"output_{name}.bin")
+            data.astype(self.datatype).tofile(output_dir / f"output_{name}.bin")
 
         # Save scan chain as .bin (int32)
         np.array(self.scan_chain, dtype=np.int32).tofile(output_dir / "scan_chain.bin")
@@ -76,7 +77,7 @@ class TestData:
 
         print(f"Test case '{self.name}' saved to {output_dir}")
 
-def generate_conv2d_test(num_pes: int = 64) -> TestData:
+def generate_conv2d_test(num_pes: int = 64, num_bus: int = 4, stride = 1) -> TestData:
     """
     Generate Conv2d test case.
     Spec:
@@ -122,12 +123,27 @@ def generate_conv2d_test(num_pes: int = 64) -> TestData:
     }
 
     scan_chain = []
-    for i in range(num_pes):
-        cfg = ScanChainConfig(
-            ps_id=i, pd_id=i, pli_id=i, plo_id=i,
-            route_mode=PERouterMode.PLI_FROM_BUS_PLO_TO_BUS, enable=True
-        )
-        scan_chain.append(cfg.pack())
+
+    def get_route_mode(row_idx: int, kh: int) -> int:
+        if row_idx == 0: # First row
+            return PERouterMode.PLI_FROM_BUS_PLO_TO_LN
+        elif row_idx == kh-1: # Last row
+            return PERouterMode.PLI_FROM_LN_PLO_TO_BUS
+        else: # Middle rows
+            return PERouterMode.PLI_FROM_LN_PLO_TO_LN
+
+    num_pes_per_bus = num_pes // num_bus
+    for i in range(num_bus):
+        for j in range(num_pes_per_bus):
+            cfg = ScanChainConfig(
+                ps_id=i,
+                pd_id=(i+j)*stride,
+                pli_id=j if i==0 else 63,
+                plo_id=j if i==KH-1 else 63,
+                route_mode=get_route_mode(i, KH),
+                enable=True if i<KH else False
+            )
+            scan_chain.append(cfg.pack())
 
     config = {
         "mode": "conv2d",
@@ -209,6 +225,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate NoC/PE simulation test data")
     parser.add_argument("--output-dir", type=str, default="output/noc_test_data", help="Directory to save test data")
     parser.add_argument("--num-pes", type=int, default=64, help="Total number of PEs")
+    parser.add_argument("--num-bus", type=int, default=4, help="Total number of buses")
     parser.add_argument("--seed", type=int, default=123, help="Random seed")
     args = parser.parse_args()
 
@@ -218,7 +235,7 @@ def main():
     output_path = Path(args.output_dir)
 
     # Generate Conv2d
-    conv_test = generate_conv2d_test(args.num_pes)
+    conv_test = generate_conv2d_test(args.num_pes, args.num_bus)
     conv_test.save(output_path / "conv2d")
 
     # Generate GEMM

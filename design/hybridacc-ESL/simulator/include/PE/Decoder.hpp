@@ -26,7 +26,7 @@ public:
         inst_in("inst_in"),
         decode_signals_out("decode_signals_out")
     {
-        DEBUG_PE_MSG("[Create] Decoder");
+        DEBUG_MSG("[Create] Decoder", DEBUG_LEVEL_PE_COMPONENTS);
         SC_METHOD(combinational_process);
         sensitive << inst_in;
     }

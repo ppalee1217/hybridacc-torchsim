@@ -52,8 +52,6 @@ public:
           fifo_depth(depth),
           fifo_name(name)  // Store the name
     {
-        DEBUG_MSG("[Create] FIFO '" << name << "' with depth=" << fifo_depth);
-
         // Initialize storage
         storage.resize(fifo_depth);
         for (int i = 0; i < fifo_depth; i++) {
@@ -171,18 +169,11 @@ private:
             if (push.read() && count_reg.read() < fifo_depth) {
                 int wr_ptr = write_ptr_reg.read();
                 storage[wr_ptr] = data_in.read();
-
-                DEBUG_MSG("[FIFO:" << fifo_name << "] Push: data=0x" << std::hex << data_in.read() << std::dec
-                          << " ptr=" << wr_ptr
-                          << " count_after=" << count_next.read());
             }
 
             // Handle pop operation (just logging)
             if (pop.read() && count_reg.read() > 0) {
                 int rd_ptr = read_ptr_reg.read();
-                DEBUG_MSG("[FIFO:" << fifo_name << "] Pop: data=0x" << std::hex << storage[rd_ptr] << std::dec
-                          << " ptr=" << rd_ptr
-                          << " count_after=" << count_next.read());
             }
 
             wait();

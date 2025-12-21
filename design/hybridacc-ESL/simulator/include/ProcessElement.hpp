@@ -55,7 +55,7 @@ public:
           router_pe_pli_sig("router_pe_pli_sig"),
           router_pe_plo_sig("router_pe_plo_sig")
     {
-        DEBUG_PE_MSG("[Create] ProcessElement");
+        DEBUG_MSG("[Create] ProcessElement", DEBUG_LEVEL_PE_TOP);
 
         SC_CTHREAD(main_thread, clk.pos());
         reset_signal_is(reset_n, false);
@@ -308,13 +308,13 @@ public:
         // Check router control signals
         if (router_pe_reset.read()) {
             // Reset all stages, keep pe_running state
-            DEBUG_PE_MSG("[ProcessElement] RESET signal detected");
+            DEBUG_MSG("[ProcessElement] RESET signal detected", DEBUG_LEVEL_PE_TOP);
             stage_reset_n = true;
         }
 
         if (router_pe_start.read() && !pe_running_current) {
             // Start PE: reset + set running
-            DEBUG_PE_MSG("[ProcessElement] START signal detected");
+            DEBUG_MSG("[ProcessElement] START signal detected", DEBUG_LEVEL_PE_TOP);
             stage_reset_n = true;
             pe_running_n = true;
             cycles_n = 0;
@@ -323,7 +323,7 @@ public:
 
         if (router_pe_program.read() && pe_running_current) {
             // Stop PE
-            DEBUG_PE_MSG("[ProcessElement] PROGRAM signal detected");
+            DEBUG_MSG("[ProcessElement] PROGRAM signal detected", DEBUG_LEVEL_PE_TOP);
             pe_running_n = false;
         }
 
@@ -333,7 +333,7 @@ public:
                                  exe_a_halted_sig.read();
 
         if (all_stages_halted && pe_running_current) {
-            DEBUG_PE_MSG("[ProcessElement] All stages halted, stopping PE");
+            DEBUG_MSG("[ProcessElement] All stages halted, stopping PE", DEBUG_LEVEL_PE_TOP);
             pe_running_n = false;
         }
 
@@ -344,16 +344,16 @@ public:
 
         if (exe_a_has_valid && !exe_a_stalled && !exe_a_downstream_stalled && pe_running_current) {
             instr_count_n = instr_count_current + 1;
-            DEBUG_PE_MSG("[ProcessElement] Instruction completed: " << instr_count_n
-                << " Inst: 0x" << std::hex << exe_m_to_exe_a_signals.read().inst << std::dec);
+            DEBUG_MSG("[ProcessElement] Instruction completed: " << instr_count_n
+                << " Inst: 0x" << std::hex << exe_m_to_exe_a_signals.read().inst << std::dec, DEBUG_LEVEL_PE_TOP);
         }
 
         // Update cycle count
         if (pe_running_current) {
             cycles_n = cycles_current + 1;
             if (cycles_n % 10 == 0) {
-                DEBUG_PE_MSG("[ProcessElement] Running: cycle=" << cycles_n
-                          << ", instr_count=" << instr_count_n);
+                DEBUG_MSG("[ProcessElement] Running: cycle=" << cycles_n
+                          << ", instr_count=" << instr_count_n, DEBUG_LEVEL_PE_TOP);
             }
         }
 
@@ -382,19 +382,19 @@ public:
 
         if (pipeline_stalled && pe_running_reg.read()) {
             if (exe_m_stall_dl.read()) {
-                DEBUG_PE_MSG("[ProcessElement] Stall: DataLoader busy");
+                DEBUG_MSG("[ProcessElement] Stall: DataLoader busy", DEBUG_LEVEL_PE_TOP);
             }
             if (exe_m_stall_ps.read()) {
-                DEBUG_PE_MSG("[ProcessElement] Stall: Port Static waiting");
+                DEBUG_MSG("[ProcessElement] Stall: Port Static waiting", DEBUG_LEVEL_PE_TOP);
             }
             if (exe_m_stall_pd.read()) {
-                DEBUG_PE_MSG("[ProcessElement] Stall: Port Dynamic blocked");
+                DEBUG_MSG("[ProcessElement] Stall: Port Dynamic blocked", DEBUG_LEVEL_PE_TOP);
             }
             if (exe_a_stall_adder.read()) {
-                DEBUG_PE_MSG("[ProcessElement] Stall: VADDU in progress");
+                DEBUG_MSG("[ProcessElement] Stall: VADDU in progress", DEBUG_LEVEL_PE_TOP);
             }
             if (exe_a_stall_port_io.read()) {
-                DEBUG_PE_MSG("[ProcessElement] Stall: Local Network PLI/PLO blocked");
+                DEBUG_MSG("[ProcessElement] Stall: Local Network PLI/PLO blocked", DEBUG_LEVEL_PE_TOP);
             }
         }
     }
@@ -411,8 +411,6 @@ public:
         wait(); // Wait for first clock edge
 
         while (true) {
-            DEBUG_PE_MSG("[ProcessElement] ======= Clock Edge =======");
-
             // On each clock edge, update registers with next values
             pe_running_reg.write(pe_running_next.read());
             cycles_reg.write(cycles_next.read());

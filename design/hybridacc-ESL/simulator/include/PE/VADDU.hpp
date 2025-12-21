@@ -21,7 +21,7 @@ SC_MODULE(VADDU) {
               op2("op2"),
               result("result")
         {
-            DEBUG_PE_MSG("[Create] VADDU");
+            DEBUG_MSG("[Create] VADDU", DEBUG_LEVEL_PE_COMPONENTS);
             SC_METHOD(combinational_process);
             sensitive << op1 << op2;
         }
@@ -33,9 +33,9 @@ SC_MODULE(VADDU) {
                 res[i] = fp16_add(op1.read()[i], op2.read()[i]);
             }
             result.write(res);
-            DEBUG_PE_MSG("[VADDU] op1=" << op1.read()
+            DEBUG_MSG("[VADDU] op1=" << op1.read()
                       << " op2=" << op2.read()
-                      << " result=" << res );
+                      << " result=" << res, DEBUG_LEVEL_PE_COMPONENTS);
         }
 };
 

@@ -5,38 +5,11 @@
 #include <systemc>
 #include <fstream>
 #include <cstdint>
+#include "tb_utils.hpp"
 
 using namespace hybridacc::test;
 
 const int PE_GAP_CYCLES = 1;
-
-// Helper function to convert fp16 to float
-float fp16_to_float(uint16_t fp16_val) {
-    uint32_t sign = (fp16_val >> 15) & 0x1;
-    uint32_t exponent = (fp16_val >> 10) & 0x1F;
-    uint32_t fraction = fp16_val & 0x3FF;
-
-    if (exponent == 0 && fraction == 0) {
-        return sign ? -0.0f : 0.0f; // Zero
-    } else if (exponent == 0x1F) {
-        if (fraction == 0) {
-            return sign ? -INFINITY : INFINITY; // Infinity
-        } else {
-            return NAN; // NaN
-        }
-    }
-
-    // Normalize exponent
-    int32_t exp_unbiased = static_cast<int32_t>(exponent) - 15 + 127; // Adjust bias from 15 to 127
-
-    // Normalize fraction
-    uint32_t mantissa = fraction << 13; // Shift to align with float mantissa
-
-    uint32_t float_bits = (sign << 31) | (exp_unbiased << 23) | mantissa;
-    float result;
-    std::memcpy(&result, &float_bits, sizeof(float));
-    return result;
-}
 
 // Helper function to read binary file
 std::vector<uint8_t> read_binary_file(const std::string& filename) {

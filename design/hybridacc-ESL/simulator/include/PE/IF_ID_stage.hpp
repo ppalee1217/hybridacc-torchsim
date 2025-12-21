@@ -58,7 +58,7 @@ public:
           decoder("decoder"),
           loops("loops")
     {
-        DEBUG_PE_MSG("[Create] IF_ID_Stage");
+        DEBUG_MSG("[Create] IF_ID_Stage", DEBUG_LEVEL_PE_STAGE);
         SC_CTHREAD(main_thread, clk.pos());
         reset_signal_is(reset_n, false);
 
@@ -212,7 +212,7 @@ public:
             // Check for halt instruction
             if (decode_from_decoder.halt) {
                 halted_n = true;
-                DEBUG_PE_MSG("[IF_ID_Stage] HALT instruction detected at PC=" << pc_current);
+                DEBUG_MSG("[IF_ID_Stage] HALT instruction detected at PC=" << pc_current, DEBUG_LEVEL_PE_STAGE);
             }
 
             // Update PC
@@ -288,11 +288,11 @@ public:
         while (true) {
             // 🔧 修正：顯示當前 cycle 的 PC 和對應的 decoder 輸出
             pe_decode_signals_t current_decode = decoder_decode_signals_out_sig.read();
-            DEBUG_PE_MSG("[IF_ID_Stage] Clocked: PC=0x" << std::hex << pc_reg.read()
+            DEBUG_MSG("[IF_ID_Stage] Clocked: PC=0x" << std::hex << pc_reg.read()
                       << " Inst=0x" << current_decode.inst << std::dec
                       << " Halted=" << halted_reg.read()
                       << " Valid=" << valid_reg.read()
-                      << (stall_from_downstream.read() ? " (Stalled)" : ""));
+                      << (stall_from_downstream.read() ? " (Stalled)" : ""), DEBUG_LEVEL_PE_STAGE);
 
             // On each clock edge, update registers with next values
             pc_reg.write(pc_next.read());

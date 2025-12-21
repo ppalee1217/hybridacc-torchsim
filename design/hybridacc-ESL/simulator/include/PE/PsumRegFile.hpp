@@ -49,7 +49,7 @@ SC_MODULE(PsumRegFile) {
               clear_pcounter("clear_pcounter"),
               incr_pcounter("incr_pcounter")
         {
-            DEBUG_PE_MSG("[Create] PsumRegFile");
+            DEBUG_MSG("[Create] PsumRegFile", DEBUG_LEVEL_PE_COMPONENTS);
             SC_CTHREAD(sequential_process, clk.pos());
             reset_signal_is(reset_n, false);
             SC_METHOD(combinational_process);
@@ -109,10 +109,10 @@ SC_MODULE(PsumRegFile) {
                         write.write(!write.read());
                         int write_pid = (use_pcounter.read()) ? pcounter.read() : pid.read();
                         if (mode.read() == 0) { // scalar mode
-                            DEBUG_PE_MSG("[PsumRegFile] Write P[" << write_pid << "] = " << std::hex << p_in.read() << std::dec);
+                            DEBUG_MSG("[PsumRegFile] Write P[" << write_pid << "] = " << std::hex << p_in.read() << std::dec, DEBUG_LEVEL_PE_COMPONENTS);
                             setP(write_pid, p_in.read());
                         } else if (mode.read() == 1) { // vector 64-bit mode
-                            DEBUG_PE_MSG("[PsumRegFile] Write VP64[" << write_pid << "] = " << std::hex << vp_in.read() << std::dec);
+                            DEBUG_MSG("[PsumRegFile] Write VP64[" << write_pid << "] = " << std::hex << vp_in.read() << std::dec, DEBUG_LEVEL_PE_COMPONENTS);
                             setVP64(write_pid, vp_in.read());
                         }
                     }
@@ -145,7 +145,7 @@ SC_MODULE(PsumRegFile) {
             int read_pid = use_pcounter.read() ? pcounter.read() : pid.read();
 
             if (mode.read() == 0){
-                DEBUG_PE_MSG("[PsumRegFile] Read P[" << read_pid << "] = " << std::hex << getP(read_pid) << std::dec);
+                DEBUG_MSG("[PsumRegFile] Read P[" << read_pid << "] = " << std::hex << getP(read_pid) << std::dec, DEBUG_LEVEL_PE_COMPONENTS);
                 p_out.write(getP(read_pid));  // 修正：添加缺少的參數
                 vp_out.write(v_fp16_t()); // clear vector output in scalar mode
             } else if (mode.read() == 1){

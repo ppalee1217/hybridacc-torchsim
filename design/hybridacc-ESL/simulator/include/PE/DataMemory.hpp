@@ -35,7 +35,7 @@ SC_MODULE(DataMemory) {
               dm_read_data("dm_read_data"),
               mem(512 / sizeof(uint8_t), 0)
         {
-            DEBUG_PE_MSG("[Create] DataMemory");
+            DEBUG_MSG("[Create] DataMemory", DEBUG_LEVEL_PE_COMPONENTS);
             SC_CTHREAD(sequential_process, clk.pos());
             reset_signal_is(reset_n, false);
             SC_METHOD(combinational_process);
@@ -90,8 +90,12 @@ SC_MODULE(DataMemory) {
 
                 // Write operation
                 if (dm_write_en.read()) {
-                    // DEBUG_PE_MSG("[Write] Address: " << dm_write_addr.read() <<
-                    //            " Data: 0x" << std::hex << dm_write_data.read() << std::dec);
+                    DEBUG_MSG("[DataMemory] Writing DM["
+                              << dm_write_addr.read() << "] = 0x"
+                              << std::hex << std::setw(16) << std::setfill('0') << dm_write_data.read()
+                              << " with mask 0x"
+                              << std::hex << std::setw(2) << std::setfill('0') << static_cast<uint16_t>(dm_write_mask.read())
+                              << std::dec, DEBUG_LEVEL_PE_COMPONENTS);
                     writeWord(dm_write_addr.read(), dm_write_data.read(), dm_write_mask.read());
                 }
                 wait();

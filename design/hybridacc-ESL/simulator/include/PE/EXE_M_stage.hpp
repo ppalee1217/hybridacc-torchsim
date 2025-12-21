@@ -68,7 +68,7 @@ public:
           DL("DL"),
           DM("DM")
     {
-        DEBUG_PE_MSG("[Create] EXE_M_Stage");
+        DEBUG_MSG("[Create] EXE_M_Stage", DEBUG_LEVEL_PE_STAGE);
         SC_CTHREAD(main_thread, clk.pos());
         reset_signal_is(reset_n, false);
 
@@ -483,13 +483,13 @@ public:
             valid_reg.write(valid_next.read());
             halted_reg.write(halted_next.read());
 
-            DEBUG_PE_MSG("[EXE_M_Stage] Clocked: Valid=" << valid_reg.read()
+            DEBUG_MSG("[EXE_M_Stage] Clocked: Valid=" << valid_reg.read()
                       << " Halted=" << halted_reg.read()
                       << " Inst=0x" << std::hex << decode_signals_reg.read().inst << std::dec
                       << " Stall=" << stage_stall_internal.read()
                       << " TR.inc= " << tr_incr_vcounter_sig.read()
                       << " DL.next= " << dl_next_sig.read()
-                      << " VMUL.result= " << vmul_out_out.read());
+                      << " VMUL.result= " << vmul_out_out.read(), DEBUG_LEVEL_PE_STAGE);
 
             wait(); // Wait for next clock edge
         }

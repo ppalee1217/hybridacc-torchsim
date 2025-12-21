@@ -3,6 +3,7 @@
 #include <cassert>
 #include <vector>
 #include "NetworkOnChip.hpp"
+#include "NoC/NoCRouter.hpp" // Include for router_req_t/resp_t
 #include "utils.hpp"
 
 using namespace hybridacc;
@@ -19,11 +20,10 @@ public:
     // NoC Router interface signals
     sc_signal<bool> command_mode;
     sc_signal<sc_uint<32>> command_data;
-    sc_signal<bool> en;
-    sc_signal<bool> wen;
-    sc_signal<sc_uint<10>> addr_sig;
-    sc_signal<sc_biguint<256>> data_in_sig;
-    sc_signal<sc_biguint<256>> data_out_sig;
+
+    // New Valid-Ready Signals
+    VRDSIG<noc::router_req_t> req_sig;
+    VRDSIG<noc::router_resp_t> resp_sig;
 
     // NoC instance
     NetworkOnChip noc;
@@ -40,11 +40,8 @@ public:
           reset_n("reset_n"),
           command_mode("command_mode"),
           command_data("command_data"),
-          en("en"),
-          wen("wen"),
-          addr_sig("addr_sig"),
-          data_in_sig("data_in_sig"),
-          data_out_sig("data_out_sig"),
+          req_sig("req_sig"),
+          resp_sig("resp_sig"),
           noc("NoC_DUT", NUM_PORTS, NUM_PES_PER_PORT)
     {
 
@@ -58,13 +55,14 @@ public:
         noc.reset_n(reset_n);
         noc.command_mode(command_mode);
         noc.command_data(command_data);
-        noc.en(en);
-        noc.wen(wen);
-        noc.addr(addr_sig);
-        noc.data_in(data_in_sig);
-        noc.data_out(data_out_sig);
+
+        // Connect Valid-Ready Interfaces
+        connect_vr_signals(noc.req_in, req_sig);
+        connect_vr_signals(noc.resp_out, resp_sig);
 
         SC_THREAD(test_main);
+        SC_THREAD(response_sink); // Add sink to accept responses
+        sensitive << clk.posedge_event();
     }
 
     void dump_noc_state() {
@@ -78,15 +76,32 @@ public:
         reset_n.write(false);
         command_mode.write(false);
         command_data.write(0);
-        en.write(false);
-        wen.write(false);
-        addr_sig.write(0);
-        data_in_sig.write(0);
+
+        // Reset handshake signals
+        noc::router_req_t req;
+        req.data = 0;
+        req.addr = 0;
+        req.is_w = false;
+        req_sig.data_sig.write(req);
+        req_sig.valid_sig.write(false);
+        resp_sig.ready_sig.write(true); // Always ready to receive
 
         wait(20, SC_NS);
         reset_n.write(true);
         wait(10, SC_NS);
         std::cout << "[TB] Reset complete" << std::endl;
+    }
+
+    // Always accept responses
+    void response_sink() {
+        resp_sig.ready_sig.write(true);
+        while (true) {
+            wait();
+            if (resp_sig.valid_sig.read()) {
+                // Optional: Log response
+                // std::cout << "[TB] Received Response: " << resp_sig.data_sig.read() << std::endl;
+            }
+        }
     }
 
     void send_command(message_command_t cmd, uint32_t param = 0) {
@@ -238,34 +253,46 @@ public:
         std::cout << "=== Test 10: NoC Data Transfer ===" << std::endl;
 
         std::cout << "[TB] Writing first data..." << std::endl;
-        en.write(true);
-        wen.write(true);
-        addr_sig.write(0x000);
 
         sc_biguint<256> test_data_val = 0;
         test_data_val.range(63, 0) = 0x123456789ABCDEF0ULL;
-        data_in_sig.write(test_data_val);
+
+        noc::router_req_t req1;
+        req1.data = test_data_val;
+        req1.addr = 0x000;
+        req1.is_w = true;
+
+        req_sig.data_sig.write(req1);
+        req_sig.valid_sig.write(true);
+
+        do {
+            wait(clk.posedge_event());
+        } while (req_sig.ready_sig.read() == false);
+        req_sig.valid_sig.write(false);
 
         std::cout << "[TB] Data value: 0x" << std::hex << test_data_val.range(63, 0).to_uint64() << std::dec << std::endl;
 
-        wait(10, SC_NS);
-        std::cout << "[TB] Disabling first write..." << std::endl;
-        en.write(false);
         wait(10, SC_NS);
 
         std::cout << "[TB] Writing second data..." << std::endl;
-        en.write(true);
-        wen.write(true);
-        addr_sig.write(0x000);
 
         test_data_val.range(63, 0) = 0xFEDCBA9876543210ULL;
-        data_in_sig.write(test_data_val);
+
+        noc::router_req_t req2;
+        req2.data = test_data_val;
+        req2.addr = 0x000;
+        req2.is_w = true;
+
+        req_sig.data_sig.write(req2);
+        req_sig.valid_sig.write(true);
+
+        do {
+            wait(clk.posedge_event());
+        } while (req_sig.ready_sig.read() == false);
+        req_sig.valid_sig.write(false);
 
         std::cout << "[TB] Data value: 0x" << std::hex << test_data_val.range(63, 0).to_uint64() << std::dec << std::endl;
 
-        wait(10, SC_NS);
-        std::cout << "[TB] Disabling second write..." << std::endl;
-        en.write(false);
         wait(10, SC_NS);
 
         std::cout << "[TB] Test 10 cleanup done" << std::endl;

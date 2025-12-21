@@ -9,29 +9,37 @@
 #include <type_traits>
 #include <systemc>
 
-// DEBUG_UTILS 現在由 CMake 控制
+// DEBUG Level 控制
+enum DebugLevel {
+    DEBUG_LEVEL_NONE = 0,
+    DEBUG_LEVEL_PE_COMPONENTS,
+    DEBUG_LEVEL_PE_STAGE,
+    DEBUG_LEVEL_PE_TOP,
+    DEBUG_LEVEL_NOC_COMPONENTS,
+    DEBUG_LEVEL_NOC_TOP,
+    DEBUG_LEVEL_ALL,
+};
+
 #ifdef DEBUG_UTILS
-    #define DEBUG_MSG(msg) \
-        std::cout << "[Time]" <<  sc_time_stamp() << "[Debug] " << msg << std::endl;
-        //std::cout << "[" << __FILE__ << ":" << __LINE__ << "] " << msg << std::endl;
-#else
-    #define DEBUG_MSG(msg) do {} while(0)
-#endif
+    #ifndef DEBUG_LEVEL_MAX
+        #define DEBUG_LEVEL_MAX DEBUG_LEVEL_ALL
+    #endif
 
-// PE 專用的調試宏
-#ifdef DEBUG_PE
-    #define DEBUG_PE_MSG(msg) \
-        std::cout << "[Time]" <<  sc_time_stamp() << "[Debug-PE] " << msg << std::endl;
-#else
-    #define DEBUG_PE_MSG(msg) do {} while(0)
-#endif
+    #ifndef DEBUG_LEVEL_MIN
+        #define DEBUG_LEVEL_MIN DEBUG_LEVEL_NONE
+    #endif
 
-// NoC 專用的調試宏
-#ifdef DEBUG_NOC
-    #define DEBUG_NOC_MSG(msg) \
-        std::cout << "[Time]" <<  sc_time_stamp() << "[Debug-NoC] " << msg << std::endl;
+    #define DEBUG_MSG(msg, level)                                     \
+        do {                                                          \
+            if ((level) <= DEBUG_LEVEL_MAX &&                         \
+                (level) >= DEBUG_LEVEL_MIN) {                         \
+                std::cout << "[Debug] Time: " << sc_time_stamp()      \
+                          << " [" << this->name() << "] "          \
+                          << msg << std::endl;                        \
+            }                                                         \
+        } while (0)
 #else
-    #define DEBUG_NOC_MSG(msg) do {} while(0)
+    #define DEBUG_MSG(msg, level) do {} while (0)
 #endif
 
 // -----------------------------------------------------------------------------
@@ -84,31 +92,34 @@ fp16_t fp16_add(fp16_t a, fp16_t b);
 fp16_t fp16_mul(fp16_t a, fp16_t b);
 // -----------------------------------------------------------------------------
 
-struct noc_request_t {
-    uint64_t data; // 64 bits
-    uint16_t addr; // 9 bits
+template<typename DATA_TYPE, typename ADDR_TYPE>
+struct request_t {
+    DATA_TYPE data; // 64 bits
+    ADDR_TYPE addr; // 9 bits
     bool  is_w; // 0: read, 1: write
 
     // 相等運算符，SystemC 需要
-    bool operator==(const noc_request_t& other) const {
+    bool operator==(const request_t& other) const {
         return data == other.data && addr == other.addr && is_w == other.is_w;
     }
 
     // 輸出運算符，SystemC 訊號需要
-    friend std::ostream& operator<<(std::ostream& os, const noc_request_t& req) {
-        os << "noc_request_t{data=" << std::hex << req.data
+    friend std::ostream& operator<<(std::ostream& os, const request_t& req) {
+        os << "request_t{data=" << std::hex << req.data
            << ", addr=0x" << std::hex << req.addr
            << ", is_w=" << (req.is_w ? "write" : "read") << "}";
         return os;
     }
 
     // sc_trace for noc_request_t
-    friend void sc_trace(sc_core::sc_trace_file* tf, const noc_request_t& req, const std::string& name) {
+    friend void sc_trace(sc_core::sc_trace_file* tf, const request_t& req, const std::string& name) {
         sc_core::sc_trace(tf, req.data, name + ".data");
         sc_core::sc_trace(tf, req.addr, name + ".addr");
         sc_core::sc_trace(tf, req.is_w, name + ".is_w");
     }
 };
+
+typedef request_t<uint64_t, uint16_t> noc_request_t;
 
 // -----------------------------------------------------------------------------
 enum NOC_CHANNELS {
@@ -154,28 +165,32 @@ inline void sc_trace(sc_core::sc_trace_file* tf, const NOC_RESPONSE_STATUS& stat
 }
 
 // -----------------------------------------------------------------------------
-struct noc_response_t {
-    uint64_t data; // 64 bits
+
+template<typename DATA_TYPE>
+struct response_t {
+    DATA_TYPE data; // 64 bits
     NOC_RESPONSE_STATUS status; // response status
 
     // 相等運算符，SystemC 需要
-    bool operator==(const noc_response_t& other) const {
+    bool operator==(const response_t& other) const {
         return data == other.data && status == other.status;
     }
 
     // 輸出運算符，SystemC 訊號需要
-    friend std::ostream& operator<<(std::ostream& os, const noc_response_t& resp) {
-        os << "noc_response_t{data=" << std::hex << resp.data
+    friend std::ostream& operator<<(std::ostream& os, const response_t& resp) {
+        os << "response_t{data=" << std::hex << resp.data
            << ", status=" << static_cast<int>(resp.status) << "}";
         return os;
     }
 
-    // sc_trace for noc_response_t
-    friend void sc_trace(sc_core::sc_trace_file* tf, const noc_response_t& resp, const std::string& name) {
+    // sc_trace for response_t
+    friend void sc_trace(sc_core::sc_trace_file* tf, const response_t& resp, const std::string& name) {
         sc_core::sc_trace(tf, resp.data, name + ".data");
         sc_core::sc_trace(tf, static_cast<int>(resp.status), name + ".status");
     }
 };
+
+typedef response_t<uint64_t> noc_response_t;
 
 // -----------------------------------------------------------------------------
 struct pe_decode_signals_t {

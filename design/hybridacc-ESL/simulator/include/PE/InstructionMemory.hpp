@@ -33,7 +33,7 @@ SC_MODULE(InstructionMemory) {
               im_read_data("im_read_data"),
               mem(512 / sizeof(uint16_t), 0)
         {
-            DEBUG_PE_MSG("[Create] InstructionMemory");
+            DEBUG_MSG("[Create] InstructionMemory", DEBUG_LEVEL_PE_COMPONENTS);
             SC_CTHREAD(sequential_process, clk.pos());
             reset_signal_is(reset_n, false);
             SC_METHOD(combinational_process);
@@ -49,7 +49,7 @@ SC_MODULE(InstructionMemory) {
         void clear() { mem.clear(); }
         void dump() const {
             for (size_t i = 0; i < mem.size(); ++i) {
-                DEBUG_PE_MSG("IM[" << (i * sizeof(uint16_t)) << "] = " << std::hex << mem[i]);
+                DEBUG_MSG("IM[" << (i * sizeof(uint16_t)) << "] = " << std::hex << mem[i], DEBUG_LEVEL_PE_COMPONENTS);
             }
         }
 
@@ -58,10 +58,8 @@ SC_MODULE(InstructionMemory) {
 
         void combinational_process() {
             if (!reset_n.read()) {
-                //DEBUG_PE_MSG("[InstructionMemory] Reset active, read data set to 0");
                 im_read_data.write(0);
             } else {
-                //DEBUG_PE_MSG("[InstructionMemory] Read from address " << im_read_addr.read());
                 im_read_data.write(mem[im_read_addr.read() / sizeof(uint16_t)]);
             }
         }
@@ -73,6 +71,10 @@ SC_MODULE(InstructionMemory) {
 
             while (true) {
                 if (im_write_en.read()) {
+                    DEBUG_MSG("[InstructionMemory] Writing IM["
+                              << im_write_addr.read() << "] = 0x"
+                              << std::hex << std::setw(4) << std::setfill('0') << im_write_data.read()
+                              << std::dec, DEBUG_LEVEL_PE_COMPONENTS);
                     mem[im_write_addr.read() / sizeof(uint16_t)] = im_write_data.read();
                 }
                 wait();

@@ -22,7 +22,7 @@ SC_MODULE(VMULU) {
               op2("op2"),
               result("result")
         {
-            DEBUG_PE_MSG("[Create] VMULU");
+            DEBUG_MSG("[Create] VMULU", DEBUG_LEVEL_PE_COMPONENTS);
             SC_METHOD(combinational_process);
             sensitive << op1 << op2;
         }
@@ -34,9 +34,9 @@ SC_MODULE(VMULU) {
                 res[i] = fp16_mul(op1.read()[i], op2.read()[i]);
             }
             result.write(res);
-            DEBUG_PE_MSG("[VMULU] op1=" << op1.read()
+            DEBUG_MSG("[VMULU] op1=" << op1.read()
                       << " op2=" << op2.read()
-                      << " result=" << res );
+                      << " result=" << res, DEBUG_LEVEL_PE_COMPONENTS);
         }
 };
 
