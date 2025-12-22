@@ -342,6 +342,7 @@ public:
         PErouterState current_state = state_reg.read();
         PERouterMode mode = route_mode.read();
         bool enabled = enable.read();
+        bool pending_req_next = false;
 
         // ==================== State Machine Logic ====================
         switch (current_state) {
@@ -429,9 +430,10 @@ public:
                     }
                     else {
                         // Read request accepted
+                        DEBUG_MSG("[PErouter] Received read request from NoC, waiting to send response", DEBUG_LEVEL_PE_TOP);
                         current_noc_req_next.write(req);
-                        pending_noc_req_next.write(true);
-                        state_next.write(PErouterState::WAIT_RESP);
+                        pending_req_next = true;
+                        // state_next.write(PErouterState::WAIT_RESP);
                     }
                 }
                 // Handle LN PLI input
@@ -500,6 +502,28 @@ public:
                         // Polling mode: Do not automatically send to NoC in IDLE.
                         // Wait for Read Request to trigger response in WAIT_RESP state.
                     }
+
+                    // response to NoC read request in parrellel
+                    if (pending_noc_req_reg.read()) {
+                        // Send response
+                        noc_resp_out_if.valid_out.write(true);
+                        noc_response_t resp;
+                        resp.data = plo_fifo_data_out_sig.read();
+                        resp.status = NOC_RESPONSE_STATUS::NOC_OK;
+                        noc_resp_out_if.data_out.write(resp);
+
+                        //  如果握手成功，設定 pop 信號
+                        if (noc_resp_out_if.ready_in.read()) {
+                            DEBUG_MSG("[PErouter] IDLE: Sending PLO data to NoC: 0x" <<  std::hex << plo_fifo_data_out_sig.read() << std::dec, DEBUG_LEVEL_PE_TOP);
+                            plo_fifo_pop_sig.write(true);
+                            pending_req_next = false || pending_req_next;
+                            state_next.write(PErouterState::IDLE);
+                        } else {
+                            state_next.write(PErouterState::WAIT_RESP);
+                        }
+                    }
+
+                    pending_noc_req_next.write(pending_req_next);
                 }
                 break;
             }
@@ -517,6 +541,7 @@ public:
 
                         //  如果握手成功，設定 pop 信號
                         if (noc_resp_out_if.ready_in.read()) {
+                            DEBUG_MSG("[PErouter] WAIT_RESP:  Sending PLO data to NoC: 0x" <<  std::hex << plo_fifo_data_out_sig.read() << std::dec, DEBUG_LEVEL_PE_TOP);
                             plo_fifo_pop_sig.write(true);
                             pending_noc_req_next.write(false);
                             state_next.write(PErouterState::IDLE);
@@ -527,6 +552,7 @@ public:
                 } else {
                     state_next.write(PErouterState::IDLE);
                 }
+
                 break;
             }
 
@@ -596,3 +622,75 @@ public:
 
 } // namespace pe
 } // namespace hybridacc
+
+
+/*
+
+這份 `PErouter.hpp` 定義了 **PErouter** 模組，它是單個 Process Element (PE) 內部的通訊控制中心。
+
+它的主要職責是管理 PE 核心 (Core) 與外部世界（NoC 系統總線 和 Local Network 鄰居）之間的數據流動與控制信號。
+
+以下是 `PErouter` 的詳細行為說明：
+
+### 1. 角色與定位
+`PErouter` 位於 PE 的最前端，扮演 "守門員" 與 "分發者" 的角色：
+*   **對上 (NoC)**: 接收來自 `MBUS` 的指令與數據，並回傳運算結果。
+*   **對旁 (Local Network, LN)**: 處理與相鄰 PE 的直接數據傳輸 (Systolic Array 行為)。
+*   **對內 (PE Core)**: 將數據緩衝後餵給運算單元，並接收運算單元的輸出。
+
+### 2. 內部架構：四通道 FIFO
+為了隔離外部傳輸速度與內部運算速度的差異，`PErouter` 內部維護了四個獨立的 FIFO (佇列)，對應四種數據通道：
+1.  **PS (Partial Sum / Weight)**: 權重或部分和通道 (NoC -> PE)。
+2.  **PD (Pixel Data)**: 輸入激活值通道 (NoC -> PE)。
+3.  **PLI (Partial Loop Input)**: 脈動陣列輸入通道 (NoC/LN -> PE)。
+4.  **PLO (Partial Loop Output)**: 脈動陣列輸出通道 (PE -> NoC/LN)。
+
+### 3. 狀態機行為 (State Machine)
+`PErouter` 使用一個簡單的狀態機來管理 NoC 的請求：
+
+*   **IDLE (閒置/處理)**:
+    *   這是預設狀態。
+    *   **接收寫入 (Write)**: 如果 NoC 送來寫入請求 (`is_w`)，Router 會根據地址將數據推入對應的 FIFO (PS, PD, PLI)。
+    *   **接收命令 (Command)**: 如果地址是 `0x100`，則解析並執行控制命令 (Reset, Start, Load Program)。
+    *   **接收讀取 (Read)**: 如果 NoC 送來讀取請求 (`!is_w`)，Router 會鎖定請求並跳轉到 `WAIT_RESP` 狀態。
+    *   **數據轉發**: 同時持續將 FIFO 內的數據餵給 PE Core，或將 PE Core 的輸出存入 PLO FIFO。
+
+*   **WAIT_RESP (等待回應)**:
+    *   專門處理 **NoC 讀取請求**。
+    *   它會等待 `PLO FIFO` 中有數據。
+    *   一旦有數據，就將其取出並封裝成 `noc_response_t` 回傳給 NoC。
+    *   完成後回到 `IDLE`。
+
+### 4. 詳細數據流路徑
+
+#### A. NoC 寫入路徑 (NoC -> FIFO)
+當 NoC 發送寫入請求時，Router 根據地址的 **Channel ID** (Bit 7-6) 決定去向：
+*   **Channel 0 (PS)** -> 寫入 `ps_fifo`。
+*   **Channel 1 (PD)** -> 寫入 `pd_fifo`。
+*   **Channel 2 (PLI)** -> 寫入 `pli_fifo` (需檢查路由模式是否允許)。
+*   **流控**: 如果目標 FIFO 滿了 (`full`)，Router 會拉低 `ready_out`，暫停 NoC 的傳輸。
+
+#### B. NoC 讀取路徑 (FIFO -> NoC)
+*   NoC 只能讀取 **PLO Channel**。
+*   這是一個 **Polling (輪詢)** 機制：PE 不會主動把數據推給 NoC，而是將數據存在 `plo_fifo` 中，等待 NoC 發送讀取請求來 "取貨"。
+
+#### C. Local Network (LN) 路徑
+這是為了支援 Systolic Array (脈動陣列) 的數據流動：
+*   **PLI 輸入**: 如果路由模式設定為從 LN 接收 (`PLI_FROM_LN...`)，Router 會忽略 NoC 對 PLI 的寫入，轉而從 `ln_pli_in_if` (鄰居) 接收數據放入 `pli_fifo`。
+*   **PLO 輸出**: 如果路由模式設定為輸出到 LN (`...PLO_TO_LN`)，`plo_fifo` 的數據會自動被 pop 出來並發送給 `ln_plo_out_if` (鄰居)。
+
+#### D. 控制命令路徑 (Command)
+當寫入地址為 `0x100` 時，數據被視為指令：
+*   **CMD_RESET**: 觸發 `pe_reset` 信號，重置 PE Core。
+*   **CMD_LOAD_PROGRAM**: 觸發 `im_write_en`，將數據寫入 PE 的指令記憶體 (Instruction Memory)。這允許透過 NoC 更新 PE 的程式碼。
+*   **CMD_START_PE**: 觸發 `pe_start`，啟動 PE 運算。
+
+### 5. 路由模式 (Route Mode)
+`PErouter` 的行為高度依賴 `route_mode` 輸入，這決定了數據流的拓撲結構：
+*   **PLI 來源**: 決定 `pli_fifo` 的數據是來自 NoC (Bus) 還是左邊鄰居 (LN)。
+*   **PLO 去向**: 決定 `plo_fifo` 的數據是送往 NoC (Bus) 還是右邊鄰居 (LN)。
+
+### 6. 總結
+`PErouter` 是一個 **具有緩衝能力的交叉開關 (Buffered Crossbar)**。它將不同來源 (NoC, LN) 的數據流解耦，透過 FIFO 緩衝，確保 PE Core 可以穩定地獲取數據，同時處理複雜的控制信號與 NoC 通訊協定。
+
+*/

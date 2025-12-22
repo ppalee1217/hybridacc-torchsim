@@ -88,14 +88,11 @@ public:
           scan_chain_data_next("scan_chain_data_next"),
           scan_chain_enable_reg("scan_chain_enable_reg"),
           scan_chain_enable_next("scan_chain_enable_next"),
-          sub_reqs_reg("sub_reqs_reg", num_ports),
-          sub_reqs_next("sub_reqs_next", num_ports),
-          target_mask_reg("target_mask_reg", num_ports),
-          target_mask_next("target_mask_next", num_ports),
-          sent_mask_reg("sent_mask_reg", num_ports),
-          sent_mask_next("sent_mask_next", num_ports),
-          responded_mask_reg("responded_mask_reg", num_ports),
-          responded_mask_next("responded_mask_next", num_ports),
+          pending_read_reg("pending_read_reg"),
+          pending_read_next("pending_read_next"),
+          pending_read_simd_reg("pending_read_simd_reg"),
+          pending_read_simd_next("pending_read_simd_next"),
+          rx_stall_sig("rx_stall_sig"),
           req_fifo("req_fifo", 4),
           resp_fifo("resp_fifo", 4)
     {
@@ -126,13 +123,19 @@ public:
         SC_CTHREAD(seq_process, clk.pos());
         reset_signal_is(reset_n, false);
 
-        // Main processing FSM
-        SC_METHOD(comb_fsm_process);
-        sensitive << state_reg << current_req_reg << collected_data_reg << error_flag_reg << is_sideband_reg
-                  << command_mode << command_data << req_fifo_empty_sig << req_fifo_out_sig << resp_fifo_full_sig;
+        // Request Processing (Tx)
+        SC_METHOD(process_requests);
+        sensitive << req_fifo_empty_sig << req_fifo_out_sig << rx_stall_sig
+                  << command_mode << command_data;
         for (size_t i = 0; i < num_ports; ++i) {
-            sensitive << sub_reqs_reg[i] << target_mask_reg[i] << sent_mask_reg[i] << responded_mask_reg[i]
-                      << noc_to_bus_req[i].ready_in << bus_to_noc_resp[i].valid_in << bus_to_noc_resp[i].data_in;
+            sensitive << noc_to_bus_req[i].ready_in;
+        }
+
+        // Response Processing (Rx)
+        SC_METHOD(process_responses);
+        sensitive << pending_read_reg << pending_read_simd_reg << resp_fifo_full_sig;
+        for (size_t i = 0; i < num_ports; ++i) {
+            sensitive << bus_to_noc_resp[i].valid_in << bus_to_noc_resp[i].data_in;
         }
 
         // Combinational processes
@@ -185,32 +188,13 @@ private:
     sc_signal<bool> scan_chain_enable_reg;
     sc_signal<bool> scan_chain_enable_next;
 
-    sc_signal<RouterState> state_reg;
-    sc_signal<RouterState> state_next;
+    sc_signal<bool> pending_read_reg;
+    sc_signal<bool> pending_read_next;
+    sc_signal<bool> pending_read_simd_reg;
+    sc_signal<bool> pending_read_simd_next;
 
-    sc_signal<router_req_t> current_req_reg;
-    sc_signal<router_req_t> current_req_next;
-
-    sc_vector<sc_signal<noc_request_t>> sub_reqs_reg;
-    sc_vector<sc_signal<noc_request_t>> sub_reqs_next;
-
-    sc_vector<sc_signal<bool>> target_mask_reg;
-    sc_vector<sc_signal<bool>> target_mask_next;
-
-    sc_vector<sc_signal<bool>> sent_mask_reg;
-    sc_vector<sc_signal<bool>> sent_mask_next;
-
-    sc_vector<sc_signal<bool>> responded_mask_reg;
-    sc_vector<sc_signal<bool>> responded_mask_next;
-
-    sc_signal<sc_biguint<256>> collected_data_reg;
-    sc_signal<sc_biguint<256>> collected_data_next;
-
-    sc_signal<bool> error_flag_reg;
-    sc_signal<bool> error_flag_next;
-
-    sc_signal<bool> is_sideband_reg;
-    sc_signal<bool> is_sideband_next;
+    // Internal signal for Rx stall
+    sc_signal<bool> rx_stall_sig;
 
     // === Sequential Process ===
     void seq_process() {
@@ -225,41 +209,20 @@ private:
         scan_chain_data_reg.write(init_config);
         scan_chain_enable_reg.write(false);
 
-        state_reg.write(RouterState::IDLE);
-        current_req_reg.write(router_req_t());
-        collected_data_reg.write(0);
-        error_flag_reg.write(false);
-        is_sideband_reg.write(false);
-
-        for (size_t i = 0; i < num_ports; ++i) {
-            sub_reqs_reg[i].write(noc_request_t());
-            target_mask_reg[i].write(false);
-            sent_mask_reg[i].write(false);
-            responded_mask_reg[i].write(false);
-        }
+        pending_read_reg.write(false);
+        pending_read_simd_reg.write(false);
 
         wait();
 
-        // Sequential logic
         while (true) {
             scan_chain_data_reg.write(scan_chain_data_next.read());
             scan_chain_enable_reg.write(scan_chain_enable_next.read());
-
-            state_reg.write(state_next.read());
-            current_req_reg.write(current_req_next.read());
-            collected_data_reg.write(collected_data_next.read());
-            error_flag_reg.write(error_flag_next.read());
-            is_sideband_reg.write(is_sideband_next.read());
-
-            for (size_t i = 0; i < num_ports; ++i) {
-                sub_reqs_reg[i].write(sub_reqs_next[i].read());
-                target_mask_reg[i].write(target_mask_next[i].read());
-                sent_mask_reg[i].write(sent_mask_next[i].read());
-                responded_mask_reg[i].write(responded_mask_next[i].read());
-            }
+            pending_read_reg.write(pending_read_next.read());
+            pending_read_simd_reg.write(pending_read_simd_next.read());
             wait();
         }
     }
+
 
     // === Interface Logic (Combinational) ===
     void comb_interface_logic() {
@@ -288,222 +251,195 @@ private:
         }
     }
 
-    // === Main Processing FSM (Combinational) ===
-    void comb_fsm_process() {
-        // Default next state values (hold current)
-        state_next.write(state_reg.read());
-        current_req_next.write(current_req_reg.read());
-        collected_data_next.write(collected_data_reg.read());
-        error_flag_next.write(error_flag_reg.read());
-        is_sideband_next.write(is_sideband_reg.read());
-
-        for (size_t i = 0; i < num_ports; ++i) {
-            sub_reqs_next[i].write(sub_reqs_reg[i].read());
-            target_mask_next[i].write(target_mask_reg[i].read());
-            sent_mask_next[i].write(sent_mask_reg[i].read());
-            responded_mask_next[i].write(responded_mask_reg[i].read());
-        }
-
+    // === Request Processing (Tx) ===
+    void process_requests() {
         // Default outputs
         req_fifo_pop_sig.write(false);
-        resp_fifo_push_sig.write(false);
-        resp_fifo_in_sig.write(router_resp_t());
+        pending_read_next.write(false);
+        pending_read_simd_next.write(false);
 
         for (size_t i = 0; i < num_ports; ++i) {
             noc_to_bus_req[i].valid_out.write(false);
             noc_to_bus_req[i].data_out.write(noc_request_t());
+        }
+
+        // Check Rx Stall
+        if (rx_stall_sig.read()) {
+            // Stall Tx: Hold pending read mask
+            pending_read_next.write(pending_read_reg.read());
+            pending_read_simd_next.write(pending_read_simd_reg.read());
+            return;
+        }
+
+        // 1. Sideband Command (High Priority)
+        bool cmd_active = command_mode.read();
+        sc_uint<32> cmd_val = command_data.read();
+        message_command_t cmd_type = static_cast<message_command_t>(cmd_val.range(3, 0).to_uint());
+        bool is_pe_cmd = cmd_active && (cmd_type != message_command_t::CMD_NOC_SCAN_CHAIN);
+
+        if (is_pe_cmd) {
+            noc_request_t cmd_req;
+            cmd_req.addr = 0x100;
+            cmd_req.data = cmd_val;
+            cmd_req.is_w = true;
+
+            for (size_t i = 0; i < num_ports; ++i) {
+                noc_to_bus_req[i].valid_out.write(true);
+                noc_to_bus_req[i].data_out.write(cmd_req);
+            }
+            return; // Block FIFO requests
+        }
+
+        // 2. FIFO Request
+        if (!req_fifo_empty_sig.read()) {
+            router_req_t req = req_fifo_out_sig.read();
+
+            // Decode
+            bool is_simd = (req.addr >> 8) & 0x1;
+            sc_uint<8> base_addr = req.addr & 0xFF;
+            bool is_write = req.is_w;
+
+            // Broadcast / SIMD
+            for (size_t i = 0; i < num_ports; ++i) {
+                if (is_simd) {
+                    assert(num_ports <= 4); // SIMD mode only supports up to 4 ports
+                    noc_request_t r;
+                    r.addr = base_addr;
+                    r.data = req.data.range(64*i + 63, 64*i).to_uint64();
+                    r.is_w = is_write;
+                    noc_to_bus_req[i].data_out.write(r);
+                } else { // Broadcast
+                    noc_request_t r;
+                    r.addr = base_addr;
+                    r.data = req.data.range(63, 0).to_uint64();
+                    r.is_w = is_write;
+                    noc_to_bus_req[i].data_out.write(r);
+                }
+            }
+
+            // Check Readiness
+            bool all_ready = true;
+            for (size_t i = 0; i < num_ports; ++i) {
+                if (!noc_to_bus_req[i].ready_in.read()) {
+                    all_ready = false;
+                    break;
+                }
+            }
+
+            if (all_ready) {
+                // Send Request
+                for (size_t i = 0; i < num_ports; ++i) {
+                    noc_to_bus_req[i].valid_out.write(true);
+                }
+                req_fifo_pop_sig.write(true);
+
+                if (!is_write) {
+                    pending_read_next.write(true);
+                    pending_read_simd_next.write(is_simd);
+                }
+            }
+        }
+    }
+
+    // === Response Processing (Rx) ===
+    void process_responses() {
+        // Default outputs
+        resp_fifo_push_sig.write(false);
+        resp_fifo_in_sig.write(router_resp_t());
+        rx_stall_sig.write(false);
+
+        for (size_t i = 0; i < num_ports; ++i) {
             bus_to_noc_resp[i].ready_out.write(false);
         }
 
-        // FSM Logic
-        RouterState current_state = state_reg.read();
+        bool is_pending_read = pending_read_reg.read();
+        bool is_simd = pending_read_simd_reg.read();
 
-        switch (current_state) {
-            case RouterState::IDLE: {
-                bool cmd_active = command_mode.read();
-                sc_uint<32> cmd_val = command_data.read();
-                message_command_t cmd_type = static_cast<message_command_t>(cmd_val.range(3, 0).to_uint());
-                bool is_pe_cmd = cmd_active && (cmd_type != message_command_t::CMD_NOC_SCAN_CHAIN);
-                bool is_fifo_req = !req_fifo_empty_sig.read();
+        if (!is_pending_read) return;
 
-                if (is_pe_cmd) {
-                    // Sideband Command
-                    DEBUG_MSG("Processing Sideband Command: " << cmd_type, DEBUG_LEVEL_NOC_COMPONENTS);
+        // Check if all expected responses are valid
+        bool all_valid = true;
+        sc_biguint<256> collected_data = 0;
+        uint64_t valid_rx = 0;
+        bool error_flag = false;
 
-                    noc_request_t cmd_req;
-                    cmd_req.addr = 0x100;
-                    cmd_req.data = cmd_val;
-                    cmd_req.is_w = true;
-
-                    for (size_t i = 0; i < num_ports; ++i) {
-                        sub_reqs_next[i].write(cmd_req);
-                        target_mask_next[i].write(true);
-                        sent_mask_next[i].write(false);
-                    }
-                    is_sideband_next.write(true);
-                    state_next.write(RouterState::SEND_REQ);
-
-                } else if (is_fifo_req) {
-                    // FIFO Request
-                    router_req_t req = req_fifo_out_sig.read();
-                    req_fifo_pop_sig.write(true); // Pop immediately
-
-                    current_req_next.write(req);
-                    is_sideband_next.write(false);
-
-                    // Decode
-                    bool is_simd = (req.addr >> 8) & 0x1;
-                    bool is_cmd = (req.addr >> 9) & 0x1;
-                    sc_uint<8> base_addr = req.addr & 0xFF;
-                    bool is_write = req.is_w;
-
-                    for (size_t i = 0; i < num_ports; ++i) {
-                        sent_mask_next[i].write(false);
-                        responded_mask_next[i].write(false);
-
-                        if (is_cmd) {
-                            noc_request_t cmd_req;
-                            cmd_req.addr = 0x100;
-                            cmd_req.data = req.data.to_uint64();
-                            cmd_req.is_w = true;
-                            sub_reqs_next[i].write(cmd_req);
-                            target_mask_next[i].write(true);
-                        } else if (is_simd) {
-                            if (i < 4) {
-                                noc_request_t r;
-                                r.addr = base_addr;
-                                r.data = req.data.range(64*i + 63, 64*i).to_uint64();
-                                r.is_w = is_write;
-                                sub_reqs_next[i].write(r);
-                                target_mask_next[i].write(true);
-                            } else {
-                                target_mask_next[i].write(false);
-                            }
-                        } else { // Broadcast
-                            noc_request_t r;
-                            r.addr = base_addr;
-                            r.data = req.data.range(63, 0).to_uint64();
-                            r.is_w = is_write;
-                            sub_reqs_next[i].write(r);
-                            target_mask_next[i].write(true);
-                        }
-                    }
-
-                    collected_data_next.write(0);
-                    error_flag_next.write(false);
-                    state_next.write(RouterState::SEND_REQ);
+        for (size_t i = 0; i < num_ports; ++i) {
+            if(bus_to_noc_resp[i].valid_in.read()) {
+                valid_rx |= (1ULL << i);
+                noc_response_t resp = bus_to_noc_resp[i].data_in.read();
+                if (resp.status == NOC_RESPONSE_STATUS::NOC_ERROR) {
+                    error_flag = true;
                 }
-                break;
+                collected_data.range(64*i + 63, 64*i) = resp.data;
             }
+        }
 
-            case RouterState::SEND_REQ: {
-                bool all_sent = true;
-                for (size_t i = 0; i < num_ports; ++i) {
-                    if (target_mask_reg[i].read() && !sent_mask_reg[i].read()) {
-                        noc_to_bus_req[i].valid_out.write(true);
-                        noc_to_bus_req[i].data_out.write(sub_reqs_reg[i].read());
-
-                        if (noc_to_bus_req[i].ready_in.read()) {
-                            sent_mask_next[i].write(true);
-                        } else {
-                            all_sent = false;
-                        }
-                    }
+        if (is_simd) {
+            // SIMD mode: expect response from all ports
+            for (size_t i = 0; i < num_ports; ++i) {
+                if (!(valid_rx & (1ULL << i))) {
+                    all_valid = false;
+                    break;
                 }
-
-                if (all_sent) {
-                    if (is_sideband_reg.read()) {
-                        state_next.write(RouterState::IDLE);
-                    } else {
-                        bool is_write = current_req_reg.read().is_w;
-                        if (is_write) {
-                            // Write requests are done after sending (MBUS handles ACK)
-                            // We can push OK response immediately
-                            state_next.write(RouterState::PUSH_RESP);
-                        } else {
-                            // Read requests need to collect responses
-                            state_next.write(RouterState::COLLECT_RESP);
-                        }
-                    }
-                }
-                break;
             }
+        } else {
+            // Broadcast mode: expect response from only one of ports
+            bool resp_received = false;
+            for (size_t i = 0; i < num_ports; ++i) {
+                if (valid_rx & (1ULL << i)) {
+                    if (resp_received) {
+                        // More than one response received -> error
+                        error_flag = true;
+                    }
+                    resp_received = true;
+                    collected_data.range(63, 0) = bus_to_noc_resp[i].data_in.read().data;
+                }
+            }
+            if (!resp_received) {
+                all_valid = false;
+            }
+        }
 
-            case RouterState::COLLECT_RESP: {
-                bool is_simd = (current_req_reg.read().addr >> 8) & 0x1;
-                bool collection_done = false;
-                bool any_responded = false;
-                bool all_responded = true;
 
-                sc_biguint<256> current_data = collected_data_reg.read();
-                bool current_error = error_flag_reg.read();
 
+
+
+        for (size_t i = 0; i < num_ports; ++i) {
+            DEBUG_MSG("[NoCRouter] Checking response from port " << i
+                      << ": valid=" << bus_to_noc_resp[i].valid_in.read()
+                      << ", data=0x" << std::hex << bus_to_noc_resp[i].data_in.read().data
+                      << ", status=" << static_cast<int>(bus_to_noc_resp[i].data_in.read().status)
+                      << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
+        }
+
+        if (all_valid) {
+            if (!resp_fifo_full_sig.read()) {
+                // Accept responses
                 for (size_t i = 0; i < num_ports; ++i) {
-                    if (target_mask_reg[i].read() && !responded_mask_reg[i].read()) {
+                    if (valid_rx & (1ULL << i)) {
                         bus_to_noc_resp[i].ready_out.write(true);
-
-                        if (bus_to_noc_resp[i].valid_in.read()) {
-                            noc_response_t r = bus_to_noc_resp[i].data_in.read();
-                            responded_mask_next[i].write(true);
-
-                            if (r.status != NOC_RESPONSE_STATUS::NOC_OK) {
-                                current_error = true;
-                                error_flag_next.write(true);
-                            }
-
-                            if (is_simd) {
-                                if (i < 4) current_data.range(64*i + 63, 64*i) = r.data;
-                            } else {
-                                current_data.range(63, 0) = r.data;
-                            }
-                            collected_data_next.write(current_data);
-                        }
                     }
                 }
 
-                // Check completion condition
-                for (size_t i = 0; i < num_ports; ++i) {
-                    if (target_mask_reg[i].read()) {
-                        if (responded_mask_reg[i].read() || responded_mask_next[i].read()) { // Check next too for immediate update
-                            any_responded = true;
-                        } else {
-                            all_responded = false;
-                        }
-                    }
-                }
+                // Push to FIFO
+                router_resp_t final_resp;
+                final_resp.data = collected_data;
+                // Note: router_resp_t doesn't have status field in current definition,
+                // assuming data is enough or error handling is done elsewhere/ignored for now.
 
-                if (is_simd) {
-                    collection_done = all_responded;
-                } else {
-                    // Broadcast read: wait for at least one response
-                    collection_done = any_responded;
-                }
+                resp_fifo_push_sig.write(true);
+                resp_fifo_in_sig.write(final_resp);
 
-                if (collection_done) {
-                    state_next.write(RouterState::PUSH_RESP);
-                }
-                break;
+                // rx_stall_sig remains false (default)
+            } else {
+                // FIFO full, cannot accept -> Stall
+                rx_stall_sig.write(true);
             }
+        } else {
+            // Waiting for responses -> Stall
+            rx_stall_sig.write(true);
 
-            case RouterState::PUSH_RESP: {
-                if (!resp_fifo_full_sig.read()) {
-                    router_resp_t resp;
-
-                    if (current_req_reg.read().is_w) {
-                        resp.data = 0;
-                        resp.status = NOC_RESPONSE_STATUS::NOC_OK;
-                    } else {
-                        resp.data = collected_data_reg.read();
-                        resp.status = error_flag_reg.read() ? NOC_RESPONSE_STATUS::NOC_ERROR : NOC_RESPONSE_STATUS::NOC_OK;
-                    }
-
-                    resp_fifo_in_sig.write(resp);
-                    resp_fifo_push_sig.write(true);
-
-                    state_next.write(RouterState::IDLE);
-                }
-                break;
-            }
+            // Note: We keep ready_out low, so MBUS holds the data.
         }
     }
 
@@ -577,24 +513,26 @@ public:
 private:
     void trace_process() {
         if (!trace_init) {
-            TRACE_THREAD_NAME(0, trace_id, "NoC Router");
-            TRACE_EVENT(last_state_str, "NoC_State", "B", 0, trace_id, "{}");
+            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, trace_id, "NoC Router");
+            TRACE_EVENT(last_state_str, "NoC_State", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, trace_id, "{}");
             trace_init = true;
         }
 
         // Map enum to string
         std::string current_state_str;
-        switch (state_reg.read()) {
-            case RouterState::IDLE: current_state_str = "IDLE"; break;
-            case RouterState::SEND_REQ: current_state_str = "SEND_REQ"; break;
-            case RouterState::COLLECT_RESP: current_state_str = "COLLECT_RESP"; break;
-            case RouterState::PUSH_RESP: current_state_str = "PUSH_RESP"; break;
-            default: current_state_str = "UNKNOWN"; break;
+        if (req_fifo_empty_sig.read() && pending_read_reg.read() == false) {
+            current_state_str = "IDLE";
+        } else if (!req_fifo_empty_sig.read()) {
+            current_state_str = "PROCESSING_REQ";
+        } else if (pending_read_reg.read() != false) {
+            current_state_str = "WAITING_RESP";
+        } else {
+            current_state_str = "PROCESSING_REQ_WAITING_RESP";
         }
 
         if (current_state_str != last_state_str) {
-            TRACE_EVENT(last_state_str, "NoC_State", "E", 0, trace_id, "{}");
-            TRACE_EVENT(current_state_str, "NoC_State", "B", 0, trace_id, "{}");
+            TRACE_EVENT(last_state_str, "NoC_State", TRACE_END, TRACE_PID::NOC_ROUTER, trace_id, "{}");
+            TRACE_EVENT(current_state_str, "NoC_State", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, trace_id, "{}");
             last_state_str = current_state_str;
         }
     }

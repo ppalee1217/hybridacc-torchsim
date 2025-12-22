@@ -491,8 +491,8 @@ public:
         if (trace_id == -1) return;
 
         if (!trace_init) {
-            TRACE_THREAD_NAME(2, trace_id, "PE " + std::to_string(trace_id));
-            TRACE_EVENT(last_state, "PE_State", "B", 2, trace_id, "{}");
+            TRACE_THREAD_NAME(TRACE_PID::PE, trace_id, "PE " + std::to_string(trace_id));
+            TRACE_EVENT(last_state, "PE_State", TRACE_BEGIN, TRACE_PID::PE, trace_id, "{}");
             trace_init = true;
         }
 
@@ -512,9 +512,9 @@ public:
 
         if (current_state != last_state) {
             // End previous state
-            TRACE_EVENT(last_state, "PE_State", "E", 2, trace_id, "{}");
+            TRACE_EVENT(last_state, "PE_State", TRACE_END, TRACE_PID::PE, trace_id, "{}");
             // Begin new state
-            TRACE_EVENT(current_state, "PE_State", "B", 2, trace_id, "{}");
+            TRACE_EVENT(current_state, "PE_State", TRACE_BEGIN, TRACE_PID::PE, trace_id, "{}");
             last_state = current_state;
         }
     }

@@ -84,22 +84,15 @@ public:
 
         // NoC request routing to PEs
         SC_METHOD(comb_noc_to_pe_routing);
-        sensitive << noc_to_bus_req.valid_in << noc_to_bus_req.data_in << scan_chain_enable << req_mask_reg;
+        sensitive << noc_to_bus_req.valid_in << noc_to_bus_req.data_in << scan_chain_enable;
         for (size_t i = 0; i < num_pes; ++i) {
             sensitive << pe_scan_chain_signals_reg[i]
                       << bus_to_pe_req[i].ready_in;
         }
 
-        // Request Mask Update Logic
-        SC_METHOD(comb_req_mask_update);
-        sensitive << req_mask_reg << noc_to_bus_req.valid_in << noc_to_bus_req.data_in
-                  << target_pe_mask_sig << bus_to_noc_resp.ready_in << bus_to_noc_resp.valid_out
-                  << noc_to_bus_req.ready_out; // Note: reading own output
-
         // PE response to NoC (including collision detection)
         SC_METHOD(comb_pe_to_noc_response);
-        sensitive << noc_to_bus_req.valid_in << noc_to_bus_req.data_in
-                  << bus_to_noc_resp.ready_in << scan_chain_enable << req_mask_reg;
+        sensitive << scan_chain_enable << rx_mask_reg;
         for (size_t i = 0; i < num_pes; ++i) {
             sensitive << pe_to_bus_resp[i].valid_in
                       << pe_to_bus_resp[i].data_in;
@@ -107,10 +100,7 @@ public:
 
         // PE response ready signals
         SC_METHOD(comb_pe_response_ready);
-        sensitive << bus_to_noc_resp.ready_in << req_mask_reg;
-        for (size_t i = 0; i < num_pes; ++i) {
-            sensitive << pe_to_bus_resp[i].valid_in;
-        }
+        sensitive << bus_to_noc_resp.ready_in << rx_mask_reg;
 
         SC_METHOD(trace_process);
         sensitive << clk.pos();
@@ -140,11 +130,14 @@ private:
     sc_vector<sc_signal<ScanChainFormat>> pe_scan_chain_signals_next;
 
     // Request Mask Register (for response routing)
-    sc_signal<uint64_t> req_mask_reg;
-    sc_signal<uint64_t> req_mask_next;
+    sc_signal<uint64_t> rx_mask_reg;
+    sc_signal<uint64_t> rx_mask_next;
 
     // Internal signal to share calculated mask
-    sc_signal<uint64_t> target_pe_mask_sig;
+    sc_signal<uint64_t> tx_mask_wire;
+
+    // Internal signal for NoC request ready
+    sc_signal<bool> noc_req_ready_sig;
 
     // === Sequential Process ===
     void seq_process() {
@@ -159,7 +152,7 @@ private:
             init_config.enable = false;
             pe_scan_chain_signals_reg[i].write(init_config);
         }
-        req_mask_reg.write(0);
+        rx_mask_reg.write(0);
 
         wait();
 
@@ -168,7 +161,12 @@ private:
             for (size_t i = 0; i < num_pes; ++i) {
                 pe_scan_chain_signals_reg[i].write(pe_scan_chain_signals_next[i].read());
             }
-            req_mask_reg.write(req_mask_next.read());
+
+            uint64_t next_mask = rx_mask_next.read();
+            if (next_mask != rx_mask_reg.read()) {
+                DEBUG_MSG("[MBUS] rx_mask changed: 0x" << std::hex << rx_mask_reg.read() << " -> 0x" << next_mask << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
+            }
+            rx_mask_reg.write(next_mask);
 
             wait();
         }
@@ -221,21 +219,24 @@ private:
         bool scan_mode = scan_chain_enable.read();
         bool noc_valid = noc_to_bus_req.valid_in.read();
         noc_request_t noc_req = noc_to_bus_req.data_in.read();
-        uint64_t current_mask = req_mask_reg.read();
 
-        // Calculate target PE mask
-        uint64_t target_mask = 0;
-        if (noc_valid && !scan_mode) {
-            target_mask = calculate_target_pe_mask(noc_req.addr);
-            DEBUG_MSG("Routing data: 0x" << std::hex << noc_req.data << ", Addr 0x" << noc_req.addr << ", Mask 0x" << target_mask << std::dec << ", Mode: " << (noc_req.is_w ? "Write" : "Read"), DEBUG_LEVEL_NOC_COMPONENTS);
+        // Calculate target PE mask (tx_mask_wire)
+        uint64_t tx_mask = 0;
+        // Calculate mask based on address regardless of valid signal to avoid combinational loop
+        // The address must be stable or driven speculatively by the router
+        if (!scan_mode) {
+            tx_mask = calculate_target_pe_mask(noc_req.addr);
+            if (noc_valid) {
+                DEBUG_MSG("Routing data: 0x" << std::hex << noc_req.data << ", Addr 0x" << noc_req.addr << ", Mask 0x" << tx_mask << std::dec << ", Mode: " << (noc_req.is_w ? "Write" : "Read"), DEBUG_LEVEL_NOC_COMPONENTS);
+            }
         }
-        target_pe_mask_sig.write(target_mask);
+        tx_mask_wire.write(tx_mask);
 
         // Check if all target PEs are ready
         bool all_ready = true;
-        if (target_mask != 0) {
+        if (tx_mask != 0) {
             for (size_t i = 0; i < num_pes; ++i) {
-                if (target_mask & (1ULL << i)) {
+                if (tx_mask & (1ULL << i)) {
                     if (!bus_to_pe_req[i].ready_in.read()) {
                         all_ready = false;
                         break;
@@ -245,53 +246,35 @@ private:
         }
 
         // Set NoC ready signal
-        // Ready if not in scan mode, PEs are ready, AND we are not waiting for a response (mask == 0)
-        bool noc_ready = !scan_mode && (!noc_valid || all_ready) && (current_mask == 0);
+        // Ready if not in scan mode, PEs are ready
+        bool noc_ready = !scan_mode && all_ready;
+
+        noc_req_ready_sig.write(noc_ready);
         noc_to_bus_req.ready_out.write(noc_ready);
 
         // Route request to target PEs
         for (size_t i = 0; i < num_pes; ++i) {
-            bool is_target = (target_mask & (1ULL << i)) != 0;
-            bool send_to_pe = noc_valid && !scan_mode && is_target && all_ready && (current_mask == 0);
+            bool is_target = (tx_mask & (1ULL << i)) != 0;
+            bool send_to_pe = noc_valid && !scan_mode && is_target && all_ready;
 
             bus_to_pe_req[i].data_out.write(noc_req);
             bus_to_pe_req[i].valid_out.write(send_to_pe);
         }
-    }
 
-    // === Combinational: Request Mask Update ===
-    void comb_req_mask_update() {
-        uint64_t current_mask = req_mask_reg.read();
-        uint64_t next_mask = current_mask;
-
-        bool noc_req_valid = noc_to_bus_req.valid_in.read();
-        bool noc_req_ready = noc_to_bus_req.ready_out.read(); // From comb_noc_to_pe_routing
-        bool is_write = noc_to_bus_req.data_in.read().is_w;
-        uint64_t target_mask = target_pe_mask_sig.read();
-
-        bool noc_resp_valid = bus_to_noc_resp.valid_out.read(); // From comb_pe_to_noc_response
-        bool noc_resp_ready = bus_to_noc_resp.ready_in.read();
-
-        // Logic:
-        // 1. If Request Accepted (Valid & Ready) AND Read -> Set Mask
-        // 2. If Response Sent (Valid & Ready) -> Clear Mask
-
-        if (noc_req_valid && noc_req_ready && !is_write) {
-            next_mask = target_mask;
-        } else if (noc_resp_valid && noc_resp_ready) {
-            next_mask = 0;
+        // update next_rx_mask
+        if(!scan_mode && noc_valid && noc_ready && !noc_req.is_w) {
+            rx_mask_next.write(tx_mask);
+        } else {
+            rx_mask_next.write(0);
         }
 
-        req_mask_next.write(next_mask);
+
     }
 
     // === Combinational: PE Response to NoC (with collision detection) ===
     void comb_pe_to_noc_response() {
         bool scan_mode = scan_chain_enable.read();
-        noc_request_t noc_req = noc_to_bus_req.data_in.read();
-        bool is_write = noc_req.is_w;
-        bool noc_req_valid = noc_to_bus_req.valid_in.read();
-        uint64_t active_mask = req_mask_reg.read();
+        uint64_t active_mask = rx_mask_reg.read();
 
         // Check which PEs have valid responses
         uint64_t resp_mask = 0;
@@ -302,6 +285,10 @@ private:
         for (size_t i = 0; i < num_pes; ++i) {
             // Only consider PEs that are in the active mask
             if ((active_mask & (1ULL << i)) && pe_to_bus_resp[i].valid_in.read()) {
+                DEBUG_MSG("[MBUS] Received response from PE " << i
+                          << ": data=0x" << std::hex << pe_to_bus_resp[i].data_in.read().data
+                          << ", status=" << static_cast<int>(pe_to_bus_resp[i].data_in.read().status)
+                          << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
                 resp_mask |= (1ULL << i);
                 if (resp_mask == (1ULL << i)) { // First response
                     pe_resp = pe_to_bus_resp[i].data_in.read();
@@ -317,11 +304,6 @@ private:
             noc_resp.data = 0;
             noc_resp.status = NOC_RESPONSE_STATUS::NOC_NOP;
             noc_resp_valid = false;
-        } else if (noc_req_valid && is_write) {
-            // Write request: immediate ACK (Combinational bypass)
-            noc_resp.data = 0;
-            noc_resp.status = NOC_RESPONSE_STATUS::NOC_OK;
-            noc_resp_valid = true;
         } else if (active_mask != 0 && resp_mask != 0) {
             // Read request waiting for response
             int resp_count = __builtin_popcountll(resp_mask);
@@ -344,6 +326,7 @@ private:
             noc_resp_valid = false;
         }
 
+        // Drive Output Port directly (Combinational)
         bus_to_noc_resp.data_out.write(noc_resp);
         bus_to_noc_resp.valid_out.write(noc_resp_valid);
     }
@@ -351,8 +334,8 @@ private:
     // === Combinational: PE Response Ready Signals ===
     void comb_pe_response_ready() {
         // Only ready if NoC is ready to accept response AND PE is in the active mask
-        bool noc_ready = bus_to_noc_resp.ready_in.read();
-        uint64_t active_mask = req_mask_reg.read();
+        bool noc_ready = bus_to_noc_resp.ready_in.read(); // Direct connection
+        uint64_t active_mask = rx_mask_reg.read();
 
         for (size_t i = 0; i < num_pes; ++i) {
             bool is_active = (active_mask & (1ULL << i)) != 0;
@@ -404,23 +387,28 @@ private:
         if (trace_id == -1) return;
 
         if (!trace_init) {
-            TRACE_THREAD_NAME(1, trace_id, "MBUS " + std::to_string(trace_id));
-            TRACE_EVENT(last_state, "MBUS_State", "B", 1, trace_id, "{}");
+            TRACE_THREAD_NAME(TRACE_PID::MBUS, trace_id, "MBUS " + std::to_string(trace_id));
+            TRACE_EVENT(last_state, "MBUS_State", TRACE_BEGIN, TRACE_PID::MBUS, trace_id, "{}");
             trace_init = true;
         }
 
         std::string current_state;
-        if (req_mask_reg.read() != 0) {
+        bool waiting_resp = (rx_mask_reg.read() != 0);
+        bool processing_req = noc_to_bus_req.valid_in.read();
+
+        if (waiting_resp && processing_req) {
+            current_state = "WAITING_RESP_PROCESSING_REQ";
+        } else if (waiting_resp) {
             current_state = "WAITING_RESP";
-        } else if (noc_to_bus_req.valid_in.read()) {
+        } else if (processing_req) {
             current_state = "PROCESSING_REQ";
         } else {
             current_state = "IDLE";
         }
 
         if (current_state != last_state) {
-            TRACE_EVENT(last_state, "MBUS_State", "E", 1, trace_id, "{}");
-            TRACE_EVENT(current_state, "MBUS_State", "B", 1, trace_id, "{}");
+            TRACE_EVENT(last_state, "MBUS_State", TRACE_END, TRACE_PID::MBUS, trace_id, "{}");
+            TRACE_EVENT(current_state, "MBUS_State", TRACE_BEGIN, TRACE_PID::MBUS, trace_id, "{}");
             last_state = current_state;
         }
     }
@@ -432,56 +420,73 @@ private:
 
 /*
 
-`MBUS` (Module Bus) 是 `hybridacc` 專案中連接 **NoC Router** 與多個 **Process Elements (PEs)** 之間的中介層。
+這份 `MBUS.hpp` 定義了一個名為 `MBUS` (Module Bus) 的 SystemC 模組。它是 **NoC Router** 與 **Process Elements (PEs)** 之間的中介層。
 
-簡單來說，`MBUS` 的作用就像是一個本地的總線（Bus）或集線器，負責將來自 NoC 的封包分發給掛載在它底下的多個 PE，並收集 PE 的回應回傳給 NoC。
+簡單來說，它的作用是讓一個 NoC 節點可以掛載多個 PE（預設 16 個），並負責這些 PE 的**定址、廣播、配置與數據匯流**。
 
-以下是 `MBUS` 行為的詳細解釋。
-### 1. 核心功能概述
-*   **一對多連接**：一個 `MBUS` 連接一個 NoC Router 端口和多個 PE（預設為 16 個）。
-*   **配置管理 (Scan Chain)**：透過掃描鏈 (Scan Chain) 機制來配置每個 PE 的 ID 和路由模式。
-*   **請求路由 (NoC -> PE)**：根據 NoC 請求中的地址，將數據轉發給符合條件的一個或多個 PE。
-*   **回應仲裁 (PE -> NoC)**：處理 PE 對讀取/寫入請求的回應，並檢測讀取衝突。
+以下是針對目前程式碼行為的詳細說明：
 
-### 2. 詳細行為分析
+### 1. 模組架構與介面
 
-#### A. 配置機制 (Scan Chain)
-`MBUS` 內部不透過標準的記憶體映射寫入來配置 PE，而是使用一條串行的 **Scan Chain**。
-*   **暫存器**：每個 PE 在 `MBUS` 內都有一組配置暫存器 (`pe_scan_chain_signals_reg`)，包含：
-    *   `ps_id`, `pd_id`, `pli_id`, `plo_id`：不同通道的 ID。
-    *   `route_mode`：路由模式。
-    *   `enable`：是否啟用該 PE。
-*   **運作方式**：
-    *   當 `scan_chain_enable` 為高電位時，數據會像移位暫存器一樣，從 `scan_chain_in` 進入，逐個 PE 傳遞，最後從 `scan_chain_out` 輸出。
-    *   這允許系統在初始化階段串行地設定所有 PE 的屬性。
+*   **位置**: 介於 NoC Router 與 PE 陣列之間。
+*   **連接性**:
+    *   **上游 (NoC Side)**: 一組 `VRDIF` (接收請求) 和 `VRDOF` (發送回應) 介面。
+    *   **下游 (PE Side)**: `sc_vector` 陣列，連接 N 個 PE。包含請求發送 (`bus_to_pe_req`)、回應接收 (`pe_to_bus_resp`) 以及忙碌信號 (`pe_busy`)。
+*   **配置介面**: 獨立的 Scan Chain 端口 (`scan_chain_in/out`, `scan_chain_enable`)，用於串行配置每個 PE 的 ID 和模式。
 
-#### B. 請求路由 (NoC to PE) - `comb_noc_to_pe_routing`
-當 NoC Router 送來一個請求 (`noc_to_bus_req`) 時，`MBUS` 會決定哪些 PE 應該接收這個請求：
-1.  **地址解碼**：透過 `calculate_target_pe_mask` 函數解析地址。
-    *   **Channel**：地址的第 6-7 位元決定通道類型 (PS, PD, PLI, PLO)。
-    *   **Tag**：地址的低 6 位元是目標 ID。
-    *   **Command**：如果地址是 `0x100`，則視為廣播命令。
-2.  **目標匹配**：
-    *   它會檢查每個 PE 的配置。如果 PE 被啟用 (`enable`) 且其對應通道的 ID 與請求中的 Tag 相符，該 PE 就會被選中。
-    *   這支援 **Multicast (多播)**：如果多個 PE 配置了相同的 ID，它們都會收到數據。
-3.  **流控 (Flow Control)**：
-    *   `MBUS` 會檢查所有目標 PE 的 `ready_in` 信號。
-    *   只有當**所有**目標 PE 都準備好接收時，`MBUS` 才會向 NoC 發送 `ready_out`，並將數據轉發給 PE。這確保了數據的一致性。
+### 2. 核心行為詳解
 
-#### C. 回應處理 (PE to NoC) - `comb_pe_to_noc_response`
-處理從 PE 回傳給 NoC 的訊號：
-1.  **寫入請求 (Write)**：
-    *   如果是寫入操作 (`is_w` 為真)，`MBUS` 不需要等待 PE 的實際數據回應，它會立即向 NoC 回傳 `NOC_OK` 作為寫入確認 (Write Acknowledge)。
-2.  **讀取請求 (Read)**：
-    *   如果是讀取操作，`MBUS` 會監聽所有 PE 的 `pe_to_bus_resp`。
-    *   **正常情況**：如果只有**一個** PE 回傳有效數據，該數據會被轉發給 NoC，狀態為 `NOC_OK`。
-    *   **衝突檢測 (Collision)**：如果有多個 PE 同時回傳數據（例如多個 PE 有相同的 ID 且被讀取），`MBUS` 會檢測到衝突，並回傳 `NOC_ERROR` 給 NoC。這是一種錯誤保護機制。
-    *   **等待**：如果沒有 PE 回應，則回傳 `NOC_NOP`。
+#### A. 配置機制 (Scan Chain Configuration)
+MBUS 不使用記憶體映射 (Memory Mapped) 的方式來設定 PE 的 ID，而是使用 **Scan Chain**。
+*   **行為**: 當 `scan_chain_enable` 為 High 時，每個 Clock Cycle 會將配置數據從 `scan_chain_in` 移入，並經過內部的移位暫存器 (`pe_scan_chain_signals_reg`) 傳遞給下一個 PE，最後從 `scan_chain_out` 輸出。
+*   **配置內容**: 每個 PE 包含：
+    *   `ps_id`, `pd_id`, `pli_id`, `plo_id`: 四種不同通道的 ID (用於靈活定址)。
+    *   `route_mode`: 路由模式設定。
+    *   `enable`: 是否啟用該 PE。
+*   **輸出**: 這些配置會直接輸出到 `router_enable` 和 `router_mode` 端口，控制 PE 的行為。
 
-#### D. 輸出控制
-*   `comb_router_config`：將內部暫存器的配置值直接輸出到 `router_enable` 和 `router_mode` 端口，這些信號會直接控制連接的 PE 硬體行為。
+#### B. 請求路由 (Request Routing: NoC -> PE)
+當 NoC 送來一個請求 (`noc_to_bus_req`)，MBUS 負責決定傳給哪些 PE。邏輯在 `comb_noc_to_pe_routing` 與 `calculate_target_pe_mask` 中：
 
-### 總結
-`MBUS` 是一個智慧型的路由器擴展器。它允許系統設計者將多個 PE 視為一個群組掛載在 NoC 的單個節點上，並透過靈活的 ID 配置實現單播、多播或廣播，同時處理基本的流控和錯誤檢測。
+1.  **地址解碼**:
+    *   **Command**: 若地址為 `0x100`，視為對所有啟用 PE 的廣播命令。
+    *   **Channel & Tag**: 若非命令，則解析地址的高位 (Channel) 與低位 (Tag)。
+    *   **比對**: 檢查每個 PE 對應 Channel 的 ID 是否與 Tag 相符。
+2.  **多播支援 (Multicast)**:
+    *   如果多個 PE 的 ID 相同且匹配，它們會同時被選中 (Bitmask 機制)。
+3.  **嚴格流控 (All-or-Nothing Flow Control)**:
+    *   MBUS 會檢查**所有**目標 PE 的 `ready_in` 信號。
+    *   **只有當所有目標 PE 都準備好接收時**，MBUS 才會接收 NoC 的請求 (`ready_out` 拉高) 並轉發數據。這保證了多播操作的同步性，不會發生部分 PE 收到、部分沒收到的情況。
+
+#### C. 讀取回應與仲裁 (Response Handling: PE -> NoC)
+當 NoC 發送的是**讀取請求 (Read Request)** 時，MBUS 需要收集 PE 的回應並回傳給 NoC。
+
+1.  **Mask 追蹤 (`req_mask_reg`)**:
+    *   當一個讀取請求成功發送給一組 PE 後，MBUS 會將這組 PE 的 Mask 存入 `req_mask_reg`。
+    *   這表示 MBUS 進入 "等待回應" 狀態，只接受來自這些特定 PE 的回應。
+2.  **回應收集**:
+    *   邏輯在 `comb_pe_to_noc_response`。
+    *   它會監聽 Mask 中所有 PE 的 `pe_to_bus_resp`。
+3.  **衝突檢測 (Collision Detection)**:
+    *   **正常情況**: 如果 Mask 中只有**一個** PE 回傳有效數據，該數據會被轉發給 NoC，狀態標記為 `NOC_OK`。
+    *   **衝突**: 如果 Mask 中有**多個** PE 同時回傳數據（例如廣播讀取，且多個 PE 都有數據），MBUS 會檢測到衝突，回傳 `NOC_ERROR`，且數據為 0。這是一種硬體保護機制。
+4.  **寫入請求**:
+    *   寫入請求 (`is_w`) 不會設定 `req_mask_reg`，因此 MBUS 不會等待 PE 的回應，視為 Fire-and-Forget (或由更上層確認)。
+
+#### D. 回應管線 (Response Pipeline)
+*   為了優化時序，從 PE 收集到的回應不會直接組合輸出到 NoC，而是先經過一級管線暫存器 (`resp_pipe_data_reg`)。
+*   這切斷了 PE 回應路徑與 NoC 回應路徑的 Critical Path。
+
+### 3. 狀態總結
+MBUS 的運作可以視為一個簡單的狀態機 (雖然實作上主要是組合邏輯配合 Mask 暫存器)：
+1.  **IDLE**: 等待 NoC 請求。
+2.  **PROCESSING_REQ**: 收到請求，解析地址，等待目標 PE Ready。
+3.  **WAITING_RESP** (僅讀取): 請求已發送，鎖定 `req_mask_reg`，等待 PE 回傳數據，期間不接受新的 NoC 請求 (因為 `noc_ready` 會被拉低)。
+
+### 4. 程式碼關鍵片段對照
+*   **L264 `comb_noc_to_pe_routing`**: 決定封包去向。
+*   **L308 `comb_req_mask_update`**: 決定是否進入等待回應模式 (只有讀取會)。
+*   **L333 `comb_pe_to_noc_response`**: 處理回應與衝突檢測。
+*   **L414 `calculate_target_pe_mask`**: 核心的地址解碼邏輯。
 
 */

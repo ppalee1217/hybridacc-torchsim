@@ -580,7 +580,16 @@ private:
 };
 
 #define TRACE_EVENT(name, cat, ph, pid, tid, args) \
-    PerfettoTrace::getInstance().logEvent(name, cat, ph, pid, tid, args)
+    PerfettoTrace::getInstance().logEvent(name, cat, ph, static_cast<uint32_t>(pid), tid, args)
 
 #define TRACE_THREAD_NAME(pid, tid, name) \
-    PerfettoTrace::getInstance().setThreadName(pid, tid, name)
+    PerfettoTrace::getInstance().setThreadName(static_cast<uint32_t>(pid), tid, name)
+
+#define TRACE_BEGIN "B"
+#define TRACE_END "E"
+
+enum class TRACE_PID {
+    PE,
+    MBUS,
+    NOC_ROUTER,
+};

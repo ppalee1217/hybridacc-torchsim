@@ -7,6 +7,7 @@
 #include <map>
 #include <iomanip>
 #include <filesystem>
+#include <functional>
 #include "NetworkOnChip.hpp"
 #include "NoC/NoCRouter.hpp" // Include for router_req_t/resp_t
 #include "utils.hpp"
@@ -47,9 +48,12 @@ public:
     std::vector<uint16_t> pe_program;
 
     // Response handling
-    sc_fifo<noc::router_resp_t> rx_fifo;
-    int pending_responses;
+    sc_fifo<uint64_t> rx_idx_fifo;
     float verify_tolerance;
+
+    // Statistics
+    uint64_t total_sent_bytes;
+    uint64_t total_received_bytes;
 
     // Parameters
     static constexpr size_t NUM_PORTS = 4;
@@ -68,9 +72,10 @@ public:
           resp_sig("resp_sig"),
           noc("NoC_DUT", NUM_PORTS, NUM_PES_PER_PORT),
           test_data_dir(data_dir),
-          rx_fifo("rx_fifo", 1024),
-          pending_responses(0),
-          verify_tolerance(verify_tolerance)
+          rx_idx_fifo("rx_idx_fifo", 1024),
+          verify_tolerance(verify_tolerance),
+          total_sent_bytes(0),
+          total_received_bytes(0)
     {
         // Connect DUT
         noc.clk(clk);
@@ -85,9 +90,6 @@ public:
         SC_THREAD(test_main);
         SC_THREAD(response_sink); // Add sink to accept responses
         sensitive << clk.posedge_event();
-
-        // pending_responses initialization
-        pending_responses = 0;
     }
 
     void load_test_data() {
@@ -135,11 +137,11 @@ public:
         } while (req_sig.ready_sig.read() == false);
 
         req_sig.valid_sig.write(false);
-        pending_responses++;
+        total_sent_bytes += 32; // 256 bits = 32 bytes
     }
 
-    void recv_data(uint16_t& channel, uint16_t& tag, sc_biguint<256>& data_val) {
-        // 1. Send Read Request
+    void recv_data(uint16_t& channel, uint16_t& tag, uint64_t base_idx) {
+        // Send Read Request
         noc::router_req_t req;
         req.data = 0;
         req.addr = (static_cast<uint16_t>(channel) << 6) | (static_cast<uint16_t>(tag));
@@ -154,30 +156,13 @@ public:
 
         req_sig.valid_sig.write(false);
 
-        // 2. Wait for Response
-        // std::cout << "[TB] pending_responses before recv: " << pending_responses << " ,num of available responses: " << rx_fifo.num_available() << std::endl;
-        noc::router_resp_t resp;
-
-        // pop responses (discard) until we get the one we want
-        while (pending_responses) {
-            // there are still pending responses, but response not yet arrived
-            while(rx_fifo.num_available() == 0) {
-                wait(clk.posedge_event());
-                continue;
-            }
-            pending_responses--; // decrease pending count
-            rx_fifo.read(resp); // read and discard
+        if(rx_idx_fifo.num_free() > 0) {
+            rx_idx_fifo.nb_write(base_idx);
+        } else {
+            std::cerr << "[TB] Warning: rx_idx_fifo is full, cannot log received data index!" << std::endl;
         }
 
-        // Get response - loop if there is no response yet
-        while (rx_fifo.num_available() == 0) {
-            wait(clk.posedge_event());
-            continue;
-        }
-
-        resp = rx_fifo.read();
-        // This is the response for the read request
-        data_val = resp.data;
+        total_sent_bytes += 32; // 256 bits = 32 bytes
     }
 
     // Always accept responses
@@ -185,10 +170,27 @@ public:
         // wait for reset deassertion
         wait(20, SC_NS);
         while (true) {
-            resp_sig.ready_sig.write(rx_fifo.num_free() > 0);
+            resp_sig.ready_sig.write(rx_idx_fifo.num_free() > 0);
             wait();
             if (resp_sig.valid_sig.read() && resp_sig.ready_sig.read()) {
-                rx_fifo.nb_write(resp_sig.data_sig.read());
+                // receive response
+                noc::router_resp_t resp = resp_sig.data_sig.read();
+                uint64_t base_idx;
+                if(rx_idx_fifo.nb_read(base_idx)) {
+                    // Store received data
+                    for (size_t och_offset = 0; och_offset < 4; ++och_offset) {
+                        size_t idx = base_idx + och_offset;
+                        if (idx >= output_partial_sum.size()) {
+                            std::cerr << "[TB] Warning: Received data index " << idx << " out of bounds!" << std::endl;
+                            continue;
+                        }
+                        sc_biguint<16> data_packet = resp.data.range(((och_offset) * 16) + 15, (och_offset) * 16);
+                        fp16_t ps = static_cast<fp16_t>(data_packet.to_uint64());
+                        output_partial_sum[idx] = ps;
+                    }
+                } else {
+                    std::cerr << "[TB] Warning: Received response but no index logged!" << std::endl;
+                }
             }
         }
     }
@@ -218,8 +220,9 @@ public:
         }
     }
 
-    void distribute_data() {
-        std::map<std::string, void (NoCSimTestBench::*)()> support_mode_fns = {
+    // return MACs count
+    int distribute_data() {
+        std::map<std::string, int (NoCSimTestBench::*)()> support_mode_fns = {
             {"conv2d", &NoCSimTestBench::distribute_conv2d_data},
             {"gemm", &NoCSimTestBench::distribute_gemm_data}
         };
@@ -227,13 +230,14 @@ public:
         std::string mode = config["mode"];
         if (support_mode_fns.find(mode) != support_mode_fns.end()) {
             std::cout << "[TB] Distributing data for mode: " << mode << std::endl;
-            (this->*support_mode_fns[mode])();
+            return (this->*support_mode_fns[mode])();
         } else {
             std::cerr << "[TB] Unsupported mode for data distribution: " << mode << std::endl;
+            return 0;
         }
     }
 
-    void distribute_conv2d_data() {
+    int distribute_conv2d_data() {
         std::cout << "[TB] Distributing Conv2D Data..." << std::endl;
 
         int kernel_size = std::stoi(config["kernel_size"]);
@@ -346,42 +350,24 @@ public:
             // partial sum out
             for(size_t oh = 0; oh < out_height; ++oh) {
                 for(size_t och = 0; och < out_ch; och+=4) {
-                    // receive data packet
-                    sc_biguint<256> data_packet = 0;
                     uint16_t channel = 3; // Partial Sum Out channel (PLO)
                     uint16_t tag = oh; // Use oh as tag
-                    recv_data(channel, tag, data_packet);
-
-                    // std::cout << "[TB] Received Partial Sum Out Packet: OW=" << ow
-                    //         << " OH=" << oh << " OCH=" << och
-                    //         << " Data=" << std::hex;
-                    // for (int i = 0; i < 4; ++i) {
-                    //     std::cout << std::setw(15)
-                    //                 << data_packet.range((i * 64) + 63, i * 64).to_string(SC_HEX);
-                    //     if (i != 3) std::cout << "_";
-                    // }
-
-                    // std::cout << std::dec << std::endl;
-
-                    // Store received data (NHWC format)
-                    for(size_t och_offset = 0; och_offset < 4; ++och_offset) {
-                        size_t idx = oh * out_width * out_ch +
-                                     ow * out_ch + (och + och_offset);
-                        fp16_t ps = static_cast<fp16_t>(data_packet.range(((och_offset) * 16) + 15, (och_offset) * 16).to_uint64());
-
-                        // std::cout << "[TB] Storing output partial sum at idx=" << idx
-                        //           << " value=0x" << std::hex << ps << std::dec << std::endl;
-                        output_partial_sum[idx] = ps;
-                    }
+                    size_t base_idx = oh * out_width * out_ch +
+                                     ow * out_ch + och;
+                    recv_data(channel, tag, base_idx);
                 }
             }
         }
+
+        int total_macs = out_ch * out_height * out_width * kernel_size * kernel_size * in_ch;
+        return total_macs;
     }
 
-    void distribute_gemm_data() {
+    int distribute_gemm_data() {
         std::cout << "[TB] Distributing GEMM Data..." << std::endl;
         std::cout << "[TB] GEMM data distribution not implemented yet." << std::endl;
         // Implement GEMM data distribution if needed
+        return 0;
     }
 
     void check_results(const std::vector<fp16_t>& expected, const std::vector<fp16_t>& actual, double tolerance) {
@@ -448,18 +434,59 @@ public:
         send_command(message_command_t::CMD_START_PE);
 
         // 6. Distribute Data
-        distribute_data();
+        int total_macs = distribute_data();
 
         // 7. Wait for completion
         std::cout << "[TB] Running Simulation..." << std::endl;
-        wait(1000, SC_NS); // Run for some time
+
+        // Wait until all expected responses are received (rx_idx_fifo should be empty)
+        while (rx_idx_fifo.num_available() > 0) {
+            wait(10, SC_NS);
+        }
 
         // 8. Check Results
         std::cout << "[TB] Checking Results..." << std::endl;
         check_results(expected_output, output_partial_sum, verify_tolerance);
 
+        // 9. Stop Simulation
         std::cout << "[TB] Simulation Finished." << std::endl;
         sc_stop();
+
+        // 10. statistics
+        std::cout << "========================================" << std::endl;
+        std::cout << "              Statistics                " << std::endl;
+        std::cout << "========================================" << std::endl;
+
+        // PE[0][0] stats
+        uint64_t pe_instr_count = noc.pes[0][0].instr_count_reg.read();
+        uint64_t pe_cycles = noc.pes[0][0].cycles_reg.read();
+
+        std::cout << "PE[0][0] instruction count: " << pe_instr_count << std::endl;
+        std::cout << "PE[0][0] cycle count: " << pe_cycles << std::endl;
+        std::cout << "PE[0][0] IPC: " << (double)pe_instr_count / pe_cycles << std::endl;
+
+        // Total NoC cycle count
+        // Clock period is 10 ns.
+        double total_cycles = sc_time_stamp().to_seconds() / 10e-9;
+        std::cout << "Total NoC cycle count: " << (uint64_t)total_cycles << std::endl;
+
+        // Clock rate
+        std::cout << "Clock rate: 100 MHz" << std::endl;
+
+        // Total NoC data movement
+        std::cout << "Total NoC data movement: " << (total_sent_bytes + total_received_bytes) << " Bytes" << std::endl;
+
+        // Throughput
+        double total_time_sec = sc_time_stamp().to_seconds();
+        double throughput = (total_sent_bytes + total_received_bytes) / total_time_sec / (1024.0 * 1024.0); // MB/s
+        std::cout << "NoC Throughput: " << throughput << " MB/s" << std::endl;
+
+        // Performance (MACs per second)
+        double macs_per_sec = total_macs / total_time_sec;
+        std::cout << "Performance (MACs per second): " << macs_per_sec << std::endl;
+
+        std::cout << "========================================" << std::endl;
+
     }
 };
 
@@ -476,6 +503,14 @@ int sc_main(int argc, char* argv[]) {
     }
 
     NoCSimTestBench tb("NoCSimTestBench", data_dir, vefiry_tolerance);
+
+    // Open trace file
+    PerfettoTrace::getInstance().open("trace.json");
+
     sc_start();
+
+    // Close trace file
+    PerfettoTrace::getInstance().close();
+
     return 0;
 }

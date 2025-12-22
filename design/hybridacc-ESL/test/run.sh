@@ -11,7 +11,8 @@ elif [ "$MODE" == "build" ]; then
     mkdir -p build
     cd build
     # cmake -DENABLE_DEBUG_UTILS=ON -DDEBUG_LEVEL_MIN=DEBUG_LEVEL_PE_COMPONENTS ..
-    # cmake -DENABLE_DEBUG_UTILS=ON -DDEBUG_LEVEL_MIN=DEBUG_LEVEL_NOC_TOP ..
+    # cmake -DENABLE_DEBUG_UTILS=ON -DDEBUG_LEVEL_MIN=DEBUG_LEVEL_PE_TOP ..
+    # cmake -DENABLE_DEBUG_UTILS=ON -DDEBUG_LEVEL_MIN=DEBUG_LEVEL_NOC_COMPONENTS ..
     cmake -DENABLE_DEBUG_UTILS=OFF ..
     make test_noc_sim -j8
     cd ..
