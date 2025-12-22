@@ -231,6 +231,15 @@ private:
                 connect_vr_signals(pe_inst.ln_plo, ln_pli_plo[i+1][j]);
             }
         }
+
+        // Set Trace IDs
+        router.set_trace_id(0);
+        for (size_t i = 0; i < num_port; ++i) {
+            mbus[i].set_trace_id(i);
+            for (size_t j = 0; j < num_pes_per_port; ++j) {
+                pes[i][j].set_trace_id(i * num_pes_per_port + j);
+            }
+        }
     }
 };
 

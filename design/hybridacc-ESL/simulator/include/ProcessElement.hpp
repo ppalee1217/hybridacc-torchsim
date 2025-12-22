@@ -74,6 +74,9 @@ public:
                   << exe_a_stall_port_io << downstream_stall
                   << cycles_reg << instr_count_reg;  // Add these to update counters
 
+        SC_METHOD(trace_process);
+        sensitive << clk.pos();
+
         bind();
     }
 
@@ -475,6 +478,45 @@ public:
                                                    exe_m_stall_pd.read() || exe_a_stall_adder.read() ||
                                                    exe_a_stall_port_io.read()) ? "Yes" : "No") << std::endl;
         std::cout << "========================================" << std::endl;
+    }
+
+    // Trace support
+    int trace_id = -1;
+    std::string last_state = "IDLE";
+    bool trace_init = false;
+
+    void set_trace_id(int id) { trace_id = id; }
+
+    void trace_process() {
+        if (trace_id == -1) return;
+
+        if (!trace_init) {
+            TRACE_THREAD_NAME(2, trace_id, "PE " + std::to_string(trace_id));
+            TRACE_EVENT(last_state, "PE_State", "B", 2, trace_id, "{}");
+            trace_init = true;
+        }
+
+        std::string current_state;
+        if (!router_enable.read()) {
+            current_state = "DISABLED";
+        } else if (is_halted()) {
+            current_state = "HALTED";
+        } else if (!pe_running_reg.read()) {
+            current_state = "IDLE";
+        } else if (exe_m_stall_dl.read() || exe_m_stall_ps.read() || exe_m_stall_pd.read() ||
+                   exe_a_stall_adder.read() || exe_a_stall_port_io.read() || downstream_stall.read()) {
+            current_state = "STALL";
+        } else {
+            current_state = "RUNNING";
+        }
+
+        if (current_state != last_state) {
+            // End previous state
+            TRACE_EVENT(last_state, "PE_State", "E", 2, trace_id, "{}");
+            // Begin new state
+            TRACE_EVENT(current_state, "PE_State", "B", 2, trace_id, "{}");
+            last_state = current_state;
+        }
     }
 };
 

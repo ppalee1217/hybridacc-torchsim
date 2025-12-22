@@ -514,3 +514,73 @@ inline ScanChainFormat parse_scan_chain_data(uint32_t data) {
     format.enable = ((data >> 30) & 0x01) != 0;
     return format;
 }
+
+#include <mutex>
+#include <fstream>
+
+// Perfetto Trace Manager
+class PerfettoTrace {
+public:
+    static PerfettoTrace& getInstance() {
+        static PerfettoTrace instance;
+        return instance;
+    }
+
+    void open(const std::string& filename) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (file.is_open()) file.close();
+        file.open(filename);
+        if (file.is_open()) {
+            file << "[\n";
+            is_first = true;
+        }
+    }
+
+    void close() {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (file.is_open()) {
+            file << "\n]";
+            file.close();
+        }
+    }
+
+    void logEvent(const std::string& name, const std::string& cat, const std::string& ph,
+                  uint32_t pid, uint32_t tid, const std::string& args = "{}") {
+        if (!file.is_open()) return;
+
+        double ts = sc_core::sc_time_stamp().to_seconds() * 1000000.0; // microseconds
+
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!is_first) {
+            file << ",\n";
+        }
+        is_first = false;
+
+        file << "{\"name\": \"" << name << "\", \"cat\": \"" << cat << "\", \"ph\": \"" << ph
+             << "\", \"ts\": " << std::fixed << std::setprecision(3) << ts
+             << ", \"pid\": " << pid << ", \"tid\": " << tid
+             << ", \"args\": " << args << "}";
+    }
+
+    void setThreadName(uint32_t pid, uint32_t tid, const std::string& thread_name) {
+        logEvent("thread_name", "__metadata", "M", pid, tid, "{\"name\": \"" + thread_name + "\"}");
+    }
+
+private:
+    PerfettoTrace() {}
+    ~PerfettoTrace() {
+        if (file.is_open()) {
+            file << "\n]";
+            file.close();
+        }
+    }
+    std::ofstream file;
+    std::mutex mutex;
+    bool is_first = true;
+};
+
+#define TRACE_EVENT(name, cat, ph, pid, tid, args) \
+    PerfettoTrace::getInstance().logEvent(name, cat, ph, pid, tid, args)
+
+#define TRACE_THREAD_NAME(pid, tid, name) \
+    PerfettoTrace::getInstance().setThreadName(pid, tid, name)

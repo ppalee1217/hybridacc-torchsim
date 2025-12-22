@@ -149,6 +149,9 @@ public:
         SC_METHOD(comb_interface_logic);
         sensitive << req_in.valid_in << req_in.data_in << req_fifo_full_sig
                   << resp_out.ready_in << resp_fifo_empty_sig << resp_fifo_out_sig;
+
+        SC_METHOD(trace_process);
+        sensitive << clk.pos();
     }
 
     // Overloaded constructor with default number of PEs
@@ -560,6 +563,39 @@ private:
             for (size_t i = 0; i < num_ports; ++i) {
                 scan_chain_out[i].write(default_out);
             }
+        }
+    }
+
+    // Trace support
+    int trace_id = 0;
+    std::string last_state_str = "IDLE";
+    bool trace_init = false;
+
+public:
+    void set_trace_id(int id) { trace_id = id; }
+
+private:
+    void trace_process() {
+        if (!trace_init) {
+            TRACE_THREAD_NAME(0, trace_id, "NoC Router");
+            TRACE_EVENT(last_state_str, "NoC_State", "B", 0, trace_id, "{}");
+            trace_init = true;
+        }
+
+        // Map enum to string
+        std::string current_state_str;
+        switch (state_reg.read()) {
+            case RouterState::IDLE: current_state_str = "IDLE"; break;
+            case RouterState::SEND_REQ: current_state_str = "SEND_REQ"; break;
+            case RouterState::COLLECT_RESP: current_state_str = "COLLECT_RESP"; break;
+            case RouterState::PUSH_RESP: current_state_str = "PUSH_RESP"; break;
+            default: current_state_str = "UNKNOWN"; break;
+        }
+
+        if (current_state_str != last_state_str) {
+            TRACE_EVENT(last_state_str, "NoC_State", "E", 0, trace_id, "{}");
+            TRACE_EVENT(current_state_str, "NoC_State", "B", 0, trace_id, "{}");
+            last_state_str = current_state_str;
         }
     }
 };

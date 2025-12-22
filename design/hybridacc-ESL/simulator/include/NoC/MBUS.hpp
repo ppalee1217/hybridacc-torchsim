@@ -111,6 +111,9 @@ public:
         for (size_t i = 0; i < num_pes; ++i) {
             sensitive << pe_to_bus_resp[i].valid_in;
         }
+
+        SC_METHOD(trace_process);
+        sensitive << clk.pos();
     }
 
     // Overloaded constructor with default number of PEs
@@ -386,6 +389,40 @@ private:
         }
 
         return mask;
+    }
+
+    // Trace support
+    int trace_id = -1;
+    std::string last_state = "IDLE";
+    bool trace_init = false;
+
+public:
+    void set_trace_id(int id) { trace_id = id; }
+
+private:
+    void trace_process() {
+        if (trace_id == -1) return;
+
+        if (!trace_init) {
+            TRACE_THREAD_NAME(1, trace_id, "MBUS " + std::to_string(trace_id));
+            TRACE_EVENT(last_state, "MBUS_State", "B", 1, trace_id, "{}");
+            trace_init = true;
+        }
+
+        std::string current_state;
+        if (req_mask_reg.read() != 0) {
+            current_state = "WAITING_RESP";
+        } else if (noc_to_bus_req.valid_in.read()) {
+            current_state = "PROCESSING_REQ";
+        } else {
+            current_state = "IDLE";
+        }
+
+        if (current_state != last_state) {
+            TRACE_EVENT(last_state, "MBUS_State", "E", 1, trace_id, "{}");
+            TRACE_EVENT(current_state, "MBUS_State", "B", 1, trace_id, "{}");
+            last_state = current_state;
+        }
     }
 };
 
