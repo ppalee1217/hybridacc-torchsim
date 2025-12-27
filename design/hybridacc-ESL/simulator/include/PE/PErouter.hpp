@@ -5,6 +5,7 @@
 #include <systemc>
 #include <cassert>
 #include "FIFO.hpp"
+#include "async_FIFO.hpp"
 
 using namespace sc_core;
 
@@ -134,6 +135,7 @@ public:
         pd_fifo.clk(clk);
         pd_fifo.reset_n(reset_n);
         pd_fifo.data_in(pd_fifo_data_in_sig);
+        pd_fifo.mask_in(pd_fifo_mask_in_sig);
         pd_fifo.push(pd_fifo_push_sig);
         pd_fifo.data_out(pd_fifo_data_out_sig);
         pd_fifo.pop(pd_fifo_pop_sig);
@@ -206,7 +208,7 @@ public:
     const int max_queue_size = 4;
 
     FIFO<uint64_t> ps_fifo;   // PS channel: NoC -> PE (weights)
-    FIFO<uint16_t> pd_fifo;   // PD channel: NoC -> PE (activations)
+    asyncFIFO<uint64_t, uint16_t> pd_fifo;   // PD channel: NoC -> PE (activations)
     FIFO<uint64_t> pli_fifo;  // PLI channel: NoC/LN -> PE (partial inputs)
     FIFO<uint64_t> plo_fifo;  // PLO channel: PE -> NoC/LN (partial outputs)
 
@@ -219,7 +221,8 @@ public:
     sc_signal<bool> ps_fifo_full_sig;
 
     // PD FIFO signals
-    sc_signal<uint16_t> pd_fifo_data_in_sig;
+    sc_signal<uint64_t> pd_fifo_data_in_sig;
+    sc_signal<size_t> pd_fifo_mask_in_sig;
     sc_signal<bool> pd_fifo_push_sig;
     sc_signal<uint16_t> pd_fifo_data_out_sig;
     sc_signal<bool> pd_fifo_pop_sig;
@@ -302,6 +305,7 @@ public:
 
         ps_fifo_push_sig.write(false);
         pd_fifo_push_sig.write(false);
+        pd_fifo_mask_in_sig.write(0);
         pli_fifo_push_sig.write(false);
         plo_fifo_push_sig.write(false);
 
@@ -415,7 +419,8 @@ public:
                                 ps_fifo_push_sig.write(true);
                                 break;
                             case NOC_CHANNEL_PD:
-                                pd_fifo_data_in_sig.write(static_cast<uint16_t>(req.data));
+                                pd_fifo_data_in_sig.write(req.data);
+                                pd_fifo_mask_in_sig.write(req.mask);
                                 pd_fifo_push_sig.write(true);
                                 break;
                             case NOC_CHANNEL_PLI:

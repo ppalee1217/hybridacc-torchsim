@@ -96,6 +96,7 @@ template<typename DATA_TYPE, typename ADDR_TYPE>
 struct request_t {
     DATA_TYPE data; // 64 bits
     ADDR_TYPE addr; // 9 bits
+    size_t mask; // for async FIFO
     bool  is_w; // 0: read, 1: write
 
     // 相等運算符，SystemC 需要

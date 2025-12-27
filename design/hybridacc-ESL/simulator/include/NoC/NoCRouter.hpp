@@ -298,6 +298,7 @@ private:
             bool is_simd = (req.addr >> 8) & 0x1;
             sc_uint<8> base_addr = req.addr & 0xFF;
             bool is_write = req.is_w;
+            size_t mask = req.mask;
 
             // Broadcast / SIMD
             for (size_t i = 0; i < num_ports; ++i) {
@@ -307,12 +308,14 @@ private:
                     r.addr = base_addr;
                     r.data = req.data.range(64*i + 63, 64*i).to_uint64();
                     r.is_w = is_write;
+                    r.mask = mask;
                     noc_to_bus_req[i].data_out.write(r);
                 } else { // Broadcast
                     noc_request_t r;
                     r.addr = base_addr;
                     r.data = req.data.range(63, 0).to_uint64();
                     r.is_w = is_write;
+                    r.mask = mask;
                     noc_to_bus_req[i].data_out.write(r);
                 }
             }

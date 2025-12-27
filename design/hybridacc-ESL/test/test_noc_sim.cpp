@@ -120,10 +120,11 @@ public:
         wait(10, SC_NS);
     }
 
-    void send_data(uint16_t channel, uint16_t tag, const sc_biguint<256>& data_val) {
+    void send_data(uint16_t channel, uint16_t tag, const sc_biguint<256>& data_val, size_t mask = 0xF) {
         noc::router_req_t req;
         req.data = data_val;
         req.addr = (static_cast<uint16_t>(channel) << 6) | (static_cast<uint16_t>(tag));
+        req.mask = mask;
         req.is_w = true;
 
         // std::cout << "[TB] Sending data packet: channel=" << channel
@@ -145,6 +146,7 @@ public:
         noc::router_req_t req;
         req.data = 0;
         req.addr = (static_cast<uint16_t>(channel) << 6) | (static_cast<uint16_t>(tag));
+        req.mask = 0;
         req.is_w = false;
 
         req_sig.data_sig.write(req);
@@ -287,30 +289,21 @@ public:
         for(size_t iw = 0; iw < in_width; ++iw) {
             std::cout << "[TB] Processing input width index: " << iw << "/" << in_width << std::endl;
             for(size_t ih = 0; ih < in_height; ++ih) {
+                sc_biguint<256> data_packet = 0;
+
                 for(size_t ich = 0; ich < in_ch; ++ich) {
                     // Prepare data packet (NHWC format)
-                    sc_biguint<256> data_packet = 0;
                     size_t idx = ih * in_width * in_ch +
                                  iw * in_ch + ich;
                     fp16_t a = input_activation[idx];
-                    data_packet.range(15, 0) = a; // Only use first lane for activation
-
-                    // Send data packet
-                    uint16_t channel = 1; // Activation channel (PD)
-                    uint16_t tag = ih; // Use ih as tag
-
-                    // std::cout << "[TB] Sending Activation Packet: IH=" << ih
-                    //         << " IW=" << iw << " CH=" << ich << " Data="
-                    //         << std::hex;
-                    // for (int i = 0; i < 4; ++i) {
-                    //     std::cout << std::setw(15)
-                    //             << data_packet.range((i * 64) + 63, i * 64).to_string(SC_HEX);
-                    //     if (i != 3) std::cout << "_";
-                    // }
-                    // std::cout << std::dec << std::endl;
-
-                    send_data(channel, tag, data_packet);
+                    data_packet.range((ich * 16) + 15, ich * 16) = a;
                 }
+
+                // Send data packet
+                uint16_t channel = 1; // Activation channel (PD)
+                uint16_t tag = ih; // Use ih as tag
+
+                send_data(channel, tag, data_packet, 0xF); // Full mask for activation
             }
 
             if(iw < kernel_size - 1) continue; // Need enough rows for convolution
