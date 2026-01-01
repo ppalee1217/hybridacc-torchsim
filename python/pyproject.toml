@@ -1,0 +1,13 @@
+[project]
+name = "hybridacc_verify"
+version = "0.1.0"
+description = "Verification tools for HybridAcc"
+dependencies = [
+    "numpy",
+    "torch",
+    "pyyaml"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hybridacc_verify*"]

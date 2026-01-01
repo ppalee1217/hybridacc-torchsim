@@ -1,25 +1,16 @@
-#!/usr/bin/env python3
-"""Compare two fp16 binary dumps.
-Usage:
-  python utils/pe_sim_verify.py --sim sim_output.bin --expected golden.bin [--rtol 1e-2 --atol 1e-3 --show 10]
-Exit status 0 = pass, 1 = fail.
-Files are interpreted as a flat sequence of IEEE754 half precision values (little-endian, 2 bytes each).
-Ignore NaN pairs: 若同一位置 sim 與 expected 皆為 NaN 視為通過 (不算 mismatch)。
-"""
 import argparse
 import math
 import os
 import sys
-import statistics
-from typing import Sequence, Tuple
+import struct
+from typing import Sequence, Tuple, Dict, Any
 
 try:
     import numpy as np  # type: ignore
     _HAVE_NUMPY = True
 except Exception:  # pragma: no cover
     _HAVE_NUMPY = False
-import struct
-# 改用 pandas 取代 csv
+
 try:
     import pandas as pd  # type: ignore
     _HAVE_PANDAS = True
@@ -56,7 +47,6 @@ def _to_uint16_sequence(seq):
     return out
 
 
-# 新增: 解析 fp16 組件 (sign, exponent, mantissa)
 def _fp16_components(seq):
     """回傳 (u16_array, sign, exp, mantissa)；若無 numpy 則回傳 list。"""
     if _HAVE_NUMPY and isinstance(seq, np.ndarray):
@@ -73,7 +63,7 @@ def _fp16_components(seq):
     return u16_list, sign, exp, mant
 
 
-def compare(sim, exp, rtol: float, atol: float):
+def compare(sim, exp, rtol: float, atol: float) -> Dict[str, Any]:
     if len(sim) != len(exp):
         raise ValueError(f"長度不相等: sim={len(sim)} expected={len(exp)} (元素個數)")
     if _HAVE_NUMPY and isinstance(sim, np.ndarray):

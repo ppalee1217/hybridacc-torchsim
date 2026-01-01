@@ -1,8 +1,0 @@
-task: gemm
-out_width: 100
-in_width: 200
-dim: 50
-fmt: hex
-seed: 777
-no_ps: false
-out_dir: ./output/gemm_test
