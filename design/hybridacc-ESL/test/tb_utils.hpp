@@ -12,16 +12,17 @@ std::vector<T> read_binary_file(const std::string& filepath) {
     std::ifstream file(filepath, std::ios::binary | std::ios::ate);
     if (!file) {
         std::cerr << "[Error] Cannot open file: " << filepath << std::endl;
-        return {};
+        exit(1);
     }
     std::streamsize size = file.tellg();
     file.seekg(0, std::ios::beg);
 
     std::vector<T> buffer(size / sizeof(T));
-    if (file.read(reinterpret_cast<char*>(buffer.data()), size)) {
-        return buffer;
+    if (!file.read(reinterpret_cast<char*>(buffer.data()), size)) {
+        std::cerr << "[Error] Cannot read file: " << filepath << std::endl;
+        exit(1);
     }
-    return {};
+    return buffer;
 }
 
 // Helper: Parse config.txt
@@ -68,4 +69,21 @@ float fp16_to_float(uint16_t fp16_val) {
     float result;
     std::memcpy(&result, &float_bits, sizeof(float));
     return result;
+}
+
+
+// number to (K/M/G/T) string
+inline std::string num_to_str(uint64_t num) {
+    const char* suffixes[] = {"", "K", "M", "G", "T"};
+    size_t suffix_index = 0;
+    double value = static_cast<double>(num);
+
+    while (value >= 1024.0 && suffix_index < 4) {
+        value /= 1024.0;
+        ++suffix_index;
+    }
+
+    char buffer[50];
+    std::snprintf(buffer, sizeof(buffer), "%.3f %s", value, suffixes[suffix_index]);
+    return std::string(buffer);
 }

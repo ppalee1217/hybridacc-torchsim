@@ -59,11 +59,14 @@ public:
     sc_in<bool> enable;
     sc_in<PERouterMode> route_mode;
 
-    // NoC input ports
-    VRDIF<noc_request_t> noc_req_in_if;
+    // NoC-0 input ports (Control & Push)
+    VRDIF<noc_request_t> noc0_req_in_if;
 
-    // NoC output ports
-    VRDOF<noc_response_t> noc_resp_out_if;
+    // NoC-1 input ports (Local Network)
+    VRDIF<noc_request_t> noc1_req_in_if;
+
+    // NoC-1 output ports (Local Network Response)
+    VRDOF<noc_response_t> noc1_resp_out_if;
 
     //======= LN Ports =======//
     // LN input ports - using VRDIF
@@ -101,8 +104,9 @@ public:
           reset_n("reset_n"),
           enable("enable"),
           route_mode("route_mode"),
-          noc_req_in_if("noc_req_in_if"),
-          noc_resp_out_if("noc_resp_out_if"),
+          noc0_req_in_if("noc0_req_in_if"),
+          noc1_req_in_if("noc1_req_in_if"),
+          noc1_resp_out_if("noc1_resp_out_if"),
           ln_pli_in_if("ln_pli_in_if"),
           ln_plo_out_if("ln_plo_out_if"),
           pe_reset("pe_reset"),
@@ -160,30 +164,53 @@ public:
         plo_fifo.empty(plo_fifo_empty_sig);
         plo_fifo.full(plo_fifo_full_sig);
 
-        SC_METHOD(combinational_process);
-        sensitive << reset_n << state_reg << noc_req_in_if.valid_in << noc_req_in_if.data_in << enable << route_mode
-                  << noc_resp_out_if.ready_in << ln_pli_in_if.valid_in << ln_pli_in_if.data_in << ln_plo_out_if.ready_in
-                  << pe_ps_out_if.ready_in << pe_pd_out_if.ready_in << pe_pli_out_if.ready_in << pe_plo_in_if.valid_in << pe_plo_in_if.data_in
-                  << pending_noc_req_reg << current_noc_req_reg
-                  << ps_fifo_empty_sig << ps_fifo_full_sig << ps_fifo_data_out_sig
-                  << pd_fifo_empty_sig << pd_fifo_full_sig << pd_fifo_data_out_sig
-                  << pli_fifo_empty_sig << pli_fifo_full_sig << pli_fifo_data_out_sig
-                  << plo_fifo_empty_sig << plo_fifo_full_sig << plo_fifo_data_out_sig;
+        SC_METHOD(noc0_input_handling_process);
+        sensitive << reset_n << noc0_req_in_if.valid_in << noc0_req_in_if.data_in << enable
+                  << ps_fifo_full_sig << pd_fifo_full_sig
+                  << im_write_addr_reg << im_write_data_reg;
+
+        SC_METHOD(noc1_input_handling_process);
+        sensitive << reset_n << state_reg << noc1_req_in_if.valid_in << noc1_req_in_if.data_in << enable << route_mode
+                  << ln_pli_in_if.valid_in << ln_pli_in_if.data_in
+                  << pli_fifo_full_sig << plo_fifo_empty_sig
+                  << noc1_resp_reg;
+
+        SC_METHOD(pe_feed_process);
+        sensitive << reset_n << enable
+                  << pe_ps_out_if.ready_in << pe_pd_out_if.ready_in << pe_pli_out_if.ready_in
+                  << ps_fifo_empty_sig << ps_fifo_data_out_sig
+                  << pd_fifo_empty_sig << pd_fifo_data_out_sig
+                  << pli_fifo_empty_sig << pli_fifo_data_out_sig;
+
+        SC_METHOD(pe_collect_process);
+        sensitive << reset_n << enable
+                  << pe_plo_in_if.valid_in << pe_plo_in_if.data_in
+                  << plo_fifo_full_sig;
+
+        SC_METHOD(output_and_state_process);
+        sensitive << reset_n << state_reg << pending_noc_resp_reg << noc1_resp_reg
+                  << plo_fifo_empty_sig << plo_fifo_data_out_sig
+                  << noc1_resp_out_if.ready_in << ln_plo_out_if.ready_in
+                  << route_mode << enable << internal_noc_read_req_accepted;
+
         SC_CTHREAD(sequential_process, clk.pos());
         reset_signal_is(reset_n, false);
     }
 
     // ========================= Register definitions =========================
+    // Internal signal for communication between processes
+    sc_signal<bool> internal_noc_read_req_accepted;
+
     // State registers
     sc_signal<PErouterState> state_reg;
     sc_signal<PErouterState> state_next;
 
     // Pending request registers
-    sc_signal<bool> pending_noc_req_reg;
-    sc_signal<bool> pending_noc_req_next;
+    sc_signal<bool> pending_noc_resp_reg;
+    sc_signal<bool> pending_noc_resp_next;
 
-    sc_signal<noc_request_t> current_noc_req_reg;
-    sc_signal<noc_request_t> current_noc_req_next;
+    sc_signal<noc_response_t> noc1_resp_reg;
+    sc_signal<noc_response_t> noc1_resp_next;
 
     // Control signal registers
     sc_signal<bool> im_write_en_reg;
@@ -297,39 +324,138 @@ public:
     }
 
     // ========================= Combinational Logic =========================
-    void combinational_process() {
-        ps_fifo_pop_sig.write(false);
-        pd_fifo_pop_sig.write(false);
-        pli_fifo_pop_sig.write(false);
-        plo_fifo_pop_sig.write(false);
-
+    void noc0_input_handling_process() {
         ps_fifo_push_sig.write(false);
         pd_fifo_push_sig.write(false);
         pd_fifo_mask_in_sig.write(0);
-        pli_fifo_push_sig.write(false);
-        plo_fifo_push_sig.write(false);
 
-        // Default: hold current values (reg -> next)
-        state_next.write(state_reg.read());
-        pending_noc_req_next.write(pending_noc_req_reg.read());
-        current_noc_req_next.write(current_noc_req_reg.read());
-
-        im_write_en_next.write(false);  // Single-cycle pulse
+        im_write_en_next.write(false);
         im_write_addr_next.write(im_write_addr_reg.read());
         im_write_data_next.write(im_write_data_reg.read());
 
-        pe_reset_next.write(false);     // Single-cycle pulse
-        pe_start_next.write(false);     // Single-cycle pulse
-        pe_program_next.write(false);   // Single-cycle pulse
+        pe_reset_next.write(false);
+        pe_start_next.write(false);
+        pe_program_next.write(false);
 
-        // Default outputs
-        noc_req_in_if.ready_out.write(false);
-        noc_resp_out_if.valid_out.write(false);
-        noc_resp_out_if.data_out.write(noc_response_t());
+        noc0_req_in_if.ready_out.write(false);
 
+        if (!reset_n.read()) return;
+
+        bool enabled = enable.read();
+        noc_request_t req = noc0_req_in_if.data_in.read();
+        bool noc_req_ready = false;
+
+        if (req.addr == PE_CMD_ADDRESS && req.is_w) {
+            noc_req_ready = true;
+        } else if (enabled && req.is_w) {
+            NOC_CHANNELS channel = get_noc_channel(req.addr);
+            switch (channel) {
+                case NOC_CHANNEL_PS:  noc_req_ready = can_accept_ps(); break;
+                case NOC_CHANNEL_PD:  noc_req_ready = can_accept_pd(); break;
+                default: noc_req_ready = false; break;
+            }
+        }
+
+        noc0_req_in_if.ready_out.write(noc_req_ready);
+
+        if (noc0_req_in_if.valid_in.read() && noc_req_ready) {
+            if (req.addr == PE_CMD_ADDRESS) {
+                DEBUG_MSG("[PErouter] Received command: 0x" << std::hex << req.data << std::dec, DEBUG_LEVEL_PE_TOP);
+                message_command_t cmd = static_cast<message_command_t>(req.data & 0xF);
+                switch (cmd) {
+                    case message_command_t::CMD_RESET:
+                        pe_reset_next.write(true);
+                        break;
+                    case message_command_t::CMD_LOAD_PROGRAM:
+                        im_write_addr_next.write((req.data >> PE_ROUTER_IM_ADDR_OFFSET) & PE_ROUTER_IM_ADDR_MASK);
+                        im_write_data_next.write((req.data >> PE_ROUTER_IM_DATA_OFFSET) & PE_ROUTER_IM_DATA_MASK);
+                        im_write_en_next.write(true);
+                        pe_program_next.write(true);
+                        break;
+                    case message_command_t::CMD_START_PE:
+                        pe_start_next.write(true);
+                        break;
+                    default:
+                        break;
+                }
+            } else {
+                NOC_CHANNELS channel = get_noc_channel(req.addr);
+                switch (channel) {
+                    case NOC_CHANNEL_PS:
+                        ps_fifo_data_in_sig.write(req.data);
+                        ps_fifo_push_sig.write(true);
+                        break;
+                    case NOC_CHANNEL_PD:
+                        pd_fifo_data_in_sig.write(req.data);
+                        pd_fifo_mask_in_sig.write(req.mask);
+                        pd_fifo_push_sig.write(true);
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+    }
+
+    void noc1_input_handling_process() {
+        pli_fifo_push_sig.write(false);
+        noc1_req_in_if.ready_out.write(false);
         ln_pli_in_if.ready_out.write(false);
-        ln_plo_out_if.valid_out.write(false);
-        ln_plo_out_if.data_out.write(0);
+
+        internal_noc_read_req_accepted.write(false); // tell output_and_state_process if a read request is accepted
+
+        if (!reset_n.read()) return;
+
+        PErouterState current_state = state_reg.read();
+        bool enabled = enable.read();
+
+        if (current_state == PErouterState::IDLE) {
+            noc_request_t req = noc1_req_in_if.data_in.read();
+            bool noc_req_ready = false;
+
+            if (enabled && req.is_w) {
+                NOC_CHANNELS channel = get_noc_channel(req.addr);
+                if (channel == NOC_CHANNEL_PLI) {
+                    noc_req_ready = can_route_to_bus(channel) && can_accept_pli();
+                }
+            } else if (enabled && !req.is_w) {
+                NOC_CHANNELS channel = get_noc_channel(req.addr);
+                if (channel == NOC_CHANNEL_PLO) {
+                    noc_req_ready = can_route_to_bus(channel) && has_plo_data();
+                }
+            }
+
+            noc1_req_in_if.ready_out.write(noc_req_ready);
+
+            bool noc_req_active = noc1_req_in_if.valid_in.read() && noc_req_ready;
+            bool ln_pli_ready = enabled && can_route_from_ln(NOC_CHANNEL_PLI) && can_accept_pli() && !noc_req_active;
+            ln_pli_in_if.ready_out.write(ln_pli_ready);
+
+            if (noc_req_active) {
+                if (req.is_w) {
+                    // PLI Write
+                    DEBUG_MSG("[PErouter] Receiving PLI data from NoC: 0x" << std::hex << req.data << std::dec, DEBUG_LEVEL_PE_TOP);
+                    pli_fifo_data_in_sig.write(req.data);
+                    pli_fifo_push_sig.write(true);
+                } else {
+                    // PLO Read
+                    DEBUG_MSG(" [PErouter] Receiving PLO read request from NoC: " << req << std::dec, DEBUG_LEVEL_PE_TOP);
+                    // Mark that a read request has been accepted
+                    internal_noc_read_req_accepted.write(true);
+                }
+            }
+            else if (ln_pli_ready && ln_pli_in_if.valid_in.read()) {
+                DEBUG_MSG("[PErouter] Receiving PLI data from LN: 0x" << std::hex << ln_pli_in_if.data_in.read() << std::dec, DEBUG_LEVEL_PE_TOP);
+                pli_fifo_data_in_sig.write(ln_pli_in_if.data_in.read());
+                pli_fifo_push_sig.write(true);
+            }
+        }
+    }
+
+    void pe_feed_process() {
+        ps_fifo_pop_sig.write(false);
+        pd_fifo_pop_sig.write(false);
+        pli_fifo_pop_sig.write(false);
 
         pe_ps_out_if.valid_out.write(false);
         pe_ps_out_if.data_out.write(0);
@@ -337,242 +463,148 @@ public:
         pe_pd_out_if.data_out.write(0);
         pe_pli_out_if.valid_out.write(false);
         pe_pli_out_if.data_out.write(0);
+
+        if (!reset_n.read()) return;
+        if (!enable.read()) return;
+
+        if (has_ps_data()) {
+            pe_ps_out_if.valid_out.write(true);
+            pe_ps_out_if.data_out.write(ps_fifo_data_out_sig.read());
+            if (pe_ps_out_if.ready_in.read()) {
+                ps_fifo_pop_sig.write(true);
+            }
+        }
+
+        if (has_pd_data()) {
+            pe_pd_out_if.valid_out.write(true);
+            pe_pd_out_if.data_out.write(pd_fifo_data_out_sig.read());
+            if (pe_pd_out_if.ready_in.read()) {
+                pd_fifo_pop_sig.write(true);
+            }
+        }
+
+        if (has_pli_data()) {
+            pe_pli_out_if.valid_out.write(true);
+            pe_pli_out_if.data_out.write(pli_fifo_data_out_sig.read());
+            if (pe_pli_out_if.ready_in.read()) {
+                pli_fifo_pop_sig.write(true);
+            }
+        }
+    }
+
+    void pe_collect_process() {
+        plo_fifo_push_sig.write(false);
         pe_plo_in_if.ready_out.write(false);
 
-        if (!reset_n.read()) {
+        if (!reset_n.read()) return;
+        if (!enable.read()) return;
+
+        if (pe_plo_in_if.valid_in.read() && can_accept_plo()) {
+            pe_plo_in_if.ready_out.write(true);
+            plo_fifo_data_in_sig.write(pe_plo_in_if.data_in.read());
+            plo_fifo_push_sig.write(true);
+        }
+    }
+
+    void output_and_state_process() {
+        plo_fifo_pop_sig.write(false);
+        noc1_resp_next.write(noc1_resp_reg.read());
+        state_next.write(state_reg.read());
+        noc1_resp_out_if.valid_out.write(false);
+        noc1_resp_out_if.data_out.write(noc_response_t());
+        ln_plo_out_if.valid_out.write(false);
+        ln_plo_out_if.data_out.write(0);
+
+        if (!reset_n.read()) { // reset logic
+            pending_noc_resp_next.write(false);
             return;
         }
 
+        // Logic for pending_noc_resp_next
+        bool next_pending = pending_noc_resp_reg.read();
         PErouterState current_state = state_reg.read();
         PERouterMode mode = route_mode.read();
         bool enabled = enable.read();
-        bool pending_req_next = false;
 
-        // ==================== State Machine Logic ====================
-        switch (current_state) {
-            case PErouterState::IDLE:
-            {
-                // Handle incoming NoC requests
-                // FIX: Calculate ready signal based on data_in (address) and internal state
-                // independent of valid_in to avoid deadlock with MBUS
-                noc_request_t req = noc_req_in_if.data_in.read();
-                bool noc_req_ready = false;
+        if (internal_noc_read_req_accepted.read()) {
+            // Send PLO data as response
+            noc_response_t resp;
+            resp.data = plo_fifo_data_out_sig.read();
+            resp.status = NOC_RESPONSE_STATUS::NOC_OK;
+            noc1_resp_next.write(resp);
 
-                if (req.addr == PE_CMD_ADDRESS && req.is_w) {
-                    // Command requests - always accepted
-                    noc_req_ready = true;
-                } else if (enabled && req.is_w) {
-                    // Data write requests
-                    NOC_CHANNELS channel = get_noc_channel(req.addr);
-                    switch (channel) {
-                        case NOC_CHANNEL_PS:  noc_req_ready = can_accept_ps(); break;
-                        case NOC_CHANNEL_PD:  noc_req_ready = can_accept_pd(); break;
-                        case NOC_CHANNEL_PLI: noc_req_ready = can_route_to_bus(channel) && can_accept_pli(); break;
-                        default: noc_req_ready = false; break;
-                    }
-                } else if (enabled && !req.is_w) {
-                    // Read requests
-                    NOC_CHANNELS channel = get_noc_channel(req.addr);
-                    if (channel == NOC_CHANNEL_PLO) {
-                        noc_req_ready = has_plo_data();
-                    }
-                }
+            // Pop PLO FIFO
+            plo_fifo_pop_sig.write(true);
 
-                noc_req_in_if.ready_out.write(noc_req_ready);
-
-                // Calculate LN PLI ready signal
-                // Ready if enabled, routing allows, FIFO has space, AND not busy with NoC request
-                bool noc_req_active = noc_req_in_if.valid_in.read() && noc_req_ready;
-                bool ln_pli_ready = enabled && can_route_from_ln(NOC_CHANNEL_PLI) && can_accept_pli() && !noc_req_active;
-                ln_pli_in_if.ready_out.write(ln_pli_ready);
-
-                // Process NoC request if Valid AND Ready
-                if (noc_req_active) {
-                    if (req.addr == PE_CMD_ADDRESS && req.is_w) {
-                        // Process command
-                        DEBUG_MSG("[PErouter] Received command: 0x" << std::hex << req.data << std::dec, DEBUG_LEVEL_PE_TOP);
-                        message_command_t cmd = static_cast<message_command_t>(req.data & 0xF);
-                        switch (cmd) {
-                            case message_command_t::CMD_RESET:
-                                pe_reset_next.write(true);
-                                break;
-                            case message_command_t::CMD_LOAD_PROGRAM:
-                                im_write_addr_next.write((req.data >> PE_ROUTER_IM_ADDR_OFFSET) & PE_ROUTER_IM_ADDR_MASK);
-                                im_write_data_next.write((req.data >> PE_ROUTER_IM_DATA_OFFSET) & PE_ROUTER_IM_DATA_MASK);
-                                im_write_en_next.write(true);
-                                pe_program_next.write(true);
-                                break;
-                            case message_command_t::CMD_START_PE:
-                                pe_start_next.write(true);
-                                break;
-                            default:
-                                break;
-                        }
-                        state_next.write(PErouterState::IDLE);
-                    }
-                    else if (req.is_w) {
-                        // Write data to FIFOs
-                        NOC_CHANNELS channel = get_noc_channel(req.addr);
-                        switch (channel) {
-                            case NOC_CHANNEL_PS:
-                                ps_fifo_data_in_sig.write(req.data);
-                                ps_fifo_push_sig.write(true);
-                                break;
-                            case NOC_CHANNEL_PD:
-                                pd_fifo_data_in_sig.write(req.data);
-                                pd_fifo_mask_in_sig.write(req.mask);
-                                pd_fifo_push_sig.write(true);
-                                break;
-                            case NOC_CHANNEL_PLI:
-                                DEBUG_MSG("[PErouter] Receiving PLI data from NoC: 0x" << std::hex << req.data << std::dec, DEBUG_LEVEL_PE_TOP);
-                                pli_fifo_data_in_sig.write(req.data);
-                                pli_fifo_push_sig.write(true);
-                                break;
-                            default:
-                                break;
-                        }
-                        state_next.write(PErouterState::IDLE);
-                    }
-                    else {
-                        // Read request accepted
-                        DEBUG_MSG("[PErouter] Received read request from NoC, waiting to send response", DEBUG_LEVEL_PE_TOP);
-                        current_noc_req_next.write(req);
-                        pending_req_next = true;
-                        // state_next.write(PErouterState::WAIT_RESP);
-                    }
-                }
-                // Handle LN PLI input
-                else if (ln_pli_ready && ln_pli_in_if.valid_in.read()) {
-                    DEBUG_MSG("[PErouter] Receiving PLI data from LN: 0x" << std::hex << ln_pli_in_if.data_in.read() << std::dec, DEBUG_LEVEL_PE_TOP);
-                    // ln_pli_in_if.ready_out.write(true); // Already written
-                    pli_fifo_data_in_sig.write(ln_pli_in_if.data_in.read());
-                    pli_fifo_push_sig.write(true);
-                    state_next.write(PErouterState::IDLE);
-                }
-
-                //  Data output to PE - 提供數據並在握手成功時 pop FIFO
-                if (enabled) {
-                    // PS channel: NoC -> PE
-                    if (has_ps_data()) {
-                        pe_ps_out_if.valid_out.write(true);
-                        pe_ps_out_if.data_out.write(ps_fifo_data_out_sig.read());
-                        //  如果握手成功，設定 pop 信號
-                        if (pe_ps_out_if.ready_in.read()) {
-                            ps_fifo_pop_sig.write(true);
-                        }
-                    }
-
-                    // PD channel: NoC -> PE
-                    if (has_pd_data()) {
-                        pe_pd_out_if.valid_out.write(true);
-                        pe_pd_out_if.data_out.write(pd_fifo_data_out_sig.read());
-                        if (pe_pd_out_if.ready_in.read()) {
-                            pd_fifo_pop_sig.write(true);
-                        }
-                    }
-
-                    // PLI channel: NoC/LN -> PE
-                    if (has_pli_data()) {
-                        pe_pli_out_if.valid_out.write(true);
-                        pe_pli_out_if.data_out.write(pli_fifo_data_out_sig.read());
-                        if (pe_pli_out_if.ready_in.read()) {
-                            pli_fifo_pop_sig.write(true);
-                        }
-                    }
-
-                    // PLO channel: PE -> internal FIFO
-                    if (pe_plo_in_if.valid_in.read() && can_accept_plo()) {
-                        pe_plo_in_if.ready_out.write(true);
-                        plo_fifo_data_in_sig.write(pe_plo_in_if.data_in.read());
-                        plo_fifo_push_sig.write(true);
-                    }
-
-                    // PLO output
-                    if (has_plo_data()) {
-                        bool plo_to_ln = (mode == PERouterMode::PLI_FROM_LN_PLO_TO_LN) ||
-                                         (mode == PERouterMode::PLI_FROM_BUS_PLO_TO_LN);
-                        bool plo_to_noc = (mode == PERouterMode::PLI_FROM_LN_PLO_TO_BUS) ||
-                                          (mode == PERouterMode::PLI_FROM_BUS_PLO_TO_BUS);
-
-                        DEBUG_MSG("[PErouter] has_plo_data, mode: " << mode << ", plo_to_ln: " << plo_to_ln << ", plo_to_noc: " << plo_to_noc << ", data: 0x" << std::hex << plo_fifo_data_out_sig.read() << std::dec, DEBUG_LEVEL_PE_TOP);
-                        if (plo_to_ln) {
-                            ln_plo_out_if.valid_out.write(true);
-                            ln_plo_out_if.data_out.write(plo_fifo_data_out_sig.read());
-
-                            if (ln_plo_out_if.ready_in.read()) {
-                                DEBUG_MSG("[PErouter] Sending PLO data to LN: 0x" <<  std::hex << plo_fifo_data_out_sig.read() << std::dec, DEBUG_LEVEL_PE_TOP);
-                                plo_fifo_pop_sig.write(true);
-                            }
-                        }
-                        // Polling mode: Do not automatically send to NoC in IDLE.
-                        // Wait for Read Request to trigger response in WAIT_RESP state.
-                    }
-
-                    // response to NoC read request in parrellel
-                    if (pending_noc_req_reg.read()) {
-                        // Send response
-                        noc_resp_out_if.valid_out.write(true);
-                        noc_response_t resp;
-                        resp.data = plo_fifo_data_out_sig.read();
-                        resp.status = NOC_RESPONSE_STATUS::NOC_OK;
-                        noc_resp_out_if.data_out.write(resp);
-
-                        //  如果握手成功，設定 pop 信號
-                        if (noc_resp_out_if.ready_in.read()) {
-                            DEBUG_MSG("[PErouter] IDLE: Sending PLO data to NoC: 0x" <<  std::hex << plo_fifo_data_out_sig.read() << std::dec, DEBUG_LEVEL_PE_TOP);
-                            plo_fifo_pop_sig.write(true);
-                            pending_req_next = false || pending_req_next;
-                            state_next.write(PErouterState::IDLE);
-                        } else {
-                            state_next.write(PErouterState::WAIT_RESP);
-                        }
-                    }
-
-                    pending_noc_req_next.write(pending_req_next);
-                }
-                break;
-            }
-
-            case PErouterState::WAIT_RESP:
-            {
-                if (pending_noc_req_reg.read()) {
-                    // Send response
-                    if (has_plo_data()) {
-                        noc_resp_out_if.valid_out.write(true);
-                        noc_response_t resp;
-                        resp.data = plo_fifo_data_out_sig.read();
-                        resp.status = NOC_RESPONSE_STATUS::NOC_OK;
-                        noc_resp_out_if.data_out.write(resp);
-
-                        //  如果握手成功，設定 pop 信號
-                        if (noc_resp_out_if.ready_in.read()) {
-                            DEBUG_MSG("[PErouter] WAIT_RESP:  Sending PLO data to NoC: 0x" <<  std::hex << plo_fifo_data_out_sig.read() << std::dec, DEBUG_LEVEL_PE_TOP);
-                            plo_fifo_pop_sig.write(true);
-                            pending_noc_req_next.write(false);
-                            state_next.write(PErouterState::IDLE);
-                        } else {
-                            state_next.write(PErouterState::WAIT_RESP);
-                        }
-                    }
-                } else {
-                    state_next.write(PErouterState::IDLE);
-                }
-
-                break;
-            }
-
-            default:
-                state_next.write(PErouterState::IDLE);
-                break;
+            next_pending = true;
         }
+
+        if (current_state == PErouterState::IDLE) {
+            if (enabled && has_plo_data()) { // 主動 (non-pending) 發送 PLO 資料到 LN
+                bool plo_to_ln = (mode == PERouterMode::PLI_FROM_LN_PLO_TO_LN) ||
+                                 (mode == PERouterMode::PLI_FROM_BUS_PLO_TO_LN);
+
+                DEBUG_MSG("[PErouter] has_plo_data, mode: " << mode << ", plo_to_ln: " << plo_to_ln << ", data: 0x" << std::hex << plo_fifo_data_out_sig.read() << std::dec, DEBUG_LEVEL_PE_TOP);
+
+                if (plo_to_ln) {
+                    ln_plo_out_if.valid_out.write(true);
+                    ln_plo_out_if.data_out.write(plo_fifo_data_out_sig.read());
+
+                    if (ln_plo_out_if.ready_in.read()) {
+                        DEBUG_MSG("[PErouter] Sending PLO data to LN: 0x" <<  std::hex << plo_fifo_data_out_sig.read() << std::dec, DEBUG_LEVEL_PE_TOP);
+                        plo_fifo_pop_sig.write(true);
+                    }
+                }
+            }
+
+            if (enabled && pending_noc_resp_reg.read()) {
+                noc1_resp_out_if.valid_out.write(true);
+                noc1_resp_out_if.data_out.write(noc1_resp_reg.read());
+
+                if (noc1_resp_out_if.ready_in.read()) {
+                    DEBUG_MSG("[PErouter] IDLE: Sending PLO data to NoC: 0x" <<  std::hex << plo_fifo_data_out_sig.read()  << std::dec, DEBUG_LEVEL_PE_TOP);
+
+                    if (!internal_noc_read_req_accepted.read()) {
+                        next_pending = false;
+                    }
+
+                    state_next.write(PErouterState::IDLE);
+                } else {
+                    state_next.write(PErouterState::WAIT_RESP);
+                }
+            }
+        }
+        else if (current_state == PErouterState::WAIT_RESP) {
+            if (pending_noc_resp_reg.read()) {
+                if (has_plo_data()) {
+                    noc1_resp_out_if.valid_out.write(true);
+                    noc1_resp_out_if.data_out.write(noc1_resp_reg.read());
+
+                    if (noc1_resp_out_if.ready_in.read()) {
+                        DEBUG_MSG("[PErouter] WAIT_RESP: Sending PLO data to NoC: 0x" <<  std::hex << plo_fifo_data_out_sig.read() << std::dec, DEBUG_LEVEL_PE_TOP);
+                        next_pending = false;
+                        state_next.write(PErouterState::IDLE);
+                    } else {
+                        state_next.write(PErouterState::WAIT_RESP);
+                    }
+                }
+            } else {
+                state_next.write(PErouterState::IDLE);
+            }
+        }
+        else {
+            state_next.write(PErouterState::IDLE);
+        }
+
+        pending_noc_resp_next.write(next_pending);
     }
 
     // ========================= Sequential Logic =========================
     void sequential_process() {
         // Reset
         state_reg.write(PErouterState::IDLE);
-        pending_noc_req_reg.write(false);
-        current_noc_req_reg.write(noc_request_t());
+        pending_noc_resp_reg.write(false);
+        noc1_resp_reg.write(noc_response_t());
 
         im_write_en_reg.write(false);
         im_write_addr_reg.write(0);
@@ -586,8 +618,8 @@ public:
         while (true) {
             // ========== Register updates: next -> reg ==========
             state_reg.write(state_next.read());
-            pending_noc_req_reg.write(pending_noc_req_next.read());
-            current_noc_req_reg.write(current_noc_req_next.read());
+            pending_noc_resp_reg.write(pending_noc_resp_next.read());
+            noc1_resp_reg.write(noc1_resp_next.read());
 
             im_write_en_reg.write(im_write_en_next.read());
             im_write_addr_reg.write(im_write_addr_next.read());
@@ -603,9 +635,6 @@ public:
             pe_reset.write(pe_reset_reg.read());
             pe_start.write(pe_start_reg.read());
             pe_program.write(pe_program_reg.read());
-
-            //  時序邏輯只負責更新暫存器，不再處理 FIFO 操作
-            // FIFO 的 push/pop 信號已經在組合邏輯中設定
 
             DEBUG_MSG("[PErouter] State: " << state_reg.read()
                       << " PS_empty=" << ps_fifo_empty_sig.read()

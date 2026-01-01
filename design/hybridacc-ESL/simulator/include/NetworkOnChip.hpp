@@ -22,9 +22,10 @@ public:
     sc_in<bool> command_mode;
     sc_in<sc_uint<32>> command_data;
 
-    // New Valid-Ready Interface
-    VRDIF<noc::router_req_t> req_in;
-    VRDOF<noc::router_resp_t> resp_out;
+    // New Valid-Ready Interface (Dual Plane)
+    VRDIF<noc::router_req_t> req0_in;
+    VRDIF<noc::router_req_t> req1_in;
+    VRDOF<noc::router_resp_t> resp1_out;
 
     // ---------------------------------------------
     // parameters
@@ -38,20 +39,22 @@ public:
     sc_vector<sc_vector<pe::ProcessElement>> pes;
 
     // Internal signals - NoC/MBus
-    sc_vector<VRDSIG<noc_request_t>> noc_to_bus_req;
-    sc_vector<VRDSIG<noc_response_t>> bus_to_noc_resp;
+    sc_vector<VRDSIG<noc_request_t>> noc0_to_bus_req;
+    sc_vector<VRDSIG<noc_request_t>> noc1_to_bus_req;
+    sc_vector<VRDSIG<noc_response_t>> bus_to_noc1_resp;
 
     sc_signal<bool> scan_chain_enable;
+
+    // Scan chain signals
     sc_vector<sc_signal<ScanChainFormat>> router_scan_chain_out;
     sc_vector<sc_signal<ScanChainFormat>> mbus_scan_chain_out;
-    sc_vector<sc_signal<ScanChainFormat>> scan_chain_in;
-    sc_vector<sc_signal<ScanChainFormat>> scan_chain_out;
 
     //  Internal signals - MBus/PE
     sc_vector<sc_vector<sc_signal<bool>>> router_enable;
     sc_vector<sc_vector<sc_signal<PERouterMode>>> router_mode;
-    sc_vector<sc_vector<VRDSIG<noc_request_t>>> bus_to_pe_req;
-    sc_vector<sc_vector<VRDSIG<noc_response_t>>> pe_to_bus_resp;
+    sc_vector<sc_vector<VRDSIG<noc_request_t>>> bus_to_pe_noc0_req;
+    sc_vector<sc_vector<VRDSIG<noc_request_t>>> bus_to_pe_noc1_req;
+    sc_vector<sc_vector<VRDSIG<noc_response_t>>> pe_to_bus_noc1_resp;
     sc_vector<sc_vector<sc_signal<bool>>> pe_busy;
 
     //  Internal signals - PE/PE
@@ -64,24 +67,25 @@ public:
           reset_n("reset_n"),
           command_mode("command_mode"),
           command_data("command_data"),
-          req_in("req_in"),
-          resp_out("resp_out"),
+          req0_in("req0_in"),
+          req1_in("req1_in"),
+          resp1_out("resp1_out"),
           num_port(num_port),
           num_pes_per_port(num_pes_per_port),
           router("NoC_Router", num_port),
           mbus("mbus"),
           pes("pes"),
-          noc_to_bus_req("noc_to_bus_req", num_port),
-          bus_to_noc_resp("bus_to_noc_resp", num_port),
+          noc0_to_bus_req("noc0_to_bus_req", num_port),
+          noc1_to_bus_req("noc1_to_bus_req", num_port),
+          bus_to_noc1_resp("bus_to_noc1_resp", num_port),
           scan_chain_enable("scan_chain_enable"),
           router_scan_chain_out("router_scan_chain_out", num_port),
           mbus_scan_chain_out("mbus_scan_chain_out", num_port),
-          scan_chain_in("scan_chain_in", num_port),
-          scan_chain_out("scan_chain_out", num_port),
           router_enable("router_enable"),
           router_mode("router_mode"),
-          bus_to_pe_req("bus_to_pe_req"),
-          pe_to_bus_resp("pe_to_bus_resp"),
+          bus_to_pe_noc0_req("bus_to_pe_noc0_req"),
+          bus_to_pe_noc1_req("bus_to_pe_noc1_req"),
+          pe_to_bus_noc1_resp("pe_to_bus_noc1_resp"),
           pe_busy("pe_busy"),
           ln_pli_plo("ln_pli_plo")
     {
@@ -113,11 +117,15 @@ public:
             return new sc_vector<sc_signal<PERouterMode>>(n, num_pes_per_port);
         });
 
-        bus_to_pe_req.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
+        bus_to_pe_noc0_req.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
             return new sc_vector<VRDSIG<noc_request_t>>(n, num_pes_per_port);
         });
 
-        pe_to_bus_resp.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
+        bus_to_pe_noc1_req.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
+            return new sc_vector<VRDSIG<noc_request_t>>(n, num_pes_per_port);
+        });
+
+        pe_to_bus_noc1_resp.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
             return new sc_vector<VRDSIG<noc_response_t>>(n, num_pes_per_port);
         });
 
@@ -140,6 +148,7 @@ public:
     // Debug: Dump internal state
     void dump_state() {
         std::cout << "\n[NoC] Dumping NetworkOnChip State:" << std::endl;
+        std::cout << "--- MBUS ---" << std::endl;
         for(auto& mbus_inst : mbus) {
             mbus_inst.dump_state();
         }
@@ -148,23 +157,25 @@ public:
 
 private:
     void bind() {
-        // NoC Router bindings
+        // NoC Router bindings (Dual Plane Integrated)
         router.clk(clk);
         router.reset_n(reset_n);
         router.command_mode(command_mode);
         router.command_data(command_data);
 
-        // Connect new interface ports
-        bind_vr_interface(router.req_in, req_in);
-        bind_vr_interface(resp_out, router.resp_out);
+        // Bind external ports to router
+        bind_vr_interface(router.req0_in, req0_in);
+        bind_vr_interface(router.req1_in, req1_in);
+        bind_vr_interface(resp1_out, router.resp1_out);
 
         for (size_t i = 0; i < num_port; ++i) {
             // Connect NoC to MBUS request signals
-            connect_vr_signals(router.noc_to_bus_req[i], noc_to_bus_req[i]);
-            connect_vr_signals(router.bus_to_noc_resp[i], bus_to_noc_resp[i]);
+            connect_vr_signals(router.noc0_to_bus_req[i], noc0_to_bus_req[i]);
+            connect_vr_signals(router.noc1_to_bus_req[i], noc1_to_bus_req[i]);
+            connect_vr_signals(router.bus_to_noc1_resp[i], bus_to_noc1_resp[i]);
 
-            // Connect NoCRouter scan-chain output
-            router.scan_chain_in[i](scan_chain_in[i]);
+            // Scan chain: router -> mbus
+            router.scan_chain_in[i](mbus_scan_chain_out[i]);
             router.scan_chain_out[i](router_scan_chain_out[i]);
         }
         router.scan_chain_enable(scan_chain_enable);
@@ -177,31 +188,24 @@ private:
             mbus_inst.reset_n(reset_n);
 
             // Connect NoC to MBUS request signals
-            connect_vr_signals(mbus_inst.noc_to_bus_req, noc_to_bus_req[i]);
-            connect_vr_signals(mbus_inst.bus_to_noc_resp, bus_to_noc_resp[i]);
+            connect_vr_signals(mbus_inst.noc0_to_bus_req, noc0_to_bus_req[i]);
+            connect_vr_signals(mbus_inst.noc1_to_bus_req, noc1_to_bus_req[i]);
+            connect_vr_signals(mbus_inst.bus_to_noc1_resp, bus_to_noc1_resp[i]);
 
-            // Connect scan-chain signals: Chain MBUSes together
+            // Scan chain: router -> mbus
             mbus_inst.scan_chain_enable(scan_chain_enable);
-            if (i == 0) {
-                // First MBUS gets scan-chain from Router
-                mbus_inst.scan_chain_in(router_scan_chain_out[0]);
-            } else {
-                // Subsequent MBUSes get scan-chain from previous MBUS
-                mbus_inst.scan_chain_in(mbus_scan_chain_out[i-1]);
-            }
+            mbus_inst.scan_chain_in(router_scan_chain_out[i]);
             mbus_inst.scan_chain_out(mbus_scan_chain_out[i]);
 
             // Connect PE interface signals
             for (size_t j = 0; j < num_pes_per_port; ++j) {
-                // Router config ports
                 mbus_inst.router_enable[j](router_enable[i][j]);
                 mbus_inst.router_mode[j](router_mode[i][j]);
 
-                // NoC <-> PE ports - using connect_vr_signals (not bind_vr_interface)
-                connect_vr_signals(mbus_inst.bus_to_pe_req[j], bus_to_pe_req[i][j]);
-                connect_vr_signals(mbus_inst.pe_to_bus_resp[j], pe_to_bus_resp[i][j]);
+                connect_vr_signals(mbus_inst.bus_to_pe_noc0_req[j], bus_to_pe_noc0_req[i][j]);
+                connect_vr_signals(mbus_inst.bus_to_pe_noc1_req[j], bus_to_pe_noc1_req[i][j]);
+                connect_vr_signals(mbus_inst.pe_to_bus_noc1_resp[j], pe_to_bus_noc1_resp[i][j]);
 
-                // PE busy signals
                 mbus_inst.pe_busy[j](pe_busy[i][j]);
             }
         }
@@ -220,8 +224,9 @@ private:
                 pe_inst.router_mode(router_mode[i][j]);
 
                 // NoC interface
-                connect_vr_signals(pe_inst.noc_req, bus_to_pe_req[i][j]);
-                connect_vr_signals(pe_inst.noc_resp, pe_to_bus_resp[i][j]);
+                connect_vr_signals(pe_inst.noc0_req, bus_to_pe_noc0_req[i][j]);
+                connect_vr_signals(pe_inst.noc1_req, bus_to_pe_noc1_req[i][j]);
+                connect_vr_signals(pe_inst.noc1_resp, pe_to_bus_noc1_resp[i][j]);
 
                 // PE busy signal
                 pe_inst.pe_busy(pe_busy[i][j]);
@@ -235,7 +240,7 @@ private:
         // Set Trace IDs
         router.set_trace_id(0);
         for (size_t i = 0; i < num_port; ++i) {
-            mbus[i].set_trace_id(i);
+            mbus[i].set_trace_id(i + 1);
             for (size_t j = 0; j < num_pes_per_port; ++j) {
                 pes[i][j].set_trace_id(i * num_pes_per_port + j);
             }

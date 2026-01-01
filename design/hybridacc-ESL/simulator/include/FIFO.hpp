@@ -68,6 +68,20 @@ public:
         sensitive << write_ptr_reg << read_ptr_reg << count_reg << data_in << push << pop << data_out_reg;
     }
 
+    friend std::ostream& operator<<(std::ostream& os, const FIFO<T>& fifo) {
+        os << "[FIFO: " << fifo.fifo_name << "] Depth: " << fifo.fifo_depth
+           << ", Count: " << fifo.count_reg.read()
+           << ", Empty: " << fifo.empty.read()
+           << ", Full: " << fifo.full.read()
+           << " Datastorage: [" << std::hex;
+        for (int i = 0; i < fifo.fifo_depth; ++i) {
+            os << fifo.storage[i];
+            if (i != fifo.fifo_depth - 1) os << ", ";
+        }
+        os << std::dec << "]";
+        return os;
+    }
+
 private:
     // Parameters
     const int fifo_depth;

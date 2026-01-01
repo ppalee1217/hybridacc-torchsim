@@ -74,7 +74,7 @@ class v_fp16_t {
         friend std::ostream& operator<<(std::ostream& os, const v_fp16_t& v) {
             os << "v_fp16_t[";
             for (size_t i = 0; i < v.lanes.size(); ++i) {
-                os << "0x" << std::hex << std::setw(4) << std::setfill('0') << v.lanes[i];
+                os << "0x" << std::hex << std::setw(4) << std::setfill('0') << v.lanes[i] << std::dec;
                 if (i != v.lanes.size() - 1) os << ", ";
             }
             os << "]";
@@ -107,8 +107,8 @@ struct request_t {
     // 輸出運算符，SystemC 訊號需要
     friend std::ostream& operator<<(std::ostream& os, const request_t& req) {
         os << "request_t{data=" << std::hex << req.data
-           << ", addr=0x" << std::hex << req.addr
-           << ", is_w=" << (req.is_w ? "write" : "read") << "}";
+           << ", addr=0x" << std::hex << req.addr << std::dec
+           << ", is_w=" << (req.is_w ? "write" : "read") << "}" ;
         return os;
     }
 
@@ -179,7 +179,7 @@ struct response_t {
 
     // 輸出運算符，SystemC 訊號需要
     friend std::ostream& operator<<(std::ostream& os, const response_t& resp) {
-        os << "response_t{data=" << std::hex << resp.data
+        os << "response_t{data=" << std::hex << resp.data << std::dec
            << ", status=" << static_cast<int>(resp.status) << "}";
         return os;
     }

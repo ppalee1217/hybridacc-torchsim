@@ -25,8 +25,9 @@ public:
     sc_in<PERouterMode> router_mode;
 
     // NoC interface ports - using VRDIF/VRDOF
-    VRDIF<noc_request_t> noc_req;
-    VRDOF<noc_response_t> noc_resp;
+    VRDIF<noc_request_t> noc0_req;
+    VRDIF<noc_request_t> noc1_req;
+    VRDOF<noc_response_t> noc1_resp;
 
     // Control ports
     sc_out<bool> pe_busy;
@@ -41,8 +42,9 @@ public:
           reset_n("reset_n"),
           router_enable("router_enable"),
           router_mode("router_mode"),
-          noc_req("noc_req"),
-          noc_resp("noc_resp"),
+          noc0_req("noc0_req"),
+          noc1_req("noc1_req"),
+          noc1_resp("noc1_resp"),
           pe_busy("pe_busy"),
           ln_pli("ln_pli"),
           ln_plo("ln_plo"),
@@ -156,8 +158,9 @@ public:
         router.route_mode(router_mode);
 
         // NoC interface - using bind_vr_interface
-        bind_vr_interface(router.noc_req_in_if, noc_req);
-        bind_vr_interface(noc_resp, router.noc_resp_out_if);
+        bind_vr_interface(router.noc0_req_in_if, noc0_req);
+        bind_vr_interface(router.noc1_req_in_if, noc1_req);
+        bind_vr_interface(noc1_resp, router.noc1_resp_out_if);
 
         // Local Network interface - using bind_vr_interface
         bind_vr_interface(router.ln_pli_in_if, ln_pli);
