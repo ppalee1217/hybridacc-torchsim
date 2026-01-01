@@ -1,72 +1,41 @@
-# HybridAcc Top-Level Module Specification
+# HybridAcc System Architecture
 
 ## Overview
-`HybridAcc` is the top-level SystemC module representing the entire accelerator subsystem. It acts as the interface between the host system (CPU/System Bus) and the internal accelerator components. It orchestrates data movement, configuration, and execution control.
 
-## Module Interface (IO Specification)
+HybridAcc is a heterogeneous accelerator designed for efficient neural network processing. The system is built upon a scalable Network-on-Chip (NoC) architecture that interconnects multiple Compute Clusters or Process Elements (PEs).
 
-| Port Name | Type | Direction | Width | Description |
-|-----------|------|-----------|-------|-------------|
-| `clk` | `sc_in<bool>` | Input | 1 | System Clock |
-| `reset_n` | `sc_in<bool>` | Input | 1 | Active Low Reset |
-| `host_req` | `sc_in<host_req_t>` | Input | - | Request from Host (AXI-like or simple valid/ready) |
-| `host_resp` | `sc_out<host_resp_t>` | Output | - | Response to Host |
-| `irq` | `sc_out<bool>` | Output | 1 | Interrupt Request to Host |
+The current ESL (Electronic System Level) simulation focuses on the **NetworkOnChip** module as the top-level container, which instantiates the interconnect and the Processing Elements.
 
-## Internal Architecture
+## System Components
 
-The HybridAcc module integrates the following major components:
+### 1. Network-on-Chip (NoC)
+The NoC provides the communication backbone for the accelerator. It features a **Dual-Plane Architecture**:
+*   **NoC-0 (Push Plane)**: A write-only plane used for broadcasting commands, distributing weights, and streaming input activations to PEs.
+*   **NoC-1 (Local Network Plane)**: A read/write plane used for PE-to-PE communication (Local Network) and collecting partial sum results.
 
-1.  **CoreController**: The main state machine that parses host instructions (e.g., "Start Kernel", "Config") and coordinates the other units.
-2.  **DMA (Direct Memory Access)**: Handles high-speed data transfer between System Memory (DRAM) and the internal HDDU/NoC.
-3.  **ClusterDataDeliverUnit (HDDU)**: A specialized buffering and scheduling unit that feeds data into the NoC. It manages the "Shared Injection Port" arbitration and "Bus Locking".
-4.  **NetworkOnChip (NoC)**: The interconnect fabric that houses the Processing Elements (PEs) and manages data distribution to them.
+Key components include:
+*   **NoCRouter**: The central routing unit that manages traffic between different ports.
+*   **MBUS (Multicast Bus)**: Connects a single router port to multiple PEs, enabling efficient data distribution and collection.
 
-### System Block Diagram
+### 2. Process Element (PE)
+The PE is the core computation unit, featuring a 3-stage pipeline:
+*   **IF_ID Stage**: Instruction Fetch and Decode. Handles loop control and instruction dispatch.
+*   **EXE_M Stage**: Execution Memory/Multiply. Performs vector multiplication (`VMULU`) and handles data loading (`DataLoader`) and storage (`DataMemory`).
+*   **EXE_A Stage**: Execution Accumulate. Performs vector accumulation (`VADDU`) and manages partial sums (`PsumRegFile`).
 
-```mermaid
-graph TD
-    Host[Host System] <-->|AXI/Bus| HA[HybridAcc Top]
+The PE interfaces with the system via the **PErouter**, which manages data flow between the NoC planes and the PE's internal ports (PS, PD, PLI, PLO).
 
-    subgraph HA [HybridAcc]
-        CC[Core Controller]
-        DMA[DMA Engine]
-        HDDU[Cluster Data Deliver Unit]
-        NoC[Network On Chip]
+### 3. Hybrid Data Deliver Unit (HDDU)
+The HDDU acts as a bridge between the system memory (SRAM/DMA) and the NoC. It contains Address Generation Units (AGUs) for Weights, Inputs, and Accumulation data, ensuring efficient data feeding into the accelerator.
 
-        CC -->|Config/Control| DMA
-        CC -->|Config/Control| HDDU
-        CC -->|Config/Control| NoC
+## Simulation Structure
 
-        DMA <-->|Data Stream| HDDU
-        HDDU <-->|NoC Packets| NoC
+The simulation is built using SystemC. The top-level testbench (`test_noc_sim.cpp`) instantiates the `NetworkOnChip` module and drives it with test patterns (activations, weights, programs) loaded from files.
 
-        subgraph NoC_Fabric
-            Router
-            PEs[Processing Elements]
-        end
-    end
-```
-
-## Operational Flow
-
-1.  **Initialization**:
-    - Host asserts `reset_n`.
-    - `CoreController` initializes all sub-modules.
-
-2.  **Configuration Phase**:
-    - Host sends configuration packets via `host_req`.
-    - `CoreController` routes these to `HDDU` (for tiling/stride config) or `NoC` (for PE microcode loading).
-
-3.  **Execution Phase**:
-    - Host triggers "Start".
-    - `DMA` fetches data from system memory.
-    - `HDDU` buffers data, applies "Smart Arbitration" (Priority/Locking), and injects it into the `NoC`.
-    - `NoC` routes data to PEs.
-    - PEs perform computation.
-
-4.  **Writeback Phase**:
-    - PEs send results back to `NoC`.
-    - `NoC` routes results to `HDDU` (or separate Output Unit).
-    - `DMA` writes results back to system memory.
-    - `CoreController` asserts `irq` upon completion.
+### Directory Structure
+*   `simulator/include/`: Header files for all modules.
+    *   `NoC/`: Router and MBUS definitions.
+    *   `PE/`: Process Element stages and units.
+    *   `Cluster/`: HDDU and memory components.
+*   `simulator/src/`: Implementation files (mostly empty as logic is often in headers or specific cpp files).
+*   `test/`: Testbenches and simulation entry points (`test_noc_sim.cpp`, `test_pe_sim.cpp`).

@@ -21,7 +21,7 @@ Generates a sequence of addresses for reading/writing data from/to SRAM. It supp
 ---
 
 ## DataMemory (SRAM)
-**Used in**: `ClusterDataDeliverUnit`, `ProcessElement` (Scratchpad)
+**Used in**: `ClusterDataDeliverUnit`, `ProcessElement` (Scratchpad/Weight Buffer)
 
 ### Function
 A generic single-port or dual-port SRAM model.
@@ -53,8 +53,9 @@ A simple multiplexer to select data sources.
 **Used in**: `ProcessElement` (IF_ID Stage)
 
 ### Function
-Decodes the 32-bit instruction word into control signals for the datapath.
+Decodes the 16-bit instruction word into control signals for the datapath.
 
 ### Interface
-- `instr_in`: 32-bit instruction.
+- `instr_in`: 16-bit instruction.
 - `ctrl_signals_out`: Struct containing all control lines (ALU op, Reg Write, Mux Selects, etc.).
+

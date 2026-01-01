@@ -1,84 +1,59 @@
-# ProcessElement (PE) Module Specification
+# Process Element (PE) Architecture
 
 ## Overview
-The `ProcessElement` (PE) is the core computational unit of the HybridAcc architecture. It implements a 3-stage pipeline (IF/ID, EXE-M, EXE-A) to execute custom instructions for convolution, matrix multiplication, and other tensor operations. It connects to the NoC via a Router and to neighbors via a Local Network.
 
-## Module Interface (IO Specification)
+The Process Element (PE) is the fundamental computation unit of the HybridAcc accelerator. It is designed as a 3-stage pipeline to efficiently execute vector operations for neural networks.
 
-| Port Name | Type | Direction | Description |
-|-----------|------|-----------|-------------|
-| `clk` | `sc_in<bool>` | Input | System Clock |
-| `reset_n` | `sc_in<bool>` | Input | Active Low Reset |
-| `router_enable` | `sc_in<bool>` | Input | Enable signal for the internal PE Router |
-| `router_mode` | `sc_in<PERouterMode>` | Input | Mode selection for PE Router (e.g., UNICAST, BROADCAST) |
-| `noc_req` | `VRDIF<noc_request_t>` | Input | NoC Request Interface (Valid/Ready/Data) |
-| `noc_resp` | `VRDOF<noc_response_t>` | Output | NoC Response Interface (Valid/Ready/Data) |
-| `pe_busy` | `sc_out<bool>` | Output | Busy status signal |
-| `ln_pli` | `VRDIF<uint64_t>` | Input | Local Network Input (from Left/Neighbor) |
-| `ln_plo` | `VRDOF<uint64_t>` | Output | Local Network Output (to Right/Neighbor) |
+## Pipeline Stages
 
-## Internal Architecture
+### 1. IF_ID Stage (Instruction Fetch & Decode)
+*   **Function**: Fetches instructions from the Instruction Memory (IM), decodes them, and handles loop control.
+*   **Components**:
+    *   `InstructionMemory`: Stores the PE program.
+    *   `Decoder`: Decodes instructions into control signals.
+    *   `LoopController`: Manages hardware loops (Zero-Overhead Loops).
+*   **Outputs**: Decoded signals to the EXE_M stage.
 
-The PE consists of the following main components:
+### 2. EXE_M Stage (Execution - Memory/Multiply)
+*   **Function**: Performs vector multiplication and handles data movement.
+*   **Components**:
+    *   `VMULU` (Vector Multiply Unit): Performs FP16 vector multiplication.
+    *   `DataLoader`: Loads data from Data Memory or external ports.
+    *   `DataMemory`: Local scratchpad memory.
+    *   `TransformRegFile`: Register file for transformation coefficients.
+*   **Inputs**:
+    *   **PS (Port Static)**: Input for stationary data (e.g., weights).
+    *   **PD (Port Dynamic)**: Input for streaming data (e.g., activations).
+*   **Outputs**: Multiplication results to EXE_A stage.
 
-1.  **PE Router**: Handles incoming data from the NoC and directs it to the appropriate internal buffer (Weight Buffer, Input Buffer) or control register.
-2.  **IF_ID_Stage (Instruction Fetch / Instruction Decode)**:
-    - Fetches instructions from the microcode memory.
-    - Decodes instructions into control signals.
-    - Handles loop control and branching.
-3.  **EXE_M_Stage (Execute - Multiplier)**:
-    - Performs multiplication operations (e.g., MAC).
-    - Accesses the Weight Buffer and Input Buffer (Scratchpad).
-4.  **EXE_A_Stage (Execute - Adder/Accumulator)**:
-    - Performs accumulation and post-processing (ReLU, Quantization).
-    - Manages the Accumulator Registers.
-    - Handles data movement to/from the Local Network (`ln_pli`, `ln_plo`).
+### 3. EXE_A Stage (Execution - Accumulate)
+*   **Function**: Performs vector accumulation and manages partial sums.
+*   **Components**:
+    *   `VADDU` (Vector Add Unit): Performs FP16 vector addition/accumulation.
+    *   `PsumRegFile`: Register file for storing partial sums.
+*   **Inputs**:
+    *   **PLI (Port Local Input)**: Input from neighbor PE (Local Network).
+*   **Outputs**:
+    *   **PLO (Port Local Output)**: Output to neighbor PE or NoC.
 
-### Pipeline Diagram
+## PE Router (`PErouter`)
 
-```mermaid
-graph LR
-    NoC[NoC Interface] --> Router[PE Router]
-    Router -->|Weights| WB[Weight Buffer]
-    Router -->|Inputs| IB[Input Buffer]
-    Router -->|uCode| IM[Instruction Memory]
+The `PErouter` manages the data flow into and out of the PE. It connects the PE to the NoC and the Local Network.
 
-    IM --> IF_ID[IF/ID Stage]
-    IF_ID -->|Control| EXE_M[EXE-M Stage]
-    IF_ID -->|Control| EXE_A[EXE-A Stage]
+*   **NoC Interface**:
+    *   Receives data from **NoC-0** and **NoC-1**.
+    *   Routes data to internal ports: `PS`, `PD`, `PLI`.
+    *   Sends data from `PLO` to **NoC-1**.
+*   **Control**:
+    *   Handles PE configuration commands (Reset, Start, Program IM).
+    *   Manages flow control (Valid/Ready) for all ports.
 
-    WB --> EXE_M
-    IB --> EXE_M
-    EXE_M -->|Partial Sum| EXE_A
+## Data Ports
 
-    LN_In[Local Net In] --> EXE_A
-    EXE_A --> LN_Out[Local Net Out]
-    EXE_A -->|Writeback| IB
-```
+*   **PS (Port Static)**: 64-bit wide. Typically used for weights or constants.
+*   **PD (Port Dynamic)**: 16-bit wide. Typically used for input activations.
+*   **PLI (Port Local Input)**: 64-bit wide. Input from the previous PE in the chain.
+*   **PLO (Port Local Output)**: 64-bit wide. Output to the next PE or back to the NoC.
 
-## Pipeline Stages Detail
-
-### IF_ID Stage
-- **Function**: Fetches 32-bit instructions from the local Instruction Memory (IM).
-- **Logic**:
-    - Maintains `pc` (Program Counter).
-    - Decodes opcodes (CONV, GEMM, ALU, etc.).
-    - Generates stall signals if dependencies are not met.
-
-### EXE_M Stage
-- **Function**: The "Multiplier" stage.
-- **Logic**:
-    - Reads operands from SRAM (Input/Weight).
-    - Performs 16-bit/8-bit multiplications.
-    - Pipelined to feed the Adder stage.
-
-### EXE_A Stage
-- **Function**: The "Adder" stage.
-- **Logic**:
-    - Accumulates results from EXE_M.
-    - Adds values from Local Network (systolic flow).
-    - Writes results back to Input Buffer or sends to Local Network.
-
-## Control Logic
-- **Stall Propagation**: The PE implements a back-pressure mechanism. If EXE_A stalls (e.g., waiting for output readiness), it stalls EXE_M, which in turn stalls IF_ID.
-- **Busy Signal**: `pe_busy` is asserted when the pipeline is active or when there are pending operations.
+## Instruction Set
+The PE executes a custom VLIW-like instruction set optimized for CNN/RNN operations. Instructions control the datapath, memory access, and loop logic.
