@@ -1,0 +1,16 @@
+{
+  "mode": "conv2d",
+  "num_pes": 64,
+  "num_bus": 4,
+  "stride": 1,
+  "input_h": 14,
+  "input_w": 200,
+  "input_c": 4,
+  "out_ch": 16,
+  "kernel_h": 3,
+  "kernel_w": 3,
+  "seed": 123,
+  "padding": 0,
+  "ultra_mode": false,
+  "out_dir": "./output/noc-dse-sim/conv_k3c4h12"
+}

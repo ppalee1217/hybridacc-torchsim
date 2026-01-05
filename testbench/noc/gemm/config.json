@@ -1,0 +1,10 @@
+{
+    "mode": "gemm",
+    "num_pes": 64,
+    "M": 32,
+    "N": 32,
+    "K": 32,
+    "seed": 123,
+    "ultra_mode": true,
+    "out_dir": "./output/noc-sim/gemm"
+}

@@ -1,0 +1,16 @@
+{
+    "mode": "conv2d",
+    "num_pes": 64,
+    "num_bus": 4,
+    "stride": 1,
+    "input_h": 22,
+    "input_w": 200,
+    "input_c": 1,
+    "out_ch": 16,
+    "kernel_h": 7,
+    "kernel_w": 7,
+    "seed": 123,
+    "padding": 0,
+    "ultra_mode": false,
+    "out_dir": "./output/noc-sim/conv_k7c1"
+}

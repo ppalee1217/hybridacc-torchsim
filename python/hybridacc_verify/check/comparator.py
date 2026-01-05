@@ -182,17 +182,7 @@ def dump_csv(sim_seq, exp_seq, result, path: str):
     df.to_csv(path, index=False)
 
 
-def main(argv: Sequence[str]) -> int:
-    p = argparse.ArgumentParser(description='Compare two fp16 binary files.')
-    p.add_argument('--sim', required=True, help='模擬輸出檔案 (.bin)')
-    p.add_argument('--expected', required=True, help='期望/黃金輸出檔案 (.bin)')
-    p.add_argument('--rtol', type=float, default=1e-2, help='相對誤差容忍 (default 1e-2)')
-    p.add_argument('--atol', type=float, default=1e-3, help='絕對誤差容忍 (default 1e-3)')
-    p.add_argument('--show', type=int, default=10, help='顯示前 N 個 mismatch (default 10)')
-    p.add_argument('--quiet', action='store_true', help='僅用退出碼表示結果')
-    p.add_argument('--dump-csv', dest='dump_csv', help='(需要 pandas) 輸出詳細 CSV: hex, sign, exp, mantissa, float, diff')
-    args = p.parse_args(argv)
-
+def run_check_with_args(args) -> int:
     if not os.path.isfile(args.sim):
         print(f"找不到模擬檔案: {args.sim}", file=sys.stderr)
         return 2
@@ -252,6 +242,20 @@ def main(argv: Sequence[str]) -> int:
         if not args.quiet:
             print('結果: FAIL')
         return 1
+
+
+def main(argv: Sequence[str]) -> int:
+    p = argparse.ArgumentParser(description='Compare two fp16 binary files.')
+    p.add_argument('--sim', required=True, help='模擬輸出檔案 (.bin)')
+    p.add_argument('--expected', required=True, help='期望/黃金輸出檔案 (.bin)')
+    p.add_argument('--rtol', type=float, default=1e-2, help='相對誤差容忍 (default 1e-2)')
+    p.add_argument('--atol', type=float, default=1e-3, help='絕對誤差容忍 (default 1e-3)')
+    p.add_argument('--show', type=int, default=10, help='顯示前 N 個 mismatch (default 10)')
+    p.add_argument('--quiet', action='store_true', help='僅用退出碼表示結果')
+    p.add_argument('--dump-csv', dest='dump_csv', help='(需要 pandas) 輸出詳細 CSV: hex, sign, exp, mantissa, float, diff')
+    args = p.parse_args(argv)
+
+    return run_check_with_args(args)
 
 
 if __name__ == '__main__':  # pragma: no cover

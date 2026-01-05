@@ -17,9 +17,9 @@ if [ -d "$SYSTEMC_DIR" ]; then
 else
     echo "SystemC not found. Creating libs directory..."
     mkdir -p "$LIBS_DIR"
-    
+
     cd "$LIBS_DIR"
-    
+
     echo "Downloading SystemC $SYSTEMC_VERSION..."
     # Check for wget or curl
     if command -v wget &> /dev/null; then
@@ -30,15 +30,15 @@ else
         echo "Error: Neither wget nor curl found. Please install one of them."
         exit 1
     fi
-    
+
     echo "Extracting SystemC..."
     tar -xzf systemc.tar.gz
-    
+
     # The tarball usually extracts to systemc-2.3.3
     if [ -d "systemc-$SYSTEMC_VERSION" ]; then
         mv "systemc-$SYSTEMC_VERSION" systemc
     fi
-    
+
     rm systemc.tar.gz
     echo "SystemC setup complete."
 fi
@@ -50,7 +50,7 @@ echo "Setting up uv environment..."
 if ! command -v uv &> /dev/null; then
     echo "uv not found. Installing uv..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
-    
+
     # Add uv to PATH for the current session if it was just installed
     if [ -f "$HOME/.cargo/env" ]; then
         source "$HOME/.cargo/env"
@@ -64,19 +64,28 @@ fi
 if [ -d "$PROJECT_ROOT/python" ]; then
     echo "Setting up Python environment in $PROJECT_ROOT..."
     cd "$PROJECT_ROOT"
-    
+
     # Create venv if it doesn't exist
     if [ ! -d ".venv" ]; then
         uv venv
+    else
+        echo "Virtual environment already exists."
     fi
-    
-    # Install dependencies
+
+    # Activate venv
     source .venv/bin/activate
-    
-    echo "Installing dependencies from python/pyproject.toml..."
-    cd python
-    uv pip install -e .
-    
+
+    # Prefer modern pyproject at repo root; fall back to python/setup.py editable install
+    if [ -f "$PROJECT_ROOT/pyproject.toml" ]; then
+        echo "Installing python package from project root (pyproject.toml)..."
+        uv pip install -e .
+    elif [ -f "$PROJECT_ROOT/python/setup.py" ]; then
+        echo "Installing python package using python/setup.py..."
+        uv pip install -e python/
+    else
+        echo "Warning: no pyproject.toml or python/setup.py found; skipping python install."
+    fi
+
     echo "uv environment setup complete."
 else
     echo "Warning: python directory not found. Skipping python setup."

@@ -1,11 +1,31 @@
 from dataclasses import dataclass
 from typing import Optional
 
+
+MAX_INPUT_WIDTH = 800
 class PERouterMode:
     PLI_FROM_LN_PLO_TO_LN = 0
     PLI_FROM_BUS_PLO_TO_LN = 1
     PLI_FROM_LN_PLO_TO_BUS = 2
     PLI_FROM_BUS_PLO_TO_BUS = 3
+
+    def to_str(mode: int) -> str:
+        mapping = {
+            PERouterMode.PLI_FROM_LN_PLO_TO_LN: "PLI_FROM_LN_PLO_TO_LN",
+            PERouterMode.PLI_FROM_BUS_PLO_TO_LN: "PLI_FROM_BUS_PLO_TO_LN",
+            PERouterMode.PLI_FROM_LN_PLO_TO_BUS: "PLI_FROM_LN_PLO_TO_BUS",
+            PERouterMode.PLI_FROM_BUS_PLO_TO_BUS: "PLI_FROM_BUS_PLO_TO_BUS",
+        }
+        return mapping.get(mode, "UNKNOWN_MODE")
+
+    def to_symbol(mode: int) -> str:
+        mapping = {
+            PERouterMode.PLI_FROM_LN_PLO_TO_LN: "(IL, OL)",
+            PERouterMode.PLI_FROM_BUS_PLO_TO_LN: "(IB, OL)",
+            PERouterMode.PLI_FROM_LN_PLO_TO_BUS: "(IL, OB)",
+            PERouterMode.PLI_FROM_BUS_PLO_TO_BUS: "(IB, OB)",
+        }
+        return mapping.get(mode, "?")
 
 @dataclass
 class ScanChainConfig:
@@ -43,15 +63,15 @@ class ConvConfig:
     def validate(self):
         valid_modes = ['k3c4', 'k5c2', 'k7c1', 'k1c12']
         if self.mode not in valid_modes:
-            raise ValueError(f"mode 必須為 {valid_modes}，收到: {self.mode}")
+            raise ValueError(f"mode 必須為 {valid_modes}, 收到: {self.mode}")
         if not (1 <= self.out_ch <= 16):
-            raise ValueError(f"out_ch 範圍 1~16，收到: {self.out_ch}")
-        if not (3 <= self.in_width <= 800):
-            raise ValueError(f"in_width 範圍 3~800，收到: {self.in_width}")
+            raise ValueError(f"out_ch 範圍 1~16, 收到: {self.out_ch}")
+        if not (3 <= self.in_width <= MAX_INPUT_WIDTH):
+            raise ValueError(f"in_width 範圍 3~800, 收到: {self.in_width}")
         if self.layout not in ('channels_first', 'channels_last'):
-            raise ValueError(f"layout 需為 channels_first 或 channels_last，收到: {self.layout}")
+            raise ValueError(f"layout 需為 channels_first 或 channels_last, 收到: {self.layout}")
         if self.fmt not in ('bin', 'hex'):
-            raise ValueError(f"fmt 需為 bin 或 hex，收到: {self.fmt}")
+            raise ValueError(f"fmt 需為 bin 或 hex, 收到: {self.fmt}")
 
 
 @dataclass
@@ -66,14 +86,58 @@ class GemmConfig:
     out_dir: str = './output'
 
     def validate(self):
-        if not (1 <= self.out_width <= 800):
-            raise ValueError(f"out_width 範圍 1~800，收到: {self.out_width}")
-        if not (3 <= self.in_width <= 800):
-            raise ValueError(f"in_width 範圍 3~800，收到: {self.in_width}")
+        if not (1 <= self.out_width <= MAX_INPUT_WIDTH):
+            raise ValueError(f"out_width 範圍 1~800, 收到: {self.out_width}")
+        if not (3 <= self.in_width <= MAX_INPUT_WIDTH):
+            raise ValueError(f"in_width 範圍 3~800, 收到: {self.in_width}")
         if self.dim < 1:
-            raise ValueError(f"dim 必須 >= 1，收到: {self.dim}")
+            raise ValueError(f"dim 必須 >= 1, 收到: {self.dim}")
         if self.fmt not in ('bin', 'hex'):
-            raise ValueError(f"fmt 需為 bin 或 hex，收到: {self.fmt}")
+            raise ValueError(f"fmt 需為 bin 或 hex, 收到: {self.fmt}")
+
+@dataclass
+class NocConvConfig:
+    """NoC Conv2d Configuration"""
+    num_pes: int
+    num_bus: int
+    stride: int
+    input_h: int
+    input_w: int
+    input_c: int
+    out_ch: int
+    kernel_h: int
+    kernel_w: int
+    seed: int = 123
+    padding: int = 0
+    ultra_mode: bool = False
+    mode: str = "conv2d" # To identify the task type in config file
+    out_dir: str = "./output/conv2d"
+
+    def validate(self):
+        if self.num_pes <= 0:
+            raise ValueError(f"num_pes must be > 0, got {self.num_pes}")
+        if self.num_bus <= 0:
+            raise ValueError(f"num_bus must be > 0, got {self.num_bus}")
+        if self.stride <= 0:
+            raise ValueError(f"stride must be > 0, got {self.stride}")
+
+@dataclass
+class NocGemmConfig:
+    """NoC GEMM Configuration"""
+    num_pes: int
+    M: int
+    N: int
+    K: int
+    seed: int = 123
+    mode: str = "gemm"
+    ultra_mode: bool = False
+    out_dir: str = "./output/gemm"
+
+    def validate(self):
+        if self.num_pes <= 0:
+            raise ValueError(f"num_pes must be > 0, got {self.num_pes}")
+        if self.M <= 0 or self.N <= 0 or self.K <= 0:
+            raise ValueError(f"M, N, K must be > 0, got {self.M}, {self.N}, {self.K}")
 
 import json
 from pathlib import Path
@@ -105,6 +169,9 @@ class ConfigLoader:
     @staticmethod
     def load(path: Path) -> Dict:
         """自動偵測並載入配置文件"""
+        if not path.exists():
+            raise FileNotFoundError(f"配置文件不存在: {path}")
+
         suffix = path.suffix.lower()
         if suffix == '.json':
             return ConfigLoader.load_from_json(path)

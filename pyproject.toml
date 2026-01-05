@@ -2,6 +2,7 @@
 name = "hybridacc_verify"
 version = "0.1.0"
 description = "Verification tools for HybridAcc"
+requires-python = ">=3.8"
 dependencies = [
     "numpy",
     "torch",
@@ -9,5 +10,5 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["hybridacc_verify*"]
+where = ["python"]
+include = ["hybridacc_verify*", "trace_parser*"]
