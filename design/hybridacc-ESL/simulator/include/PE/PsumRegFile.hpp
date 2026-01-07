@@ -53,7 +53,7 @@ SC_MODULE(PsumRegFile) {
             SC_CTHREAD(sequential_process, clk.pos());
             reset_signal_is(reset_n, false);
             SC_METHOD(combinational_process);
-            sensitive << pid << write << mode << reset_n << pcounter;
+            sensitive << pid << write << mode << reset_n << pcounter << enable << use_pcounter;
         }
 
 
@@ -122,6 +122,7 @@ SC_MODULE(PsumRegFile) {
                     } else if (clear_pcounter.read()) {
                         pcounter.write(0);
                     } else if (incr_pcounter.read()) {
+                        DEBUG_MSG("[PsumRegFile] INCR pcounter: " << pcounter.read() << " -> " << (pcounter.read() + pid.read()), DEBUG_LEVEL_PE_COMPONENTS);
                         pcounter.write(pcounter.read() + pid.read());
                     }
                 }
@@ -149,6 +150,7 @@ SC_MODULE(PsumRegFile) {
                 p_out.write(getP(read_pid));  // 修正：添加缺少的參數
                 vp_out.write(v_fp16_t()); // clear vector output in scalar mode
             } else if (mode.read() == 1){
+                DEBUG_MSG("[PsumRegFile] Read VP64[" << read_pid << "] = " << std::hex << getVP64(read_pid) << std::dec, DEBUG_LEVEL_PE_COMPONENTS);
                 p_out.write(0); // clear scalar output in vector mode
                 vp_out.write(getVP64(read_pid));
             }

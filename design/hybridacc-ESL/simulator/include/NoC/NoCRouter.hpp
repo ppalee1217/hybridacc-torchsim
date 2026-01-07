@@ -95,8 +95,8 @@ public:
           scan_chain_enable_next("scan_chain_enable_next"),
           pending_read_reg("pending_read_reg"),
           pending_read_next("pending_read_next"),
-          pending_read_simd_reg("pending_read_simd_reg"),
-          pending_read_simd_next("pending_read_simd_next"),
+          pending_read_ultra_reg("pending_read_ultra_reg"),
+          pending_read_ultra_next("pending_read_ultra_next"),
           rx_stall_sig("rx_stall_sig"),
           req0_fifo("req0_fifo", 4),
           req1_fifo("req1_fifo", 4),
@@ -153,7 +153,7 @@ public:
 
         // Response Processing (Rx)
         SC_METHOD(process_responses);
-        sensitive << pending_read_reg << pending_read_simd_reg << resp_fifo_full_sig;
+        sensitive << pending_read_reg << pending_read_ultra_reg << resp_fifo_full_sig;
         for (size_t i = 0; i < num_ports; ++i) {
             sensitive << bus_to_noc1_resp[i].valid_in << bus_to_noc1_resp[i].data_in;
         }
@@ -220,8 +220,8 @@ private:
 
     sc_signal<bool> pending_read_reg;
     sc_signal<bool> pending_read_next;
-    sc_signal<bool> pending_read_simd_reg;
-    sc_signal<bool> pending_read_simd_next;
+    sc_signal<bool> pending_read_ultra_reg;
+    sc_signal<bool> pending_read_ultra_next;
 
     // Internal signal for Rx stall
     sc_signal<bool> rx_stall_sig;
@@ -240,7 +240,7 @@ private:
         scan_chain_enable_reg.write(false);
 
         pending_read_reg.write(false);
-        pending_read_simd_reg.write(false);
+        pending_read_ultra_reg.write(false);
 
         wait();
 
@@ -248,7 +248,7 @@ private:
             scan_chain_data_reg.write(scan_chain_data_next.read());
             scan_chain_enable_reg.write(scan_chain_enable_next.read());
             pending_read_reg.write(pending_read_next.read());
-            pending_read_simd_reg.write(pending_read_simd_next.read());
+            pending_read_ultra_reg.write(pending_read_ultra_next.read());
             wait();
         }
     }
@@ -324,7 +324,7 @@ private:
             router_req_t req = req0_fifo_out_sig.read();
 
             // Decode
-            bool is_simd = (req.addr >> 8) & 0x1;
+            bool is_ultra = (req.addr >> 8) & 0x1;
             sc_uint<8> base_addr = req.addr & 0xFF;
             bool is_write = req.is_w;
             size_t mask = req.mask;
@@ -332,8 +332,8 @@ private:
             // Broadcast / SIMD
             for (size_t i = 0; i < num_ports; ++i) {
                 noc_request_t r;
-                if (is_simd) {
-                    assert(num_ports <= 4);
+                if (is_ultra) {
+                    assert(num_ports <= 4); // Max 4 ports for ultra mode (since 256/64=4)
                     r.data = req.data.range(64*i + 63, 64*i).to_uint64();
                 } else { // Broadcast
                     r.data = req.data.range(63, 0).to_uint64();
@@ -368,7 +368,7 @@ private:
         // Default outputs
         req1_fifo_pop_sig.write(false);
         pending_read_next.write(false);
-        pending_read_simd_next.write(false);
+        pending_read_ultra_next.write(false);
 
         for (size_t i = 0; i < num_ports; ++i) {
             noc1_to_bus_req[i].valid_out.write(false);
@@ -379,7 +379,7 @@ private:
         if (rx_stall_sig.read()) {
             // Stall Tx: Hold pending read mask
             pending_read_next.write(pending_read_reg.read());
-            pending_read_simd_next.write(pending_read_simd_reg.read());
+            pending_read_ultra_next.write(pending_read_ultra_reg.read());
             return;
         }
 
@@ -388,7 +388,7 @@ private:
             router_req_t req = req1_fifo_out_sig.read();
 
             // Decode
-            bool is_simd = (req.addr >> 8) & 0x1;
+            bool is_ultra = (req.addr >> 8) & 0x1;
             sc_uint<8> base_addr = req.addr & 0xFF;
             bool is_write = req.is_w;
             size_t mask = req.mask;
@@ -397,7 +397,7 @@ private:
             // Broadcast / SIMD
             for (size_t i = 0; i < num_ports; ++i) {
 
-                if (is_simd) {
+                if (is_ultra) {
                     assert(num_ports <= 4);
                     r.data = req.data.range(64*i + 63, 64*i).to_uint64();
                 } else { // Broadcast
@@ -427,7 +427,7 @@ private:
 
                 if (!is_write) {
                     pending_read_next.write(true);
-                    pending_read_simd_next.write(is_simd);
+                    pending_read_ultra_next.write(is_ultra);
                 }
             }
             else{
@@ -448,7 +448,7 @@ private:
         }
 
         bool is_pending_read = pending_read_reg.read();
-        bool is_simd = pending_read_simd_reg.read();
+        bool is_ultra = pending_read_ultra_reg.read();
 
         if (!is_pending_read) return;
 
@@ -467,7 +467,7 @@ private:
             }
         }
 
-        if (is_simd) {
+        if (is_ultra) {
             // SIMD mode: expect response from all ports
             for (size_t i = 0; i < num_ports; ++i) {
                 if (!(valid_rx & (1ULL << i))) {

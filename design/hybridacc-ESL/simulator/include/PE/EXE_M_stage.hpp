@@ -22,20 +22,25 @@ public:
     sc_in<bool> stage_reset;        // Reset stage state
     sc_in<bool> pe_running;         // PE is running (false = all stages stop)
 
-    // pipelined inputs
+    // Pipeline Handshake Inputs (From Upstream IF_ID)
     sc_in<pe_decode_signals_t> ID_decode_signals_in;
-    sc_in<bool> signal_valid_in;
+    sc_in<bool> valid_in;           // Renamed from signal_valid_in
 
-    // pipelined outputs
+    // Pipeline Handshake Outputs (To Upstream IF_ID)
+    sc_out<bool> ready_out;         // New: Backpressure to IF_ID
+
+    // Pipeline Handshake Outputs (To Downstream EXE_A)
     sc_out<v_fp16_t> vmul_out_out;
     sc_out<pe_decode_signals_t> EXE_A_decode_signals_out;
-    sc_out<bool> signal_valid_out;
+    sc_out<bool> valid_out;         // Renamed from signal_valid_out
+
+    // Pipeline Handshake Inputs (From Downstream EXE_A)
+    sc_in<bool> ready_in;           // New: Replaces stall_from_downstream
 
     // Status outputs
     sc_out<bool> halted_out;
 
-    // stall control
-    sc_in<bool> stall_from_downstream;
+    // stall monitoring (internal stall sources)
     sc_out<bool> stall_DL;
     sc_out<bool> stall_PS;
     sc_out<bool> stall_PD;
@@ -52,12 +57,13 @@ public:
           stage_reset("stage_reset"),
           pe_running("pe_running"),
           ID_decode_signals_in("ID_decode_signals_in"),
-          signal_valid_in("signal_valid_in"),
+          valid_in("signal_valid_in"),
+          ready_out("ready_out"),
           vmul_out_out("vmul_out_out"),
           EXE_A_decode_signals_out("EXE_A_decode_signals_out"),
-          signal_valid_out("signal_valid_out"),
+          valid_out("signal_valid_out"),
+          ready_in("ready_in"), // Map to downstream stall if inverted externally, or assume ready logic
           halted_out("halted_out"),
-          stall_from_downstream("stall_from_downstream"),
           stall_DL("stall_DL"),
           stall_PS("stall_PS"),
           stall_PD("stall_PD"),
@@ -69,32 +75,41 @@ public:
           DM("DM")
     {
         DEBUG_MSG("[Create] EXE_M_Stage", DEBUG_LEVEL_PE_STAGE);
+
+        // Sequential Process
         SC_CTHREAD(main_thread, clk.pos());
         reset_signal_is(reset_n, false);
 
-        // === Combinational logic split by function ===
+        // Combinational Logic Processes
 
-        // Stage 1: Stall calculation (only reads, no writes to control signals)
-        SC_METHOD(stall_calculation_process);
+        // 1. Internal Stall Logic
+        SC_METHOD(comb_internal_stall);
         sensitive << decode_signals_reg << valid_reg
-                  << signal_valid_in << ID_decode_signals_in
-                  << dl_stall_sig  // DataLoader stall output
-                  << ps_data.valid_in << pd_data.valid_in
-                  << stall_from_downstream;
+                  << dl_stall_sig
+                  << ps_data.valid_in << pd_data.valid_in;
 
-        // Stage 2: Pipeline control (calculates next state based on stalls)
-        SC_METHOD(pipeline_control_process);
-        sensitive << decode_signals_reg << valid_reg << halted_reg
-                  << pe_running << stage_reset
-                  << ID_decode_signals_in << signal_valid_in
-                  << dl_stall_internal << ps_stall_internal << pd_stall_internal << stage_stall_internal;
+        // 2. Handshake Control (Ready/Valid Next)
+        SC_METHOD(comb_handshake_logic);
+        sensitive << valid_reg << internal_stall_sig << ready_in
+                  << stage_reset << pe_running << valid_in << halted_reg;
 
-        // Stage 3: Submodule control (drives control signals based on CURRENT register state)
-        SC_METHOD(submodule_control_process);
-        sensitive << decode_signals_reg << valid_reg  // 使用暫存器而非 _next
-                  << stall_from_downstream  // 只需要外部 stall
+        // 3. Pipeline Data Next State
+        SC_METHOD(comb_pipeline_data);
+        sensitive << decode_signals_reg << halted_reg << ID_decode_signals_in
+                  << ready_out_sig; // Depends on if we accepted data
+
+        // 4. Submodule Control Signals (Drive based on CURRENT registers)
+        SC_METHOD(comb_submodule_control);
+        sensitive << decode_signals_reg << valid_reg
                   << tr_vtid_out_sig << dl_dmrv_out_sig
-                  << pd_data.valid_in << pd_data.data_in;
+                  << pd_data.valid_in << pd_data.data_in
+                  << internal_stall_sig; // Disable things if stalled?
+
+        // 5. Output Signals
+        SC_METHOD(comb_outputs);
+        sensitive << decode_signals_reg << valid_reg << halted_reg
+                  << vmul_out_out_sig << ready_out_sig
+                  << dl_stall_internal << ps_stall_internal << pd_stall_internal;
 
         // PS data type conversion process
         SC_METHOD(ps_data_conversion_process);
@@ -177,7 +192,10 @@ public:
     sc_signal<bool> dl_stall_internal;
     sc_signal<bool> ps_stall_internal;
     sc_signal<bool> pd_stall_internal;
-    sc_signal<bool> stage_stall_internal;
+    sc_signal<bool> internal_stall_sig;
+
+    sc_signal<bool> ready_out_sig;      // To IF_ID
+    sc_signal<v_fp16_t> vmul_out_out_sig;
 
     void bind() {
         // Clock and reset
@@ -237,10 +255,10 @@ public:
         // VMULU
         vmul.op1(vmul_op1_sig);
         vmul.op2(vmul_op2_sig);
-        vmul.result(vmul_out_out);
+        vmul.result(vmul_out_out_sig);
     }
 
-    // === Combinational Logic (Split by function) ===
+    // === Combinational Logic ===
 
     // PS data type conversion: uint64_t -> v_fp16_t
     void ps_data_conversion_process() {
@@ -249,14 +267,15 @@ public:
         ps_data_in_converted_sig.write(converted);
     }
 
-    // Stage 1: Calculate all stall conditions
-    void stall_calculation_process() {
+    // 1. Internal Stall Logic
+    // Calculates if the CURRENT valid instruction cannot proceed due to internal resources
+    void comb_internal_stall() {
+        bool valid_current = valid_reg.read();
+        pe_decode_signals_t decode_current = decode_signals_reg.read();
+
         bool dl_stall = dl_stall_sig.read();  // Read from DataLoader output
         bool ps_stall = false;
         bool pd_stall = false;
-
-        pe_decode_signals_t decode_current = decode_signals_reg.read();
-        bool valid_current = valid_reg.read();
 
         // Calculate stalls for current instruction
         if (valid_current) {
@@ -274,138 +293,88 @@ public:
             }
         }
 
-        // Calculate stalls for incoming instruction
-        pe_decode_signals_t next_signals = ID_decode_signals_in.read();
-        bool next_valid = signal_valid_in.read();
-
-        if (next_valid && !valid_current) {
-            // Check if new instruction will stall
-            bool next_ps_operation = next_signals.DL_active &&
-                                    (next_signals.func3 == 0 || next_signals.func3 == 1);
-            if (next_ps_operation && !ps_data.valid_in.read()) {
-                ps_stall = true;
-            }
-
-            bool next_pd_operation = next_signals.pd_load;
-            if (next_pd_operation && !pd_data.valid_in.read()) {
-                pd_stall = true;
-            }
-        }
-
-        bool stage_stall = dl_stall || ps_stall || pd_stall || stall_from_downstream.read();
-
-        // Write internal stall signals
+        // Write internal stall debugging signals
         dl_stall_internal.write(dl_stall);
         ps_stall_internal.write(ps_stall);
         pd_stall_internal.write(pd_stall);
-        stage_stall_internal.write(stage_stall);
 
-        // Drive output ports
-        stall_DL.write(dl_stall);
-        stall_PS.write(ps_stall);
-        stall_PD.write(pd_stall);
+        // Total internal stall
+        internal_stall_sig.write(dl_stall || ps_stall || pd_stall);
     }
 
-    // Stage 2: Pipeline control and next state calculation
-    void pipeline_control_process() {
-        pe_decode_signals_t decode_current = decode_signals_reg.read();
-        bool valid_current = valid_reg.read();
-        bool halted_current = halted_reg.read();
+    // 2. Handshake Control (Ready/Valid Next)
+    void comb_handshake_logic() {
+        // Standard Pipeline Handshake Logic
+        // Ready to accept new input if:
+        // 1. Current valid data is being accepted by downstream (ready_in) OR
+        // 2. We don't have valid data (Bubble)
+        // AND
+        // 3. We are not stalled internally
 
-        pe_decode_signals_t decode_n = decode_current;
-        bool valid_n = valid_current;
-        bool halted_n = halted_current;
+        bool internal_busy = internal_stall_sig.read();
+        bool downstream_ready = ready_in.read();
+        bool current_valid = valid_reg.read();
 
-        pe_decode_signals_t next_signals = ID_decode_signals_in.read();
-        bool next_valid = signal_valid_in.read();
-        bool stage_stall = stage_stall_internal.read();
+        // If we are stalled internally, we can't move current data, so we can't accept new data
+        // If we have valid data and downstream is not ready, we can't accept new data
+        bool ready_for_new_data = !internal_busy && (downstream_ready || !current_valid);
 
-        // Output defaults
-        pe_decode_signals_t exe_a_out = pe_decode_signals_t();
-        bool valid_out = false;
+        ready_out_sig.write(ready_for_new_data);
 
-        // Check for stage_reset (highest priority)
-        if (stage_reset.read()) {
-            decode_n = pe_decode_signals_t();
+        // Logic for valid_next
+        bool valid_n = false;
+
+        if (stage_reset.read() || !pe_running.read() || halted_reg.read()) {
             valid_n = false;
-            halted_n = false;
-        }
-        // If PE not running or halted, hold state
-        else if (!pe_running.read()) {
-            decode_n = decode_current;
-            valid_n = valid_current;
-        }
-        else if (halted_current) {
-            decode_n = decode_current;
-            valid_n = valid_current;
-            halted_n = halted_current;
-
-            exe_a_out = decode_current;
-            valid_out = true;
-        }
-        // If stalled, hold state
-        else if (stage_stall) {
-            decode_n = decode_current;
-            valid_n = valid_current;
-            halted_n = halted_current;
-
-            // Determine output based on stall source
-            bool internal_stall = dl_stall_internal.read() || ps_stall_internal.read() || pd_stall_internal.read();
-
-            if (internal_stall) {
-                // If stalled internally (e.g. waiting for memory), output bubble
-                exe_a_out = pe_decode_signals_t();
-                valid_out = false;
+        } else {
+            if (ready_for_new_data) {
+                // If we are ready, next valid depends on input valid
+                valid_n = valid_in.read();
             } else {
-                // If stalled only by downstream, hold the valid output
-                if (valid_current) {
-                    exe_a_out = decode_current;
-                    valid_out = true;
-                } else {
-                    exe_a_out = pe_decode_signals_t();
-                    valid_out = false;
-                }
+                // Not ready, keep current state (stall)
+                valid_n = current_valid;
             }
         }
-        // Normal operation: advance pipeline
-        else {
-            // Load new instruction from upstream
-            decode_n = next_signals;
-            valid_n = next_valid;
-
-            // Check for halt instruction
-            if (valid_n && decode_n.halt) {
-                halted_n = true;
-            }
-
-            // Execute current instruction
-            if (valid_current) {
-                exe_a_out = decode_current;
-                valid_out = true;
-            }
-        }
-
-        // Write next values
-        decode_signals_next.write(decode_n);
         valid_next.write(valid_n);
-        halted_next.write(halted_n);
-
-        // Drive output ports
-        EXE_A_decode_signals_out.write(exe_a_out);
-        signal_valid_out.write(valid_out);
-        halted_out.write(halted_n);
     }
 
-    // Stage 3: Submodule control signals
-    void submodule_control_process() {
-        pe_decode_signals_t signals = decode_signals_reg.read();  //  改為讀取暫存器
-        bool valid = valid_reg.read();  //  改為讀取暫存器
-        bool stalled = stall_from_downstream.read();  //  只需要外部 stall
+    // 3. Pipeline Data Next State
+    void comb_pipeline_data() {
+        bool halted_n = halted_reg.read();
+        pe_decode_signals_t decode_n = decode_signals_reg.read();
+
+        if (stage_reset.read()) {
+            halted_n = false;
+            decode_n = pe_decode_signals_t();
+        } else if (ready_out_sig.read()) {
+             // We are accepting new data
+             decode_n = ID_decode_signals_in.read();
+
+             // Check for halt in NEW instruction
+             if (valid_in.read() && decode_n.halt) {
+                 halted_n = true;
+             }
+        }
+        // Else hold current data
+
+        decode_signals_next.write(decode_n);
+        halted_next.write(halted_n);
+    }
+
+    // 4. Submodule Control Signals
+    void comb_submodule_control() {
+        pe_decode_signals_t signals = decode_signals_reg.read();
+        bool valid = valid_reg.read();
+        bool internal_stall = internal_stall_sig.read();
+        // Even if stalled internally or by downstream, we might need to hold control signals active
+        // e.g. Memory read enable must stay high until done.
+        // However, some pulses (like write enable) might need care.
+        // Assuming strictly combinatorial based on current instruction.
 
         bool pd_ready = false;
 
-        if (!valid || stalled) {
-            // Reset control signals when invalid or stalled
+        if (!valid) {
+            // Clear signals when invalid
             dl_addr_len_sig.write(0);
             dl_set_addr_sig.write(false);
             dl_set_len_sig.write(false);
@@ -428,6 +397,8 @@ public:
 
             pd_ready = false;
         } else {
+            // Drive signals from instruction
+
             // DataLoader control
             dl_addr_len_sig.write(signals.imm);
             dl_set_addr_sig.write(signals.DL_setaddr);
@@ -441,14 +412,34 @@ public:
             // TransformRegFile control
             tr_enable_sig.write(signals.tr_en);
             tr_shift_en_sig.write(signals.tr_shift);
-            tr_shift_mode_sig.write(signals.imm & 0x3); // 取低2位作為shift_mode
+            tr_shift_mode_sig.write(signals.imm & 0x3);
             tr_tid_sig.write(signals.rid3);
             tr_tid_write_en_sig.write(signals.tr_write);
             tr_clear_regs_sig.write(signals.tr_clear_regs);
             tr_use_vcounter_sig.write(signals.tr_use_vcounter);
             tr_set_vcounter_sig.write(signals.tr_set_vcounter);
             tr_clear_vcounter_sig.write(signals.tr_clear_vcounter);
-            tr_incr_vcounter_sig.write(signals.tr_incr_vcounter);
+
+            // Only increment counter if we are moving to next instruction (not stalled)
+            // Or does the instruction specify "increment after this op"?
+            // If we stall, we execute the SAME instruction again.
+            // If incr_vcounter is high, we might double increment if we don't gate it.
+            // Assumption: Submodules edge-detect or we must gate it.
+            // The "done" signal from TR isn't here.
+            // Let's assume TR increments on clock if enable is high.
+            // If we stall, we must NOT assert increment again?
+            // Usually counters increment when operation completes.
+
+            // SAFEGUARD: If internal stall or downstream not ready, do we freeze submodule side-effects?
+            // If we are stalled, we are effectively extending the current cycle.
+            // Combinational outputs like "write enable" should probably stay high?
+            // But "increment" pulse should probably be gated?
+            // Let's assume signals.tr_incr_vcounter is a level signal saying "this inst increments".
+            // If we hold it for 10 cycles, it increments 10 times? -> BAD.
+            // FIX: Gating side-effects with handshake.
+
+            bool advancing = ready_in.read() && !internal_stall; // We are finishing this instruction
+            tr_incr_vcounter_sig.write(signals.tr_incr_vcounter && advancing);
 
             // VMUL inputs (combinational)
             vmul_op1_sig.write(tr_vtid_out_sig.read());
@@ -468,6 +459,37 @@ public:
         pd_data.ready_out.write(pd_ready);
     }
 
+    // 5. Output Signals
+    void comb_outputs() {
+        bool valid = valid_reg.read();
+        bool internal_stall = internal_stall_sig.read();
+
+        // Valid Output to Downstream:
+        // Valid if current stage has valid data AND no internal stall
+        // (If internal stall, data is not ready to move)
+        bool out_valid = valid && !internal_stall;
+
+        // Mask outputs if invalid
+        if (out_valid) {
+             EXE_A_decode_signals_out.write(decode_signals_reg.read());
+             vmul_out_out.write(vmul_out_out_sig.read());
+        } else {
+             EXE_A_decode_signals_out.write(pe_decode_signals_t());
+             vmul_out_out.write(v_fp16_t());
+        }
+
+        valid_out.write(out_valid);
+
+        // Ready Output to Upstream
+        ready_out.write(ready_out_sig.read());
+
+        // Debug outputs
+        halted_out.write(halted_reg.read());
+        stall_DL.write(dl_stall_internal.read());
+        stall_PS.write(ps_stall_internal.read());
+        stall_PD.write(pd_stall_internal.read());
+    }
+
     // === Sequential Logic (Register Updates) ===
     void main_thread() {
         // Reset initialization
@@ -483,13 +505,13 @@ public:
             valid_reg.write(valid_next.read());
             halted_reg.write(halted_next.read());
 
-            DEBUG_MSG("[EXE_M_Stage] Clocked: Valid=" << valid_reg.read()
-                      << " Halted=" << halted_reg.read()
+            if (pe_running.read()) {
+                DEBUG_MSG("[EXE_M_Stage] Clocked: Valid=" << valid_reg.read()
+                      << " ReadyIn=" << ready_in.read()
+                      << " ReadyOut=" << ready_out_sig.read()
                       << " Inst=0x" << std::hex << decode_signals_reg.read().inst << std::dec
-                      << " Stall=" << stage_stall_internal.read()
-                      << " TR.inc= " << tr_incr_vcounter_sig.read()
-                      << " DL.next= " << dl_next_sig.read()
-                      << " VMUL.result= " << vmul_out_out.read(), DEBUG_LEVEL_PE_STAGE);
+                      << " IntStall=" << internal_stall_sig.read(), DEBUG_LEVEL_PE_STAGE);
+            }
 
             wait(); // Wait for next clock edge
         }

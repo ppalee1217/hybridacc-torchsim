@@ -73,13 +73,13 @@ float fp16_to_float(uint16_t fp16_val) {
 
 
 // number to (K/M/G/T) string
-inline std::string num_to_str(uint64_t num) {
+inline std::string num_to_str(uint64_t num, uint64_t base=1024) {
     const char* suffixes[] = {"", "K", "M", "G", "T"};
     size_t suffix_index = 0;
     double value = static_cast<double>(num);
 
-    while (value >= 1024.0 && suffix_index < 4) {
-        value /= 1024.0;
+    while (value >= static_cast<double>(base) && suffix_index < 4) {
+        value /= static_cast<double>(base);
         ++suffix_index;
     }
 

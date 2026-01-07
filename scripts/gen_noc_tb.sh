@@ -97,7 +97,7 @@ generate_testbench() {
     fi
 
     mkdir -p "$OUT_DIR"
-    "$ASSEMBLER" "$TB_DIR/pe_program.asm" -o "$OUT_DIR/pe_program.bin"
+    "$ASSEMBLER" "$TB_DIR/pe_program.asm" -o "$OUT_DIR/pe_program.bin" --json "$OUT_DIR/pe_asm.json"
 
     # Step 3: If there are split simulation parts, copy pe_program.bin to each part directory
     for part_dir in "$OUT_DIR"/*/; do

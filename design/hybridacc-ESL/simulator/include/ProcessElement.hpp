@@ -59,22 +59,28 @@ public:
     {
         DEBUG_MSG("[Create] ProcessElement", DEBUG_LEVEL_PE_TOP);
 
+        // Single Sequential Process
         SC_CTHREAD(main_thread, clk.pos());
         reset_signal_is(reset_n, false);
 
-        // Combinational logic
-        SC_METHOD(stall_propagation_process);
-        sensitive << exe_a_stall_adder << exe_a_stall_port_io
-                  << exe_m_stall_dl << exe_m_stall_ps << exe_m_stall_pd
-                  << downstream_stall;
+        // Combinational Processes
 
-        SC_METHOD(control_logic_process);
-        sensitive << pe_running_reg << router_pe_reset << router_pe_start
-                  << router_pe_program << if_id_halted_sig
-                  << exe_m_halted_sig << exe_a_halted_sig
-                  << exe_m_to_exe_a_valid << exe_a_stall_adder
-                  << exe_a_stall_port_io << downstream_stall
-                  << cycles_reg << instr_count_reg;  // Add these to update counters
+        // 1. Control Logic (Next State Calculation)
+        SC_METHOD(comb_control_next);
+        sensitive << pe_running_reg << cycles_reg << instr_count_reg << stage_reset_reg
+                  << router_pe_reset << router_pe_start << router_pe_program
+                  << if_id_halted_sig << exe_m_halted_sig << exe_a_halted_sig
+                  << exe_m_to_exe_a_valid << exe_a_to_exe_m_ready << exe_a_stall_adder << exe_a_stall_port_io;
+
+        // 2. Output Logic
+        SC_METHOD(comb_outputs);
+        sensitive << pe_running_reg << stage_reset_reg;
+
+        // 3. Status/Performance Monitoring
+        SC_METHOD(comb_monitoring);
+        sensitive << exe_m_to_if_id_ready << exe_a_to_exe_m_ready
+                  << exe_m_stall_dl << exe_m_stall_ps << exe_m_stall_pd
+                  << exe_a_stall_adder << exe_a_stall_port_io;
 
         SC_METHOD(trace_process);
         sensitive << clk.pos();
@@ -104,10 +110,12 @@ public:
     // Pipeline interconnect signals
     sc_signal<pe_decode_signals_t> if_id_to_exe_m_signals;
     sc_signal<bool> if_id_to_exe_m_valid;
+    sc_signal<bool> exe_m_to_if_id_ready; // New: Ready path from EXE_M to IF_ID
 
     sc_signal<v_fp16_t> exe_m_to_exe_a_vmul;
     sc_signal<pe_decode_signals_t> exe_m_to_exe_a_signals;
     sc_signal<bool> exe_m_to_exe_a_valid;
+    sc_signal<bool> exe_a_to_exe_m_ready; // New: Ready path from EXE_A to EXE_M
 
     // Stage status signals
     sc_signal<uint16_t> if_id_pc_sig;
@@ -115,17 +123,13 @@ public:
     sc_signal<bool> exe_m_halted_sig;
     sc_signal<bool> exe_a_halted_sig;
 
-    // Stall signals
+    // Stall signals (monitoring only now)
     sc_signal<bool> exe_m_stall_dl;
     sc_signal<bool> exe_m_stall_ps;
     sc_signal<bool> exe_m_stall_pd;
 
     sc_signal<bool> exe_a_stall_adder;
     sc_signal<bool> exe_a_stall_port_io;
-
-    sc_signal<bool> downstream_stall;
-    sc_signal<bool> exe_a_stage_stall;
-    sc_signal<bool> exe_m_stage_stall;
 
     // PE control signals
     sc_signal<uint16_t> pc_init_value;
@@ -186,7 +190,7 @@ public:
 
         // Pipeline outputs
         if_id_stage.ID_decode_signals_out(if_id_to_exe_m_signals);
-        if_id_stage.signal_valid_out(if_id_to_exe_m_valid);
+        if_id_stage.valid_out(if_id_to_exe_m_valid);
 
         // Status outputs
         if_id_stage.pc_out(if_id_pc_sig);
@@ -197,8 +201,8 @@ public:
         if_id_stage.im_write_addr(router_im_write_addr_sig);
         if_id_stage.im_write_data(router_im_write_data_sig);
 
-        // Stall input
-        if_id_stage.stall_from_downstream(exe_m_stage_stall);
+        // Flow control input (Backpressure from EXE_M)
+        if_id_stage.ready_in(exe_m_to_if_id_ready);
 
         // === EXE_M Stage Connections ===
         exe_m_stage.clk(clk);
@@ -210,29 +214,30 @@ public:
 
         // Pipeline inputs
         exe_m_stage.ID_decode_signals_in(if_id_to_exe_m_signals);
-        exe_m_stage.signal_valid_in(if_id_to_exe_m_valid);
+        exe_m_stage.valid_in(if_id_to_exe_m_valid);
 
         // Pipeline outputs
         exe_m_stage.vmul_out_out(exe_m_to_exe_a_vmul);
         exe_m_stage.EXE_A_decode_signals_out(exe_m_to_exe_a_signals);
-        exe_m_stage.signal_valid_out(exe_m_to_exe_a_valid);
+        exe_m_stage.valid_out(exe_m_to_exe_a_valid);
+
+        // Flow control Flow
+        exe_m_stage.ready_out(exe_m_to_if_id_ready); // To IF_ID
+        exe_m_stage.ready_in(exe_a_to_exe_m_ready);   // From EXE_A
 
         // Status outputs
         exe_m_stage.halted_out(exe_m_halted_sig);
 
-        // Stall outputs
+        // Stall outputs (for monitoring)
         exe_m_stage.stall_DL(exe_m_stall_dl);
         exe_m_stage.stall_PS(exe_m_stall_ps);
         exe_m_stage.stall_PD(exe_m_stall_pd);
 
-        // Stall input
-        exe_m_stage.stall_from_downstream(exe_a_stage_stall);
-
-        // PS port (Port Static) - using connect_vr_signals
+        // PS port (Port Static)
         connect_vr_signals(exe_m_stage.ps_data, router_pe_ps_sig);
         connect_vr_signals(router.pe_ps_out_if, router_pe_ps_sig);
 
-        // PD port (Port Dynamic) - using connect_vr_signals
+        // PD port (Port Dynamic)
         connect_vr_signals(exe_m_stage.pd_data, router_pe_pd_sig);
         connect_vr_signals(router.pe_pd_out_if, router_pe_pd_sig);
 
@@ -247,53 +252,31 @@ public:
         // Pipeline inputs
         exe_a_stage.vmul_out_in(exe_m_to_exe_a_vmul);
         exe_a_stage.EXE_M_decode_signals_in(exe_m_to_exe_a_signals);
-        exe_a_stage.signal_valid_in(exe_m_to_exe_a_valid);
+        exe_a_stage.valid_in(exe_m_to_exe_a_valid);
+
+        // Flow control Flow
+        exe_a_stage.ready_out(exe_a_to_exe_m_ready); // To EXE_M
 
         // Status outputs
         exe_a_stage.halted_out(exe_a_halted_sig);
 
-        // Stall outputs
-        exe_a_stage.stall_adder(exe_a_stall_adder);
+        // Stall outputs (debug)
+        // exe_a_stage.stall_adder(exe_a_stall_adder); // Removed from port list
         exe_a_stage.stall_port_io(exe_a_stall_port_io);
 
-        // Stall input
-        exe_a_stage.stall_from_downstream(downstream_stall);
-
-        // PLI port (Port Local Input) - using connect_vr_signals
+        // PLI port (Port Local Input)
         connect_vr_signals(exe_a_stage.pli, router_pe_pli_sig);
         connect_vr_signals(router.pe_pli_out_if, router_pe_pli_sig);
 
-        // PLO port (Port Local Output) - using connect_vr_signals
+        // PLO port (Port Local Output)
         connect_vr_signals(router.pe_plo_in_if, router_pe_plo_sig);
         connect_vr_signals(exe_a_stage.plo, router_pe_plo_sig);
     }
 
     // === Combinational Logic ===
 
-    // Stall propagation calculation
-    void stall_propagation_process() {
-        // Downstream stall (from external system)
-        bool external_stall = false;
-        downstream_stall.write(external_stall);
-
-        // EXE_A stage stall (internal + downstream)
-        bool exe_a_internal_stall = exe_a_stall_adder.read() || exe_a_stall_port_io.read();
-        bool exe_a_total_stall = exe_a_internal_stall || external_stall;
-        exe_a_stage_stall.write(exe_a_total_stall);
-
-        // EXE_M stage stall (internal + from EXE_A)
-        bool exe_m_internal_stall = exe_m_stall_dl.read() ||
-                                    exe_m_stall_ps.read() ||
-                                    exe_m_stall_pd.read();
-        bool exe_m_total_stall = exe_m_internal_stall || exe_a_total_stall;
-        exe_m_stage_stall.write(exe_m_total_stall);
-
-        // Monitor stalls for debugging
-        monitor_stalls();
-    }
-
-    // Control logic and state calculation
-    void control_logic_process() {
+    // 1. Control Logic (Next State)
+    void comb_control_next() {
         bool pe_running_current = pe_running_reg.read();
         uint64_t cycles_current = cycles_reg.read();
         uint64_t instr_count_current = instr_count_reg.read();
@@ -304,7 +287,6 @@ public:
         uint64_t cycles_n = cycles_current;
         uint64_t instr_count_n = instr_count_current;
         bool stage_reset_n = false;  // stage_reset is a pulse signal
-        bool pe_busy_n = false;
 
         // Clear stage_reset after one cycle pulse
         if (stage_reset_current) {
@@ -328,82 +310,81 @@ public:
         }
 
         if (router_pe_program.read() && pe_running_current) {
-            // Stop PE
+            // Stop PE manually
             DEBUG_MSG("[ProcessElement] PROGRAM signal detected", DEBUG_LEVEL_PE_TOP);
             pe_running_n = false;
         }
 
-        // Check if all stages are halted
-        bool all_stages_halted = if_id_halted_sig.read() &&
-                                 exe_m_halted_sig.read() &&
-                                 exe_a_halted_sig.read();
-
-        if (all_stages_halted && pe_running_current) {
-            DEBUG_MSG("[ProcessElement] All stages halted, stopping PE", DEBUG_LEVEL_PE_TOP);
-            pe_running_n = false;
-        }
-
-        // Count instructions
-        bool exe_a_has_valid = exe_m_to_exe_a_valid.read();
-        bool exe_a_stalled = exe_a_stall_adder.read() || exe_a_stall_port_io.read();
-        bool exe_a_downstream_stalled = downstream_stall.read();
-
-        if (exe_a_has_valid && !exe_a_stalled && !exe_a_downstream_stalled && pe_running_current) {
-            instr_count_n = instr_count_current + 1;
-            DEBUG_MSG("[ProcessElement] Instruction completed: " << instr_count_n
-                << " Inst: 0x" << std::hex << exe_m_to_exe_a_signals.read().inst << std::dec, DEBUG_LEVEL_PE_TOP);
-        }
-
-        // Update cycle count
+        // Check for Auto Halting (All stages reported halted)
+         // Only halt if actually running
         if (pe_running_current) {
+            bool all_stages_halted = if_id_halted_sig.read() &&
+                                     exe_m_halted_sig.read() &&
+                                     exe_a_halted_sig.read();
+            if (all_stages_halted) {
+                DEBUG_MSG("[ProcessElement] All stages halted, stopping PE", DEBUG_LEVEL_PE_TOP);
+                pe_running_n = false;
+            }
+        }
+
+        // Performance Counters
+        if (pe_running_current) {
+            // Count instructions completed (Valid output from M to A, and A is accepting it)
+             // Essentially, instruction "issued" to execution units.
+             // Or maybe better: instructions leaving pipeline (exe_a completed).
+             // Let's stick to M->A transition as "issued to execution".
+             /*
+                Correction: We should count completed instructions.
+                If EXE_A is valid and ready (no backpressure to M), then M is feeding A.
+             */
+            bool instr_issued = exe_m_to_exe_a_valid.read() && exe_a_to_exe_m_ready.read();
+
+            if (instr_issued) {
+                instr_count_n = instr_count_current + 1;
+                 DEBUG_MSG("[ProcessElement] Instruction issued: " << instr_count_n, DEBUG_LEVEL_PE_TOP);
+            }
+
+            // Count cycles
             cycles_n = cycles_current + 1;
-            if (cycles_n % 10 == 0) {
+            if (cycles_n % 100 == 0) {
                 DEBUG_MSG("[ProcessElement] Running: cycle=" << cycles_n
                           << ", instr_count=" << instr_count_n, DEBUG_LEVEL_PE_TOP);
             }
         }
-
-        // Calculate pe_busy
-        pe_busy_n = pe_running_n;
 
         // Write next values
         pe_running_next.write(pe_running_n);
         cycles_next.write(cycles_n);
         instr_count_next.write(instr_count_n);
         stage_reset_next.write(stage_reset_n);
-
-        // Update control signals (combinational outputs)
-        pe_running_signal.write(pe_running_n);
-        stage_reset_signal.write(stage_reset_n);
-        pe_busy.write(pe_busy_n);
     }
 
-    void monitor_stalls() {
-        bool exe_m_has_stall = exe_m_stall_dl.read() ||
-                               exe_m_stall_ps.read() ||
-                               exe_m_stall_pd.read();
-        bool exe_a_has_stall = exe_a_stall_adder.read() ||
-                               exe_a_stall_port_io.read();
-        bool pipeline_stalled = exe_m_has_stall || exe_a_has_stall;
+    // 2. Output Logic
+    void comb_outputs() {
+        pe_running_signal.write(pe_running_reg.read());
+        stage_reset_signal.write(stage_reset_reg.read());
+        pe_busy.write(pe_running_reg.read());
+    }
+
+    // 3. Status/Performance Monitoring logic
+    void comb_monitoring() {
+        // Just used for debug prints or driving non-functional outputs if needed
+        bool pipeline_stalled = !exe_m_to_if_id_ready.read() || !exe_a_to_exe_m_ready.read();
+
+        // Derive legacy stall signals from ready signals where possible
+        // If EXE_A is not ready, and it's not waiting for Port IO, we assume it's busy with computation (Adder/VMAC)
+        bool a_not_ready = !exe_a_to_exe_m_ready.read();
+        bool a_port_io_stall = exe_a_stall_port_io.read();
+        exe_a_stall_adder.write(a_not_ready && !a_port_io_stall);
 
         if (pipeline_stalled && pe_running_reg.read()) {
-            if (exe_m_stall_dl.read()) {
-                DEBUG_MSG("[ProcessElement] Stall: DataLoader busy", DEBUG_LEVEL_PE_TOP);
-            }
-            if (exe_m_stall_ps.read()) {
-                DEBUG_MSG("[ProcessElement] Stall: Port Static waiting", DEBUG_LEVEL_PE_TOP);
-            }
-            if (exe_m_stall_pd.read()) {
-                DEBUG_MSG("[ProcessElement] Stall: Port Dynamic blocked", DEBUG_LEVEL_PE_TOP);
-            }
-            if (exe_a_stall_adder.read()) {
-                DEBUG_MSG("[ProcessElement] Stall: VADDU in progress", DEBUG_LEVEL_PE_TOP);
-            }
-            if (exe_a_stall_port_io.read()) {
-                DEBUG_MSG("[ProcessElement] Stall: Local Network PLI/PLO blocked", DEBUG_LEVEL_PE_TOP);
-            }
+             // We can use the debug flags to see WHY it is stalled (internal flags)
+             // Internal stalls are monitored via bound signals directly.
         }
     }
+
+    // Stall propagation calculation (Removed - replaced by Valid/Ready wiring in bind)
+    // Control logic (split above)
 
     // === Sequential Logic (Register Updates) ===
     void main_thread() {
@@ -444,15 +425,17 @@ public:
         std::cout << std::endl;
 
         // === IF_ID Stage Status ===
+        bool if_id_stalled = !exe_m_to_if_id_ready.read();
         std::cout << "[IF_ID Stage]" << std::endl;
         std::cout << "  PC: " << if_id_pc_sig.read() << std::endl;
         std::cout << "  Halted: " << (if_id_halted_sig.read() ? "Yes" : "No") << std::endl;
         std::cout << "  PE Running: " << (pe_running_signal.read() ? "Yes" : "No") << std::endl;
         std::cout << "  Valid Out: " << (if_id_to_exe_m_valid.read() ? "Yes" : "No") << std::endl;
-        std::cout << "  Stalled: " << (exe_m_stage_stall.read() ? "Yes" : "No") << std::endl;
+        std::cout << "  Stalled (Not Ready): " << (if_id_stalled ? "Yes" : "No") << std::endl;
         std::cout << std::endl;
 
         // === EXE_M Stage Status ===
+        bool exe_m_total_stall = !exe_a_to_exe_m_ready.read();
         std::cout << "[EXE_M Stage]" << std::endl;
         std::cout << "  Valid In: " << (if_id_to_exe_m_valid.read() ? "Yes" : "No") << std::endl;
         std::cout << "  Valid Out: " << (exe_m_to_exe_a_valid.read() ? "Yes" : "No") << std::endl;
@@ -460,7 +443,7 @@ public:
         std::cout << "  DL Stall: " << (exe_m_stall_dl.read() ? "Yes" : "No") << std::endl;
         std::cout << "  PS Stall: " << (exe_m_stall_ps.read() ? "Yes" : "No") << std::endl;
         std::cout << "  PD Stall: " << (exe_m_stall_pd.read() ? "Yes" : "No") << std::endl;
-        std::cout << "  Total Stall: " << (exe_a_stage_stall.read() ? "Yes" : "No") << std::endl;
+        std::cout << "  Backpressure (Not Ready): " << (exe_m_total_stall ? "Yes" : "No") << std::endl;
         std::cout << std::endl;
 
         // === EXE_A Stage Status ===
@@ -477,9 +460,7 @@ public:
         std::cout << "  PE Busy: " << (pe_busy.read() ? "Yes" : "No") << std::endl;
         std::cout << "  All Stages Halted: " << (is_halted() ? "Yes" : "No") << std::endl;
         std::cout << "  Instructions Executed: " << instr_count_reg.read() << std::endl;
-        std::cout << "  Pipeline Stalled: " << ((exe_m_stall_dl.read() || exe_m_stall_ps.read() ||
-                                                   exe_m_stall_pd.read() || exe_a_stall_adder.read() ||
-                                                   exe_a_stall_port_io.read()) ? "Yes" : "No") << std::endl;
+        std::cout << "  Pipeline Backpressure: " << ((if_id_stalled || exe_m_total_stall) ? "Yes" : "No") << std::endl;
         std::cout << "========================================" << std::endl;
     }
 
@@ -507,7 +488,8 @@ public:
         } else if (!pe_running_reg.read()) {
             current_state = "IDLE";
         } else if (exe_m_stall_dl.read() || exe_m_stall_ps.read() || exe_m_stall_pd.read() ||
-                   exe_a_stall_adder.read() || exe_a_stall_port_io.read() || downstream_stall.read()) {
+                   exe_a_stall_adder.read() || exe_a_stall_port_io.read() ||
+                   !exe_m_to_if_id_ready.read() || !exe_a_to_exe_m_ready.read()) {
             current_state = "STALL";
         } else {
             current_state = "RUNNING";

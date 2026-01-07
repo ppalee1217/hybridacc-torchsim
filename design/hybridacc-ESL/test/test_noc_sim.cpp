@@ -143,10 +143,10 @@ public:
         command_mode.write(false);
     }
 
-    void send_data_noc0(uint16_t channel, uint16_t tag, const sc_biguint<256>& data_val, size_t mask = 0xF) {
+    void send_data_noc0(uint16_t channel, uint16_t tag, const sc_biguint<256>& data_val, bool ultra_mode = false, size_t mask = 0xF) {
         noc::router_req_t req;
         req.data = data_val;
-        req.addr = (static_cast<uint16_t>(channel) << 6) | (static_cast<uint16_t>(tag));
+        req.addr = (static_cast<uint16_t>(channel) << 6) | (static_cast<uint16_t>(tag)) | (ultra_mode ? 0x8000 : 0x0000);
         req.mask = mask;
         req.is_w = true;
 
@@ -161,10 +161,10 @@ public:
         total_sent_bytes += 32; // 256 bits = 32 bytes
     }
 
-    void send_data_noc1(uint16_t channel, uint16_t tag, const sc_biguint<256>& data_val, size_t mask = 0xF) {
+    void send_data_noc1(uint16_t channel, uint16_t tag, const sc_biguint<256>& data_val, bool ultra_mode = false, size_t mask = 0xF) {
         noc::router_req_t req;
         req.data = data_val;
-        req.addr = (static_cast<uint16_t>(channel) << 6) | (static_cast<uint16_t>(tag));
+        req.addr = (static_cast<uint16_t>(channel) << 6) | (static_cast<uint16_t>(tag)) | (ultra_mode ? 0x8000 : 0x0000);
         req.mask = mask;
         req.is_w = true;
 
@@ -179,11 +179,11 @@ public:
         total_sent_bytes += 32; // 256 bits = 32 bytes
     }
 
-    void recv_data_noc1(uint16_t& channel, uint16_t& tag, uint64_t base_idx) {
+    void recv_data_noc1(uint16_t& channel, uint16_t& tag, uint64_t base_idx, bool ultra_mode = false) {
         // Send Read Request
         noc::router_req_t req;
         req.data = 0;
-        req.addr = (static_cast<uint16_t>(channel) << 6) | (static_cast<uint16_t>(tag));
+        req.addr = (static_cast<uint16_t>(channel) << 6) | (static_cast<uint16_t>(tag)) | (ultra_mode ? 0x8000 : 0x0000);
         req.mask = 0;
         req.is_w = false;
 
@@ -292,6 +292,7 @@ public:
         int out_ch = std::stoi(config["out_ch"]);
         int in_height = std::stoi(config["in_height"]);
         int in_width = std::stoi(config["in_width"]);
+        bool ultra_mode = (config["ultra_mode"] == "True");
 
         std::cout << "[TB-NoC0] Kernel Size: " << kernel_size << std::endl;
         std::cout << "[TB-NoC0] Input Channels: " << in_ch << std::endl;
@@ -303,18 +304,18 @@ public:
         std::cout << "[TB-NoC0] Sending Weights..." << std::endl;
         for(size_t och = 0; och < out_ch; ++och) {
             for(size_t kh = 0; kh < kernel_size; ++kh) {
-                for(size_t kw = 0; kw < kernel_size; ++kw) {
+                for(size_t kw = 0; kw < 3; ++kw) { // Assume kernel width is 3 for simplicity
                     sc_biguint<256> data_packet = 0;
-                    for(size_t ich = 0; ich < in_ch; ++ich) {
-                        size_t idx = och * kernel_size * kernel_size * in_ch +
-                                     kh * kernel_size * in_ch +
-                                     kw * in_ch + ich;
+                    for(size_t ich = 0; ich < 4; ++ich) {
+                        size_t idx = och * kernel_size * 3 * 4 +
+                                     kh * 3 * 4 +
+                                     kw * 4 + ich;
                         fp16_t w = input_weight[idx];
                         data_packet.range((ich * 16) + 15, ich * 16) = w;
                     }
                     uint16_t channel = NOC_CHANNEL_PS; // PS
                     uint16_t tag = kh;
-                    send_data_noc0(channel, tag, data_packet);
+                    send_data_noc0(channel, tag, data_packet, false, 0xF);
                 }
             }
         }
@@ -322,19 +323,43 @@ public:
 
         // 2. Activations (PD)
         std::cout << "[TB-NoC0] Sending Activations..." << std::endl;
+
+        size_t loop_in_height;
+        if (ultra_mode) {
+            loop_in_height = in_height / NUM_PORTS; // Split height among ports
+        } else {
+            loop_in_height = in_height;
+        }
+
         for(size_t iw = 0; iw < in_width; ++iw) {
             std::cout << "[TB-NoC0] Processing input width index: " << iw << "/" << in_width << std::endl;
-            for(size_t ih = 0; ih < in_height; ++ih) {
+            for(size_t ih = 0; ih < loop_in_height; ++ih) {
                 sc_biguint<256> data_packet = 0;
-                for(size_t ich = 0; ich < in_ch; ++ich) {
-                    size_t idx = ih * in_width * in_ch +
-                                 iw * in_ch + ich;
-                    fp16_t a = input_activation[idx];
-                    data_packet.range((ich * 16) + 15, ich * 16) = a;
+                size_t mask = 0;
+
+                if (ultra_mode) { // Ultra Mode: Each bus handles a chunk of the input height
+                    for(size_t ih_u = 0; ih_u < NUM_PORTS; ++ih_u) {
+                        for(size_t ich = 0; ich < in_ch; ++ich) {
+                            size_t idx = (ih_u * loop_in_height + ih) * in_width * in_ch +
+                                        iw * in_ch + ich;
+                            fp16_t a = input_activation[idx];
+                            data_packet.range(((ih_u * in_ch + ich) * 16) + 15, (ih_u * in_ch + ich) * 16) = a;
+                            mask |= (1 << ich);
+                        }
+                    }
+                } else { // Normal Mode: Single bus handles all channels for the given (ih, iw)
+                    for(size_t ich = 0; ich < in_ch; ++ich) {
+                        size_t idx = ih * in_width * in_ch +
+                                    iw * in_ch + ich;
+                        fp16_t a = input_activation[idx];
+                        data_packet.range((ich * 16) + 15, ich * 16) = a;
+                        mask |= (1 << ich);
+                    }
                 }
+
                 uint16_t channel = NOC_CHANNEL_PD; // PD
                 uint16_t tag = ih;
-                send_data_noc0(channel, tag, data_packet, 0xF);
+                send_data_noc0(channel, tag, data_packet, ultra_mode, mask);
             }
         }
     }
@@ -355,21 +380,40 @@ public:
         std::cout << "[TB-NoC1] Output Height: " << out_height << std::endl;
         std::cout << "[TB-NoC1] Output Width: " << out_width << std::endl;
 
+        size_t loop_out_height;
+        bool ultra_mode = (config["ultra_mode"] == "True");
+        if (ultra_mode) {
+            loop_out_height = out_height / NUM_PORTS; // Split height among ports
+        } else {
+            loop_out_height = out_height;
+        }
+
         for(size_t ow = 0; ow < out_width; ++ow) {
             // Partial Sum In (PLI)
             std::cout << "[TB-NoC1] Sending Partial Sum In (PLI) for ow=" << ow << std::endl;
-            for(size_t oh = 0; oh < out_height; ++oh) {
+            for(size_t oh = 0; oh < loop_out_height; ++oh) {
                 for(size_t och = 0; och < out_ch; och+=4) {
                     sc_biguint<256> data_packet = 0;
-                    for(size_t och_offset = 0; och_offset < 4; ++och_offset) {
-                        size_t idx = oh * out_width * out_ch +
-                                     ow * out_ch + (och + och_offset);
-                        fp16_t ps = partial_sum_zero ? fp16_t(0) : input_partial_sum[idx];
-                        data_packet.range(((och_offset) * 16) + 15, (och_offset) * 16) = ps;
+                    if (ultra_mode) {
+                        for(size_t oh_u = 0; oh_u < NUM_PORTS; ++oh_u) {
+                            for(size_t och_offset = 0; och_offset < 4; ++och_offset) {
+                                size_t idx = (oh_u * loop_out_height + oh) * out_width * out_ch +
+                                            ow * out_ch + (och + och_offset);
+                                fp16_t ps = partial_sum_zero ? fp16_t(0) : input_partial_sum[idx];
+                                data_packet.range(((oh_u * 4 + och_offset) * 16) + 15, (oh_u * 4 + och_offset) * 16) = ps;
+                            }
+                        }
+                    } else {
+                        for(size_t och_offset = 0; och_offset < 4; ++och_offset) {
+                            size_t idx = oh * out_width * out_ch +
+                                        ow * out_ch + (och + och_offset);
+                            fp16_t ps = partial_sum_zero ? fp16_t(0) : input_partial_sum[idx];
+                            data_packet.range(((och_offset) * 16) + 15, (och_offset) * 16) = ps;
+                        }
                     }
                     uint16_t channel = NOC_CHANNEL_PLI; // PLI (NoC1 Channel 0)
                     uint16_t tag = oh;
-                    send_data_noc1(channel, tag, data_packet);
+                    send_data_noc1(channel, tag, data_packet, ultra_mode, 0xF);
                 }
             }
 
@@ -377,13 +421,13 @@ public:
 
             // Partial Sum Out (PLO)
             std::cout << "[TB-NoC1] Receiving Partial Sum Out (PLO) for ow=" << ow << std::endl;
-            for(size_t oh = 0; oh < out_height; ++oh) {
+            for(size_t oh = 0; oh < loop_out_height; ++oh) {
                 for(size_t och = 0; och < out_ch; och+=4) {
                     uint16_t channel = NOC_CHANNEL_PLO; // PLO (NoC1 Channel 1)
                     uint16_t tag = oh;
                     size_t base_idx = oh * out_width * out_ch +
                                      ow * out_ch + och;
-                    recv_data_noc1(channel, tag, base_idx);
+                    recv_data_noc1(channel, tag, base_idx, ultra_mode);
                 }
             }
         }
@@ -540,45 +584,57 @@ public:
         std::cout << "========================================" << std::endl;
 
         // PE average stats
+        uint64_t active_pe = 0;
         uint64_t total_instr = 0;
         uint64_t total_cycles = 0;
         double total_ipc = 0.0;
         for(size_t p = 0; p < NUM_PORTS; ++p) {
             for(size_t q = 0; q < NUM_PES_PER_PORT; ++q) {
-                uint64_t instr_count = noc.pes[p][q].instr_count_reg.read();
+                // check if PE is active (enabled)
+                if (!noc.pes[p][q].router_enable.read()) {
+                    continue;
+                }
+
+                // read stats
+                int64_t instr_count = noc.pes[p][q].instr_count_reg.read();
                 uint64_t cycles = noc.pes[p][q].cycles_reg.read();
                 double ipc = (cycles > 0) ? static_cast<double>(instr_count) / cycles : 0.0;
                 total_instr += instr_count;
                 total_cycles += cycles;
                 total_ipc += ipc;
+                active_pe++;
             }
         }
-        double avg_ipc = total_ipc / TOTAL_PES;
-        std::cout << "PEs Average instruction count: " << total_instr / TOTAL_PES << std::endl;
-        std::cout << "PEs Average cycle count: " << total_cycles / TOTAL_PES << std::endl;
+        double avg_ipc = total_ipc / active_pe;
+        std::cout << "PEs Average instruction count: " << total_instr / active_pe << std::endl;
+        std::cout << "PEs Average cycle count: " << total_cycles / active_pe << std::endl;
         std::cout << "PEs Average IPC: " << avg_ipc << std::endl;
 
         // Total NoC cycle count
         // Clock period is 10 ns.
-        double total_cycles_d = sc_time_stamp().to_seconds() / 10e-9;
+        int ns_per_sec = 1000000000;
+        double total_cycles_d = sc_time_stamp().to_seconds() * ns_per_sec / clock_period_ns;
         std::cout << "Total NoC cycle count: " << (uint64_t)total_cycles_d << std::endl;
 
         // Clock rate
-        int ns_per_sec = 1000000000;
-        std::cout << "Clock rate: " << num_to_str(ns_per_sec / clock_period_ns) << "Hz" << std::endl;
+        std::cout << "Clock rate: " << num_to_str(ns_per_sec / clock_period_ns, 1000) << "Hz" << std::endl;
 
         // Total NoC data movement
-        std::cout << "Total NoC data movement: " << num_to_str(total_sent_bytes + total_received_bytes) << " B" << std::endl;
+        std::cout << "Total NoC data movement: " << num_to_str(total_sent_bytes + total_received_bytes) << "B" << std::endl;
 
         // Throughput
         double total_time_sec = sc_time_stamp().to_seconds();
         double throughput = (total_sent_bytes + total_received_bytes) / total_time_sec;
-        std::cout << "NoC Throughput: " << num_to_str(static_cast<uint64_t>(throughput)) << " B/s" << std::endl;
+        std::cout << "NoC Throughput: " << num_to_str(static_cast<uint64_t>(throughput)) << "B/s" << std::endl;
 
         // Performance (MACs per second, 2FLOPS equivalent 1 MAC)
         double macs_per_sec = total_macs / total_time_sec;
-        std::cout << "Performance (MACs per second): " << num_to_str(static_cast<uint64_t>(macs_per_sec)) << " MACs/s"
-        << "(" << num_to_str(static_cast<uint64_t>(macs_per_sec * 2)) << " FLOPS)" << std::endl;
+        std::cout << "Performance (MACs per second): " << num_to_str(static_cast<uint64_t>(macs_per_sec)) << "MACs/s"
+        << "(" << num_to_str(static_cast<uint64_t>(macs_per_sec * 2)) << "FLOPS)" << std::endl;
+
+        // Arithmetic Intensity
+        double arithmetic_intensity = static_cast<double>(total_macs) / (total_sent_bytes + total_received_bytes);
+        std::cout << "Arithmetic Intensity: " << arithmetic_intensity << " MACs/Byte" << std::endl;
 
         std::cout << "========================================" << std::endl;
 
@@ -652,20 +708,26 @@ public:
 void print_usage() {
     std::cout << "Usage: ./test_noc_sim [options] <data_dir>" << std::endl;
     std::cout << "Options:" << std::endl;
+    std::cout << "  -c <clock_period_ns>   Set clock period in nanoseconds (default: 10)" << std::endl;
     std::cout << "  -v <tolerance>   Set verification tolerance (default: 0.02)" << std::endl;
     std::cout << "  -t <trace_file>  Set trace file path (default: trace.json)" << std::endl;
     std::cout << "  <data_dir>       Path to the test data directory (default: output/noc/conv2d)" << std::endl;
 }
 
 int sc_main(int argc, char* argv[]) {
-    std::string data_dir = "output/noc/conv2d"; // Default
+    // Default parameters
+    std::string data_dir = "output/noc/conv2d";
     std::string trace_file = "trace.json";
     float verify_tolerance = 0.02f;
+    int clock_period_ns = 10;
 
+    // Parse command-line arguments
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-v" && i + 1 < argc) {
             verify_tolerance = std::stof(argv[++i]);
+        } else if (arg == "-c" && i + 1 < argc) {
+            clock_period_ns = std::stoi(argv[++i]);
         } else if (arg == "-t" && i + 1 < argc) {
             trace_file = argv[++i];
         } else if (arg == "-h" || arg == "--help") {
@@ -676,7 +738,8 @@ int sc_main(int argc, char* argv[]) {
         }
     }
 
-    NoCSimTestBench tb("NoCSimTestBench", data_dir, verify_tolerance,10);
+    // Instantiate TestBench
+    NoCSimTestBench tb("NoCSimTestBench", data_dir, verify_tolerance, clock_period_ns);
 
     // Open trace file
     PerfettoTrace::getInstance().open(trace_file);

@@ -9,6 +9,8 @@ using namespace sc_core;  // Add this to use SystemC types without prefix
 namespace hybridacc {
 namespace pe {
 
+const int DMEMORY_DEFAULT_SIZE_BYTES = 512;
+
 // Data Memory (element size 16-bit, bandwidth 64-bit)
 SC_MODULE(DataMemory) {
     public:
@@ -33,17 +35,17 @@ SC_MODULE(DataMemory) {
               dm_write_mask("dm_write_mask"),
               dm_read_addr("dm_read_addr"),
               dm_read_data("dm_read_data"),
-              mem(512 / sizeof(uint8_t), 0)
+              mem(DMEMORY_DEFAULT_SIZE_BYTES / sizeof(uint8_t), 0)
         {
             DEBUG_MSG("[Create] DataMemory", DEBUG_LEVEL_PE_COMPONENTS);
             SC_CTHREAD(sequential_process, clk.pos());
             reset_signal_is(reset_n, false);
             SC_METHOD(combinational_process);
             sensitive << reset_n;
-        } // default 512 bytes
+        } // default DMEMORY_DEFAULT_SIZE_BYTES bytes
 
         // Helper Methods
-        void reset() { mem.clear(); mem.resize(512 / sizeof(uint8_t), 0); }
+        void reset() { mem.clear(); mem.resize(DMEMORY_DEFAULT_SIZE_BYTES / sizeof(uint8_t), 0); }
         void resize(int bytes) { mem.resize(bytes / sizeof(uint8_t), 0); }
         int size() const { return (int)(mem.size() * sizeof(uint8_t)); }
         const std::vector<uint8_t>& raw() const { return mem; }
