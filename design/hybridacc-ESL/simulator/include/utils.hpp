@@ -97,18 +97,16 @@ struct request_t {
     DATA_TYPE data; // 64 bits
     ADDR_TYPE addr; // 9 bits
     size_t mask; // for async FIFO
-    bool  is_w; // 0: read, 1: write
 
     // 相等運算符，SystemC 需要
     bool operator==(const request_t& other) const {
-        return data == other.data && addr == other.addr && is_w == other.is_w;
+        return data == other.data && addr == other.addr;
     }
 
     // 輸出運算符，SystemC 訊號需要
     friend std::ostream& operator<<(std::ostream& os, const request_t& req) {
         os << "request_t{data=" << std::hex << req.data
-           << ", addr=0x" << std::hex << req.addr << std::dec
-           << ", is_w=" << (req.is_w ? "write" : "read") << "}" ;
+           << ", addr=0x" << std::hex << req.addr << "}";
         return os;
     }
 
@@ -116,11 +114,30 @@ struct request_t {
     friend void sc_trace(sc_core::sc_trace_file* tf, const request_t& req, const std::string& name) {
         sc_core::sc_trace(tf, req.data, name + ".data");
         sc_core::sc_trace(tf, req.addr, name + ".addr");
-        sc_core::sc_trace(tf, req.is_w, name + ".is_w");
     }
 };
 
 typedef request_t<uint64_t, uint16_t> noc_request_t;
+
+// struct for NoC 2 Read Request (only address)
+struct noc_addr_req_t {
+    uint16_t addr;
+
+    noc_addr_req_t(uint16_t a = 0) : addr(a) {}
+
+    bool operator==(const noc_addr_req_t& other) const {
+        return addr == other.addr;
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, const noc_addr_req_t& req) {
+        os << "noc_addr_req_t{addr=0x" << std::hex << req.addr << "}";
+        return os;
+    }
+
+    friend void sc_trace(sc_core::sc_trace_file* tf, const noc_addr_req_t& req, const std::string& name) {
+        sc_core::sc_trace(tf, req.addr, name + ".addr");
+    }
+};
 
 // -----------------------------------------------------------------------------
 enum NOC_CHANNELS {

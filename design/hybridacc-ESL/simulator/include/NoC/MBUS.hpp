@@ -42,7 +42,8 @@ public:
     // PE interface ports
     sc_vector<VRDOF<noc_request_t>> bus_to_pe_noc0_req; // To PE's noc0_req_in
     sc_vector<VRDOF<noc_request_t>> bus_to_pe_noc1_req; // To PE's noc1_req_in
-    sc_vector<VRDIF<noc_response_t>> pe_to_bus_noc1_resp; // From PE's noc1_resp_out
+    sc_vector<VRDOF<noc_addr_req_t>> bus_to_pe_noc2_req; // To PE's noc2_req_in (New: Read request)
+    sc_vector<VRDIF<noc_response_t>> pe_to_bus_noc2_resp; // From PE's noc2_resp_out (Was noc1)
 
     // Control ports
     sc_vector<sc_in<bool>> pe_busy;
@@ -51,9 +52,12 @@ public:
     // NoC-0 (Control & Push)
     VRDIF<noc_request_t> noc0_to_bus_req;
 
-    // NoC-1 (Local Network)
+    // NoC-1 (Local Network - Write PLI)
     VRDIF<noc_request_t> noc1_to_bus_req;
-    VRDOF<noc_response_t> bus_to_noc1_resp;
+
+    // NoC-2 (Local Network - Read PLO)
+    VRDIF<noc_addr_req_t> noc2_to_bus_req;
+    VRDOF<noc_response_t> bus_to_noc2_resp;
 
     // ID, mode, enable scan-chain ports
     sc_in<bool> scan_chain_enable;
@@ -69,13 +73,15 @@ public:
           num_pes(num_pes),
           bus_to_pe_noc0_req("bus_to_pe_noc0_req", num_pes),
           bus_to_pe_noc1_req("bus_to_pe_noc1_req", num_pes),
-          pe_to_bus_noc1_resp("pe_to_bus_noc1_resp", num_pes),
+          bus_to_pe_noc2_req("bus_to_pe_noc2_req", num_pes),
+          pe_to_bus_noc2_resp("pe_to_bus_noc2_resp", num_pes),
           router_enable("router_enable", num_pes),
           router_mode("router_mode", num_pes),
           pe_busy("pe_busy", num_pes),
           noc0_to_bus_req("noc0_to_bus_req"),
           noc1_to_bus_req("noc1_to_bus_req"),
-          bus_to_noc1_resp("bus_to_noc1_resp"),
+          noc2_to_bus_req("noc2_to_bus_req"),
+          bus_to_noc2_resp("bus_to_noc2_resp"),
           scan_chain_enable("scan_chain_enable"),
           scan_chain_in("scan_chain_in"),
           scan_chain_out("scan_chain_out"),
@@ -111,7 +117,7 @@ public:
                       << bus_to_pe_noc0_req[i].ready_in;
         }
 
-        // NoC-1 request routing (Pipelined/Stateful for Read)
+        // NoC-1 request routing (Combinational, Write-Only)
         SC_METHOD(comb_noc1_routing);
         sensitive << noc1_to_bus_req.valid_in << noc1_to_bus_req.data_in << scan_chain_enable;
         for (size_t i = 0; i < num_pes; ++i) {
@@ -119,17 +125,25 @@ public:
                       << bus_to_pe_noc1_req[i].ready_in;
         }
 
-        // PE response to NoC-1 (including collision detection)
-        SC_METHOD(comb_pe_to_noc1_response);
+        // NoC-2 request routing (Combinational, Read-Only, updates rx_mask)
+        SC_METHOD(comb_noc2_routing);
+        sensitive << noc2_to_bus_req.valid_in << noc2_to_bus_req.data_in << scan_chain_enable;
+        for (size_t i = 0; i < num_pes; ++i) {
+            sensitive << pe_scan_chain_signals_reg[i]
+                      << bus_to_pe_noc2_req[i].ready_in;
+        }
+
+        // PE response to NoC-2 (including collision detection)
+        SC_METHOD(comb_pe_to_noc2_response);
         sensitive << scan_chain_enable << rx_mask_reg;
         for (size_t i = 0; i < num_pes; ++i) {
-            sensitive << pe_to_bus_noc1_resp[i].valid_in
-                      << pe_to_bus_noc1_resp[i].data_in;
+            sensitive << pe_to_bus_noc2_resp[i].valid_in
+                      << pe_to_bus_noc2_resp[i].data_in;
         }
 
         // PE response ready signals
         SC_METHOD(comb_pe_response_ready);
-        sensitive << bus_to_noc1_resp.ready_in << rx_mask_reg;
+        sensitive << bus_to_noc2_resp.ready_in << rx_mask_reg;
 
         SC_METHOD(trace_process);
         sensitive << clk.pos();
@@ -168,6 +182,7 @@ private:
     // Internal signal for NoC request ready
     sc_signal<bool> noc0_req_ready_sig;
     sc_signal<bool> noc1_req_ready_sig;
+    sc_signal<bool> noc2_req_ready_sig;
 
     // === Sequential Process ===
     void seq_process() {
@@ -288,7 +303,7 @@ private:
         }
     }
 
-    // === Combinational: NoC-1 Request Routing (Read/Write) ===
+    // === Combinational: NoC-1 Request Routing (Write-Only - PLI) ===
     void comb_noc1_routing() {
         bool scan_mode = scan_chain_enable.read();
         bool noc_valid = noc1_to_bus_req.valid_in.read();
@@ -299,10 +314,9 @@ private:
         if (!scan_mode) {
             tx_mask = calculate_target_pe_mask(noc_req.addr);
             if (noc_valid) {
-                DEBUG_MSG("[MBUS] NoC-1 Routing data: 0x" << std::hex << noc_req.data << ", Addr 0x" << noc_req.addr << ", Mask 0x" << tx_mask << std::dec << ", Mode: " << (noc_req.is_w ? "Write" : "Read"), DEBUG_LEVEL_NOC_COMPONENTS);
+                DEBUG_MSG("[MBUS] NoC-1 Routing (Write PLI): 0x" << std::hex << noc_req.data << ", Addr 0x" << noc_req.addr << ", Mask 0x" << tx_mask << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
             }
         }
-        tx_mask_wire.write(tx_mask);
 
         // Check if all target PEs are ready
         bool all_ready = true;
@@ -331,17 +345,64 @@ private:
             bus_to_pe_noc1_req[i].data_out.write(noc_req);
             bus_to_pe_noc1_req[i].valid_out.write(send_to_pe);
         }
+        // No mask update here since it is Write Only
+    }
 
-        // update next_rx_mask (Only for NoC-1 Read)
-        if(!scan_mode && noc_valid && noc_ready && !noc_req.is_w) {
+    // === Combinational: NoC-2 Request Routing (Read-Only - PLO) ===
+    void comb_noc2_routing() {
+        bool scan_mode = scan_chain_enable.read();
+        bool noc_valid = noc2_to_bus_req.valid_in.read();
+        noc_addr_req_t noc_req = noc2_to_bus_req.data_in.read();
+
+        // Calculate target PE mask
+        uint64_t tx_mask = 0;
+        if (!scan_mode) {
+            tx_mask = calculate_target_pe_mask(noc_req.addr);
+            if (noc_valid) {
+                DEBUG_MSG("[MBUS] NoC-2 Routing (Read PLO): Addr 0x" << std::hex << noc_req.addr << ", Mask 0x" << tx_mask << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
+            }
+        }
+        tx_mask_wire.write(tx_mask);
+
+        // Check if all target PEs are ready
+        // Note: For Read, target PEs need to accept the Read Request
+        bool all_ready = true;
+        if (tx_mask != 0) {
+            for (size_t i = 0; i < num_pes; ++i) {
+                if (tx_mask & (1ULL << i)) {
+                    if (!bus_to_pe_noc2_req[i].ready_in.read()) {
+                        all_ready = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Set NoC ready signal
+        bool noc_ready = !scan_mode && all_ready;
+
+        noc2_req_ready_sig.write(noc_ready);
+        noc2_to_bus_req.ready_out.write(noc_ready);
+
+        // Route request to target PEs
+        for (size_t i = 0; i < num_pes; ++i) {
+            bool is_target = (tx_mask & (1ULL << i)) != 0;
+            bool send_to_pe = noc_valid && !scan_mode && is_target && all_ready;
+
+            bus_to_pe_noc2_req[i].data_out.write(noc_req);
+            bus_to_pe_noc2_req[i].valid_out.write(send_to_pe);
+        }
+
+        // update next_rx_mask (Always for NoC-2 Read)
+        if(!scan_mode && noc_valid && noc_ready) {
             rx_mask_next.write(tx_mask);
         } else {
             rx_mask_next.write(0);
         }
     }
 
-    // === Combinational: PE Response to NoC-1 (with collision detection) ===
-    void comb_pe_to_noc1_response() {
+    // === Combinational: PE Response to NoC-2 (with collision detection) ===
+    void comb_pe_to_noc2_response() {
         bool scan_mode = scan_chain_enable.read();
         uint64_t active_mask = rx_mask_reg.read();
 
@@ -353,14 +414,10 @@ private:
 
         for (size_t i = 0; i < num_pes; ++i) {
             // Only consider PEs that are in the active mask
-            if ((active_mask & (1ULL << i)) && pe_to_bus_noc1_resp[i].valid_in.read()) {
-                DEBUG_MSG("[MBUS] Received response from PE " << i
-                          << ": data=0x" << std::hex << pe_to_bus_noc1_resp[i].data_in.read().data
-                          << ", status=" << static_cast<int>(pe_to_bus_noc1_resp[i].data_in.read().status)
-                          << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
+            if ((active_mask & (1ULL << i)) && pe_to_bus_noc2_resp[i].valid_in.read()) {
                 resp_mask |= (1ULL << i);
                 if (resp_mask == (1ULL << i)) { // First response
-                    pe_resp = pe_to_bus_noc1_resp[i].data_in.read();
+                    pe_resp = pe_to_bus_noc2_resp[i].data_in.read();
                 }
             }
         }
@@ -396,19 +453,19 @@ private:
         }
 
         // Drive Output Port directly (Combinational)
-        bus_to_noc1_resp.data_out.write(noc_resp);
-        bus_to_noc1_resp.valid_out.write(noc_resp_valid);
+        bus_to_noc2_resp.data_out.write(noc_resp);
+        bus_to_noc2_resp.valid_out.write(noc_resp_valid);
     }
 
     // === Combinational: PE Response Ready Signals ===
     void comb_pe_response_ready() {
         // Only ready if NoC is ready to accept response AND PE is in the active mask
-        bool noc_ready = bus_to_noc1_resp.ready_in.read(); // Direct connection
+        bool noc_ready = bus_to_noc2_resp.ready_in.read(); // Direct connection
         uint64_t active_mask = rx_mask_reg.read();
 
         for (size_t i = 0; i < num_pes; ++i) {
             bool is_active = (active_mask & (1ULL << i)) != 0;
-            pe_to_bus_noc1_resp[i].ready_out.write(noc_ready && is_active);
+            pe_to_bus_noc2_resp[i].ready_out.write(noc_ready && is_active);
         }
     }
 

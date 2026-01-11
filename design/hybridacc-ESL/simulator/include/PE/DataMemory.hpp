@@ -9,7 +9,9 @@ using namespace sc_core;  // Add this to use SystemC types without prefix
 namespace hybridacc {
 namespace pe {
 
-const int DMEMORY_DEFAULT_SIZE_BYTES = 512;
+constexpr int DMEMORY_ADDRESS_WIDTH = 9; // 512 bytes addressable space
+constexpr int DMEMORY_ADDRESS_MASK = (1 << DMEMORY_ADDRESS_WIDTH) - 1;
+constexpr int DMEMORY_DEFAULT_SIZE_BYTES = (1 << DMEMORY_ADDRESS_WIDTH); // 512 bytes
 
 // Data Memory (element size 16-bit, bandwidth 64-bit)
 SC_MODULE(DataMemory) {
@@ -87,18 +89,18 @@ SC_MODULE(DataMemory) {
 
             while (true) {
                 // Read operation
-                uint64_t data = readWord(dm_read_addr.read());
+                uint64_t data = readWord(dm_read_addr.read() & DMEMORY_ADDRESS_MASK);
                 dm_read_data.write(data);
 
                 // Write operation
                 if (dm_write_en.read()) {
                     DEBUG_MSG("[DataMemory] Writing DM["
-                              << dm_write_addr.read() << "] = 0x"
+                              << (dm_write_addr.read() & DMEMORY_ADDRESS_MASK) << "] = 0x"
                               << std::hex << std::setw(16) << std::setfill('0') << dm_write_data.read()
                               << " with mask 0x"
                               << std::hex << std::setw(2) << std::setfill('0') << static_cast<uint16_t>(dm_write_mask.read())
                               << std::dec, DEBUG_LEVEL_PE_COMPONENTS);
-                    writeWord(dm_write_addr.read(), dm_write_data.read(), dm_write_mask.read());
+                    writeWord(dm_write_addr.read() & DMEMORY_ADDRESS_MASK, dm_write_data.read(), dm_write_mask.read());
                 }
                 wait();
             }

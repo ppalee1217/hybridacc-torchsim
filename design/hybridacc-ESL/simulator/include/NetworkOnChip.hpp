@@ -25,7 +25,8 @@ public:
     // New Valid-Ready Interface (Dual Plane)
     VRDIF<noc::router_req_t> req0_in;
     VRDIF<noc::router_req_t> req1_in;
-    VRDOF<noc::router_resp_t> resp1_out;
+    VRDIF<noc_addr_req_t> req2_in;
+    VRDOF<noc::router_resp_t> resp2_out;
 
     // ---------------------------------------------
     // parameters
@@ -41,7 +42,8 @@ public:
     // Internal signals - NoC/MBus
     sc_vector<VRDSIG<noc_request_t>> noc0_to_bus_req;
     sc_vector<VRDSIG<noc_request_t>> noc1_to_bus_req;
-    sc_vector<VRDSIG<noc_response_t>> bus_to_noc1_resp;
+    sc_vector<VRDSIG<noc_addr_req_t>> noc2_to_bus_req;
+    sc_vector<VRDSIG<noc_response_t>> bus_to_noc2_resp;
 
     sc_signal<bool> scan_chain_enable;
 
@@ -54,7 +56,8 @@ public:
     sc_vector<sc_vector<sc_signal<PERouterMode>>> router_mode;
     sc_vector<sc_vector<VRDSIG<noc_request_t>>> bus_to_pe_noc0_req;
     sc_vector<sc_vector<VRDSIG<noc_request_t>>> bus_to_pe_noc1_req;
-    sc_vector<sc_vector<VRDSIG<noc_response_t>>> pe_to_bus_noc1_resp;
+    sc_vector<sc_vector<VRDSIG<noc_addr_req_t>>> bus_to_pe_noc2_req;
+    sc_vector<sc_vector<VRDSIG<noc_response_t>>> pe_to_bus_noc2_resp;
     sc_vector<sc_vector<sc_signal<bool>>> pe_busy;
 
     //  Internal signals - PE/PE
@@ -69,7 +72,8 @@ public:
           command_data("command_data"),
           req0_in("req0_in"),
           req1_in("req1_in"),
-          resp1_out("resp1_out"),
+          req2_in("req2_in"),
+          resp2_out("resp2_out"),
           num_port(num_port),
           num_pes_per_port(num_pes_per_port),
           router("NoC_Router", num_port),
@@ -77,7 +81,8 @@ public:
           pes("pes"),
           noc0_to_bus_req("noc0_to_bus_req", num_port),
           noc1_to_bus_req("noc1_to_bus_req", num_port),
-          bus_to_noc1_resp("bus_to_noc1_resp", num_port),
+          noc2_to_bus_req("noc2_to_bus_req", num_port),
+          bus_to_noc2_resp("bus_to_noc2_resp", num_port),
           scan_chain_enable("scan_chain_enable"),
           router_scan_chain_out("router_scan_chain_out", num_port),
           mbus_scan_chain_out("mbus_scan_chain_out", num_port),
@@ -85,7 +90,8 @@ public:
           router_mode("router_mode"),
           bus_to_pe_noc0_req("bus_to_pe_noc0_req"),
           bus_to_pe_noc1_req("bus_to_pe_noc1_req"),
-          pe_to_bus_noc1_resp("pe_to_bus_noc1_resp"),
+          bus_to_pe_noc2_req("bus_to_pe_noc2_req"),
+          pe_to_bus_noc2_resp("pe_to_bus_noc2_resp"),
           pe_busy("pe_busy"),
           ln_pli_plo("ln_pli_plo")
     {
@@ -125,7 +131,11 @@ public:
             return new sc_vector<VRDSIG<noc_request_t>>(n, num_pes_per_port);
         });
 
-        pe_to_bus_noc1_resp.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
+        bus_to_pe_noc2_req.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
+            return new sc_vector<VRDSIG<noc_addr_req_t>>(n, num_pes_per_port);
+        });
+
+        pe_to_bus_noc2_resp.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
             return new sc_vector<VRDSIG<noc_response_t>>(n, num_pes_per_port);
         });
 
@@ -142,7 +152,7 @@ public:
     }
 
     NetworkOnChip(sc_module_name name)
-        : NetworkOnChip(name, 4, 16) // Default to 4 ports, 16 PEs per port
+        : NetworkOnChip(name, 3, 16) // Default to 3 ports, 16 PEs per port
     {}
 
     // Debug: Dump internal state
@@ -166,13 +176,15 @@ private:
         // Bind external ports to router
         bind_vr_interface(router.req0_in, req0_in);
         bind_vr_interface(router.req1_in, req1_in);
-        bind_vr_interface(resp1_out, router.resp1_out);
+        bind_vr_interface(router.req2_in, req2_in);
+        bind_vr_interface(resp2_out, router.resp2_out);
 
         for (size_t i = 0; i < num_port; ++i) {
             // Connect NoC to MBUS request signals
             connect_vr_signals(router.noc0_to_bus_req[i], noc0_to_bus_req[i]);
             connect_vr_signals(router.noc1_to_bus_req[i], noc1_to_bus_req[i]);
-            connect_vr_signals(router.bus_to_noc1_resp[i], bus_to_noc1_resp[i]);
+            connect_vr_signals(router.noc2_to_bus_req[i], noc2_to_bus_req[i]);
+            connect_vr_signals(router.bus_to_noc2_resp[i], bus_to_noc2_resp[i]);
 
             // Scan chain: router -> mbus
             router.scan_chain_in[i](mbus_scan_chain_out[i]);
@@ -190,7 +202,8 @@ private:
             // Connect NoC to MBUS request signals
             connect_vr_signals(mbus_inst.noc0_to_bus_req, noc0_to_bus_req[i]);
             connect_vr_signals(mbus_inst.noc1_to_bus_req, noc1_to_bus_req[i]);
-            connect_vr_signals(mbus_inst.bus_to_noc1_resp, bus_to_noc1_resp[i]);
+            connect_vr_signals(mbus_inst.noc2_to_bus_req, noc2_to_bus_req[i]);
+            connect_vr_signals(mbus_inst.bus_to_noc2_resp, bus_to_noc2_resp[i]);
 
             // Scan chain: router -> mbus
             mbus_inst.scan_chain_enable(scan_chain_enable);
@@ -204,7 +217,8 @@ private:
 
                 connect_vr_signals(mbus_inst.bus_to_pe_noc0_req[j], bus_to_pe_noc0_req[i][j]);
                 connect_vr_signals(mbus_inst.bus_to_pe_noc1_req[j], bus_to_pe_noc1_req[i][j]);
-                connect_vr_signals(mbus_inst.pe_to_bus_noc1_resp[j], pe_to_bus_noc1_resp[i][j]);
+                connect_vr_signals(mbus_inst.bus_to_pe_noc2_req[j], bus_to_pe_noc2_req[i][j]);
+                connect_vr_signals(mbus_inst.pe_to_bus_noc2_resp[j], pe_to_bus_noc2_resp[i][j]);
 
                 mbus_inst.pe_busy[j](pe_busy[i][j]);
             }
@@ -226,7 +240,8 @@ private:
                 // NoC interface
                 connect_vr_signals(pe_inst.noc0_req, bus_to_pe_noc0_req[i][j]);
                 connect_vr_signals(pe_inst.noc1_req, bus_to_pe_noc1_req[i][j]);
-                connect_vr_signals(pe_inst.noc1_resp, pe_to_bus_noc1_resp[i][j]);
+                connect_vr_signals(pe_inst.noc2_req, bus_to_pe_noc2_req[i][j]);
+                connect_vr_signals(pe_inst.noc2_resp, pe_to_bus_noc2_resp[i][j]);
 
                 // PE busy signal
                 pe_inst.pe_busy(pe_busy[i][j]);
@@ -317,6 +332,6 @@ private:
 ### 總結
 `NetworkOnChip` 就像是一個 **封裝良好的黑盒子**。
 *   **對外**：它看起來像一個帶有 FIFO 的單一裝置，你只要餵給它 Request，它就會吐出 Response，不用擔心內部複雜的路由。
-*   **對內**：它管理著複雜的層級連接，確保數據能準確地在 64 個 (4x16) 或更多 PE 之間流動，並處理所有的握手與阻塞問題。
+*   **對內**：它管理著複雜的層級連接，確保數據能準確地在 48 個 (3x16) 或更多 PE 之間流動，並處理所有的握手與阻塞問題。
 
 */

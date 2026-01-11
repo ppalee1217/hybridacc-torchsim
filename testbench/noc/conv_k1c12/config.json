@@ -1,9 +1,9 @@
 {
   "mode": "conv2d",
-  "num_pes": 64,
-  "num_bus": 4,
+  "num_pes": 48,
+  "num_bus": 3,
   "stride": 1,
-  "input_h": 64,
+  "input_h": 48,
   "input_w": 200,
   "input_c": 12,
   "out_ch": 16,

@@ -87,3 +87,26 @@ inline std::string num_to_str(uint64_t num, uint64_t base=1024) {
     std::snprintf(buffer, sizeof(buffer), "%.3f %s", value, suffixes[suffix_index]);
     return std::string(buffer);
 }
+
+// -----------------------------------------------------------------------------
+// Helper: Tensor index utilities (Index2D / Index3D / Index4D)
+// Provide simple, constexpr-style small classes to compute flattened indices
+// with row-major ordering. Improves readability over manual arithmetic.
+
+struct Index2D {
+    size_t D0, D1;
+    Index2D(size_t d0, size_t d1) : D0(d0), D1(d1) {}
+    inline size_t operator()(size_t i, size_t j) const { return i * D1 + j; }
+};
+
+struct Index3D {
+    size_t D0, D1, D2;
+    Index3D(size_t d0, size_t d1, size_t d2) : D0(d0), D1(d1), D2(d2) {}
+    inline size_t operator()(size_t i, size_t j, size_t k) const { return (i * D1 + j) * D2 + k; }
+};
+
+struct Index4D {
+    size_t D0, D1, D2, D3;
+    Index4D(size_t d0, size_t d1, size_t d2, size_t d3) : D0(d0), D1(d1), D2(d2), D3(d3) {}
+    inline size_t operator()(size_t a, size_t b, size_t c, size_t d) const { return (((a * D1 + b) * D2 + c) * D3 + d); }
+};

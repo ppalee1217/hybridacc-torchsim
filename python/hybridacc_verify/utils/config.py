@@ -125,6 +125,7 @@ class NocConvConfig:
 class NocGemmConfig:
     """NoC GEMM Configuration"""
     num_pes: int
+    num_bus: int
     M: int
     N: int
     K: int
