@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>BankedScratchpad Architecture</title>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: true });
+    </script>
+    <style>
+        /* General SVG typography and layout */
+        svg { font-family: Inter, Arial, Helvetica, sans-serif; }
+        .heading { font-size: 20px; font-weight: 700; fill: #333; }
+        .subheading { font-size: 16px; font-weight: 700; fill: #4a148c; }
+
+        /* Background */
+        .bg-rect { fill: #fbfbfb; stroke: #e0e0e0; stroke-width: 1.5; rx: 12; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.06)); }
+
+        /* Component styles */
+        .rect-interface { rx: 8; stroke-width: 2; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.06)); }
+        .rect-noc { fill: #e8f5e9; stroke: #2e7d32; }
+        .rect-noc-w { fill: #fff3e0; stroke: #ef6c00; }
+        .rect-dma { fill: #e1f5fe; stroke: #01579b; }
+        .rect-ctrl { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 3; rx: 10; }
+        .rect-bank { fill: #f5f5f5; stroke: #333; stroke-width: 1.5; }
+
+        .text-muted { fill: #555; font-family: monospace; font-size: 12px; }
+        .note-text { font-size: 11px; }
+
+        /* Marker uses currentColor so arrow inherits stroke color */
+        .marker { fill: currentColor; }
+
+        /* Small visual tweaks */
+        .dot-list { fill: #777; font-size: 30px; text-anchor: middle; }
+    </style>
+</head>
+<body>
+    <h1>BankedScratchpad Internal Architecture</h1>
+
+    <div class="mermaid">
+    graph TD
+        subgraph "BankedScratchpad Module"
+            %% Interfaces
+            DMA[DMA Port]
+            NoC0[NoC0 Read Port]
+            NoC1[NoC1 Read Port]
+            NoC2[NoC2 Write Port]
+
+            %% Control Signals
+            Sel0[noc0_bank_sel]
+            Sel1[noc1_bank_sel]
+            Sel2[noc2_bank_sel]
+
+            %% Logic
+            CTRL[Control Logic / Crossbar]
+
+            %% Banks
+            subgraph Banks
+                B0[SRAM Bank 0]
+                B1[SRAM Bank 1]
+                Bn[SRAM Bank N...]
+            end
+
+            %% Connections
+            DMA <==> CTRL
+            NoC0 <==> CTRL
+            NoC1 <==> CTRL
+            NoC2 ==> CTRL
+
+            Sel0 -.-> CTRL
+            Sel1 -.-> CTRL
+            Sel2 -.-> CTRL
+
+            CTRL <==> B0
+            CTRL <==> B1
+            CTRL <==> Bn
+
+            %% Locking Logic Description
+            note[Locking Logic:<br/>If nocX_bank_sel == BankID,<br/>NoCX gets EXCLUSIVE access.<br/>DMA access to LOCKED bank<br/>triggers ERROR Interrupt.]
+            note -.-> CTRL
+        end
+
+        style DMA fill:#e1f5fe,stroke:#01579b
+        style NoC0 fill:#e8f5e9,stroke:#2e7d32
+        style NoC1 fill:#e8f5e9,stroke:#2e7d32
+        style NoC2 fill:#fff3e0,stroke:#ef6c00
+        style CTRL fill:#f3e5f5,stroke:#7b1fa2
+        style Banks fill:#eeeeee,stroke:#333
+    </div>
+
+    <h2>Micro-Architecture Diagram</h2>
+    <svg width="900" height="600" viewBox="0 0 900 600" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+            <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L9,3 z" class="marker" />
+            </marker>
+        </defs>
+
+        <!-- Background -->
+        <rect class="bg-rect" x="10" y="10" width="880" height="580" />
+        <text x="34" y="44" class="heading">BankedScratchpad Micro-Architecture</text>
+
+        <!-- Left Interface Area (Inputs/Masters) -->
+        <g transform="translate(50, 80)">
+             <!-- NoC0 -->
+             <g transform="translate(0, 0)">
+                <rect class="rect-noc rect-interface" x="0" y="0" width="140" height="56" />
+                <text x="70" y="22" text-anchor="middle" font-family="Arial" font-size="14" font-weight="bold">NoC0 (Read)</text>
+
+                <line x1="140" y1="18" x2="220" y2="18" style="stroke:#2e7d32; color:#2e7d32; stroke-width:2" marker-end="url(#arrow)"/>
+                <text x="150" y="14" class="text-muted">req_addr[12]</text>
+
+                <line x1="220" y1="42" x2="140" y2="42" style="stroke:#2e7d32; color:#2e7d32; stroke-width:4" marker-end="url(#arrow)"/>
+                <text x="150" y="52" class="text-muted">resp_data[256]</text>
+             </g>
+
+             <!-- NoC1 -->
+             <g transform="translate(0, 80)">
+                <rect class="rect-noc rect-interface" x="0" y="0" width="140" height="56" />
+                <text x="70" y="22" text-anchor="middle" font-family="Arial" font-size="14" font-weight="bold">NoC1 (Read)</text>
+
+                <line x1="140" y1="18" x2="220" y2="18" style="stroke:#2e7d32; color:#2e7d32; stroke-width:2" marker-end="url(#arrow)"/>
+                <text x="150" y="14" class="text-muted">req_addr[12]</text>
+
+                <line x1="220" y1="42" x2="140" y2="42" style="stroke:#2e7d32; color:#2e7d32; stroke-width:4" marker-end="url(#arrow)"/>
+                <text x="150" y="52" class="text-muted">resp_data[256]</text>
+             </g>
+
+             <!-- NoC2 -->
+             <g transform="translate(0, 160)">
+                <rect class="rect-noc-w rect-interface" x="0" y="0" width="140" height="56" />
+                <text x="70" y="22" text-anchor="middle" font-family="Arial" font-size="14" font-weight="bold">NoC2 (Write)</text>
+
+                <line x1="140" y1="28" x2="220" y2="28" style="stroke:#ef6c00; color:#ef6c00; stroke-width:4" marker-end="url(#arrow)"/>
+                <text x="150" y="20" class="text-muted">addr[12], data[256]</text>
+                <text x="150" y="48" class="text-muted">mask[32]</text>
+             </g>
+
+             <!-- DMA -->
+             <g transform="translate(0, 240)">
+                <rect class="rect-dma rect-interface" x="0" y="0" width="140" height="68" />
+                <text x="70" y="22" text-anchor="middle" font-family="Arial" font-size="14" font-weight="bold">DMA Port</text>
+
+                <line x1="140" y1="22" x2="220" y2="22" style="stroke:#01579b; color:#01579b; stroke-width:4" marker-end="url(#arrow)"/>
+                <text x="150" y="16" class="text-muted">addr[32], w_data[256]</text>
+
+                <line x1="220" y1="46" x2="140" y2="46" style="stroke:#01579b; color:#01579b; stroke-width:4" marker-end="url(#arrow)"/>
+                <text x="150" y="58" class="text-muted">r_data[256]</text>
+             </g>
+
+             <!-- Config Signals -->
+             <g transform="translate(0, 340)">
+                 <line x1="0" y1="0" x2="200" y2="0" style="stroke:#777; color:#777; stroke-width:1; stroke-dasharray:5,5" marker-end="url(#arrow)"/>
+                 <text x="10" y="-5" class="text-muted">noc[0-2]_bank_sel</text>
+             </g>
+
+             <!-- Interrupt -->
+             <g transform="translate(0, 380)">
+                 <line x1="200" y1="0" x2="0" y2="0" style="stroke:#d32f2f; color:#d32f2f; stroke-width:2" marker-end="url(#arrow)"/>
+                 <text x="80" y="-5" font-weight="bold" fill="#d32f2f">error_intr</text>
+             </g>
+        </g>
+
+        <!-- Center Logic Block -->
+        <g transform="translate(250, 60)">
+            <rect class="rect-ctrl" x="0" y="0" width="260" height="460" />
+            <text x="130" y="34" text-anchor="middle" class="subheading">Control Logic</text>
+            <text x="130" y="60" text-anchor="middle" class="subheading">& Crossbar</text>
+
+            <!-- Logic Details -->
+            <rect x="25" y="80" width="200" height="80" rx="5" fill="#fff" stroke="#aaa" />
+            <text x="125" y="110" text-anchor="middle" font-family="Arial" font-size="14">Bank ID Decoder</text>
+            <text x="125" y="130" text-anchor="middle" font-family="Monospace" font-size="10">BankID = Addr >> 12</text>
+            <text x="125" y="145" text-anchor="middle" font-family="Monospace" font-size="10">Offset = Addr & 0xFFF</text>
+
+            <rect x="25" y="180" width="200" height="100" rx="5" fill="#fff" stroke="#d32f2f" stroke-width="2"/>
+            <text x="125" y="210" text-anchor="middle" font-family="Arial" font-size="14" fill="#d32f2f" font-weight="bold">Lock & Arbiter</text>
+            <text x="125" y="235" text-anchor="middle" font-size="11">If Sel == BankID -> Locked</text>
+            <text x="125" y="255" text-anchor="middle" font-size="11">Blocks conflicting DMA</text>
+
+            <rect x="25" y="300" width="200" height="120" rx="5" fill="#fff" stroke="#aaa" />
+            <text x="125" y="330" text-anchor="middle" font-family="Arial" font-size="14">Bank MUX / DEMUX</text>
+            <text x="125" y="360" text-anchor="middle" font-size="11">Interfaces ↔ Banks</text>
+        </g>
+
+        <!-- Right Banks Area -->
+        <g transform="translate(600, 80)">
+             <!-- Bank 0 -->
+             <g transform="translate(0, 0)">
+                <rect class="rect-bank" x="0" y="0" width="120" height="84" />
+                <text x="60" y="32" text-anchor="middle" font-family="Arial" font-size="14" font-weight="700">SRAM</text>
+                <text x="60" y="54" text-anchor="middle" font-family="Arial" font-size="13">Bank 0</text>
+
+                <!-- Connections -->
+                <line x1="-120" y1="24" x2="0" y2="24" style="stroke:#333; color:#333; stroke-width:2" marker-end="url(#arrow)"/>
+                <text x="-110" y="18" class="text-muted">req[12], wdata[256]</text>
+
+                <line x1="0" y1="64" x2="-120" y2="64" style="stroke:#333; color:#333; stroke-width:4" marker-end="url(#arrow)"/>
+                <text x="-110" y="80" class="text-muted">rdata[256]</text>
+             </g>
+
+             <!-- Bank 1 -->
+             <g transform="translate(0, 110)">
+                <rect class="rect-bank" x="0" y="0" width="120" height="84" />
+                <text x="60" y="32" text-anchor="middle" font-family="Arial" font-size="14" font-weight="700">SRAM</text>
+                <text x="60" y="54" text-anchor="middle" font-family="Arial" font-size="13">Bank 1</text>
+
+                <!-- Connections -->
+                <line x1="-120" y1="24" x2="0" y2="24" style="stroke:#333; color:#333; stroke-width:2" marker-end="url(#arrow)"/>
+                <line x1="0" y1="64" x2="-120" y2="64" style="stroke:#333; color:#333; stroke-width:4" marker-end="url(#arrow)"/>
+             </g>
+
+             <!-- Dots -->
+             <text x="60" y="240" class="dot-list">⋮</text>
+
+             <!-- Bank N -->
+             <g transform="translate(0, 270)">
+                <rect class="rect-bank" x="0" y="0" width="120" height="84" />
+                <text x="60" y="32" text-anchor="middle" font-family="Arial" font-size="14" font-weight="700">SRAM</text>
+                <text x="60" y="54" text-anchor="middle" font-family="Arial" font-size="13">Bank N</text>
+
+                <!-- Connections -->
+                <line x1="-120" y1="24" x2="0" y2="24" style="stroke:#333; color:#333; stroke-width:2" marker-end="url(#arrow)"/>
+                <line x1="0" y1="64" x2="-120" y2="64" style="stroke:#333; color:#333; stroke-width:4" marker-end="url(#arrow)"/>
+             </g>
+        </g>
+    </svg>
+</body>
+</html>

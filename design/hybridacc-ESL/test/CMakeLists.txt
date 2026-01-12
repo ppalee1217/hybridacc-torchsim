@@ -133,6 +133,33 @@ target_link_libraries(test_noc_unit
     pthread
 )
 
+# SRAM Unit Tests
+add_executable(test_sram
+    test_sram.cpp
+)
+
+# Conditional compile definitions for test_sram
+if(ENABLE_DEBUG_UTILS)
+    target_compile_definitions(test_sram PRIVATE DEBUG_UTILS)
+    target_compile_definitions(test_sram PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
+    target_compile_definitions(test_sram PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
+endif()
+
+target_link_libraries(test_sram
+    systemc
+    pthread
+)
+
+# Test runner for SRAM
+add_custom_target(run_sram_test
+    COMMAND ./test_sram
+    DEPENDS test_sram
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running SRAM unit test"
+)
+
+add_test(NAME SRAM_Unit_Tests COMMAND test_sram)
+
 # Test runner script
 add_custom_target(run_tests
     COMMAND ./test_pe_unit
@@ -159,8 +186,8 @@ add_custom_target(run_noc_test
 
 # Run all tests
 add_custom_target(run_all_tests
-    COMMAND ./test_pe_unit && ./test_noc_unit
-    DEPENDS test_pe_unit test_noc_unit
+    COMMAND ./test_pe_unit && ./test_noc_unit && ./test_sram
+    DEPENDS test_pe_unit test_noc_unit test_sram
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running all unit tests"
 )
