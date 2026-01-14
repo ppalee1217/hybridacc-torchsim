@@ -27,9 +27,14 @@ conv1d_k1s1_template(KERNEL_DMA_LEN=48, OUTPUT_WINDOW_CNT=800, KERNEL_COUNT=16):
     CLEAR.P
 
 load_kernel:
-    DMA.ADDR 0
-    DMA.LEN $(KERNEL_DMA_LEN)  # STORE $(KERNEL_DMA_LEN) steps of kernel data (16 kernels * 3 vector each)
-    DMA.SD 4  # start DMA store operation
+    SDMA.ADDR 0
+    SDMA.LEN $(KERNEL_DMA_LEN)  # STORE $(KERNEL_DMA_LEN) steps of kernel data (16 kernels * 3 vector each)
+    SDMA.LOOP 1  # loop for 1 kernel set
+    SDMA.SD 4  # start DMA store operation
+
+loop_tile:
+    LOOPIN 1  # Tile loop for 1 tile
+    SWAPDM
 
 loop_window:
     LOOPIN $(OUTPUT_WINDOW_CNT)  # Loop for 800 input elements
@@ -49,9 +54,9 @@ load_input:
     TSTORE t11
 
 
-    DMA.ADDR 0
-    DMA.LEN $(KERNEL_DMA_LEN)
-    DMA.LD 4  # LOAD $(KERNEL_DMA_LEN) steps of input data (3 vector * 4 elements each)
+    LDMA.ADDR 0
+    LDMA.LEN $(KERNEL_DMA_LEN)
+    LDMA.LD 4  # LOAD $(KERNEL_DMA_LEN) steps of input data (3 vector * 4 elements each)
     SETRID.PT 0, 0
 
 loop_kernel:
@@ -69,4 +74,5 @@ calculate_psum:
     CLEAR.P # Clear the partial sum register
     LOOPEND
 
+    LOOPEND
     HALT  # End of program

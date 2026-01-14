@@ -51,6 +51,7 @@ class PortIO{
 
 class PESimulator {
 public:
+    enum class ExecStatus { NEXT, JUMP, STALL };
     explicit PESimulator(const PEConfig &cfg);
     void loadProgram(const std::vector<uint16_t>& prog);
     void connectPortIO(PortIO* p){ port_io = p; }
@@ -60,7 +61,7 @@ public:
 private:
     PortIO* port_io {nullptr};
     PEState state;
-    void execute(uint16_t inst);
+    ExecStatus execute(uint16_t inst);
     std::string disasm(uint16_t w){ return Disassembler().disasmWord(w); }
 
 };

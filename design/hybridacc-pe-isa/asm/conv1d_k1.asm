@@ -38,9 +38,14 @@
 conv1d_1x1:
 
 load_kernel:
-    DMA.ADDR 0
-    DMA.LEN 48  # STORE 48 steps of kernel data (16 kernels * 3 vector each)
-    DMA.SD 4  # start DMA store operation
+    SDMA.ADDR 0
+    SDMA.LEN 48  # STORE 48 steps of kernel data (16 kernels * 3 vector each)
+    SDMA.LOOP 1  # loop for 1 kernel set
+    SDMA.SD 4  # start DMA store operation
+
+compute:
+    LOOPIN 1 # processing pass
+    SWAPDM  # wait for previous SDMA operation to complete
 
 loop_window:
     LOOPIN 800  # Loop for 800 input elements
@@ -60,9 +65,9 @@ load_input:
     TSTORE t11
 
 
-    DMA.ADDR 0
-    DMA.LEN 48
-    DMA.LD 4  # LOAD 48 steps of input data (3 vector * 4 elements each)
+    LDMA.ADDR 0
+    LDMA.LEN 48
+    LDMA.LD 4  # LOAD 48 steps of input data (3 vector * 4 elements each)
     SETRID.PT 0, 0
 
 loop_kernel:
@@ -80,4 +85,5 @@ calculate_psum:
     CLEAR.P # Clear the partial sum register
     LOOPEND
 
+    LOOPEND
     HALT  # End of program

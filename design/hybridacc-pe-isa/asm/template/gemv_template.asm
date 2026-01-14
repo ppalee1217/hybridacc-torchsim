@@ -30,13 +30,18 @@ gemv_template(KERNEL_DMA_STORE_LEN=64, KERNEL_DMA_LOAD_LEN=256, INPUT_DIM=32, OU
     CLEAR.P
 
 load_kernel:
-    DMA.ADDR 0
-    DMA.LEN $(KERNEL_DMA_STORE_LEN)  # STORE $(KERNEL_DMA_LEN) steps of kernel data (4out * 2vector * 32dim)
-    DMA.SD 4 # start DMA store operation
+    SDMA.ADDR 0
+    SDMA.LEN $(KERNEL_DMA_STORE_LEN)  # STORE $(KERNEL_DMA_LEN) steps of kernel data (4out * 2vector * 32dim)
+    SDMA.LOOP 1  # loop for 1 kernel set
+    SDMA.SD 4 # start DMA store operation
 
-    DMA.ADDR 0
-    DMA.LEN $(KERNEL_DMA_LOAD_LEN) # LOAD $(KERNEL_DMA_LOAD_LEN) steps of input data (INPUT_DIM * 8input)
-    DMA.LHB 1 # start DMA load operation (fp16, broadcasted to 4out)
+loop_tile:
+    LOOPIN 1  # Tile loop for 1 tile
+    SWAPDM
+
+    LDMA.ADDR 0
+    LDMA.LEN $(KERNEL_DMA_LOAD_LEN) # LOAD $(KERNEL_DMA_LOAD_LEN) steps of input data (INPUT_DIM * 8input)
+    LDMA.LHB 1 # start DMA load operation (fp16, broadcasted to 4out)
 
 loop_in_dim:
     LOOPIN $(INPUT_DIM)  # Loop for $(INPUT_DIM) input dimensions
@@ -74,4 +79,5 @@ psum:
     LOOPEND # psum
     CLEAR.P # Clear the partial sum register
 
+    LOOPEND
     HALT  # End of program

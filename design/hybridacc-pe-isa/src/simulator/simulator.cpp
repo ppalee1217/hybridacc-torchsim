@@ -30,8 +30,8 @@ bool PortIO::popPD(uint16_t &v) {
     if(PD.empty()) {
         std::cerr << "PD queue is empty" << std::endl;
         v = 0; // 返回 0 或其他預設值
-        // return false;
-        return true;
+        return false;
+        // return true;
     }
     v = PD.front(); PD.pop();
     return true;
@@ -40,8 +40,8 @@ bool PortIO::popPS(uint64_t &v) {
     if(PS.empty()) {
         std::cerr << "PS queue is empty" << std::endl;
         v = 0;
-        // return false;
-        return true;
+        return false;
+        // return true;
     }
     v = PS.front(); PS.pop();
     return true;
@@ -50,8 +50,8 @@ bool PortIO::popPIL(uint64_t &v) {
     if(PIL.empty()) {
         std::cerr << "PIL queue is empty" << std::endl;
         v = 0;
-        // return false;
-        return true;
+        return false;
+        // return true;
     }
     v = PIL.front(); PIL.pop();
     return true;
@@ -135,7 +135,8 @@ PESimulator::PESimulator(const PEConfig &cfg){
     state.cfg = cfg;
     state.IM.resize(cfg.im_size);
     state.DM.resize(cfg.dm_size);
-    state.DMA.init(&state.DM, &state.dmrv, &state.dmwv, cfg.dma_latency);
+    state.LDMA.init(&state.DM, &state.dmrv, &state.dmwv, cfg.dma_latency);
+    state.SDMA.init(&state.DM, &state.dmrv, &state.dmwv, cfg.dma_latency);
     state.TR.reset();
     state.PS.reset();
     state.pc = 0;
@@ -159,7 +160,7 @@ void PESimulator::run(uint64_t max_cycles){
 }
 
 // ----------------- 指令執行 -----------------
-void PESimulator::execute(uint16_t w) {
+PESimulator::ExecStatus PESimulator::execute(uint16_t w) {
     int opcode = getOpcode(w);
     int funct2 = getFunct2(w);
     int func3  = getFunc3(w);
@@ -169,34 +170,55 @@ void PESimulator::execute(uint16_t w) {
     auto &S = state;
 
     // HALT
-    if(opcode==3 && funct2==3){ S.halted = true; return; }
-    // NOP
-    if(opcode==2 && funct2==0){ return; }
+    if(opcode==3 && funct2==3 && func3==0){ S.halted = true; return ExecStatus::NEXT; }
+    // SWAPDM
+    if(opcode==3 && funct2==3 && func3==4){ // opcode 11 funct2 11 func3 100
+        // Wait for SDMA busy or Back buffer not valid (not yet filled)
+        if(S.SDMA.busy() || !S.DM.isValid(S.DM.getBackBank())){
+            return ExecStatus::STALL; // Stall, do not advance PC
+        }
+        S.DM.swap();
+        return ExecStatus::NEXT;
+        // Advance PC (fall through to end of function)
+    } else if(opcode==3 && funct2==3) {
+        // Other system instructions handled or reserved
+    }
 
-    // DMA.ADDR / DMA.LEN (10-bit)
-    if(opcode==0 && funct2==1){
+    // NOP
+    if(opcode==2 && funct2==0){ return ExecStatus::NEXT; }
+
+    // DMA Setup (Opcode 00)
+    // f2=00: SDMA, f2=01: LDMA
+    if(opcode==0 && (funct2==0 || funct2==1)){
         int bits6_1 = payload & 0x3F;
         int bit0 = (payload >> 6) & 0x1;
         int val = (func3<<7) | (bits6_1<<1) | bit0; // 10-bit
-        if(func1==0) S.DMA.setBase(val); else S.DMA.setLen(val);
-        return;
+
+        if(funct2==1) { // LDMA
+            if(func1==0) S.LDMA.updateBase(val); else S.LDMA.updateLen(val);
+        } else { // SDMA
+            if(func1==0) S.SDMA.updateBase(val); else S.SDMA.updateLen(val);
+        }
+        return ExecStatus::NEXT;
     }
-    // DMA Loads / Broadcast Loads
+
+    // LDMA Operations (Opcode 00, f2=10)
     if(opcode==0 && funct2==2){
         int stride = (w>>10)&0x7;
         switch(func3){
-            case 0: S.DMA.issue(DMARequestType::LOAD_BYTE, stride, false); break; // LB
-            case 1: S.DMA.issue(DMARequestType::LOAD_HALF, stride, false); break; // LH
-            case 2: S.DMA.issue(DMARequestType::LOAD_WORD, stride, false); break; // LW
-            case 3: S.DMA.issue(DMARequestType::LOAD_DWORD, stride, false); break; // LD
-            case 4: S.DMA.issue(DMARequestType::LOAD_BYTE, stride, true ); break; // LBB
-            case 5: S.DMA.issue(DMARequestType::LOAD_HALF, stride, true ); break; // LHB
-            case 6: S.DMA.issue(DMARequestType::LOAD_WORD, stride, true ); break; // LWB
+            case 0: S.LDMA.issue(DMARequestType::LOAD_BYTE, stride, false); break; // LB
+            case 1: S.LDMA.issue(DMARequestType::LOAD_HALF, stride, false); break; // LH
+            case 2: S.LDMA.issue(DMARequestType::LOAD_WORD, stride, false); break; // LW
+            case 3: S.LDMA.issue(DMARequestType::LOAD_DWORD, stride, false); break; // LD
+            case 4: S.LDMA.issue(DMARequestType::LOAD_BYTE, stride, true ); break; // LBB
+            case 5: S.LDMA.issue(DMARequestType::LOAD_HALF, stride, true ); break; // LHB
+            case 6: S.LDMA.issue(DMARequestType::LOAD_WORD, stride, true ); break; // LWB
             default: break;
         }
-        return;
+        return ExecStatus::NEXT;
     }
-    // DMA Stores (only SD simplified -> just advance base)
+
+    // SDMA Operations (Opcode 00, f2=11)
     if(opcode==0 && funct2==3){
         if(func3==3){
             int stride = (w>>10)&0x7;
@@ -204,18 +226,32 @@ void PESimulator::execute(uint16_t w) {
             if (!port_io || !port_io->popPS(ps_word)) {
                 throw std::runtime_error("Blocking read failed: PS port is empty");
             }
-            S.dmwv.fromUint64(ps_word); // 從 PS 佇列讀取值
+            S.dmwv.fromUint64(ps_word); // Get data from PS port
 
-            S.DMA.issue(DMARequestType::STORE_DWORD, stride, false); // SD
-            while (S.DMA.busy()) {
-                if (!port_io->popPS(ps_word)) {
-                    throw std::runtime_error("Blocking read failed: PS port is empty");
-                }
-                S.dmwv.fromUint64(ps_word);
-                S.DMA.next();
+            S.SDMA.issue(DMARequestType::STORE_DWORD, stride, false); // SD
+
+            // Note: In blocking design, we might spin here. But to support concurrent execution
+            // SDMA should ideally run in background. For now, we keep blocking behavior for data consumption
+            // but tracking transfer size needs care.
+            while(S.SDMA.busy()) {
+                 if (!port_io->popPS(ps_word)) {
+                     throw std::runtime_error("Blocking read failed: PS port is empty");
+                 }
+                 S.dmwv.fromUint64(ps_word);
+                 S.SDMA.next();
             }
         }
-        return;
+        return ExecStatus::NEXT;
+    }
+
+    // Config LOOP (Opcode 01, f2=01)
+    if(opcode==1 && funct2==1){
+        int bits6_1 = payload & 0x3F;
+        int bit0 = (payload >> 6) & 0x1;
+        int val = (func3<<7) | (bits6_1<<1) | bit0; // 10-bit
+        if(func1==0) S.LDMA.setLoop(val); // LDMA.LOOP
+        else S.SDMA.setLoop(val);         // SDMA.LOOP
+        return ExecStatus::NEXT;
     }
 
     // TSTORE / TSHIFT
@@ -240,7 +276,7 @@ void PESimulator::execute(uint16_t w) {
             }
             state.TR.shift(maskBits); // 將 T registers 向右移動
         }
-        return;
+        return ExecStatus::NEXT;
     }
 
     // Arithmetic Group
@@ -261,7 +297,7 @@ void PESimulator::execute(uint16_t w) {
                     Element newp = state.valu.vmac(vt, state.dmrv, oldp);
                     state.PS.setP(prd, newp);
                 }
-                if(func1){ S.DMA.next(); } // N 變形: 允許下一個 DMA
+                if(func1){ S.LDMA.next(); } // N 變形: 允許下一個 DMA (Usually LDMA)
             } break;
             case 1: // VMACR / VMACRN : P[psum_cnt] += dot(VT[vtid_cnt], DMRV)
             case 3: { // VMULR / VMULRN : VP[vpsum_cnt] += mul(VT[vtid_cnt], DMRV)
@@ -299,7 +335,7 @@ void PESimulator::execute(uint16_t w) {
                 if(vtstride==3) state.TR.vtid_cnt = 0;
                 else state.TR.vtid_cnt = (state.TR.vtid_cnt + vtstride) % 3;
 
-                if(func1){ S.DMA.next(); }
+                if(func1){ S.LDMA.next(); }
             } break;
             case 4: { // VPSUM : PLO = PLI + P[psum_cnt]
                 int vprs = (w>>5)&0x1F;
@@ -329,7 +365,7 @@ void PESimulator::execute(uint16_t w) {
             } break;
             default: break;
         }
-        return;
+        return ExecStatus::NEXT;
     }
 
     // SETRID
@@ -340,7 +376,7 @@ void PESimulator::execute(uint16_t w) {
             case 3: state.PS.psum_cnt = (w>>5)&0x1F; state.TR.vtid_cnt = (w>>10)&0x3; break; // SETRID.PT
             default: break;
         }
-        return;
+        return ExecStatus::NEXT;
     }
 
     // CLEAR
@@ -350,14 +386,14 @@ void PESimulator::execute(uint16_t w) {
             case 1: state.PS.clear(); break; // CLEAR.P
             default: break;
         }
-        return;
+        return ExecStatus::NEXT;
     }
 
     // JUMP (J)
     if(opcode==1 && funct2==2){
         int imm = ((func3 & 0x7)<<7) | (getFunc1(w)<<10) | (((w>>11)&1)) | ((payload & 0x3F)<<1);
         state.pc = imm;
-        return;
+        return ExecStatus::JUMP;
     }
 
     // LOOPIN / LOOPBREAK
@@ -368,8 +404,9 @@ void PESimulator::execute(uint16_t w) {
         } else { // LOOPBREAK
             state.loops.loopBreak();
         }
-        return;
+        return ExecStatus::NEXT;
     }
+    return ExecStatus::NEXT;
 }
 
 void PESimulator::step(){
@@ -391,17 +428,21 @@ void PESimulator::step(){
                   <<"  "<<disasm(inst)<<"\n";
     }
 
-    execute(inst);
+    ExecStatus status = execute(inst);
 
-    // 2. PC = PC + 2
-    // 注意：這裡假設指令是 16-bit 對齊
-    state.pc += 2;
+    if(status == ExecStatus::NEXT){
+        // 2. PC = PC + 2
+        // 注意：這裡假設指令是 16-bit 對齊
+        state.pc += 2;
+    }
 
-    // 3. 處理 loop end flag
-    if(loopEnd){
-        uint16_t new_pc = state.pc;
-        if(state.loops.handleLoopEndFlag(new_pc)){
-            state.pc = new_pc;
+    if(status != ExecStatus::STALL){
+         // 3. 處理 loop end flag
+        if(loopEnd){
+            uint16_t new_pc = state.pc;
+            if(state.loops.handleLoopEndFlag(new_pc)){
+                state.pc = new_pc;
+            }
         }
     }
 

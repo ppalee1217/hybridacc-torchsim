@@ -38,13 +38,18 @@
 gemv:
 
 load_kernel:
-    DMA.ADDR 0
-    DMA.LEN 64  # STORE 64 steps of kernel data (4out * 2vector * 32dim)
-    DMA.SD 4 # start DMA store operation
+    SDMA.ADDR 0
+    SDMA.LEN 48  # STORE 48 steps of kernel data (16 kernels * 3 vector each)
+    SDMA.LOOP 1  # loop for 1 kernel set
+    SDMA.SD 4  # start DMA store operation
 
-    DMA.ADDR 0
-    DMA.LEN 256 # LOAD 256 steps of input data (32dim * 8input)
-    DMA.LHB 1 # start DMA load operation (fp16, broadcasted to 4out)
+compute:
+    LOOPIN 1 # processing pass
+    SWAPDM  # wait for previous SDMA operation to complete
+
+    LDMA.ADDR 0
+    LDMA.LEN 256 # LOAD 256 steps of input data (32dim * 8input)
+    LDMA.LHB 1 # start DMA load operation (fp16, broadcasted to 4out)
 
 loop_in_dim:
     LOOPIN 32  # Loop for 32 input dimensions
@@ -72,7 +77,7 @@ compute_gemv:
     LOOPEND # compute_gemv
 
     SETRID.P 0
-    
+
     LOOPEND # loop_in_dim
 
 psum:
@@ -82,4 +87,5 @@ psum:
     LOOPEND # psum
     CLEAR.P # Clear the partial sum register
 
+    LOOPEND
     HALT  # End of program

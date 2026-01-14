@@ -1,0 +1,1 @@
+uv run python -m hybridacc_verify.main check --sim /home/yoyo/work/MasterResearch/HybridAcc/design/hybridacc-pe-isa/output/sim/conv1d_pol.bin --expected /home/yoyo/work/MasterResearch/HybridAcc/design/hybridacc-pe-isa/data/conv3x3/activation_output.bin --dump-csv /home/yoyo/work/MasterResearch/HybridAcc/design/hybridacc-pe-isa/output/sim/conv1d_pol.csv

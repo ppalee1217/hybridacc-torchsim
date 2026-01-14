@@ -34,6 +34,16 @@ int main(){
     assert(w5.size()==1);
     assert( ((w5[0]>>12)&1) == 1 );
 
+    // Test 6: SWAPDM
+    auto w6 = a.assemble("SWAPDM\n", false);
+    assert(w6.size()==1);
+    // Opcode=3 (bits 1-2), Funct2=3 (bits 3-4), Func3=4 (bits 13-15)
+    // 0x801E or similar check
+    uint16_t sw = w6[0];
+    assert( ((sw>>1)&0x3) == 3 ); // opcode
+    assert( ((sw>>3)&0x3) == 3 ); // funct2
+    assert( ((sw>>13)&0x7) == 4); // func3
+
     // Negative tests (error handling)
     auto expectError = [&](const char* name, const std::string &src, const char* mustContain){
         bool thrown=false;
@@ -58,7 +68,7 @@ int main(){
     expectError("J unaligned","J 3\n", "even");                // J immediate must be even
     expectError("Undefined label","J target\nNOP\n", "Undefined label");
     expectError("vtstride overflow","VMACR 0, 4\n", "vtstride out of range");
-    expectError("DMA.LEN range","DMA.LEN 3000\n", "len out of range");
+    expectError("LDMA.LEN range","LDMA.LEN 3000\n", "len out of range");
     expectError("Duplicate label","L1:\nL1:\nNOP\n", "Duplicate label");
 
     std::cout<<"All error tests passed.\n";

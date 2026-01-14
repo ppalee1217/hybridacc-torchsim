@@ -14,7 +14,7 @@ fi
 mkdir -p "$OUTPUT_DIR"
 
 $VALGRIND_PREFIX \
-    $SIMULATOR -asm "$ASM_DIR/conv1d_simple.asm" \
+    $SIMULATOR -asm "$ASM_DIR/conv1d_k3.asm" \
     --dump "$OUTPUT_DIR/conv1d_simple_dump.txt" \
     --data "$data_DIR" \
     --pol "$OUTPUT_DIR/conv1d_pol.bin" \

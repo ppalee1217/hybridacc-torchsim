@@ -293,20 +293,24 @@ uint64_t DataMemory::readWord(int idx) const {
     if (idx < 0 || idx >= size()) {
         throw std::out_of_range("[readWord] Index out of range: " + std::to_string(idx));
     }
+    const auto& bank = banks[active_bank];
     uint64_t word = 0;
     for (int i = 0; i < 8; ++i) {
-        word |= static_cast<uint64_t>(mem[idx + i]) << (i * 8);
+        word |= static_cast<uint64_t>(bank[idx + i]) << (i * 8);
     }
     return word;
 }
 
-void DataMemory::writeWord(int idx, uint64_t v, uint8_t mask) {
-    if (mask == 0) return; // 如果 mask 為 0，則
+void DataMemory::writeBack(int idx, uint64_t v, uint8_t mask) {
+    // Write to BACK (Non-active) bank - used by SDMA
+    if (mask == 0) return;
     if (idx < 0 || idx >= size()) {
-        throw std::out_of_range("[writeWord] Index out of range: " + std::to_string(idx));
+        throw std::out_of_range("[writeBack] Index out of range: " + std::to_string(idx));
     }
+    int target_bank = 1 - active_bank;
+    auto& bank = banks[target_bank];
     for (int i = 0; i < 8; ++i) {
-        if (mask & (1 << i)) mem[idx + i] = static_cast<uint8_t>((v >> (i * 8)) & 0xFF);
+        if (mask & (1 << i)) bank[idx + i] = static_cast<uint8_t>((v >> (i * 8)) & 0xFF);
     }
 }
 
@@ -350,14 +354,34 @@ bool LoopController::handleLoopEndFlag(uint16_t &pc_after_increment){
 }
 
 void DMAController::activate() {
-    assert(!dma_active); // 確保沒有活動的 DMA
+    assert(!dma_active);
     dma_active = true;
-    handle(); // 立即處理下一步
+    handle();
 }
 
 void DMAController::next() {
-    if (!dma_active) return; // 如果沒有活動則不處理
-    handle(); // 處理當前請求
+    if (!dma_active) return;
+    handle();
+}
+
+void DMAController::checkLoopReset() {
+     if(dma_len == 0){
+         // loop_count > 1 means we need more iterations (N means total N times)
+         // loop_count == 1 means we are done (1 time total)
+         // loop_count == 0 means default (1 time total)
+         if(loop_count > 1){
+             loop_count--;
+             dma_base = init_base;
+             dma_len = init_len;
+             dma_offset = 0;
+         } else {
+             dma_active = false;
+             // If we are SDMA, finalize the bank (mark valid)
+             if(request_type == DMARequestType::STORE_DWORD && dm != nullptr){
+                dm->setValid(dm->getBackBank(), true);
+             }
+         }
+     }
 }
 
 void DMAController::handle(){
@@ -369,54 +393,55 @@ void DMAController::handle(){
     switch (request_type) {
         case DMARequestType::LOAD_BYTE:
             v = dm->readWord(dma_base + dma_offset);
-            v = v & 0xFF; // 假設只讀取低位
+            v = v & 0xFF;
             if(dma_broadcast) {
                 for(int i = 0; i < 4; ++i) {
                     broadcast_v |= v << (i * 16);
                 }
-                v = broadcast_v; // 將所有 lane 設為相同值
+                v = broadcast_v;
             }
-            dmrv->fromUint64(v); // 假設將其存儲為 64 位
+            dmrv->fromUint64(v);
             break;
         case DMARequestType::LOAD_HALF:
             v = dm->readWord(dma_base + dma_offset);
-            v = v & 0xFFFF; // 假設只讀取低位
+            v = v & 0xFFFF;
             if(dma_broadcast) {
                 for(int i = 0; i < 4; ++i) {
                     broadcast_v |= v << (i * 16);
                 }
-                v = broadcast_v; // 將所有 lane 設為相同值
+                v = broadcast_v;
             }
-            dmrv->fromUint64(v); // 假設將其存儲為 64 位
+            dmrv->fromUint64(v);
             break;
         case DMARequestType::LOAD_WORD:
             v = dm->readWord(dma_base + dma_offset);
-            v = v & 0xFFFFFFFF; // 假設只讀取低位
+            v = v & 0xFFFFFFFF;
             if(dma_broadcast) {
                 for(int i = 0; i < 2; ++i) {
                     broadcast_v |= v << (i * 32);
                 }
-                v = broadcast_v; // 將所有 lane 設為相同值
+                v = broadcast_v;
             }
-            dmrv->fromUint64(v); // 假設將其存儲為 64 位
+            dmrv->fromUint64(v);
             break;
         case DMARequestType::LOAD_DWORD:
             v = dm->readWord(dma_base + dma_offset);
-            dmrv->fromUint64(v); // 假設將其存儲為 64 位
+            dmrv->fromUint64(v);
             break;
         case DMARequestType::STORE_DWORD:
-            dm->writeWord(dma_base + dma_offset, dmwv->toUint64(), 0xFF); // 假設寫入整個字
+            // SDMA uses writeBack to fill the back buffer
+            dm->writeBack(dma_base + dma_offset, dmwv->toUint64(), 0xFF);
             break;
         default:
             throw std::runtime_error("Unsupported DMA request type");
     }
 
     // step
-    dma_offset += dma_stride * sizeof(uint16_t); // 假設 stride 是 16-bit 對齊
-    dma_len--;
-    if (dma_len == 0) {
-        dma_active = false; // 完成後關閉 DMA
-    }
+    dma_offset += dma_stride * sizeof(uint16_t); // 16-bit word aligned
+    if (dma_len > 0) dma_len--;
+
+    // Check loop or completion
+    checkLoopReset();
 }
 
 } // namespace hybridacc

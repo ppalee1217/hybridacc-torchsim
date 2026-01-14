@@ -6,7 +6,8 @@ requires-python = ">=3.8"
 dependencies = [
     "numpy",
     "torch",
-    "pyyaml"
+    "pyyaml",
+    "pandas>=2.0.3",
 ]
 
 [tool.setuptools.packages.find]

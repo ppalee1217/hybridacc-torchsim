@@ -70,17 +70,54 @@ private:
     size_t program_size;
 };
 
-// Data Memory (element size 16-bit, bandwidth 64-bit)
+// Data Memory (Dual Bank Ping-pong buffer, element size 16-bit)
 class DataMemory {
 public:
-    explicit DataMemory(int bytes = 512): mem(bytes / sizeof(uint8_t), 0) {} // 初始化為 512 bytes
-    void resize(int bytes) { mem.resize(bytes / sizeof(uint8_t), 0); }
-    uint64_t readWord(int idx) const; // 加上 const
-    void writeWord(int idx, uint64_t v, uint8_t mask);
-    int size() const { return (int)(mem.size() * sizeof(uint8_t)); }
-    const std::vector<uint8_t>& raw() const { return mem; }
+    explicit DataMemory(int bytes = 512) {
+        // Init two banks
+        int bank_size = bytes / sizeof(uint8_t); // Single bank size
+        banks[0].resize(bank_size, 0);
+        banks[1].resize(bank_size, 0);
+        bank_valid[0] = false;
+        bank_valid[1] = false;
+        active_bank = 0; // Bank visible to LDMA and VMAC
+    }
+
+    void resize(int bytes) {
+        int bank_size = bytes / sizeof(uint8_t);
+        banks[0].assign(bank_size, 0);
+        banks[1].assign(bank_size, 0);
+        active_bank = 0;
+        resetValid();
+    }
+
+    uint64_t readWord(int idx) const; // Read from active_bank
+
+    // Write to back buffer (for SDMA)
+    void writeBack(int idx, uint64_t v, uint8_t mask);
+
+    // Bank management
+    void swap() {
+        // Clear validity of the *outgoing* active bank (which becomes the new back buffer)
+        // implying it is now empty/dirty and ready for SDMA to fill
+        bank_valid[active_bank] = false;
+        active_bank = 1 - active_bank;
+        // std::cout << "[DataMemory] Swapped active bank to " << active_bank << "\n";
+    }
+
+    bool isValid(int bank_idx) const { return bank_valid[bank_idx]; }
+    void setValid(int bank_idx, bool v) { bank_valid[bank_idx] = v; }
+    void resetValid() { bank_valid[0]=false; bank_valid[1]=false; }
+    int getActiveBank() const { return active_bank; }
+    int getBackBank() const { return 1 - active_bank; }
+
+    int size() const { return (int)(banks[0].size() * sizeof(uint8_t)); }
+    const std::vector<uint8_t>& raw(int bank_idx) const { return banks[bank_idx]; }
+
 private:
-    std::vector<uint8_t> mem;
+    std::vector<uint8_t> banks[2];
+    bool bank_valid[2];
+    int active_bank;
 };
 
 // Transform Register File (unified representation for scalar T and vector selector VT)
@@ -169,14 +206,23 @@ public:
     DMAController(): dm(nullptr), dmrv(nullptr), dmwv(nullptr), latency(1) {}
     void init(DataMemory* dm_, Vector* dmrv_, Vector* dmwv_,int lat){ dm = dm_; dmrv = dmrv_; dmwv = dmwv_; latency = lat; }
 
-    void setBase(uint16_t base){ dma_base = base; dma_offset = 0; }
-    void setLen(uint16_t len){ dma_len = len; }
+    void setBase(uint16_t base){ dma_base = base; if(dma_offset==0) init_base=base; dma_offset = 0; } // Note: Simple reset logic, refined in next step
+    void setLen(uint16_t len){ dma_len = len; init_len=len;}
+    void setLoop(uint16_t count){ loop_count = count; }
+
+    // Explicit setup for init values (called by ADDR/LEN instructions)
+    void updateBase(uint16_t base) { dma_base = base; init_base = base; dma_offset = 0; }
+    void updateLen(uint16_t len) { dma_len = len; init_len = len; }
+
     void setStride(uint16_t stride){ dma_stride = stride; }
     void setBroadcast(bool broadcast){ dma_broadcast = broadcast; }
     void setRequestType(DMARequestType type){ request_type = type; }
     uint16_t base() const { return dma_base; }
     uint16_t len() const { return dma_len; }
     uint16_t stride() const { return dma_stride; }
+    uint32_t transferred() const { return bytes_transferred; }
+    void resetTransferred() { bytes_transferred = 0; }
+
     bool broadcast() const { return dma_broadcast; }
     DMARequestType requestType() const { return request_type; }
 
@@ -186,6 +232,9 @@ public:
         setBroadcast(broadcast);
         activate();
     }
+
+    // SDMA specific methods
+    void checkLoopReset();
 
     void next();
     void activate();
@@ -200,6 +249,15 @@ private:
     uint16_t dma_offset = 0;
     uint16_t dma_len = 0;
     uint16_t dma_stride = 0;
+
+    // Auto-reset support
+    uint16_t init_base = 0;
+    uint16_t init_len = 0;
+    uint16_t loop_count = 0;
+
+    // Transfer tracking
+    uint32_t bytes_transferred = 0;
+
     bool dma_broadcast = false;
     DMARequestType request_type;
     bool dma_active = false;
@@ -211,7 +269,10 @@ struct PEState {
     DataMemory DM;           // 資料記憶體
     TransformRegFile TR;     // Transform registers
     PsumRegFile PS;          // Psum registers
-    DMAController DMA;       // DMA 控制器
+
+    DMAController LDMA;      // Load DMA (PE -> DM)
+    DMAController SDMA;      // Store DMA (PS -> DM)
+
     LoopController loops;    // Loop 控制器
     Vector dmrv;             // 最新 DMA 載入值
     Vector dmwv;             // 最新 DMA 寫入值

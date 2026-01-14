@@ -27,9 +27,14 @@ conv1d_k3s1_template(KERNEL_DMA_LEN=48, OUTPUT_WINDOW_CNT=798, KERNEL_COUNT=16):
     CLEAR.P
 
 load_kernel:
-    DMA.ADDR 0
-    DMA.LEN $(KERNEL_DMA_LEN)  # Load kernel weights: 16 kernels × 3 vectors
-    DMA.SD 4  # start DMA store operation
+    SDMA.ADDR 0
+    SDMA.LEN $(KERNEL_DMA_LEN)  # Load kernel weights: 16 kernels × 3 vectors
+    SDMA.LOOP 1  # loop for 1 kernel set
+    SDMA.SD 4  # start DMA store operation
+
+loop_tile:
+    LOOPIN 1  # Tile loop for 1 tile
+    SWAPDM
 
 preload_input:
     TSTORE t0
@@ -50,9 +55,9 @@ load_input:
     TSTORE t8
     TSTORE t11
 
-    DMA.ADDR 0
-    DMA.LEN $(KERNEL_DMA_LEN)  # Load input data for current window
-    DMA.LD 4  # LOAD 48 steps of input data (3 vector * 4 elements each)
+    LDMA.ADDR 0
+    LDMA.LEN $(KERNEL_DMA_LEN)  # Load input data for current window
+    LDMA.LD 4  # LOAD 48 steps of input data (3 vector * 4 elements each)
     SETRID.PT 0, 0
 
 loop_kernel:
@@ -72,4 +77,5 @@ calculate_psum:
     TSHIFT K3
     LOOPEND
 
+    LOOPEND
     HALT  # End of program

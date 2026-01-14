@@ -25,29 +25,81 @@ Assembler::Assembler(){
         else ctx.words.back() |= 0x1; // loop-end flag
     });
 
-    // DMA.ADDR start_addr (新版: 10-bit start_addr[9:0] 映射: [15:13]=[9:7], bit12 func1=0, bit11=[0], [10:5]=[6:1])
-    add("DMA.ADDR", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
-        if(ops.size()!=1) throw AsmError("DMA.ADDR expects 1 operand");
+    // LDMA.ADDR start_addr (opcode=00 f2=01 f1=0)
+    add("LDMA.ADDR", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=1) throw AsmError("LDMA.ADDR expects 1 operand");
         int addr = parseInt(ops[0]);
         if(addr < 0 || addr > 0x3FF) throw AsmError("start_addr out of range (0..1023)");
         uint16_t w = makeBase(0, 1); // opcode=00 funct2=01
         w |= ((addr >> 7) & 0x7) << 13;      // bits 15:13 = addr[9:7]
-        // bit12 func1=0 (保持 0)
+        // bit12 func1=0 (LDMA ADDR)
         w |= (addr & 0x1) << 11;             // bit11 = addr[0]
         w |= ((addr >> 1) & 0x3F) << 5;      // bits 10:5 = addr[6:1]
         ctx.words.push_back(w);
     });
 
-    // DMA.LEN len (新版: 10-bit len[9:0] 映射同 ADDR 但 func1=1)
-    add("DMA.LEN", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
-        if(ops.size()!=1) throw AsmError("DMA.LEN expects 1 operand");
+    // LDMA.LEN len (opcode=00 f2=01 f1=1)
+    add("LDMA.LEN", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=1) throw AsmError("LDMA.LEN expects 1 operand");
         int len = parseInt(ops[0]);
         if(len < 0 || len > 0x3FF) throw AsmError("len out of range (0..1023)");
         uint16_t w = makeBase(0, 1); // opcode=00 funct2=01
         w |= ((len >> 7) & 0x7) << 13;       // bits 15:13 = len[9:7]
-        w |= 1 << 12;                        // func1=1
+        w |= 1 << 12;                        // func1=1 (LDMA LEN)
         w |= (len & 0x1) << 11;              // bit11 = len[0]
         w |= ((len >> 1) & 0x3F) << 5;       // bits 10:5 = len[6:1]
+        ctx.words.push_back(w);
+    });
+
+    // SDMA.ADDR start_addr (opcode=00 f2=00 f1=0)
+    add("SDMA.ADDR", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=1) throw AsmError("SDMA.ADDR expects 1 operand");
+        int addr = parseInt(ops[0]);
+        if(addr < 0 || addr > 0x3FF) throw AsmError("start_addr out of range (0..1023)");
+        uint16_t w = makeBase(0, 0); // opcode=00 funct2=00
+        w |= ((addr >> 7) & 0x7) << 13;      // bits 15:13 = addr[9:7]
+        // bit12 func1=0 (SDMA ADDR)
+        w |= (addr & 0x1) << 11;             // bit11 = addr[0]
+        w |= ((addr >> 1) & 0x3F) << 5;      // bits 10:5 = addr[6:1]
+        ctx.words.push_back(w);
+    });
+
+    // SDMA.LEN len (opcode=00 f2=00 f1=1)
+    add("SDMA.LEN", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=1) throw AsmError("SDMA.LEN expects 1 operand");
+        int len = parseInt(ops[0]);
+        if(len < 0 || len > 0x3FF) throw AsmError("len out of range (0..1023)");
+        uint16_t w = makeBase(0, 0); // opcode=00 funct2=00
+        w |= ((len >> 7) & 0x7) << 13;       // bits 15:13 = len[9:7]
+        w |= 1 << 12;                        // func1=1 (SDMA LEN)
+        w |= (len & 0x1) << 11;              // bit11 = len[0]
+        w |= ((len >> 1) & 0x3F) << 5;       // bits 10:5 = len[6:1]
+        ctx.words.push_back(w);
+    });
+
+    // LDMA.LOOP count (opcode=01 f2=01 f1=0)
+    add("LDMA.LOOP", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=1) throw AsmError("LDMA.LOOP expects 1 operand");
+        int count = parseInt(ops[0]);
+        if(count < 0 || count > 0x3FF) throw AsmError("count out of range (0..1023)");
+        uint16_t w = makeBase(1, 1); // opcode=01 funct2=01
+        w |= ((count >> 7) & 0x7) << 13;     // bits 15:13
+        // bit12 func1=0
+        w |= (count & 0x1) << 11;            // bit11
+        w |= ((count >> 1) & 0x3F) << 5;     // bits 10:5
+        ctx.words.push_back(w);
+    });
+
+    // SDMA.LOOP count (opcode=01 f2=01 f1=1)
+    add("SDMA.LOOP", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=1) throw AsmError("SDMA.LOOP expects 1 operand");
+        int count = parseInt(ops[0]);
+        if(count < 0 || count > 0x3FF) throw AsmError("count out of range (0..1023)");
+        uint16_t w = makeBase(1, 1); // opcode=01 funct2=01
+        w |= ((count >> 7) & 0x7) << 13;     // bits 15:13
+        w |= 1 << 12;                        // func1=1
+        w |= (count & 0x1) << 11;            // bit11
+        w |= ((count >> 1) & 0x3F) << 5;     // bits 10:5
         ctx.words.push_back(w);
     });
 
@@ -64,17 +116,17 @@ Assembler::Assembler(){
             ctx.words.push_back(w);
         });
     };
-    addDMALoad("DMA.LB", 0);
-    addDMALoad("DMA.LH", 1);
-    addDMALoad("DMA.LW", 2);
-    addDMALoad("DMA.LD", 3);
-    addDMALoad("DMA.LBB",4);
-    addDMALoad("DMA.LHB",5);
-    addDMALoad("DMA.LWB",6);
+    addDMALoad("LDMA.LB", 0);
+    addDMALoad("LDMA.LH", 1);
+    addDMALoad("LDMA.LW", 2);
+    addDMALoad("LDMA.LD", 3);
+    addDMALoad("LDMA.LBB",4);
+    addDMALoad("LDMA.LHB",5);
+    addDMALoad("LDMA.LWB",6);
 
-    // DMA.SD stride (store double-word) opcode=00 funct2=11 func3=011 stride bits [12:10]
-    add("DMA.SD", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
-        if(ops.size()!=1) throw AsmError("DMA.SD expects 1 operand");
+    // SDMA.SD stride (store double-word) opcode=00 funct2=11 func3=011 stride bits [12:10]
+    add("SDMA.SD", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=1) throw AsmError("SDMA.SD expects 1 operand");
         int stride = parseInt(ops[0]); if(stride<0||stride>7) throw AsmError("stride out of range");
         uint16_t w = makeBase(0, 3); // opcode=00 funct2=11 func3=011
         w |= (0x3) << 13; // func3=011
@@ -173,7 +225,7 @@ Assembler::Assembler(){
         ctx.words.push_back(w);
     });
 
-    // J imm pattern same as DMA.LEN
+    // J imm pattern same as LDMA.LEN
     add("J", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("J expects 1 immediate/label");
         int imm=-1;
@@ -225,9 +277,16 @@ Assembler::Assembler(){
         uint16_t w = makeBase(2, 0);
         ctx.words.push_back(w);
     });
+    add("SWAPDM", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(!ops.empty()) throw AsmError("SWAPDM no operands");
+        uint16_t w = makeBase(3, 3); // opcode=11 funct2=11
+        w |= (4) << 13; // func3 = 100
+        ctx.words.push_back(w);
+    });
     add("HALT", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(!ops.empty()) throw AsmError("HALT no operands");
-        uint16_t w = makeBase(3, 3);
+        uint16_t w = makeBase(3, 3); // opcode=11 funct2=11
+        // func3 = 000
         ctx.words.push_back(w);
     });
     add("CLEAR.T", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
@@ -416,8 +475,9 @@ TemplateResult Assembler::assembleTemplate(const std::string &source, bool verbo
 
         auto operands = splitOperands(rest);
 
-        // Check for template parameters in operands (only for DMA.ADDR, DMA.LEN, LOOPIN)
-        if (inTemplate && (u == "DMA.ADDR" || u == "DMA.LEN" || u == "LOOPIN")) {
+        // Check for template parameters in operands
+        // (only for LDMA.ADDR, LDMA.LEN, LOOPIN, LDMA.LOOP, SDMA.LOOP, SDMA.LEN, SDMA.ADDR)
+        if (inTemplate && (u == "LDMA.ADDR" || u == "LDMA.LEN" || u == "LOOPIN" || u == "LDMA.LOOP" || u == "SDMA.LOOP" || u == "SDMA.LEN" || u == "SDMA.ADDR")) {
             if (operands.size() == 1) {
                 auto paramIdx = extractTemplateParam(operands[0]);
                 if (paramIdx.has_value()) {
@@ -561,20 +621,29 @@ std::string Disassembler::disasmWord(uint16_t w) const {
     int func3=(w>>13)&0x7;
     int func1=(w>>12)&1;
     int payload=(w>>5)&0x7F;
-    if(opcode==3 && funct2==3){ os<<"HALT"; }
+    if(opcode==3 && funct2==3){
+        if(func3==4) os<<"SWAPDM";
+        else os<<"HALT";
+    }
     else if(opcode==2 && funct2==0){ os<<"NOP"; }
+    else if(opcode==0 && funct2==0){
+        int bits6_1 = payload & 0x3F;
+        int bit0   = (payload >> 6) & 0x1;
+        int val = (func3 << 7) | (bits6_1 << 1) | bit0;
+        if(func1==0) os<<"SDMA.ADDR "<<val; else os<<"SDMA.LEN "<<val;
+    }
     else if(opcode==0 && funct2==1){
         int bits6_1 = payload & 0x3F;           // payload bits5:0 -> [10:5] => value[6:1]
         int bit0   = (payload >> 6) & 0x1;      // payload bit6   -> [11]   => value[0]
         int val = (func3 << 7) | (bits6_1 << 1) | bit0; // 10-bit
-        if(func1==0) os<<"DMA.ADDR "<<val; else os<<"DMA.LEN "<<val;
+        if(func1==0) os<<"LDMA.ADDR "<<val; else os<<"LDMA.LEN "<<val;
     }
     else if(opcode==0 && funct2==2){
-        static const char* names[7] = {"DMA.LB","DMA.LH","DMA.LW","DMA.LD","DMA.LBB","DMA.LHB","DMA.LWB"};
+        static const char* names[7] = {"LDMA.LB","LDMA.LH","LDMA.LW","LDMA.LD","LDMA.LBB","LDMA.LHB","LDMA.LWB"};
         if(func3<=6){ os<<names[func3]<<" "<< ((w>>10)&0x7); }
         else os<<"DMA.?";
     }
-    else if(opcode==0 && funct2==3 && func3==3){ os<<"DMA.SD "<< ((w>>10)&0x7); }
+    else if(opcode==0 && funct2==3 && func3==3){ os<<"SDMA.SD "<< ((w>>10)&0x7); }
     else if(opcode==2 && funct2==1){
         switch(func3){
             case 0: os<<(func1?"VMACN":"VMAC")<<" P"<<((w>>5)&0x1F)<<", VT"<<((w>>10)&0x3); break;
@@ -598,6 +667,12 @@ std::string Disassembler::disasmWord(uint16_t w) const {
         switch(func3){
             case 0: os<<"CLEAR.T"; break; case 1: os<<"CLEAR.P"; break; default: os<<"CLEAR?"; break;
         }
+    }
+    else if(opcode==1 && funct2==1){
+        int bits6_1 = payload & 0x3F;
+        int bit0   = (payload >> 6) & 0x1;
+        int val = (func3 << 7) | (bits6_1 << 1) | bit0;
+        if(func1==0) os<<"LDMA.LOOP "<<val; else os<<"SDMA.LOOP "<<val;
     }
     else if(opcode==1 && funct2==2){
         int imm = ((func3 & 0x7)<<7) | (func1<<10) | (((w>>11)&1)) | ((payload & 0x3F)<<1);

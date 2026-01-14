@@ -7,7 +7,7 @@ This document describes the instruction set architecture (ISA) for a custom proc
 ---
 ## PE Components
 - SRAM
-    - Data Memmory (DM), 16-bit, 256 words
+    - Data Memmory (DM), 16-bit, 256 words (Ping-pong buffer, LDMA sees one bank, SDMA manages Mux)
     - Instruction Memory (IM), 16-bit, 256 words
 - ALU (fp16 *4, int8 *4, int4 *16)
     - VMAC Unit
@@ -46,55 +46,75 @@ Each instruction is encoded in a 16-bit format, with specific fields for:
 
 ### 1. **Data Movement Instructions**
 These instructions handle data transfer between memory and registers.
-- **DMA.ADDR, start_addr**: Load the starting address for DMA operations.
+- **LDMA.ADDR, start_addr**: Load the starting address for LDMA operations.
     - Opcode: `00`, Function code: `01`, func1 = `0`
     - Fields: `start_addr[9:7]` (inst[15:13]),`start_addr[0|6:1]` (inst[11:5])
-    - Notes: Sets the DMA starting address.
+    - Notes: Sets the LDMA starting address.
 
-- **DMA.LEN, len**: Load the length for DMA operations.
+- **LDMA.LEN, len**: Load the length for LDMA operations.
     - Opcode: `00`, Function code: `01`, func1 = `1`
     - Fields: `len[9:7]` (inst[15:13]),`len[0|6:1]` (inst[11:5])
-    - Notes: Specifies the length of the DMA transfer.
+    - Notes: Specifies the length of the LDMA transfer.
 
-- **DMA.LB, stride**: Load a byte to DMRV (nonblocking).
+- **LDMA.LOOP, count**: Set loop count for LDMA auto-reset.
+    - Opcode: `01`, Function code: `01`, func1 = `0`
+    - Fields: `count[9:7]` (inst[15:13]),`count[0|6:1]` (inst[11:5])
+    - Notes: Sets loop count for LDMA.
+
+- **SDMA.ADDR, start_addr**: Load the starting address for SDMA operations.
+    - Opcode: `00`, Function code: `00`, func1 = `0`
+    - Fields: `start_addr[9:7]` (inst[15:13]),`start_addr[0|6:1]` (inst[11:5])
+    - Notes: Sets the SDMA starting address.
+
+- **SDMA.LEN, len**: Load the length for SDMA operations.
+    - Opcode: `00`, Function code: `00`, func1 = `1`
+    - Fields: `len[9:7]` (inst[15:13]),`len[0|6:1]` (inst[11:5])
+    - Notes: Specifies the length of the SDMA transfer.
+
+- **SDMA.LOOP, count**: Set loop count for SDMA auto-reset.
+    - Opcode: `01`, Function code: `01`, func1 = `1`
+    - Fields: `count[9:7]` (inst[15:13]),`count[0|6:1]` (inst[11:5])
+    - Notes: Sets loop count for SDMA.
+
+- **LDMA.LB, stride**: Load a byte to DMRV (nonblocking, LDMA).
     - Opcode: `00`, Function code: `10`, func3: `000`
     - Fields: `stride` (inst[12:10])
     - Notes: Transfers a byte from memory to DMRV.
 
-- **DMA.LH, stride**: Load a half-word (16bits) to DMRV (nonblocking).
+- **LDMA.LH, stride**: Load a half-word (16bits) to DMRV (nonblocking, LDMA).
     - Opcode: `00`, Function code: `10`, func3: `001`
     - Fields: `stride` (inst[12:10])
     - Notes: Transfers a half-word from memory to DMRV.
 
-- **DMA.LW, stride**: Load a word (32bits) to DMRV (nonblocking).
+- **LDMA.LW, stride**: Load a word (32bits) to DMRV (nonblocking, LDMA).
     - Opcode: `00`, Function code: `10`, func3: `010`
     - Fields: `stride` (inst[12:10])
     - Notes: Transfers a word from memory to DMRV.
 
-- **DMA.LD, stride**: Load a double-word (64bits) to DMRV (nonblocking).
+- **LDMA.LD, stride**: Load a double-word (64bits) to DMRV (nonblocking, LDMA).
     - Opcode: `00`, Function code: `10`, func3: `011`
     - Fields: `stride` (inst[12:10])
     - Notes: Transfers a double-word from memory to DMRV.
 
-- **DMA.LBB, stride**: Load a byte and broadcast to DMRV (nonblocking).
+- **LDMA.LBB, stride**: Load a byte and broadcast to DMRV (nonblocking, LDMA).
     - Opcode: `00`, Function code: `10`, func3: `100`
     - Fields: `stride` (inst[12:10])
     - Notes: Transfers a byte and broadcasts it to DMRV.
 
-- **DMA.LHB, stride**: Load a half-word and broadcast to DMRV (nonblocking).
+- **LDMA.LHB, stride**: Load a half-word and broadcast to DMRV (nonblocking, LDMA).
     - Opcode: `00`, Function code: `10`, func3: `101`
     - Fields: `stride` (inst[12:10])
     - Notes: Transfers a half-word and broadcasts it to DMRV.
 
-- **DMA.LWB, stride**: Load a word and broadcast to DMRV (nonblocking).
+- **LDMA.LWB, stride**: Load a word and broadcast to DMRV (nonblocking, LDMA).
     - Opcode: `00`, Function code: `10`, func3: `110`
     - Fields: `stride` (inst[12:10])
     - Notes: Transfers a word and broadcasts it to DMRV.
 
-- **DMA.SD, stride**: Store a double-word from PS port (blocking).
+- **SDMA.SD, stride**: Store a double-word from PS port (blocking, SDMA).
     - Opcode: `00`, Function code: `11`, func3: `011`
     - Fields: `stride` (inst[12:10])
-    - Notes: Transfers a double-word from PS port.
+    - Notes: Transfers a double-word from PS port using SDMA.
 
 - **TSTORE, trd**: Store data from PD port.
     - Opcode: `01`, Function code: `00`, func3: `000`
@@ -194,6 +214,10 @@ These instructions handle system-level operations.
     - Opcode: `10`, Function code: `00`
     - Notes: Performs no operation.
 
+- **SWAPDM**: Swap Data Memory banks.
+    - Opcode: `11`, Function code: `11`, func3: `100`
+    - Notes: Waits for SDMA to finish, then swaps DM banks. If SDMA is busy, it stalls.
+
 - **SETRID.PT, pid, vtid**: Set resource ID for PID and VTID.
     - Opcode: `10`, Function code: `10`, func3: `011`
     - Fields: `pid` (inst[9:5]), `vtid` (inst[11:10])
@@ -218,7 +242,7 @@ These instructions handle system-level operations.
     - Notes: Clears PID.
 
 - **HALT**: Halt the processor.
-    - Opcode: `11`, Function code: `11`
+    - Opcode: `11`, Function code: `11`, func3: `000`
     - Notes: Stops processor execution.
 
 ---
