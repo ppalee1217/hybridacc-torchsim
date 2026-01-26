@@ -249,6 +249,7 @@ PESimulator::ExecStatus PESimulator::execute(uint16_t w) {
         int bits6_1 = payload & 0x3F;
         int bit0 = (payload >> 6) & 0x1;
         int val = (func3<<7) | (bits6_1<<1) | bit0; // 10-bit
+        val += 1; // 0-based
         if(func1==0) S.LDMA.setLoop(val); // LDMA.LOOP
         else S.SDMA.setLoop(val);         // SDMA.LOOP
         return ExecStatus::NEXT;
@@ -400,6 +401,7 @@ PESimulator::ExecStatus PESimulator::execute(uint16_t w) {
     if(opcode==1 && funct2==3){
         if(getFunc1(w)==0){ // LOOPIN
             int lc = ((func3 &0x7)<<7) | (((w>>11)&1)) | ((payload & 0x3F)<<1);
+            lc += 1; // 0-based
             state.loops.loopIn(state.pc+2, lc);
         } else { // LOOPBREAK
             state.loops.loopBreak();

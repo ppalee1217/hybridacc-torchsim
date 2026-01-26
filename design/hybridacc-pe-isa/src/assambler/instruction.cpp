@@ -81,12 +81,13 @@ Assembler::Assembler(){
     add("LDMA.LOOP", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("LDMA.LOOP expects 1 operand");
         int count = parseInt(ops[0]);
-        if(count < 0 || count > 0x3FF) throw AsmError("count out of range (0..1023)");
+        if(count < 1 || count > 1024) throw AsmError("count out of range (1..1024) for 0-based encoding");
+        int val = count - 1; // 0-based encoding
         uint16_t w = makeBase(1, 1); // opcode=01 funct2=01
-        w |= ((count >> 7) & 0x7) << 13;     // bits 15:13
+        w |= ((val >> 7) & 0x7) << 13;     // bits 15:13
         // bit12 func1=0
-        w |= (count & 0x1) << 11;            // bit11
-        w |= ((count >> 1) & 0x3F) << 5;     // bits 10:5
+        w |= (val & 0x1) << 11;            // bit11
+        w |= ((val >> 1) & 0x3F) << 5;     // bits 10:5
         ctx.words.push_back(w);
     });
 
@@ -94,12 +95,13 @@ Assembler::Assembler(){
     add("SDMA.LOOP", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("SDMA.LOOP expects 1 operand");
         int count = parseInt(ops[0]);
-        if(count < 0 || count > 0x3FF) throw AsmError("count out of range (0..1023)");
+        if(count < 1 || count > 1024) throw AsmError("count out of range (1..1024) for 0-based encoding");
+        int val = count - 1; // 0-based encoding
         uint16_t w = makeBase(1, 1); // opcode=01 funct2=01
-        w |= ((count >> 7) & 0x7) << 13;     // bits 15:13
+        w |= ((val >> 7) & 0x7) << 13;     // bits 15:13
         w |= 1 << 12;                        // func1=1
-        w |= (count & 0x1) << 11;            // bit11
-        w |= ((count >> 1) & 0x3F) << 5;     // bits 10:5
+        w |= (val & 0x1) << 11;            // bit11
+        w |= ((val >> 1) & 0x3F) << 5;     // bits 10:5
         ctx.words.push_back(w);
     });
 
@@ -253,11 +255,12 @@ Assembler::Assembler(){
     // LOOPIN loop_count pattern bits 9:7 -> [15:13]; bits 6:1 + bit0 -> [11:5]; func1=0 at bit12, funct2=11 opcode=01 func1=0, func3= loop_count[9:7]
     add("LOOPIN", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("LOOPIN expects loop_count");
-        int lc = parseInt(ops[0]); if(lc<0||lc>0x3FF) throw AsmError("loop_count out of range (0..1023)");
+        int lc = parseInt(ops[0]); if(lc<1||lc>1024) throw AsmError("loop_count out of range (1..1024) for 0-based encoding");
+        int val = lc - 1; // 0-based encoding
         uint16_t w = makeBase(1, 3); // opcode=01 funct2=11
-        int b_9_7=(lc>>7)&0x7;
-        int b_0 = lc &1;
-        int b_6_1=(lc>>1)&0x3F;
+        int b_9_7=(val>>7)&0x7;
+        int b_0 = val &1;
+        int b_6_1=(val>>1)&0x3F;
         w |= b_9_7<<13; // func3 region
         // bit12 func1=0 already 0
         w |= b_0 << 11;
@@ -672,6 +675,7 @@ std::string Disassembler::disasmWord(uint16_t w) const {
         int bits6_1 = payload & 0x3F;
         int bit0   = (payload >> 6) & 0x1;
         int val = (func3 << 7) | (bits6_1 << 1) | bit0;
+        val += 1; // 0-based decoding
         if(func1==0) os<<"LDMA.LOOP "<<val; else os<<"SDMA.LOOP "<<val;
     }
     else if(opcode==1 && funct2==2){
@@ -679,7 +683,7 @@ std::string Disassembler::disasmWord(uint16_t w) const {
         os<<"J 0x"<<std::hex<<imm<<std::dec<<" (idx="<<(imm/2)<<")";
     }
     else if(opcode==1 && funct2==3){
-        if(func1==0){ int lc = ((func3 &0x7)<<7) | (((w>>11)&1)) | ((payload & 0x3F)<<1); os<<"LOOPIN "<<lc; }
+        if(func1==0){ int lc = ((func3 &0x7)<<7) | (((w>>11)&1)) | ((payload & 0x3F)<<1); lc+=1; os<<"LOOPIN "<<lc; }
         else os<<"LOOPBREAK";
     }
     else if(opcode==1 && funct2==0){ // TSTORE / TSHIFT 新規格 funct2=00

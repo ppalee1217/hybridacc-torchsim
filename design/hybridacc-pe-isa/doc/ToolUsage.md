@@ -1015,7 +1015,8 @@ psum:
 | **vtstride** | 2-bit stride | 0 ~ 3 (3=VTRST) |
 | **pstride** | 5-bit stride | 0 ~ 31 (31=PRST) |
 | **vpstride** | 5-bit stride | 0 ~ 31 (31=VPRST) |
-| **LOOPIN count** | 10-bit 迴圈計數 | 0 ~ 1023 |
+| **LOOPIN count** | 10-bit 迴圈計數 | 1 ~ 1024 (編碼為 000-3FF) |
+| **LDMA/SDMA.LOOP** | 10-bit 迴圈計數 | 1 ~ 1024 (編碼為 000-3FF) |
 | **J immediate** | 11-bit 位元組位址 | 0 ~ 2047, **必須 2-byte 對齊** |
 | **J label** | 標籤跳轉 | 目標必須在程式範圍內 |
 
@@ -1483,6 +1484,7 @@ hybridacc-pe-isa/
 |------|------|----------|
 | 1.0 | 2025-08 | 初始版本，DMA.ADDR/LEN 10-bit 編碼 |
 | 1.1 | 2025-12 | 新增 Template 系統支援 |
+| 1.2 | 2026-01 | 更新 LOOP 編碼原則 (0-based 映射到 1..N) |
 
 ---
 
