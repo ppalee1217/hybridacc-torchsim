@@ -1,4 +1,5 @@
 import torch
+import math
 import numpy as np
 from typing import Dict, Any, List
 from ..utils.config import ScanChainConfig, PERouterMode, NocConvConfig, NocGemmConfig
@@ -124,6 +125,8 @@ def generate_conv2d_test(config: NocConvConfig) -> List[TestData]:
                 return PERouterMode.PLI_FROM_LN_PLO_TO_LN
 
         num_pes_per_bus = num_pes // num_bus
+        temporal_wave_count = math.ceil(out_h_final / num_pes_per_bus)
+
         for i in range(num_bus):
             for j in range(num_pes_per_bus):
                 if config.ultra_mode:
@@ -159,6 +162,7 @@ def generate_conv2d_test(config: NocConvConfig) -> List[TestData]:
 
         test_config = {
             "mode": "conv2d",
+            "temporal_wave_count": temporal_wave_count,
             "ultra_mode": config.ultra_mode,
             "kernel_size": split_kh,
             "in_ch": C,
@@ -216,8 +220,20 @@ def generate_gemm_test(config: NocGemmConfig) -> TestData:
     # Total PEs needed: M_grid * N_grid * K_grid
     active_pes_count = grid_m * grid_n * grid_k
 
-    if active_pes_count > num_pes:
-        raise ValueError(f"Config requires {active_pes_count} PEs, but only {num_pes} available.")
+    # Calculate Temporal Waves if hardware resources are insufficient
+    pes_per_bus = num_pes // num_bus
+    pes_per_layer = grid_m * grid_n # PEs needed for one K-slice (one bus)
+
+    # Number of waves needed inside a bus to cover M*N grid
+    mn_waves = math.ceil(pes_per_layer / pes_per_bus)
+
+    # Number of waves needed for K-dimension (if K-splits > Buses)
+    if num_bus > 0:
+        k_waves = math.ceil(grid_k / num_bus)
+    else:
+        k_waves = 1
+
+    temporal_wave_count = mn_waves * k_waves
 
     # We map K-splits to Buses.
     # Requirement: We need at least grid_k buses to chain them vertically efficiently.
@@ -335,10 +351,11 @@ def generate_gemm_test(config: NocGemmConfig) -> TestData:
 
     print(f"GEMM K-Split Scan-Chain Generated.")
     print(f"  Mapping: K-split {grid_k} layers mapped to first {grid_k} buses.")
-    print(f"  Per Layer: {grid_m}x{grid_n} PEs active.")
+    print(f"  Temporal Waves: {temporal_wave_count} (MN waves: {mn_waves}, K waves: {k_waves})")
 
     test_config = {
         "mode": "gemm",
+        "temporal_wave_count": temporal_wave_count,
         "M": M,
         "N": N,
         "K": K,

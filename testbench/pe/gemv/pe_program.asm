@@ -1,13 +1,14 @@
 gemv:
 
 load_kernel:
-    DMA.ADDR 0
-    DMA.LEN 64  # STORE 64 steps of kernel data (4out * 2vector * 32dim)
-    DMA.SD 4 # start DMA store operation
+    SDMA.ADDR 0
+    SDMA.LEN 64  # STORE 64 steps of kernel data (4out * 2vector * 32dim)
+    SDMA.SD 4 # start DMA store operation
+    SWAPDM
 
-    DMA.ADDR 0
-    DMA.LEN 256 # LOAD 256 steps of input data (32dim * 8input)
-    DMA.LHB 1 # start DMA load operation (fp16, broadcasted to 4out)
+    LDMA.ADDR 0
+    LDMA.LEN 256 # LOAD 256 steps of input data (32dim * 8input)
+    LDMA.LHB 1 # start DMA load operation (fp16, broadcasted to 4out)
 
 loop_in_dim:
     LOOPIN 32  # Loop for 32 input dimensions

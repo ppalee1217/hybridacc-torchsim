@@ -1,9 +1,14 @@
 conv2d_1x1:
 
+    SDMA.LOOP 4
+    SDMA.ADDR 0
+    SDMA.LEN 48  # STORE 48 steps of kernel data
+    SDMA.SD 4  # start DMA store operation
+
+    LOOPIN 4  # Global loop for 4x data volume
+
 load_kernel:
-    DMA.ADDR 0
-    DMA.LEN 48  # STORE 48 steps of kernel data
-    DMA.SD 4  # start DMA store operation
+    SWAPDM
 
 loop_window:
     LOOPIN 200  # Loop for 200 input elements
@@ -23,9 +28,9 @@ load_input:
     TSTORE t11
 
 
-    DMA.ADDR 0
-    DMA.LEN 48
-    DMA.LD 4  # LOAD 48 steps of input data
+    LDMA.ADDR 0
+    LDMA.LEN 48
+    LDMA.LD 4  # LOAD 48 steps of input data
     SETRID.PT 0, 0
 
 loop_kernel:
@@ -44,4 +49,7 @@ calculate_psum:
 
     LOOPEND
 
-    HALT  # End of program
+
+    LOOPEND  # End global loop
+
+    HALT

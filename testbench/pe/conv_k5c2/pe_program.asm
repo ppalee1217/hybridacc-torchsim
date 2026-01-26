@@ -1,9 +1,10 @@
 conv1d_5x5:
 
 load_kernel:
-    DMA.ADDR 0
-    DMA.LEN 48  # STORE 48 steps of kernel data (16 kernels * 3 vector each)
-    DMA.SD 4  # start DMA store operation
+    SDMA.ADDR 0
+    SDMA.LEN 48  # STORE 48 steps of kernel data (16 kernels * 3 vector each)
+    SDMA.SD 4  # start DMA store operation
+    SWAPDM
 
 preload_input:
     TSTORE t0
@@ -22,9 +23,9 @@ load_input:
     TSTORE t4
     TSTORE t10
 
-    DMA.ADDR 0
-    DMA.LEN 48
-    DMA.LD 4  # LOAD 48 steps of input data (3 vector * 4 elements each)
+    LDMA.ADDR 0
+    LDMA.LEN 48
+    LDMA.LD 4  # LOAD 48 steps of input data (3 vector * 4 elements each)
     SETRID.PT 0, 0
 
 loop_kernel:

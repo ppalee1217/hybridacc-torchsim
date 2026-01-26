@@ -6,7 +6,7 @@
   "input_h": 10,
   "input_w": 200,
   "input_c": 4,
-  "out_ch": 16,
+  "out_ch": 64,
   "kernel_h": 3,
   "kernel_w": 3,
   "seed": 123,
