@@ -25,6 +25,7 @@ struct ConvParams {
     int in_ch = 0;
     int out_ch = 0;
     int out_width = 0;
+    int in_width = 0;
     int groups_per_output = 0; // out_ch / 4
 };
 
@@ -35,14 +36,15 @@ ConvParams parse_conv_params_from_meta(const std::string& meta_path) {
     if (meta.count("in_ch")) p.in_ch = std::stoi(meta["in_ch"]);
     if (meta.count("out_ch")) p.out_ch = std::stoi(meta["out_ch"]);
     if (meta.count("out_width")) p.out_width = std::stoi(meta["out_width"]);
+    if (meta.count("in_width")) p.in_width = std::stoi(meta["in_width"]);
     if (p.out_ch > 0) p.groups_per_output = p.out_ch / 4;
     return p;
 }
 
-uint64_t pack_fp16x4(const std::vector<fp16_t>& vals, size_t base_idx, uint8_t& mask_out) {
+uint64_t pack_fp16x4(const std::vector<fp16_t>& vals, size_t base_idx, int lanes, uint8_t& mask_out) {
     uint64_t data = 0;
     mask_out = 0;
-    for (int lane = 0; lane < 4; lane++) {
+    for (int lane = 0; lane < lanes; lane++) {
         const size_t idx = base_idx + static_cast<size_t>(lane);
         if (idx < vals.size()) {
             data |= (static_cast<uint64_t>(vals[idx]) << (lane * 16));
@@ -228,7 +230,7 @@ private:
         const std::string meta_file = data_dir + "/meta.txt";
 
         conv = parse_conv_params_from_meta(meta_file);
-        if (conv.kernel_size <= 0 || conv.in_ch <= 0 || conv.out_ch <= 0 || conv.out_width <= 0 || conv.groups_per_output <= 0) {
+        if (conv.kernel_size <= 0 || conv.in_ch <= 0 || conv.out_ch <= 0 || conv.out_width <= 0 || conv.groups_per_output <= 0 || conv.in_width <= 0) {
             std::cerr << "[TB] Invalid conv params from meta.txt" << std::endl;
             sc_stop();
             return;
@@ -251,6 +253,7 @@ private:
                   << " in_ch=" << conv.in_ch
                   << " out_ch=" << conv.out_ch
                   << " out_width=" << conv.out_width
+                  << " in_width=" << conv.in_width
                   << " groups_per_output=" << conv.groups_per_output << std::endl;
     }
 
@@ -452,20 +455,9 @@ private:
     void pd_sender() {
         wait(start_traffic_event);
         std::cout << "[PD] Streaming partial dot-product positions..." << std::endl;
-        // Sliding window: positions count = out_width + kernel_size - 1
-        for (int out_pos = 0; out_pos < conv.out_width; out_pos++) {
-            if (out_pos == 0) {
-                // full window
-                for (int k = 0; k < conv.kernel_size; k++) {
-                    const size_t pos = static_cast<size_t>(k);
-                    send_pd_position(pos);
-                    wait_cycles(PE_GAP_CYCLES);
-                }
-            } else {
-                const size_t new_pos = static_cast<size_t>(out_pos + conv.kernel_size - 1);
-                send_pd_position(new_pos);
-                wait_cycles(PE_GAP_CYCLES);
-            }
+        for (int in_pos = 0; in_pos < conv.in_width; in_pos++) {
+            send_pd_position(static_cast<size_t>(in_pos));
+            wait_cycles(PE_GAP_CYCLES);
         }
         std::cout << "[PD] Completed streaming PD positions." << std::endl;
         pd_done_event.notify(SC_ZERO_TIME);
@@ -473,13 +465,29 @@ private:
 
     void send_pd_position(size_t position_idx) {
         const size_t base = position_idx * static_cast<size_t>(conv.in_ch);
-        for (int c = 0; c < conv.in_ch; c += 4) {
+        int in_ch_step = 0;
+        switch (conv.kernel_size) {
+            case 3:
+                in_ch_step = 4;
+                break;
+            case 5:
+                in_ch_step = 2; // last lane will be masked
+                break;
+            case 7:
+                in_ch_step = 1; // last two lanes will be masked
+                break;
+            default:
+                in_ch_step = 4;
+                std::cerr << "[PD] Warning: unexpected kernel_size=" << conv.kernel_size << std::endl;
+                break;
+        }
+        for (int c = 0; c < conv.in_ch; c += in_ch_step) {
             const size_t idx = base + static_cast<size_t>(c);
             if (idx >= activations.size()) {
                 return;
             }
             uint8_t mask = 0;
-            const uint64_t data = pack_fp16x4(activations, idx, mask);
+            const uint64_t data = pack_fp16x4(activations, idx, in_ch_step, mask);
             if (mask == 0) {
                 return;
             }
