@@ -1,11 +1,11 @@
 {
   "task": "conv",
   "mode": "k5c2",
-  "out_ch": 4,
-  "in_width": 64,
-  "fmt": "hex",
+  "out_ch": 16,
+  "in_width": 800,
+  "fmt": "bin",
   "seed": 100,
   "no_ps": false,
-  "layout": "channels_first",
+  "layout": "channels_last",
   "out_dir": "./output/pe-sim/conv_k5c2"
 }

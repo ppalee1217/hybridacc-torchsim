@@ -50,33 +50,9 @@ target_link_libraries(pe_simulator
     pthread
 )
 
-# PE Wrapper Library
-add_library(pe_wrapper
-    pe_wrapper.cpp
-)
-
 # Test Bench Utils (Header Only)
 add_library(tb_utils INTERFACE)
 target_include_directories(tb_utils INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Conditional compile definitions for pe_wrapper
-if(ENABLE_DEBUG_UTILS)
-    target_compile_definitions(pe_wrapper PRIVATE DEBUG_UTILS)
-    target_compile_definitions(pe_wrapper PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
-    target_compile_definitions(pe_wrapper PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
-endif()
-
-target_include_directories(pe_wrapper PUBLIC
-    .
-    ../simulator/include
-    ${SYSTEMC_ROOT}/include
-)
-
-target_link_libraries(pe_wrapper
-    pe_simulator  # 連結 PE simulator 庫
-    systemc
-    pthread
-)
 
 # PE Unit Tests
 add_executable(test_pe_unit
@@ -91,7 +67,7 @@ if(ENABLE_DEBUG_UTILS)
 endif()
 
 target_link_libraries(test_pe_unit
-    pe_wrapper
+    pe_simulator
     systemc
     pthread
 )
@@ -109,7 +85,7 @@ if(ENABLE_DEBUG_UTILS)
 endif()
 
 target_link_libraries(test_pe_sim
-    pe_wrapper
+    pe_simulator
     systemc
     pthread
     tb_utils
@@ -193,7 +169,7 @@ add_custom_target(run_all_tests
 )
 
 # Installation
-install(TARGETS pe_wrapper test_pe_unit test_pe_sim test_noc_unit
+install(TARGETS test_pe_unit test_pe_sim test_noc_unit
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib

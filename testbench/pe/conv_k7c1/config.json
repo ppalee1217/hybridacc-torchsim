@@ -2,7 +2,7 @@
   "task": "conv",
   "mode": "k7c1",
   "out_ch": 16,
-  "in_width": 256,
+  "in_width": 800,
   "fmt": "bin",
   "seed": 888,
   "no_ps": false,

@@ -1,8 +1,12 @@
 #pragma once
 
 #include <systemc>
+#include <cassert>
 #include <vector>
+#include <string>
 #include "utils.hpp"
+
+using namespace sc_core;  // Add this to use SystemC types without prefix
 
 namespace hybridacc {
 namespace pe {
@@ -52,6 +56,8 @@ public:
           fifo_depth(depth),
           fifo_name(name)  // Store the name
     {
+        assert(fifo_depth > 0 && "FIFO depth must be > 0");
+
         // Initialize storage
         storage.resize(fifo_depth);
         for (int i = 0; i < fifo_depth; i++) {
@@ -65,7 +71,7 @@ public:
         reset_signal_is(reset_n, false);
 
         SC_METHOD(combinational_process);
-        sensitive << write_ptr_reg << read_ptr_reg << count_reg << data_in << push << pop << data_out_reg;
+        sensitive << write_ptr_reg << read_ptr_reg << count_reg << data_in << push << pop;
     }
 
     friend std::ostream& operator<<(std::ostream& os, const FIFO<T>& fifo) {
@@ -92,69 +98,17 @@ private:
 
     // Registers
     sc_signal<int> write_ptr_reg;
-    sc_signal<int> write_ptr_next;
-
     sc_signal<int> read_ptr_reg;
-    sc_signal<int> read_ptr_next;
-
     sc_signal<int> count_reg;
-    sc_signal<int> count_next;
+    sc_signal<bool> empty_reg;
+    sc_signal<bool> full_reg;
 
-    sc_signal<T> data_out_reg;
-    sc_signal<T> data_out_next;
-
-    // Combinational logic
+    // Combinational logic (purely for data_out)
     void combinational_process() {
-        int wr_ptr = write_ptr_reg.read();
-        int rd_ptr = read_ptr_reg.read();
-        int cnt = count_reg.read();
-
-        bool do_push = push.read() && (cnt < fifo_depth);
-        bool do_pop = pop.read() && (cnt > 0);
-
-        // Calculate next state
-        int next_wr_ptr = wr_ptr;
-        int next_rd_ptr = rd_ptr;
-        int next_cnt = cnt;
-        T next_data_out = data_out_reg.read();
-
-        // Update pointers and count based on operations
-        if (do_push && do_pop) {
-            // Both push and pop in same cycle
-            next_wr_ptr = (wr_ptr + 1) % fifo_depth;
-            next_rd_ptr = (rd_ptr + 1) % fifo_depth;
-            // Count stays the same
-            if (cnt > 0) {
-                next_data_out = storage[rd_ptr];
-            }
-        } else if (do_push) {
-            // Only push
-            next_wr_ptr = (wr_ptr + 1) % fifo_depth;
-            next_cnt = cnt + 1;
-        } else if (do_pop) {
-            // Only pop
-            next_rd_ptr = (rd_ptr + 1) % fifo_depth;
-            next_cnt = cnt - 1;
-            if (cnt > 0) {
-                next_data_out = storage[rd_ptr];
-            }
-        }
-
-        // Always output the data at read pointer (even if not popping)
-        if (!do_pop && cnt > 0) {
-            next_data_out = storage[rd_ptr];
-        }
-
-        // Write next values
-        write_ptr_next.write(next_wr_ptr);
-        read_ptr_next.write(next_rd_ptr);
-        count_next.write(next_cnt);
-        data_out_next.write(next_data_out);
-
-        // Output status signals (combinational)
-        empty.write(cnt == 0);
-        full.write(cnt >= fifo_depth);
-        data_out.write(next_data_out);
+        const int rd_ptr = read_ptr_reg.read();
+        const int cnt = count_reg.read();
+        const T head_value = (cnt > 0) ? storage[rd_ptr] : T();
+        data_out.write(head_value);
     }
 
     // Sequential logic
@@ -163,7 +117,10 @@ private:
         write_ptr_reg.write(0);
         read_ptr_reg.write(0);
         count_reg.write(0);
-        data_out_reg.write(T());
+        empty_reg.write(true);
+        full_reg.write(false);
+        empty.write(true);
+        full.write(false);
 
         // Initialize storage
         for (int i = 0; i < fifo_depth; i++) {
@@ -173,23 +130,55 @@ private:
         wait();
 
         while (true) {
-            // Update registers
-            write_ptr_reg.write(write_ptr_next.read());
-            read_ptr_reg.write(read_ptr_next.read());
-            count_reg.write(count_next.read());
-            data_out_reg.write(data_out_next.read());
+            const int wr_ptr = write_ptr_reg.read();
+            const int rd_ptr = read_ptr_reg.read();
+            const int cnt = count_reg.read();
 
-            // Handle push operation (update storage)
-            if (push.read() && count_reg.read() < fifo_depth) {
-                int wr_ptr = write_ptr_reg.read();
+            const bool want_push = push.read();
+            const bool want_pop = pop.read();
+
+            const bool is_empty = (cnt == 0);
+            const bool is_full = (cnt == fifo_depth);
+
+            // Decide operations (synchronous semantics)
+            bool do_pop = false;
+            bool do_push = false;
+
+            if (is_full) {
+                do_pop = want_pop;
+                do_push = want_push && want_pop; // allow push+pop when full
+            } else if (is_empty) {
+                do_pop = false; // no bypass on empty
+                do_push = want_push;
+            } else {
+                do_pop = want_pop;
+                do_push = want_push;
+            }
+
+            int next_wr_ptr = wr_ptr;
+            int next_rd_ptr = rd_ptr;
+            int next_cnt = cnt;
+
+            if (do_push) {
                 storage[wr_ptr] = data_in.read();
+                next_wr_ptr = (wr_ptr + 1) % fifo_depth;
+                next_cnt += 1;
+            }
+            if (do_pop) {
+                next_rd_ptr = (rd_ptr + 1) % fifo_depth;
+                next_cnt -= 1;
             }
 
-            // Handle pop operation (just logging)
-            if (pop.read() && count_reg.read() > 0) {
-                int rd_ptr = read_ptr_reg.read();
-            }
+            write_ptr_reg.write(next_wr_ptr);
+            read_ptr_reg.write(next_rd_ptr);
+            count_reg.write(next_cnt);
 
+            const bool next_empty = (next_cnt == 0);
+            const bool next_full = (next_cnt == fifo_depth);
+            empty_reg.write(next_empty);
+            full_reg.write(next_full);
+            empty.write(next_empty);
+            full.write(next_full);
             wait();
         }
     }

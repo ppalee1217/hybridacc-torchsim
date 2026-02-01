@@ -1,5 +1,11 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -12,7 +18,7 @@ std::vector<T> read_binary_file(const std::string& filepath) {
     std::ifstream file(filepath, std::ios::binary | std::ios::ate);
     if (!file) {
         std::cerr << "[Error] Cannot open file: " << filepath << std::endl;
-        exit(1);
+        std::exit(1);
     }
     std::streamsize size = file.tellg();
     file.seekg(0, std::ios::beg);
@@ -20,9 +26,16 @@ std::vector<T> read_binary_file(const std::string& filepath) {
     std::vector<T> buffer(size / sizeof(T));
     if (!file.read(reinterpret_cast<char*>(buffer.data()), size)) {
         std::cerr << "[Error] Cannot read file: " << filepath << std::endl;
-        exit(1);
+        std::exit(1);
     }
     return buffer;
+}
+
+inline std::string trim_copy(std::string s) {
+    auto is_ws = [](unsigned char c) { return std::isspace(c) != 0; };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), [&](unsigned char c) { return !is_ws(c); }));
+    s.erase(std::find_if(s.rbegin(), s.rend(), [&](unsigned char c) { return !is_ws(c); }).base(), s.end());
+    return s;
 }
 
 // Helper: Parse config.txt
@@ -35,9 +48,11 @@ inline std::map<std::string, std::string> read_config_file(const std::string& fi
     while (std::getline(file, line)) {
         size_t delimiter_pos = line.find(':');
         if (delimiter_pos != std::string::npos) {
-            std::string key = line.substr(0, delimiter_pos);
-            std::string value = line.substr(delimiter_pos + 1);
-            config[key] = value;
+            std::string key = trim_copy(line.substr(0, delimiter_pos));
+            std::string value = trim_copy(line.substr(delimiter_pos + 1));
+            if (!key.empty()) {
+                config[key] = value;
+            }
         }
     }
     return config;
@@ -69,6 +84,61 @@ float fp16_to_float(uint16_t fp16_val) {
     float result;
     std::memcpy(&result, &float_bits, sizeof(float));
     return result;
+}
+
+struct VerifyStats {
+    size_t total_elements = 0;
+    size_t mismatches = 0;
+    double cosine_similarity = 0.0;
+    double max_diff = 0.0;
+    double mse = 0.0;
+};
+
+inline VerifyStats verify_fp16_vectors(const std::vector<uint16_t>& expected_fp16,
+                                      const std::vector<uint16_t>& received_fp16,
+                                      double tolerance = 1e-2) {
+    VerifyStats stats;
+    stats.total_elements = expected_fp16.size();
+
+    if (expected_fp16.size() != received_fp16.size() || expected_fp16.empty()) {
+        stats.mismatches = std::max(expected_fp16.size(), received_fp16.size());
+        stats.cosine_similarity = 0.0;
+        stats.max_diff = std::numeric_limits<double>::infinity();
+        stats.mse = std::numeric_limits<double>::infinity();
+        return stats;
+    }
+
+    double dot_product = 0.0;
+    double mag_recv = 0.0;
+    double mag_exp = 0.0;
+    double max_diff = 0.0;
+    double total_sq_err = 0.0;
+    size_t mismatches = 0;
+
+    for (size_t i = 0; i < expected_fp16.size(); i++) {
+        const float recv_val = fp16_to_float(received_fp16[i]);
+        const float exp_val = fp16_to_float(expected_fp16[i]);
+        dot_product += static_cast<double>(recv_val) * static_cast<double>(exp_val);
+        mag_recv += static_cast<double>(recv_val) * static_cast<double>(recv_val);
+        mag_exp += static_cast<double>(exp_val) * static_cast<double>(exp_val);
+        const double diff = std::abs(static_cast<double>(recv_val) - static_cast<double>(exp_val));
+        total_sq_err += diff * diff;
+        if (diff > max_diff) {
+            max_diff = diff;
+        }
+        if (diff > tolerance) {
+            mismatches++;
+        }
+    }
+
+    mag_recv = std::sqrt(mag_recv);
+    mag_exp = std::sqrt(mag_exp);
+
+    stats.mismatches = mismatches;
+    stats.max_diff = max_diff;
+    stats.mse = total_sq_err / static_cast<double>(expected_fp16.size());
+    stats.cosine_similarity = (mag_recv > 0.0 && mag_exp > 0.0) ? (dot_product / (mag_recv * mag_exp)) : 0.0;
+    return stats;
 }
 
 

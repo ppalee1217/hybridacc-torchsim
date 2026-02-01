@@ -25,10 +25,11 @@ public:
     sc_in<PERouterMode> router_mode;
 
     // NoC interface ports - using VRDIF/VRDOF
-    VRDIF<noc_request_t> noc0_req;
-    VRDIF<noc_request_t> noc1_req;
-    VRDIF<noc_addr_req_t> noc2_req;
-    VRDOF<noc_response_t> noc2_resp;
+    VRDIF<noc_request_t> noc_ps_req;
+    VRDIF<noc_request_t> noc_pd_req;
+    VRDIF<noc_request_t> noc_pli_req;
+    VRDIF<noc_addr_req_t> noc_plo_req;
+    VRDOF<noc_response_t> noc_plo_resp;
 
     // Control ports
     sc_out<bool> pe_busy;
@@ -43,10 +44,11 @@ public:
           reset_n("reset_n"),
           router_enable("router_enable"),
           router_mode("router_mode"),
-          noc0_req("noc0_req"),
-          noc1_req("noc1_req"),
-          noc2_req("noc2_req"),
-          noc2_resp("noc2_resp"),
+          noc_ps_req("noc_ps_req"),
+          noc_pd_req("noc_pd_req"),
+          noc_pli_req("noc_pli_req"),
+          noc_plo_req("noc_plo_req"),
+          noc_plo_resp("noc_plo_resp"),
           pe_busy("pe_busy"),
           ln_pli("ln_pli"),
           ln_plo("ln_plo"),
@@ -164,10 +166,11 @@ public:
         router.route_mode(router_mode);
 
         // NoC interface - using bind_vr_interface
-        bind_vr_interface(router.noc0_req_in_if, noc0_req);
-        bind_vr_interface(router.noc1_req_in_if, noc1_req);
-        bind_vr_interface(router.noc2_req_in_if, noc2_req);
-        bind_vr_interface(noc2_resp, router.noc2_resp_out_if);
+        bind_vr_interface(router.noc_ps_req_in_if, noc_ps_req);
+        bind_vr_interface(router.noc_pd_req_in_if, noc_pd_req);
+        bind_vr_interface(router.noc_pli_req_in_if, noc_pli_req);
+        bind_vr_interface(router.noc_plo_req_in_if, noc_plo_req);
+        bind_vr_interface(noc_plo_resp, router.noc_plo_resp_out_if);
 
         // Local Network interface - using bind_vr_interface
         bind_vr_interface(router.ln_pli_in_if, ln_pli);

@@ -1,435 +1,582 @@
-#include "pe_wrapper.hpp"
-#include <iostream>
-#include <cassert>
-#include <vector>
 #include <systemc>
-#include <fstream>
+
+#include <cassert>
 #include <cstdint>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <string>
+#include <vector>
+
+#include "ProcessElement.hpp"
+#include "utils.hpp"
 #include "tb_utils.hpp"
 
-using namespace hybridacc::test;
+using namespace sc_core;
+using namespace hybridacc;
 
-const int PE_GAP_CYCLES = 1;
+namespace {
 
-// Helper function to read binary file
-std::vector<uint8_t> read_binary_file(const std::string& filename) {
-    std::ifstream file(filename, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        std::cerr << "Failed to open file: " << filename << std::endl;
-        return {};
-    }
+static constexpr int DEFAULT_CLOCK_PERIOD_NS = 10;
+static constexpr int PE_GAP_CYCLES = 1;
 
-    std::streamsize size = file.tellg();
-    file.seekg(0, std::ios::beg);
-
-    std::vector<uint8_t> buffer(size);
-    if (!file.read(reinterpret_cast<char*>(buffer.data()), size)) {
-        std::cerr << "Failed to read file: " << filename << std::endl;
-        return {};
-    }
-
-    return buffer;
-}
-
-// Helper function to convert bytes to fp16 values
-std::vector<uint16_t> bytes_to_fp16(const std::vector<uint8_t>& bytes) {
-    std::vector<uint16_t> fp16_values;
-    for (size_t i = 0; i + 1 < bytes.size(); i += 2) {
-        uint16_t value = static_cast<uint16_t>(bytes[i]) |
-                        (static_cast<uint16_t>(bytes[i + 1]) << 8);
-        fp16_values.push_back(value);
-    }
-    return fp16_values;
-}
-
-// Helper function to convert bytes to uint64_t
-std::vector<uint64_t> bytes_to_uint64(const std::vector<uint8_t>& bytes) {
-    std::vector<uint64_t> values;
-    for (size_t i = 0; i + 7 < bytes.size(); i += 8) {
-        uint64_t value = 0;
-        for (int j = 0; j < 8; j++) {
-            value |= (static_cast<uint64_t>(bytes[i + j]) << (j * 8));
-        }
-        values.push_back(value);
-    }
-    return values;
-}
-
-// Helper function to parse meta.txt file
 struct ConvParams {
-    int kernel_size;
-    int in_channels;
-    int out_channels;
-    int out_width;
-    int groups_per_output;
+    int kernel_size = 0;
+    int in_ch = 0;
+    int out_ch = 0;
+    int out_width = 0;
+    int groups_per_output = 0; // out_ch / 4
 };
 
-ConvParams parse_meta_file(const std::string& filename) {
-    ConvParams params = {0};
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Failed to open meta file: " << filename << std::endl;
-        return params;
-    }
-
-    std::string line;
-    while (std::getline(file, line)) {
-        size_t colon_pos = line.find(':');
-        if (colon_pos == std::string::npos) continue;
-
-        std::string key = line.substr(0, colon_pos);
-        std::string value = line.substr(colon_pos + 1);
-
-        // Trim whitespace
-        key.erase(0, key.find_first_not_of(" \t"));
-        key.erase(key.find_last_not_of(" \t") + 1);
-        value.erase(0, value.find_first_not_of(" \t"));
-        value.erase(value.find_last_not_of(" \t") + 1);
-
-        if (key == "kernel_size") {
-            params.kernel_size = std::stoi(value);
-        } else if (key == "in_ch") {  // Changed from "in_channels"
-            params.in_channels = std::stoi(value);
-        } else if (key == "out_ch") {  // Changed from "out_channels"
-            params.out_channels = std::stoi(value);
-        } else if (key == "out_width") {
-            params.out_width = std::stoi(value);
-        }
-    }
-
-    // Calculate groups_per_output (out_channels / 4, since 4 fp16 per 64-bit)
-    params.groups_per_output = params.out_channels / 4;
-
-    return params;
+ConvParams parse_conv_params_from_meta(const std::string& meta_path) {
+    ConvParams p;
+    auto meta = read_config_file(meta_path);
+    if (meta.count("kernel_size")) p.kernel_size = std::stoi(meta["kernel_size"]);
+    if (meta.count("in_ch")) p.in_ch = std::stoi(meta["in_ch"]);
+    if (meta.count("out_ch")) p.out_ch = std::stoi(meta["out_ch"]);
+    if (meta.count("out_width")) p.out_width = std::stoi(meta["out_width"]);
+    if (p.out_ch > 0) p.groups_per_output = p.out_ch / 4;
+    return p;
 }
 
-// Main test runner
+uint64_t pack_fp16x4(const std::vector<fp16_t>& vals, size_t base_idx, uint8_t& mask_out) {
+    uint64_t data = 0;
+    mask_out = 0;
+    for (int lane = 0; lane < 4; lane++) {
+        const size_t idx = base_idx + static_cast<size_t>(lane);
+        if (idx < vals.size()) {
+            data |= (static_cast<uint64_t>(vals[idx]) << (lane * 16));
+            mask_out |= static_cast<uint8_t>(1U << lane);
+        }
+    }
+    return data;
+}
+
+} // namespace
+
+// -----------------------------------------------------------------------------
+// TestBench
+class PESimTestBench : public sc_module {
+public:
+    // Clock and reset
+    sc_clock clk;
+    sc_signal<bool> reset_n;
+
+    // Router config
+    sc_signal<bool> router_enable;
+    sc_signal<PERouterMode> router_mode;
+
+    sc_signal<bool> pe_busy;
+
+    // NoC interfaces (Valid/Ready)
+    VRDSIG<noc_request_t> ps_sig;
+    VRDSIG<noc_request_t> pd_sig;
+    VRDSIG<noc_request_t> pli_sig;
+    VRDSIG<noc_addr_req_t> plo_req_sig;
+    VRDSIG<noc_response_t> plo_resp_sig;
+
+    // Local network interfaces (unused in BUS/BUS routing, but must be bound)
+    VRDSIG<uint64_t> ln_pli_sig;
+    VRDSIG<uint64_t> ln_plo_sig;
+
+    // DUT
+    pe::ProcessElement pe;
+
+    // Configuration
+    std::string data_dir;
+    double verify_tolerance;
+    int clock_period_ns;
+
+    // Data
+    ConvParams conv;
+    std::vector<uint16_t> program;
+    std::vector<uint64_t> weights;
+    std::vector<fp16_t> activations;
+    std::vector<uint64_t> ps_inputs;
+    std::vector<fp16_t> expected_fp16;
+    std::vector<uint64_t> received_vectors;
+
+    // Synchronization
+    sc_event start_traffic_event;
+    sc_event ps_program_event;
+    sc_event ps_program_done_event;
+    sc_event ps_start_event;
+    sc_event ps_start_done_event;
+    sc_event ps_done_event;
+    sc_event pd_done_event;
+    sc_event pli_done_event;
+    sc_event plo_req_done_event;
+    sc_event outputs_done_event;
+
+    SC_HAS_PROCESS(PESimTestBench);
+
+    PESimTestBench(sc_module_name name, std::string data_dir, double verify_tolerance, int clock_period_ns)
+        : sc_module(name),
+          clk("clk", clock_period_ns, SC_NS),
+          reset_n("reset_n"),
+          router_enable("router_enable"),
+          router_mode("router_mode"),
+          pe_busy("pe_busy"),
+          ps_sig("ps_sig"),
+          pd_sig("pd_sig"),
+          pli_sig("pli_sig"),
+          plo_req_sig("plo_req_sig"),
+          plo_resp_sig("plo_resp_sig"),
+          ln_pli_sig("ln_pli_sig"),
+          ln_plo_sig("ln_plo_sig"),
+          pe("PE_DUT"),
+          data_dir(std::move(data_dir)),
+          verify_tolerance(verify_tolerance),
+          clock_period_ns(clock_period_ns)
+    {
+        // DUT bind
+        pe.clk(clk);
+        pe.reset_n(reset_n);
+        pe.router_enable(router_enable);
+        pe.router_mode(router_mode);
+        pe.pe_busy(pe_busy);
+        connect_vr_signals(pe.noc_ps_req, ps_sig);
+        connect_vr_signals(pe.noc_pd_req, pd_sig);
+        connect_vr_signals(pe.noc_pli_req, pli_sig);
+        connect_vr_signals(pe.noc_plo_req, plo_req_sig);
+        connect_vr_signals(pe.noc_plo_resp, plo_resp_sig);
+
+        connect_vr_signals(pe.ln_pli, ln_pli_sig);
+        connect_vr_signals(pe.ln_plo, ln_plo_sig);
+
+        SC_THREAD(test_main);
+
+        SC_THREAD(ps_sender);
+        sensitive << clk.posedge_event();
+
+        SC_THREAD(pd_sender);
+        sensitive << clk.posedge_event();
+
+        SC_THREAD(pli_sender);
+        sensitive << clk.posedge_event();
+
+        SC_THREAD(plo_request_thread);
+        sensitive << clk.posedge_event();
+
+        SC_THREAD(plo_response_sink);
+        sensitive << clk.posedge_event();
+    }
+
+private:
+    void wait_cycles(int cycles) {
+        for (int i = 0; i < cycles; i++) {
+            wait(clk.posedge_event());
+        }
+    }
+
+    void reset_dut(int reset_cycles) {
+        reset_n.write(false);
+        router_enable.write(false);
+        router_mode.write(PERouterMode::PLI_FROM_BUS_PLO_TO_BUS);
+
+        // Note: VR/Ready interfaces are driven by their dedicated threads.
+        // Avoid driving them here to prevent sc_signal multi-driver errors.
+        ln_pli_sig.valid_sig.write(false);
+        ln_plo_sig.ready_sig.write(true); // always accept LN stream if ever enabled
+
+        wait_cycles(reset_cycles);
+
+        reset_n.write(true);
+        wait_cycles(1);
+    }
+
+    void send_req(VRDSIG<noc_request_t>& sig, const noc_request_t& req) {
+        sig.data_sig.write(req);
+        sig.valid_sig.write(true);
+
+        // Avoid a SystemC delta-cycle race: ready is typically produced by SC_METHOD(s)
+        // that run *after* the clock edge. If we sample ready immediately at posedge,
+        // we may see a stale value from the previous cycle and drop a beat.
+        while (true) {
+            wait(clk.posedge_event());
+            wait(SC_ZERO_TIME);
+            if (sig.ready_sig.read()) {
+                // Handshake has occurred on this clock edge.
+                // Deassert valid immediately (same cycle) so we don't
+                // accidentally resend the same beat on the next edge.
+                sig.valid_sig.write(false);
+                break;
+            }
+        }
+    }
+
+    void send_addr_req(VRDSIG<noc_addr_req_t>& sig, const noc_addr_req_t& req) {
+        sig.data_sig.write(req);
+        sig.valid_sig.write(true);
+
+        while (true) {
+            wait(clk.posedge_event());
+            wait(SC_ZERO_TIME);
+            if (sig.ready_sig.read()) {
+                sig.valid_sig.write(false);
+                break;
+            }
+        }
+    }
+
+    void load_test_data_conv2d() {
+        const std::string inst_file = data_dir + "/pe_program.bin";
+        const std::string weight_file = data_dir + "/weight.bin";
+        const std::string activation_file = data_dir + "/activation_input.bin";
+        const std::string ps_input_file = data_dir + "/ps_input.bin";
+        const std::string expected_output_file = data_dir + "/activation_output.bin";
+        const std::string meta_file = data_dir + "/meta.txt";
+
+        conv = parse_conv_params_from_meta(meta_file);
+        if (conv.kernel_size <= 0 || conv.in_ch <= 0 || conv.out_ch <= 0 || conv.out_width <= 0 || conv.groups_per_output <= 0) {
+            std::cerr << "[TB] Invalid conv params from meta.txt" << std::endl;
+            sc_stop();
+            return;
+        }
+
+        program = read_binary_file<uint16_t>(inst_file);
+        weights = read_binary_file<uint64_t>(weight_file);
+        activations = read_binary_file<fp16_t>(activation_file);
+        ps_inputs = read_binary_file<uint64_t>(ps_input_file);
+        expected_fp16 = read_binary_file<fp16_t>(expected_output_file);
+
+        std::cout << "[TB] Loaded data from " << data_dir << std::endl;
+        std::cout << "  Program: " << program.size() << " instructions" << std::endl;
+        std::cout << "  Weights: " << weights.size() << " x uint64" << std::endl;
+        std::cout << "  Activations: " << activations.size() << " x fp16" << std::endl;
+        std::cout << "  PS Inputs: " << ps_inputs.size() << " x uint64" << std::endl;
+        std::cout << "  Expected: " << expected_fp16.size() << " x fp16" << std::endl;
+        std::cout << "[TB] Meta:" << std::endl;
+        std::cout << "  kernel_size=" << conv.kernel_size
+                  << " in_ch=" << conv.in_ch
+                  << " out_ch=" << conv.out_ch
+                  << " out_width=" << conv.out_width
+                  << " groups_per_output=" << conv.groups_per_output << std::endl;
+    }
+
+    void program_pe() {
+        // Load program through PS command messages (addr=0x100)
+        for (size_t i = 0; i < program.size(); i++) {
+            uint64_t cmd = 2; // CMD_LOAD_PROGRAM
+            cmd |= (static_cast<uint64_t>(i * sizeof(uint16_t)) << 4);
+            cmd |= (static_cast<uint64_t>(program[i]) << 20);
+
+            noc_request_t req{};
+            req.addr = 0x0100;
+            req.data = cmd;
+            req.mask = 0;
+            send_req(ps_sig, req);
+        }
+    }
+
+    void start_pe() {
+        // CMD_START_PE = 4
+        noc_request_t req{};
+        req.addr = 0x0100;
+        req.data = 4;
+        req.mask = 0;
+        send_req(ps_sig, req);
+        wait_cycles(5);
+    }
+
+    // -----------------------------------------------------------------
+    // Threads
+
+    void test_main() {
+        sc_report_handler::set_actions("/IEEE_Std_1666/deprecated", SC_DO_NOTHING);
+
+        std::cout << "========================================" << std::endl;
+        std::cout << "PE Simulation Test (conv2d)" << std::endl;
+        std::cout << "========================================" << std::endl;
+
+        reset_dut(10);
+        router_enable.write(true);
+        router_mode.write(PERouterMode::PLI_FROM_BUS_PLO_TO_BUS);
+        wait_cycles(1);
+
+        load_test_data_conv2d();
+        if (program.empty()) {
+            std::cerr << "[TB] Empty program" << std::endl;
+            sc_stop();
+            return;
+        }
+
+        std::cout << "\n[Step 1] Programming PE..." << std::endl;
+        ps_program_event.notify(SC_ZERO_TIME);
+        wait(ps_program_done_event);
+
+        std::cout << "\n[Step 2] Starting PE..." << std::endl;
+        ps_start_event.notify(SC_ZERO_TIME);
+        wait(ps_start_done_event);
+
+        std::cout << "\n[Step 3] Starting traffic threads..." << std::endl;
+        start_traffic_event.notify(SC_ZERO_TIME);
+
+        // Wait until we collected all expected vectors (or timeout)
+        const size_t expected_vectors = static_cast<size_t>(conv.out_width) * static_cast<size_t>(conv.groups_per_output);
+        const uint64_t max_wait_cycles = 200000; // generous
+        uint64_t waited = 0;
+        while (received_vectors.size() < expected_vectors && waited < max_wait_cycles) {
+            wait(clk.posedge_event());
+            waited++;
+            if (waited % 20000 == 0) {
+                std::cout << "[TB] Waiting outputs... cycles=" << waited
+                          << " received_vectors=" << received_vectors.size() << "/" << expected_vectors
+                          << " pe_cycles=" << pe.get_cycle_count() << std::endl;
+            }
+        }
+
+        if (received_vectors.size() < expected_vectors) {
+            std::cerr << "[TB] Output timeout: received_vectors=" << received_vectors.size()
+                      << " expected=" << expected_vectors << std::endl;
+        } else {
+            std::cout << "[TB] Outputs collected: " << received_vectors.size() << " vectors" << std::endl;
+        }
+
+        // Wait for halt (bounded)
+        std::cout << "\n[Step 4] Waiting for PE halt..." << std::endl;
+        const uint64_t halt_timeout = 200000;
+        uint64_t halt_waited = 0;
+        while (!pe.is_halted() && halt_waited < halt_timeout) {
+            wait(clk.posedge_event());
+            halt_waited++;
+        }
+        std::cout << "[TB] PE halted=" << (pe.is_halted() ? "Yes" : "No")
+                  << " after " << halt_waited << " cycles" << std::endl;
+
+        // Verification
+        std::cout << "\n[Step 5] Verifying outputs..." << std::endl;
+        std::vector<uint16_t> received_fp16;
+        received_fp16.reserve(received_vectors.size() * 4);
+        for (uint64_t v : received_vectors) {
+            for (int lane = 0; lane < 4; lane++) {
+                received_fp16.push_back(static_cast<uint16_t>((v >> (lane * 16)) & 0xFFFFU));
+            }
+        }
+
+        std::cout << "Expected fp16: " << expected_fp16.size() << std::endl;
+        std::cout << "Received fp16: " << received_fp16.size() << std::endl;
+
+        auto stats = verify_fp16_vectors(expected_fp16, received_fp16, verify_tolerance);
+        std::cout << "----------------------------------------" << std::endl;
+        std::cout << "Verification Results:" << std::endl;
+        std::cout << "  Total Elements: " << stats.total_elements << std::endl;
+        std::cout << "  Mismatches: " << stats.mismatches << " (Tolerance: " << verify_tolerance << ")" << std::endl;
+        std::cout << "  Cosine Similarity: " << stats.cosine_similarity << std::endl;
+        std::cout << std::scientific << "  Max Difference: " << stats.max_diff << std::dec << std::endl;
+        std::cout << std::scientific << "  MSE: " << stats.mse << std::dec << std::endl;
+        std::cout << "----------------------------------------" << std::endl;
+
+        if (stats.cosine_similarity > 0.99 && stats.mismatches == 0) {
+            std::cout << "✓ Test PASSED" << std::endl;
+        } else {
+            std::cout << "✗ Test FAILED" << std::endl;
+        }
+
+        // Stats
+        std::cout << "\n[Step 6] Performance Metrics:" << std::endl;
+        const uint64_t total_cycles = pe.get_cycle_count();
+        const uint64_t instr = pe.get_instruction_count();
+        const double ipc = (total_cycles > 0) ? (static_cast<double>(instr) / static_cast<double>(total_cycles)) : 0.0;
+        std::cout << "  Total Cycles: " << total_cycles << std::endl;
+        std::cout << "  Instructions: " << instr << std::endl;
+        std::cout << "  IPC: " << std::fixed << std::setprecision(3) << ipc << std::endl;
+
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "Test completed." << std::endl;
+        std::cout << "========================================" << std::endl;
+
+        sc_stop();
+    }
+
+    void ps_sender() {
+        // Ensure reset is released before any bus activity
+        while (!reset_n.read()) {
+            wait(reset_n.value_changed_event());
+        }
+
+        // Step 1: program PE via PS bus
+        wait(ps_program_event);
+        program_pe();
+        ps_program_done_event.notify(SC_ZERO_TIME);
+
+        // Step 2: start PE via PS bus
+        wait(ps_start_event);
+        start_pe();
+        ps_start_done_event.notify(SC_ZERO_TIME);
+
+        // Step 3: stream weights after traffic starts
+        wait(start_traffic_event);
+        std::cout << "[PS] Streaming weights..." << std::endl;
+        for (size_t i = 0; i < weights.size(); i++) {
+            noc_request_t req{};
+            req.addr = 0x0000;
+            req.data = weights[i];
+            req.mask = 0;
+            send_req(ps_sig, req);
+            if (i % 256 == 0) {
+                std::cout << "[PS] Sent weights " << i << "/" << weights.size() << std::endl;
+            }
+            wait_cycles(PE_GAP_CYCLES);
+        }
+        std::cout << "[PS] Completed streaming weights." << std::endl;
+        ps_done_event.notify(SC_ZERO_TIME);
+    }
+
+    void pli_sender() {
+        wait(start_traffic_event);
+        const size_t expected_vectors = static_cast<size_t>(conv.out_width) * static_cast<size_t>(conv.groups_per_output);
+        const size_t want_ps_inputs = expected_vectors;
+        if (ps_inputs.size() < want_ps_inputs) {
+            std::cout << "[PLI] Warning: ps_inputs smaller than expected ("
+                      << ps_inputs.size() << " < " << want_ps_inputs << ")" << std::endl;
+        }
+
+        for (int out_pos = 0; out_pos < conv.out_width; out_pos++) {
+            const size_t base = static_cast<size_t>(out_pos) * static_cast<size_t>(conv.groups_per_output);
+            for (int g = 0; g < conv.groups_per_output; g++) {
+                const size_t idx = base + static_cast<size_t>(g);
+                if (idx >= ps_inputs.size()) break;
+                noc_request_t req{};
+                req.addr = 0x0080;
+                req.data = ps_inputs[idx];
+                req.mask = 0;
+                send_req(pli_sig, req);
+                wait_cycles(PE_GAP_CYCLES);
+            }
+        }
+
+        pli_done_event.notify(SC_ZERO_TIME);
+    }
+
+    void pd_sender() {
+        wait(start_traffic_event);
+        std::cout << "[PD] Streaming partial dot-product positions..." << std::endl;
+        // Sliding window: positions count = out_width + kernel_size - 1
+        for (int out_pos = 0; out_pos < conv.out_width; out_pos++) {
+            if (out_pos == 0) {
+                // full window
+                for (int k = 0; k < conv.kernel_size; k++) {
+                    const size_t pos = static_cast<size_t>(k);
+                    send_pd_position(pos);
+                    wait_cycles(PE_GAP_CYCLES);
+                }
+            } else {
+                const size_t new_pos = static_cast<size_t>(out_pos + conv.kernel_size - 1);
+                send_pd_position(new_pos);
+                wait_cycles(PE_GAP_CYCLES);
+            }
+        }
+        std::cout << "[PD] Completed streaming PD positions." << std::endl;
+        pd_done_event.notify(SC_ZERO_TIME);
+    }
+
+    void send_pd_position(size_t position_idx) {
+        const size_t base = position_idx * static_cast<size_t>(conv.in_ch);
+        for (int c = 0; c < conv.in_ch; c += 4) {
+            const size_t idx = base + static_cast<size_t>(c);
+            if (idx >= activations.size()) {
+                return;
+            }
+            uint8_t mask = 0;
+            const uint64_t data = pack_fp16x4(activations, idx, mask);
+            if (mask == 0) {
+                return;
+            }
+            noc_request_t req{};
+            req.addr = 0x0040;
+            req.data = data;
+            req.mask = static_cast<size_t>(mask);
+            send_req(pd_sig, req);
+        }
+    }
+
+    void plo_request_thread() {
+        wait(start_traffic_event);
+
+        const size_t expected_vectors = static_cast<size_t>(conv.out_width) * static_cast<size_t>(conv.groups_per_output);
+        for (size_t i = 0; i < expected_vectors; i++) {
+            noc_addr_req_t req{};
+            req.addr = 0x00C0;
+            send_addr_req(plo_req_sig, req);
+            if ((i + 1) % 256 == 0) {
+                std::cout << "[PLO-REQ] Issued " << (i + 1) << "/" << expected_vectors << " read requests" << std::endl;
+            }
+        }
+
+        plo_req_done_event.notify(SC_ZERO_TIME);
+    }
+
+    void plo_response_sink() {
+        wait(start_traffic_event);
+        plo_resp_sig.ready_sig.write(true);
+
+        const size_t expected_vectors = static_cast<size_t>(conv.out_width) * static_cast<size_t>(conv.groups_per_output);
+
+        while (received_vectors.size() < expected_vectors) {
+            wait(clk.posedge_event());
+            if (plo_resp_sig.valid_sig.read() && plo_resp_sig.ready_sig.read()) {
+                const noc_response_t resp = plo_resp_sig.data_sig.read();
+                if (resp.status == NOC_RESPONSE_STATUS::NOC_OK) {
+                    received_vectors.push_back(resp.data);
+                    if (received_vectors.size() % 256 == 0) {
+                        std::cout << "[PLO-RSP] Received " << received_vectors.size() << "/" << expected_vectors << " vectors" << std::endl;
+                    }
+                    if (received_vectors.size() >= expected_vectors) {
+                        outputs_done_event.notify(SC_ZERO_TIME);
+                    }
+                }
+            }
+        }
+
+        // Stop consuming further responses to keep verification sizes consistent.
+        plo_resp_sig.ready_sig.write(false);
+    }
+
+    // -----------------------------------------------------------------
+    // Placeholder hooks for GEMM (TBD)
+    void load_test_data_gemm_tbd() {
+        std::cout << "[TB] GEMM flow is To Be Design" << std::endl;
+    }
+};
+
+// -----------------------------------------------------------------------------
+void print_usage() {
+    std::cout << "Usage: ./test_pe_sim [options] <data_dir>" << std::endl;
+    std::cout << "Options:" << std::endl;
+    std::cout << "  -c <clock_period_ns>   Set clock period in ns (default: 10)" << std::endl;
+    std::cout << "  -v <tolerance>         Set verification tolerance (default: 0.01)" << std::endl;
+    std::cout << "  <data_dir>             Path to PE test data (default: output/pe-sim/conv_k3c4)" << std::endl;
+}
+
 int sc_main(int argc, char* argv[]) {
-    sc_core::sc_report_handler::set_actions("/IEEE_Std_1666/deprecated",
-        sc_core::SC_DO_NOTHING);
+    std::string data_dir = "output/pe-sim/conv_k3c4";
+    double verify_tolerance = 0.01;
+    int clock_period_ns = DEFAULT_CLOCK_PERIOD_NS;
 
-    std::cout << "========================================" << std::endl;
-    std::cout << "Conv3x3 Processing Pass Simulation Test" << std::endl;
-    std::cout << "========================================" << std::endl;
-
-    // Create PE Wrapper
-    PEWrapper pe_wrapper("PE_Conv3x3", sc_time(10, SC_NS));
-    pe_wrapper.set_debug(true);
-
-    // Data paths
-    const std::string data_dir = "/home/yoyo/work/MasterResearch/HybridAcc/output/data/conv3x3/";
-    const std::string inst_file = data_dir + "conv1d_k3.bin";
-    const std::string weight_file = data_dir + "weight.bin";
-    const std::string activation_file = data_dir + "activation_input.bin";
-    const std::string ps_input_file = data_dir + "ps_input.bin";
-    const std::string expected_output_file = data_dir + "activation_output.bin";
-    const std::string meta_file = data_dir + "meta.txt";
-
-    // Parse convolution parameters from meta.txt
-    std::cout << "\n[Step 0] Parsing convolution parameters from meta.txt..." << std::endl;
-    ConvParams conv_params = parse_meta_file(meta_file);
-    if (conv_params.kernel_size == 0 || conv_params.out_width == 0) {
-        std::cerr << "Failed to parse meta.txt or invalid parameters" << std::endl;
-        return 1;
-    }
-    std::cout << "Convolution parameters:" << std::endl;
-    std::cout << "  kernel_size: " << conv_params.kernel_size << std::endl;
-    std::cout << "  in_channels: " << conv_params.in_channels << std::endl;
-    std::cout << "  out_channels: " << conv_params.out_channels << std::endl;
-    std::cout << "  out_width: " << conv_params.out_width << std::endl;
-    std::cout << "  groups_per_output: " << conv_params.groups_per_output << std::endl;
-
-    // Step 1: Reset PE
-    std::cout << "\n[Step 1] Resetting PE..." << std::endl;
-    pe_wrapper.reset(10);
-    std::cout << "PE Reset completed." << std::endl;
-
-    // Step 2: Initialize PE Router
-    std::cout << "\n[Step 2] Initializing PE Router..." << std::endl;
-    // CMD_INIT format (based on PE_ROUTER_* definitions):
-    // [30] enable (1 bit) - PE_ROUTER_EN_ID_OFFSET = 30
-    // [29:28] mode (2 bits) - PE_ROUTER_MODE_ID_OFFSET = 28
-    // [27:22] plo_id (6 bits) - PE_ROUTER_PLO_ID_OFFSET = 22
-    // [21:16] pli_id (6 bits) - PE_ROUTER_PLI_ID_OFFSET = 16
-    // [15:10] pd_id (6 bits) - PE_ROUTER_PD_ID_OFFSET = 10
-    // [9:4] ps_id (6 bits) - PE_ROUTER_PS_ID_OFFSET = 4
-    // [3:0] command (4 bits) = CMD_INIT (1)
-
-    // Note: With the new router_enable and router_mode ports,
-    // we also need to set these signals directly
-    pe_wrapper.set_router_mode(PERouterMode::PLI_FROM_BUS_PLO_TO_BUS);
-    pe_wrapper.set_router_enable(true);
-
-    uint64_t init_cmd = 1; // CMD_INIT
-    init_cmd |= (0ULL << 4);   // ps_id = 0 (bit 4-9)
-    init_cmd |= (0ULL << 10);  // pd_id = 0 (bit 10-15)
-    init_cmd |= (0ULL << 16);  // pli_id = 0 (bit 16-21)
-    init_cmd |= (0ULL << 22);  // plo_id = 0 (bit 22-27)
-    init_cmd |= (0b11ULL << 28); // mode = PLI_FROM_BUS_PLO_TO_BUS (bit 28-29)
-    init_cmd |= (1ULL << 30);  // enable = 1 (bit 30)
-
-    if (!pe_wrapper.send_noc_request(0x100, init_cmd)) {
-        std::cerr << "Failed to send INIT command" << std::endl;
-        return 1;
-    }
-    pe_wrapper.run_cycles(PE_GAP_CYCLES);
-    std::cout << "PE Router initialized with:" << std::endl;
-    std::cout << "  - ps_id=0, pd_id=0, pli_id=0, plo_id=0" << std::endl;
-    std::cout << "  - mode=PLI_FROM_BUS_PLO_TO_BUS (0b11)" << std::endl;
-    std::cout << "  - enable=true" << std::endl;
-
-    // Step 3: Load Program
-    std::cout << "\n[Step 3] Loading program..." << std::endl;
-    if (!pe_wrapper.load_program(inst_file)) {
-        std::cerr << "Failed to load program from: " << inst_file << std::endl;
-        return 1;
-    }
-    pe_wrapper.dump_instruction_memory();
-    std::cout << "Program loaded successfully." << std::endl;
-
-    // Step 4: Start PE
-    std::cout << "\n[Step 4] Starting PE..." << std::endl;
-    pe_wrapper.start();
-    std::cout << "PE started." << std::endl;
-
-    // Step 5: Load weights (PS channel)
-    std::cout << "\n[Step 5] Loading weights..." << std::endl;
-    auto weight_bytes = read_binary_file(weight_file);
-    if (weight_bytes.empty()) {
-        std::cerr << "Failed to read weight file" << std::endl;
-        return 1;
-    }
-    auto weights = bytes_to_uint64(weight_bytes);
-    std::cout << "Loaded " << weights.size() << " weight vectors (64-bit each)" << std::endl;
-
-    // Send weights through NoC PS channel (address format: [7:6]=00 for PS, [5:0]=ps_id)
-    const uint16_t PS_ADDR = 0x0000; // Channel PS, ID 0
-    for (size_t i = 0; i < weights.size(); i++) {
-        if (!pe_wrapper.send_noc_request(PS_ADDR, weights[i])) {
-            std::cerr << "Failed to send weight " << i << std::endl;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            print_usage();
+            return 0;
+        }
+        if (arg == "-c" && i + 1 < argc) {
+            clock_period_ns = std::stoi(argv[++i]);
+            continue;
+        }
+        if (arg == "-v" && i + 1 < argc) {
+            verify_tolerance = std::stod(argv[++i]);
+            continue;
+        }
+        if (!arg.empty() && arg[0] == '-') {
+            std::cerr << "Unknown option: " << arg << std::endl;
+            print_usage();
             return 1;
         }
-        if (i % 100 == 0) {
-            std::cout << "Sent " << i << " / " << weights.size() << " weights" << std::endl;
-        }
-    }
-    std::cout << "All weights sent." << std::endl;
-
-    // Step 6: Send activation data (PD channel) and partial sums (PLI channel)
-    std::cout << "\n[Step 6] Sending activation data and partial sums with proper convolution timing..." << std::endl;
-
-    auto activation_bytes = read_binary_file(activation_file);
-    auto ps_input_bytes = read_binary_file(ps_input_file);
-
-    if (activation_bytes.empty() || ps_input_bytes.empty()) {
-        std::cerr << "Failed to read data files" << std::endl;
-        return 1;
+        data_dir = arg;
     }
 
-    auto activations = bytes_to_fp16(activation_bytes);
-    auto ps_inputs = bytes_to_uint64(ps_input_bytes);
-
-    std::cout << "Loaded " << activations.size() << " activations (fp16 each)" << std::endl;
-    std::cout << "Loaded " << ps_inputs.size() << " partial sum inputs (64-bit each)" << std::endl;
-
-    const uint16_t PD_ADDR = 0x0040;  // Channel PD (01), ID 0
-    const uint16_t PLI_ADDR = 0x0080; // Channel PLI (10), ID 0
-    const uint16_t PLO_ADDR = 0x00C0; // Channel PLO (11), ID 0
-
-    // Use parameters from meta.txt
-    std::vector<uint64_t> outputs;
-    outputs.reserve(conv_params.out_width * conv_params.groups_per_output);
-
-    // For each output position
-    for (int out_pos = 0; out_pos < conv_params.out_width; out_pos++) {
-        // Step 6a: Send activation data with sliding window optimization
-        if (out_pos == 0) {
-            // First position: Send entire window (KERNEL_SIZE groups)
-            std::cout << "Position " << out_pos << ": Sending full window ("
-                      << conv_params.kernel_size << " groups)" << std::endl;
-            for (int k = 0; k < conv_params.kernel_size; k++) {
-                int act_base_idx = k * conv_params.in_channels;
-
-                // Send in_channels fp16 activations (one group)
-                for (int c = 0; c < conv_params.in_channels; c++) {
-                    int act_idx = act_base_idx + c;
-                    if (act_idx < activations.size()) {
-                        std::cout << "Sending activation at pos=" << out_pos
-                                  << " k=" << k << " c=" << c
-                                  << " idx=" << act_idx
-                                  << " value=0x" << std::hex << activations[act_idx] << std::dec << std::endl;
-                        if (!pe_wrapper.send_noc_request(PD_ADDR, activations[act_idx])) {
-                            std::cerr << "Failed to send activation" << std::endl;
-                        }
-                    }
-                }
-                pe_wrapper.run_cycles(PE_GAP_CYCLES);
-            }
-        } else {
-            // Subsequent positions: Only send new data entering the window
-            // New data is at position: out_pos + kernel_size - 1
-            int new_pos = out_pos + conv_params.kernel_size - 1;
-            int act_base_idx = new_pos * conv_params.in_channels;
-
-            std::cout << "Position " << out_pos << ": Sending new window data (1 group at position "
-                      << new_pos << ")" << std::endl;
-
-            // Send in_channels fp16 activations for the new position
-            for (int c = 0; c < conv_params.in_channels; c++) {
-                int act_idx = act_base_idx + c;
-                if (act_idx < activations.size()) {
-                    std::cout << "Sending activation at pos=" << out_pos
-                              << " new_pos=" << new_pos << " c=" << c
-                              << " idx=" << act_idx
-                              << " value=0x" << std::hex << activations[act_idx] << std::dec << std::endl;
-                    if (!pe_wrapper.send_noc_request(PD_ADDR, activations[act_idx])) {
-                        std::cerr << "Failed to send activation" << std::endl;
-                    }
-                } else {
-                    std::cerr << "Warning: activation index " << act_idx << " out of range" << std::endl;
-                }
-            }
-            pe_wrapper.run_cycles(PE_GAP_CYCLES);
-        }
-
-        // Step 6b: Send partial sum inputs (groups_per_output groups)
-        int ps_base_idx = out_pos * conv_params.groups_per_output;
-        for (int g = 0; g < conv_params.groups_per_output; g++) {
-            int ps_idx = ps_base_idx + g;
-            if (ps_idx < ps_inputs.size()) {
-                if (!pe_wrapper.send_noc_request(PLI_ADDR, ps_inputs[ps_idx])) {
-                    std::cerr << "Failed to send ps_input at pos=" << out_pos
-                              << " group=" << g << std::endl;
-                }
-            } else {
-                std::cerr << "Warning: ps_input index " << ps_idx << " out of range" << std::endl;
-            }
-            pe_wrapper.run_cycles(PE_GAP_CYCLES);
-        }
-
-        // Step 6c: Run computation and collect outputs
-        pe_wrapper.run_cycles(PE_GAP_CYCLES);  // Give time for computation
-
-        for (int g = 0; g < conv_params.groups_per_output; g++) {
-            // 先發送讀取請求到 PLO 通道
-            if (!pe_wrapper.send_noc_read_request(PLO_ADDR)) {
-                std::cerr << "Failed to send PLO read request at pos=" << out_pos
-                          << " group=" << g << std::endl;
-                continue;
-            }
-
-            // 然後讀取響應
-            uint64_t output_data;
-            if (pe_wrapper.read_noc_response(output_data)) {
-                outputs.push_back(output_data);
-                if (outputs.size() % 100 == 0) {
-                    std::cout << "Received output " << outputs.size() << ": 0x"
-                              << std::hex << output_data << std::dec << std::endl;
-                }
-            } else {
-                std::cerr << "Warning: Failed to receive output at pos=" << out_pos
-                          << " group=" << g << " (total received: " << outputs.size() << ")" << std::endl;
-            }
-        }
-
-        // Progress indicator
-        if (out_pos % 100 == 0) {
-            std::cout << "Progress: " << out_pos << " / " << conv_params.out_width
-                      << " (outputs collected: " << outputs.size() << ")" << std::endl;
-        }
-    }
-
-    std::cout << "All input data sent and outputs collected: " << outputs.size() << std::endl;
-
-    // Step 7: Wait for PE to complete
-    std::cout << "\n[Step 7] Waiting for PE to complete..." << std::endl;
-    const int MAX_WAIT_CYCLES = 10000;
-    for (int cycle = 0; cycle < MAX_WAIT_CYCLES; cycle++) {
-        if (pe_wrapper.is_halted()) {
-            std::cout << "PE halted after " << cycle << " additional cycles" << std::endl;
-            break;
-        }
-        pe_wrapper.run_cycles(1);
-
-        if (cycle % 1000 == 0 && cycle > 0) {
-            std::cout << "Waiting... cycle: " << cycle << ", outputs: " << outputs.size() << std::endl;
-        }
-    }
-
-    pe_wrapper.check_halted();
-
-    // Step 8: Verify outputs
-    std::cout << "\n[Step 8] Verifying outputs..." << std::endl;
-    auto expected_bytes = read_binary_file(expected_output_file);
-    auto expected_outputs_fp16 = bytes_to_fp16(expected_bytes);
-
-    std::cout << "Expected outputs (fp16): " << expected_outputs_fp16.size() << std::endl;
-    std::cout << "Received outputs (fp16): " << outputs.size() * 4 << std::endl;
-
-    // Convert received outputs (uint64_t) to fp16
-    std::vector<uint16_t> received_outputs_fp16;
-    for (const auto& output : outputs) {
-        for (int i = 0; i < 4; i++) { // Extract 4 fp16 values from each uint64_t
-            received_outputs_fp16.push_back(static_cast<uint16_t>((output >> (i * 16)) & 0xFFFF));
-        }
-    }
-
-    if (received_outputs_fp16.size() == expected_outputs_fp16.size()) {
-        // Calculate cosine similarity and max difference
-        double dot_product = 0.0;
-        double magnitude_received = 0.0;
-        double magnitude_expected = 0.0;
-        double max_diff = 0.0;
-
-        for (size_t i = 0; i < received_outputs_fp16.size(); i++) {
-            float received_val = fp16_to_float(received_outputs_fp16[i]);
-            float expected_val = fp16_to_float(expected_outputs_fp16[i]);
-
-            dot_product += received_val * expected_val;
-            magnitude_received += received_val * received_val;
-            magnitude_expected += expected_val * expected_val;
-
-            double diff = std::abs(received_val - expected_val);
-            if (diff > max_diff) {
-                max_diff = diff;
-            }
-            if (diff > 1e-2) {
-                std::cout << "Mismatch at index " << i
-                          << ": received=0x" << std::hex << received_outputs_fp16[i]
-                          << " expected=0x" << expected_outputs_fp16[i] << std::dec
-                          << " diff=" << std::scientific << diff << std::endl;
-            }
-        }
-
-        magnitude_received = std::sqrt(magnitude_received);
-        magnitude_expected = std::sqrt(magnitude_expected);
-
-        double cosine_similarity = dot_product / (magnitude_received * magnitude_expected);
-
-        std::cout << "Cosine Similarity: " << cosine_similarity << std::endl;
-        std::cout << std::scientific << "Max Difference: " << max_diff << std::endl;
-
-        if (cosine_similarity > 0.99) {
-            std::cout << "✓ Outputs are highly similar! Test PASSED." << std::endl;
-        } else {
-            std::cout << "✗ Outputs are not similar enough. Test FAILED." << std::endl;
-        }
-    } else {
-        std::cout << "✗ Output count mismatch. Test FAILED." << std::endl;
-    }
-
-    // Step 9: Print performance metrics
-    std::cout << "\n[Step 9] Performance Metrics:" << std::endl;
-    pe_wrapper.dump_state();
-    auto metrics = pe_wrapper.get_performance_metrics();
-    std::cout << "Total Cycles: " << metrics.total_cycles << std::endl;
-    std::cout << "Instructions Executed: " << metrics.instruction_count << std::endl;
-    std::cout << "IPC: " << metrics.ipc << std::endl;
-
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "Test completed." << std::endl;
-    std::cout << "========================================" << std::endl;
-
-    sc_stop();
+    PESimTestBench tb("PESimTestBench", data_dir, verify_tolerance, clock_period_ns);
+    sc_start();
     return 0;
 }

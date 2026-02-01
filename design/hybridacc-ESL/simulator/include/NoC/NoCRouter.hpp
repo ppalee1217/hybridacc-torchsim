@@ -54,18 +54,20 @@ public:
     sc_in<sc_uint<32>> command_data;
 
     // New Valid-Ready Interface
-    VRDIF<router_req_t> req0_in;
-    VRDIF<router_req_t> req1_in; // Write PLI
-    VRDIF<noc_addr_req_t> req2_in; // Read PLO (New)
-    VRDOF<router_resp_t> resp2_out; // Read Response (Was resp1)
+    VRDIF<router_req_t> req_ps_in; // PS (Weights)
+    VRDIF<router_req_t> req_pd_in; // PD (Activations)
+    VRDIF<router_req_t> req_pli_in; // Write PLI
+    VRDIF<noc_addr_req_t> req_plo_in; // Read PLO (New)
+    VRDOF<router_resp_t> resp_plo_out; // Read Response (Was resp1)
 
     // ===  NoC MBUS interface ports ===
     // NoC interface ports - using VRDIF/VRDOF
-    // Split into NoC-0 (Write only), NoC-1 (Write only), NoC-2 (Read only)
-    sc_vector<VRDOF<noc_request_t>> noc0_to_bus_req; // NoC-0: PS, PD, Command
-    sc_vector<VRDOF<noc_request_t>> noc1_to_bus_req; // NoC-1: PLI Write
-    sc_vector<VRDOF<noc_addr_req_t>> noc2_to_bus_req; // NoC-2: PLO Read Request
-    sc_vector<VRDIF<noc_response_t>> bus_to_noc2_resp; // NoC-2 Response
+    // Split into NoC-0 (Write only/Split), NoC-1 (Write only), NoC-2 (Read only)
+    sc_vector<VRDOF<noc_request_t>> noc_ps_to_bus_req; // PS
+    sc_vector<VRDOF<noc_request_t>> noc_pd_to_bus_req; // PD
+    sc_vector<VRDOF<noc_request_t>> noc_pli_to_bus_req; // NoC-1: PLI Write
+    sc_vector<VRDOF<noc_addr_req_t>> noc_plo_to_bus_req; // NoC-2: PLO Read Request
+    sc_vector<VRDIF<noc_response_t>> bus_to_noc_plo_resp; // NoC-2 Response
 
     // ID, mode, enable scan-chain ports
     sc_out<bool> scan_chain_enable; // broadcast to all ports
@@ -81,14 +83,16 @@ public:
           reset_n("reset_n"),
           command_mode("command_mode"),
           command_data("command_data"),
-          req0_in("req0_in"),
-          req1_in("req1_in"),
-          req2_in("req2_in"),
-          resp2_out("resp2_out"),
-          noc0_to_bus_req("noc0_to_bus_req", num_ports),
-          noc1_to_bus_req("noc1_to_bus_req", num_ports),
-          noc2_to_bus_req("noc2_to_bus_req", num_ports),
-          bus_to_noc2_resp("bus_to_noc2_resp", num_ports),
+          req_ps_in("req_ps_in"),
+          req_pd_in("req_pd_in"),
+          req_pli_in("req_pli_in"),
+          req_plo_in("req_plo_in"),
+          resp_plo_out("resp_plo_out"),
+          noc_ps_to_bus_req("noc_ps_to_bus_req", num_ports),
+          noc_pd_to_bus_req("noc_pd_to_bus_req", num_ports),
+          noc_pli_to_bus_req("noc_pli_to_bus_req", num_ports),
+          noc_plo_to_bus_req("noc_plo_to_bus_req", num_ports),
+          bus_to_noc_plo_resp("bus_to_noc_plo_resp", num_ports),
           scan_chain_enable("scan_chain_enable"),
           scan_chain_in("scan_chain_in", num_ports),
           scan_chain_out("scan_chain_out", num_ports),
@@ -102,7 +106,8 @@ public:
           pending_read_ultra_reg("pending_read_ultra_reg"),
           pending_read_ultra_next("pending_read_ultra_next"),
           rx_stall_sig("rx_stall_sig"),
-          req0_fifo("req0_fifo", 4),
+          ps_fifo("ps_fifo", 4),
+          pd_fifo("pd_fifo", 4),
           req1_fifo("req1_fifo", 4),
           req2_fifo("req2_fifo", 4),
           resp_fifo("resp_fifo", 4)
@@ -110,14 +115,23 @@ public:
         DEBUG_MSG("[Create] NoCRouter with " << num_ports << " ports", DEBUG_LEVEL_NOC_COMPONENTS);
 
         // Bind FIFOs
-        req0_fifo.clk(clk);
-        req0_fifo.reset_n(reset_n);
-        req0_fifo.data_in(req0_fifo_in_sig);
-        req0_fifo.push(req0_fifo_push_sig);
-        req0_fifo.data_out(req0_fifo_out_sig);
-        req0_fifo.pop(req0_fifo_pop_sig);
-        req0_fifo.empty(req0_fifo_empty_sig);
-        req0_fifo.full(req0_fifo_full_sig);
+        ps_fifo.clk(clk);
+        ps_fifo.reset_n(reset_n);
+        ps_fifo.data_in(ps_fifo_in_sig);
+        ps_fifo.push(ps_fifo_push_sig);
+        ps_fifo.data_out(ps_fifo_out_sig);
+        ps_fifo.pop(ps_fifo_pop_sig);
+        ps_fifo.empty(ps_fifo_empty_sig);
+        ps_fifo.full(ps_fifo_full_sig);
+
+        pd_fifo.clk(clk);
+        pd_fifo.reset_n(reset_n);
+        pd_fifo.data_in(pd_fifo_in_sig);
+        pd_fifo.push(pd_fifo_push_sig);
+        pd_fifo.data_out(pd_fifo_out_sig);
+        pd_fifo.pop(pd_fifo_pop_sig);
+        pd_fifo.empty(pd_fifo_empty_sig);
+        pd_fifo.full(pd_fifo_full_sig);
 
         req1_fifo.clk(clk);
         req1_fifo.reset_n(reset_n);
@@ -150,33 +164,40 @@ public:
         SC_CTHREAD(seq_process, clk.pos());
         reset_signal_is(reset_n, false);
 
-        // Request Processing NoC-0 (Tx)
-        SC_METHOD(process_requests_noc0);
-        sensitive << req0_fifo_empty_sig << req0_fifo_out_sig
+        // Request Processing NoC-0 PS (Tx)
+        SC_METHOD(process_requests_noc0_ps);
+        sensitive << ps_fifo_empty_sig << ps_fifo_out_sig
                   << command_mode << command_data;
         for (size_t i = 0; i < num_ports; ++i) {
-            sensitive << noc0_to_bus_req[i].ready_in;
+            sensitive << noc_ps_to_bus_req[i].ready_in;
         }
 
-        // Request Processing NoC-1 (Tx - Write)
-        SC_METHOD(process_requests_noc1);
+        // Request Processing NoC-0 PD (Tx)
+        SC_METHOD(process_requests_noc0_pd);
+        sensitive << pd_fifo_empty_sig << pd_fifo_out_sig;
+        for (size_t i = 0; i < num_ports; ++i) {
+            sensitive << noc_pd_to_bus_req[i].ready_in;
+        }
+
+        // Request Processing NoC PLI (Tx - Write)
+        SC_METHOD(process_requests_noc_pli);
         sensitive << req1_fifo_empty_sig << req1_fifo_out_sig;
         for (size_t i = 0; i < num_ports; ++i) {
-            sensitive << noc1_to_bus_req[i].ready_in;
+            sensitive << noc_pli_to_bus_req[i].ready_in;
         }
 
-        // Request Processing NoC-2 (Tx - Read)
-        SC_METHOD(process_requests_noc2);
+        // Request Processing NoC PLO (Tx - Read)
+        SC_METHOD(process_requests_noc_plo);
         sensitive << req2_fifo_empty_sig << req2_fifo_out_sig << rx_stall_sig;
         for (size_t i = 0; i < num_ports; ++i) {
-            sensitive << noc2_to_bus_req[i].ready_in;
+            sensitive << noc_plo_to_bus_req[i].ready_in;
         }
 
-        // Response Processing (Rx - NoC2)
-        SC_METHOD(process_responses);
+        // Response Processing (Rx - PLO)
+        SC_METHOD(process_responses_plo);
         sensitive << pending_read_reg << pending_read_ultra_reg << resp_fifo_full_sig;
         for (size_t i = 0; i < num_ports; ++i) {
-            sensitive << bus_to_noc2_resp[i].valid_in << bus_to_noc2_resp[i].data_in;
+            sensitive << bus_to_noc_plo_resp[i].valid_in << bus_to_noc_plo_resp[i].data_in;
         }
 
         // Combinational processes
@@ -191,10 +212,11 @@ public:
 
         // Interface logic (connect ports to FIFOs)
         SC_METHOD(comb_interface_logic);
-        sensitive << req0_in.valid_in << req0_in.data_in << req0_fifo_full_sig
-                  << req1_in.valid_in << req1_in.data_in << req1_fifo_full_sig
-                  << req2_in.valid_in << req2_in.data_in << req2_fifo_full_sig
-                  << resp2_out.ready_in << resp_fifo_empty_sig << resp_fifo_out_sig;
+        sensitive << req_ps_in.valid_in << req_ps_in.data_in << ps_fifo_full_sig
+                  << req_pd_in.valid_in << req_pd_in.data_in << pd_fifo_full_sig
+                  << req_pli_in.valid_in << req_pli_in.data_in << req1_fifo_full_sig
+                  << req_plo_in.valid_in << req_plo_in.data_in << req2_fifo_full_sig
+                  << resp_plo_out.ready_in << resp_fifo_empty_sig << resp_fifo_out_sig;
 
         SC_METHOD(trace_process);
         sensitive << clk.pos();
@@ -207,18 +229,27 @@ public:
 
 private:
     // === FIFOs ===
-    hybridacc::pe::FIFO<router_req_t> req0_fifo;
+    hybridacc::pe::FIFO<router_req_t> ps_fifo;
+    hybridacc::pe::FIFO<router_req_t> pd_fifo;
     hybridacc::pe::FIFO<router_req_t> req1_fifo;
     hybridacc::pe::FIFO<noc_addr_req_t> req2_fifo;
     hybridacc::pe::FIFO<router_resp_t> resp_fifo;
 
-    // FIFO Signals - NoC0
-    sc_signal<router_req_t> req0_fifo_in_sig;
-    sc_signal<bool> req0_fifo_push_sig;
-    sc_signal<router_req_t> req0_fifo_out_sig;
-    sc_signal<bool> req0_fifo_pop_sig;
-    sc_signal<bool> req0_fifo_empty_sig;
-    sc_signal<bool> req0_fifo_full_sig;
+    // FIFO Signals - PS
+    sc_signal<router_req_t> ps_fifo_in_sig;
+    sc_signal<bool> ps_fifo_push_sig;
+    sc_signal<router_req_t> ps_fifo_out_sig;
+    sc_signal<bool> ps_fifo_pop_sig;
+    sc_signal<bool> ps_fifo_empty_sig;
+    sc_signal<bool> ps_fifo_full_sig;
+
+    // FIFO Signals - PD
+    sc_signal<router_req_t> pd_fifo_in_sig;
+    sc_signal<bool> pd_fifo_push_sig;
+    sc_signal<router_req_t> pd_fifo_out_sig;
+    sc_signal<bool> pd_fifo_pop_sig;
+    sc_signal<bool> pd_fifo_empty_sig;
+    sc_signal<bool> pd_fifo_full_sig;
 
     // FIFO Signals - NoC1
     sc_signal<router_req_t> req1_fifo_in_sig;
@@ -287,61 +318,71 @@ private:
 
     // === Interface Logic (Combinational) ===
     void comb_interface_logic() {
-        // Input: Req0 Port -> Req0 FIFO
-        if (req0_in.valid_in.read() && !req0_fifo_full_sig.read()) {
-            req0_in.ready_out.write(true);
-            req0_fifo_in_sig.write(req0_in.data_in.read());
-            req0_fifo_push_sig.write(true);
+        // Input: Req PS Port -> PS FIFO
+        if (req_ps_in.valid_in.read() && !ps_fifo_full_sig.read()) {
+            req_ps_in.ready_out.write(true);
+            ps_fifo_in_sig.write(req_ps_in.data_in.read());
+            ps_fifo_push_sig.write(true);
         } else {
-            req0_in.ready_out.write(false);
-            req0_fifo_push_sig.write(false);
+            req_ps_in.ready_out.write(false);
+            ps_fifo_push_sig.write(false);
         }
 
-        // Input: Req1 Port -> Req1 FIFO (Write Only)
-        if (req1_in.valid_in.read() && !req1_fifo_full_sig.read()) {
-            req1_in.ready_out.write(true);
-            req1_fifo_in_sig.write(req1_in.data_in.read());
+        // Input: Req PD Port -> PD FIFO
+        if (req_pd_in.valid_in.read() && !pd_fifo_full_sig.read()) {
+            req_pd_in.ready_out.write(true);
+            pd_fifo_in_sig.write(req_pd_in.data_in.read());
+            pd_fifo_push_sig.write(true);
+        } else {
+            req_pd_in.ready_out.write(false);
+            pd_fifo_push_sig.write(false);
+        }
+
+        // Input: Req PLI Port -> Req1 FIFO (Write Only)
+        if (req_pli_in.valid_in.read() && !req1_fifo_full_sig.read()) {
+            req_pli_in.ready_out.write(true);
+            req1_fifo_in_sig.write(req_pli_in.data_in.read());
             req1_fifo_push_sig.write(true);
         } else {
-            req1_in.ready_out.write(false);
+            req_pli_in.ready_out.write(false);
             req1_fifo_push_sig.write(false);
         }
 
-        // Input: Req2 Port -> Req2 FIFO (Read Only)
-        if (req2_in.valid_in.read() && !req2_fifo_full_sig.read()) {
-            req2_in.ready_out.write(true);
-            req2_fifo_in_sig.write(req2_in.data_in.read());
+        // Input: Req PLO Port -> Req2 FIFO (Read Only)
+        if (req_plo_in.valid_in.read() && !req2_fifo_full_sig.read()) {
+            req_plo_in.ready_out.write(true);
+            req2_fifo_in_sig.write(req_plo_in.data_in.read());
             req2_fifo_push_sig.write(true);
         } else {
-            req2_in.ready_out.write(false);
+            req_plo_in.ready_out.write(false);
             req2_fifo_push_sig.write(false);
         }
 
-        // Output: Resp FIFO -> Resp2 Port
+        // Output: Resp FIFO -> Resp PLO Port
         if (!resp_fifo_empty_sig.read()) {
-            resp2_out.valid_out.write(true);
-            resp2_out.data_out.write(resp_fifo_out_sig.read());
-            if (resp2_out.ready_in.read()) {
+            resp_plo_out.valid_out.write(true);
+            resp_plo_out.data_out.write(resp_fifo_out_sig.read());
+            if (resp_plo_out.ready_in.read()) {
                 resp_fifo_pop_sig.write(true);
             } else {
                 resp_fifo_pop_sig.write(false);
             }
         } else {
-            resp2_out.valid_out.write(false);
+            resp_plo_out.valid_out.write(false);
             resp_fifo_pop_sig.write(false);
         }
     }
 
-    // === Request Processing NoC-0 (Tx) ===
-    void process_requests_noc0() {
+    // === Request Processing NoC-0 PS (Tx) ===
+    void process_requests_noc0_ps() {
         // Default outputs
-        req0_fifo_pop_sig.write(false);
+        ps_fifo_pop_sig.write(false);
         for (size_t i = 0; i < num_ports; ++i) {
-            noc0_to_bus_req[i].valid_out.write(false);
-            noc0_to_bus_req[i].data_out.write(noc_request_t());
+            noc_ps_to_bus_req[i].valid_out.write(false);
+            noc_ps_to_bus_req[i].data_out.write(noc_request_t());
         }
 
-        // 1. Sideband Command (High Priority) -> NoC-0
+        // 1. Sideband Command (High Priority) -> NoC-0 PS
         bool cmd_active = command_mode.read();
         sc_uint<32> cmd_val = command_data.read();
         message_command_t cmd_type = static_cast<message_command_t>(cmd_val.range(3, 0).to_uint());
@@ -354,15 +395,15 @@ private:
             // cmd_req.is_w = true; // Implicit Write
 
             for (size_t i = 0; i < num_ports; ++i) {
-                noc0_to_bus_req[i].valid_out.write(true);
-                noc0_to_bus_req[i].data_out.write(cmd_req);
+                noc_ps_to_bus_req[i].valid_out.write(true);
+                noc_ps_to_bus_req[i].data_out.write(cmd_req);
             }
             return; // Block FIFO requests
         }
 
-        // 2. FIFO Request (NoC-0)
-        if (!req0_fifo_empty_sig.read()) {
-            router_req_t req = req0_fifo_out_sig.read();
+        // 2. FIFO Request (NoC-0 PS)
+        if (!ps_fifo_empty_sig.read()) {
+            router_req_t req = ps_fifo_out_sig.read();
 
             // Decode
             bool is_ultra = (req.addr >> 8) & 0x1;
@@ -383,13 +424,13 @@ private:
                 // r.is_w = is_write;
                 r.mask = mask;
 
-                noc0_to_bus_req[i].data_out.write(r);
+                noc_ps_to_bus_req[i].data_out.write(r);
             }
 
             // Check Readiness
             bool all_ready = true;
             for (size_t i = 0; i < num_ports; ++i) {
-                if (!noc0_to_bus_req[i].ready_in.read()) {
+                if (!noc_ps_to_bus_req[i].ready_in.read()) {
                     all_ready = false;
                     break;
                 }
@@ -397,21 +438,72 @@ private:
 
             if (all_ready) {
                 for (size_t i = 0; i < num_ports; ++i) {
-                    noc0_to_bus_req[i].valid_out.write(true);
+                    noc_ps_to_bus_req[i].valid_out.write(true);
                 }
-                req0_fifo_pop_sig.write(true);
+                ps_fifo_pop_sig.write(true);
             }
         }
     }
 
-    // === Request Processing NoC-1 (Tx) - Write Only ===
-    void process_requests_noc1() {
+    // === Request Processing NoC-0 PD (Tx) ===
+    void process_requests_noc0_pd() {
+        // Default outputs
+        pd_fifo_pop_sig.write(false);
+        for (size_t i = 0; i < num_ports; ++i) {
+            noc_pd_to_bus_req[i].valid_out.write(false);
+            noc_pd_to_bus_req[i].data_out.write(noc_request_t());
+        }
+
+        // FIFO Request (NoC-0 PD)
+        if (!pd_fifo_empty_sig.read()) {
+            router_req_t req = pd_fifo_out_sig.read();
+
+            // Decode
+            bool is_ultra = (req.addr >> 8) & 0x1;
+            sc_uint<8> base_addr = req.addr & 0xFF;
+            size_t mask = req.mask;
+
+            // Broadcast / SIMD
+            for (size_t i = 0; i < num_ports; ++i) {
+                noc_request_t r;
+                if (is_ultra) {
+                    assert(num_ports <= NUM_PORTS_DEFAULT);
+                    r.data = req.data.range(64*i + 63, 64*i).to_uint64();
+                } else { // Broadcast
+                    r.data = req.data.range(63, 0).to_uint64();
+                }
+                r.addr = base_addr;
+                r.mask = mask;
+
+                noc_pd_to_bus_req[i].data_out.write(r);
+            }
+
+            // Check Readiness
+            bool all_ready = true;
+            for (size_t i = 0; i < num_ports; ++i) {
+                if (!noc_pd_to_bus_req[i].ready_in.read()) {
+                    all_ready = false;
+                    break;
+                }
+            }
+
+            if (all_ready) {
+                for (size_t i = 0; i < num_ports; ++i) {
+                    noc_pd_to_bus_req[i].valid_out.write(true);
+                }
+                pd_fifo_pop_sig.write(true);
+            }
+        }
+    }
+
+    // === Request Processing NoC PLI (Tx) - Write Only ===
+    void process_requests_noc_pli() {
         // Default outputs
         req1_fifo_pop_sig.write(false);
 
         for (size_t i = 0; i < num_ports; ++i) {
-            noc1_to_bus_req[i].valid_out.write(false);
-            noc1_to_bus_req[i].data_out.write(noc_request_t());
+            noc_pli_to_bus_req[i].valid_out.write(false);
+            noc_pli_to_bus_req[i].data_out.write(noc_request_t());
         }
 
         // FIFO Request (NoC-1)
@@ -437,13 +529,13 @@ private:
                 r.addr = base_addr;
                 r.mask = mask;
 
-                noc1_to_bus_req[i].data_out.write(r);
+                noc_pli_to_bus_req[i].data_out.write(r);
             }
 
             // Check Readiness
             bool all_ready = true;
             for (size_t i = 0; i < num_ports; ++i) {
-                if (!noc1_to_bus_req[i].ready_in.read()) {
+                if (!noc_pli_to_bus_req[i].ready_in.read()) {
                     all_ready = false;
                     break;
                 }
@@ -451,26 +543,26 @@ private:
 
             if (all_ready) {
                 for (size_t i = 0; i < num_ports; ++i) {
-                    noc1_to_bus_req[i].valid_out.write(true);
+                    noc_pli_to_bus_req[i].valid_out.write(true);
                 }
                 req1_fifo_pop_sig.write(true);
             }
             else{
-                DEBUG_MSG(" [NoCRouter] NoC-1 Request not all ready, stalling - " << r << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
+                DEBUG_MSG(" [NoCRouter] NoC-PLI Request not all ready, stalling - " << r << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
             }
         }
     }
 
-    // === Request Processing NoC-2 (Tx) - Read Only ===
-    void process_requests_noc2() {
+    // === Request Processing NoC PLO (Tx) - Read Only ===
+    void process_requests_noc_plo() {
         // Default outputs
         req2_fifo_pop_sig.write(false);
         pending_read_next.write(false);
         pending_read_ultra_next.write(false);
 
         for (size_t i = 0; i < num_ports; ++i) {
-            noc2_to_bus_req[i].valid_out.write(false);
-            noc2_to_bus_req[i].data_out.write(noc_addr_req_t());
+            noc_plo_to_bus_req[i].valid_out.write(false);
+            noc_plo_to_bus_req[i].data_out.write(noc_addr_req_t());
         }
 
         // Check Rx Stall (Waiting for Response)
@@ -489,7 +581,7 @@ private:
             bool is_ultra = (req.addr >> 8) & 0x1;
 
             if (is_ultra) {
-                DEBUG_MSG("[NoCRouter] Received NoC-2 ULTRA read req addr=0x" << std::hex << req.addr << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
+                DEBUG_MSG("[NoCRouter] Received NoC-PLO ULTRA read req addr=0x" << std::hex << req.addr << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
             }
 
             // Broadcast / SIMD Logic (Address based)
@@ -497,13 +589,13 @@ private:
             r.addr = req.addr;
 
             for (size_t i = 0; i < num_ports; ++i) {
-                noc2_to_bus_req[i].data_out.write(r);
+                noc_plo_to_bus_req[i].data_out.write(r);
             }
 
             // Check Readiness
             bool all_ready = true;
             for (size_t i = 0; i < num_ports; ++i) {
-                if (!noc2_to_bus_req[i].ready_in.read()) {
+                if (!noc_plo_to_bus_req[i].ready_in.read()) {
                     all_ready = false;
                     break;
                 }
@@ -511,7 +603,7 @@ private:
 
             if (all_ready) {
                 for (size_t i = 0; i < num_ports; ++i) {
-                    noc2_to_bus_req[i].valid_out.write(true);
+                    noc_plo_to_bus_req[i].valid_out.write(true);
                 }
                 req2_fifo_pop_sig.write(true);
 
@@ -520,20 +612,20 @@ private:
                 pending_read_ultra_next.write(is_ultra);
             }
             else{
-                DEBUG_MSG(" [NoCRouter] NoC-2 Request not all ready, stalling" << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
+                DEBUG_MSG(" [NoCRouter] NoC-PLO Request not all ready, stalling" << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
             }
         }
     }
 
-    // === Response Processing (Rx) ===
-    void process_responses() {
+    // === Response Processing (Rx - PLO) ===
+    void process_responses_plo() {
         // Default outputs
         resp_fifo_push_sig.write(false);
         resp_fifo_in_sig.write(router_resp_t());
         rx_stall_sig.write(false);
 
         for (size_t i = 0; i < num_ports; ++i) {
-            bus_to_noc2_resp[i].ready_out.write(false);
+            bus_to_noc_plo_resp[i].ready_out.write(false);
         }
 
         bool is_pending_read = pending_read_reg.read();
@@ -548,9 +640,9 @@ private:
         bool error_flag = false;
 
         for (size_t i = 0; i < num_ports; ++i) {
-            if(bus_to_noc2_resp[i].valid_in.read()) {
+            if(bus_to_noc_plo_resp[i].valid_in.read()) {
                 valid_rx |= (1ULL << i);
-                if ( bus_to_noc2_resp[i].data_in.read().status == NOC_RESPONSE_STATUS::NOC_ERROR) {
+                if ( bus_to_noc_plo_resp[i].data_in.read().status == NOC_RESPONSE_STATUS::NOC_ERROR) {
                     error_flag = true;
                 }
             }
@@ -563,7 +655,7 @@ private:
                     all_valid = false;
                     break;
                 }
-                collected_data.range(64*i + 63, 64*i) = bus_to_noc2_resp[i].data_in.read().data;
+                collected_data.range(64*i + 63, 64*i) = bus_to_noc_plo_resp[i].data_in.read().data;
             }
         } else {
             // Broadcast mode: expect response from only one of ports
@@ -575,7 +667,7 @@ private:
                         error_flag = true;
                     }
                     resp_received = true;
-                    collected_data.range(63, 0) = bus_to_noc2_resp[i].data_in.read().data;
+                    collected_data.range(63, 0) = bus_to_noc_plo_resp[i].data_in.read().data;
                 }
             }
             if (!resp_received) {
@@ -585,9 +677,9 @@ private:
 
         for (size_t i = 0; i < num_ports; ++i) {
             DEBUG_MSG("[NoCRouter] Checking response from port " << i
-                      << ": valid=" << bus_to_noc2_resp[i].valid_in.read()
-                      << ", data=0x" << std::hex << bus_to_noc2_resp[i].data_in.read().data
-                      << ", status=" << static_cast<int>(bus_to_noc2_resp[i].data_in.read().status)
+                      << ": valid=" << bus_to_noc_plo_resp[i].valid_in.read()
+                      << ", data=0x" << std::hex << bus_to_noc_plo_resp[i].data_in.read().data
+                      << ", status=" << static_cast<int>(bus_to_noc_plo_resp[i].data_in.read().status)
                       << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
         }
 
@@ -596,7 +688,7 @@ private:
                 // Accept responses
                 for (size_t i = 0; i < num_ports; ++i) {
                     if (valid_rx & (1ULL << i)) {
-                        bus_to_noc2_resp[i].ready_out.write(true);
+                        bus_to_noc_plo_resp[i].ready_out.write(true);
                     }
                 }
 
@@ -712,7 +804,7 @@ private:
         }
 
         // NoC-0 State
-        std::string current_state_noc0 = req0_fifo_empty_sig.read() ? "IDLE" : "PROCESSING";
+        std::string current_state_noc0 = (ps_fifo_empty_sig.read() && pd_fifo_empty_sig.read()) ? "IDLE" : "PROCESSING";
         if (current_state_noc0 != last_state_noc0) {
             TRACE_EVENT(last_state_noc0, "NoC0_State", TRACE_END, TRACE_PID::NOC_ROUTER, tid_noc0, "{}");
             TRACE_EVENT(current_state_noc0, "NoC0_State", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc0, "{}");
@@ -747,71 +839,3 @@ private:
 
 } // namespace noc
 } // namespace hybridacc
-
-/*
-
-新版 `NoCRouter` 的詳細行為解釋：
-
-### 1. 核心架構 (Core Architecture)
-
-`NoCRouter` 是 NoC 的大腦，負責協調上層控制器與下層 MBUS/PE 之間的通訊。它現在採用 **混合式處理架構 (Hybrid Processing Architecture)**：
-
-*   **數據路徑 (Data Path)**：透過 FIFO 緩衝，支援全雙工流控 (Full-Duplex Flow Control)，保證數據不丟失。
-*   **控制路徑 (Control Path)**：透過 Sideband (旁路) 介面，支援高優先級的廣播命令，繞過 FIFO 直接執行。
-
-### 2. 介面定義 (Interfaces)
-
-*   **數據介面 (Data Interface)**：
-    *   `req0_in` (Valid/Ready)：接收來自上層的寫入/控制請求 (NoC-0)。
-    *   `req1_in` (Valid/Ready)：接收來自上層的讀寫請求 (NoC-1)。
-    *   `resp1_out` (Valid/Ready)：回傳讀取結果 (NoC-1)。
-*   **控制介面 (Control Interface)**：
-    *   `command_mode` & `command_data`：用於發送全局控制命令 (如 Start/Stop PE) 或配置 Scan Chain。
-*   **下層介面 (Downstream Interface)**：
-    *   `noc_to_bus_req` & `bus_to_noc_resp`：連接到多個 MBUS，使用標準握手協定。
-
-### 3. 詳細行為流程 (Life of a Request)
-
-`process_thread` 是核心執行緒，它在每個時脈週期都會檢查並執行以下邏輯：
-
-#### A. 優先處理 Sideband Command (High Priority)
-這是最新的變更點。執行緒會**優先**檢查 `command_mode` 是否為高：
-
-1.  **檢測**：若 `command_mode=1` 且指令類型**不是** `CMD_NOC_SCAN_CHAIN`（例如 `CMD_START_PE`, `CMD_LOAD_PROGRAM`）。
-2.  **構建請求**：立即構建一個廣播寫入請求 (`addr=0x100`, `is_w=true`)。
-3.  **廣播 (Broadcast)**：
-    *   將請求同時送往所有 `MBUS` 端口。
-    *   **同步等待**：Router 會暫停並等待，直到**所有** MBUS 都回傳 Ready，確保命令被所有 PE 接收。
-4.  **完成**：命令發送完畢後，結束該週期的處理。這意味著 Sideband Command 會暫時阻塞 FIFO 中的數據處理，確保控制命令的即時性。
-
-#### B. 處理 FIFO 數據請求 (Normal Priority)
-如果沒有 Sideband Command，Router 才會檢查 `req_fifo`：
-
-1.  **取出請求 (Pop)**：從 FIFO 取出一個 `router_req_t`。
-2.  **解碼 (Decode)**：
-    *   **SIMD (addr[8]=1)**：將 192-bit 數據切分為 3x64-bit，分別送給 Port 0-2。
-    *   **Broadcast (addr[8]=0)**：將低 64-bit 數據複製送給所有端口。
-    *   **Command (addr[9]=1)**：視為廣播寫入。
-3.  **發送 (Dispatch)**：
-    *   將請求送往目標 MBUS 端口。
-    *   同樣執行**同步等待**，直到所有目標 MBUS 都接收 (Ready=1)。
-4.  **回應收集 (Response Collection)**：
-    *   **寫入**：立即生成 `NOC_OK`。
-    *   **讀取**：進入收集迴圈，等待所有目標 MBUS 回傳數據，並將其聚合 (Aggregation) 成一個 192-bit 的回應包。
-5.  **回傳**：將結果推入 `resp_fifo`。
-
-#### C. Scan Chain 配置 (Configuration)
-*   `CMD_NOC_SCAN_CHAIN` 指令由獨立的組合邏輯 (`comb_command_process`) 處理。
-*   它不經過 `process_thread`，也不會阻塞數據流，專門用於設定 Router 內部的路由表與 ID。
-
-### 4. 設計特點總結
-
-1.  **雙軌制 (Dual-Track)**：
-    *   **數據流**走 FIFO，保證吞吐量與順序。
-    *   **控制流**走 Sideband，保證低延遲與高優先級。
-2.  **絕對同步 (Strict Synchronization)**：
-    *   無論是廣播數據還是命令，Router 都會強制等待所有目標 Ready。這雖然可能被最慢的 PE 拖慢，但保證了系統狀態的一致性 (Lock-step behavior)。
-3.  **無阻塞 (Non-Blocking I/O)**：
-    *   對上層而言，只要 FIFO 沒滿，就可以一直送數據，不用管下層 PE 是否忙碌。Router 會自動處理內部的背壓 (Backpressure)。
-
-*/

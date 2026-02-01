@@ -57,8 +57,8 @@ public:
         noc.command_data(command_data);
 
         // Connect Valid-Ready Interfaces
-        connect_vr_signals(noc.req_in, req_sig);
-        connect_vr_signals(noc.resp_out, resp_sig);
+        connect_vr_signals(noc.noc_ps_in, req_sig);
+        connect_vr_signals(noc.noc_plo_out, resp_sig);
 
         SC_THREAD(test_main);
         SC_THREAD(response_sink); // Add sink to accept responses
@@ -81,7 +81,7 @@ public:
         noc::router_req_t req;
         req.data = 0;
         req.addr = 0;
-        req.is_w = false;
+        //req.is_w = false;
         req_sig.data_sig.write(req);
         req_sig.valid_sig.write(false);
         resp_sig.ready_sig.write(true); // Always ready to receive
@@ -260,7 +260,7 @@ public:
         noc::router_req_t req1;
         req1.data = test_data_val;
         req1.addr = 0x000;
-        req1.is_w = true;
+        //req1.is_w = true;
 
         req_sig.data_sig.write(req1);
         req_sig.valid_sig.write(true);
@@ -281,7 +281,7 @@ public:
         noc::router_req_t req2;
         req2.data = test_data_val;
         req2.addr = 0x000;
-        req2.is_w = true;
+        //req2.is_w = true;
 
         req_sig.data_sig.write(req2);
         req_sig.valid_sig.write(true);

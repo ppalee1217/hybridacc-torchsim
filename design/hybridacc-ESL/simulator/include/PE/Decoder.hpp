@@ -59,11 +59,13 @@ public:
             .loop_break = false,
             .loop_end = false,
             .jump_en = false,
+            .is_swap = false,
             .DL_setaddr = false,
             .DL_setlen = false,
-            .DL_write_en = false,
             .DL_active = false,
             .DL_next = false,
+            .DL_setloop = false,
+            .DL_is_sdma = false,
             .rid3 = 0,
             .rid5 = 0,
             .pd_load = false,
@@ -99,35 +101,69 @@ public:
         signals.func3 = func3;
         signals.loop_end = (w & 1); // loop end flag
 
-        // HALT
-        if(opcode==3 && funct2==3){  signals.halt = true; signals.loop_end = false; return;}
+        // HALT (Opcode 3, Funct2 3, Func3 0)
+        if(opcode==3 && funct2==3){
+            if(func3 == 0) {
+                 signals.halt = true; signals.loop_end = false; return;
+            }
+            // SWAPDM (Opcode 3, Funct2 3, Func3 4)
+            else if(func3 == 4) {
+                 signals.is_swap = true; return;
+            }
+            return;
+        }
 
         // NOP
         if(opcode==2 && funct2==0){ signals.nop = true; return;}
 
-        // DL.ADDR / DL.LEN
-        if(opcode==0 && funct2==1){
+        // SDMA.ADDR / SDMA.LEN (Opcode 0, Funct2 0)
+        if(opcode==0 && funct2==0){
             int bits6_1 = payload & 0x3F;
             int bit0 = (payload >> 6) & 0x1;
-            int val = (func3<<7) | (bits6_1<<1) | bit0; // 10-bit
+            int val = (func3<<7) | (bits6_1<<1) | bit0; // 10-bit imm
             signals.imm = val;
+            signals.DL_is_sdma = true;
             if(func1==0) signals.DL_setaddr = true; else signals.DL_setlen = true;
             return;
         }
 
-        // DL Loads / Broadcast Loads
+        // LDMA.ADDR / LDMA.LEN (Opcode 0, Funct2 1)
+        if(opcode==0 && funct2==1){
+            int bits6_1 = payload & 0x3F;
+            int bit0 = (payload >> 6) & 0x1;
+            int val = (func3<<7) | (bits6_1<<1) | bit0; // 10-bit imm
+            signals.imm = val;
+            signals.DL_is_sdma = false;
+            if(func1==0) signals.DL_setaddr = true; else signals.DL_setlen = true;
+            return;
+        }
+
+        // LDMA.LOOP / SDMA.LOOP (Opcode 1, Funct2 1)
+        if(opcode==1 && funct2==1){
+            int bits6_1 = payload & 0x3F;
+            int bit0 = (payload >> 6) & 0x1;
+            int val = (func3<<7) | (bits6_1<<1) | bit0; // 10-bit imm
+            signals.imm = val;
+            signals.DL_setloop = true;
+            // func1=0: LDMA.LOOP, func1=1: SDMA.LOOP
+            if(func1==0) signals.DL_is_sdma = false; else signals.DL_is_sdma = true;
+            return;
+        }
+
+        // DL Loads / Broadcast Loads (LDMA.L*)
         if(opcode==0 && funct2==2){
             int stride = (w>>10)&0x7;
             signals.imm = stride;
             signals.DL_active = true;
+            signals.DL_is_sdma = false; // LDMA
         }
 
-        // DL Store (only SD simplified -> just advance base)
+        // DL Store (only SD simplified -> just advance base) (SDMA.SD)
         if(opcode==0 && funct2==3 && func3==3){
             int stride = (w>>10)&0x7;
             signals.imm = stride;
-            signals.DL_write_en = true;
             signals.DL_active = true;
+            signals.DL_is_sdma = true; // SDMA
             return;
         }
 

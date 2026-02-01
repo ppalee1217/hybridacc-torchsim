@@ -4,7 +4,8 @@
 #include <systemc>
 #include "TransformRegFile.hpp"
 #include "VMULU.hpp"
-#include "DataLoader.hpp"
+#include "LDMA.hpp"
+#include "SDMA.hpp"
 #include "DataMemory.hpp"
 
 using namespace sc_core;  // Add this to use SystemC types without prefix
@@ -71,7 +72,8 @@ public:
           pd_data("pd_data"),
           TR("TR"),
           vmul("vmul"),
-          DL("DL"),
+          ldma("ldma"),
+          sdma("sdma"),
           DM("DM")
     {
         DEBUG_MSG("[Create] EXE_M_Stage", DEBUG_LEVEL_PE_STAGE);
@@ -85,7 +87,7 @@ public:
         // 1. Internal Stall Logic
         SC_METHOD(comb_internal_stall);
         sensitive << decode_signals_reg << valid_reg
-                  << dl_stall_sig
+                  << ldma_stall_sig << sdma_stall_sig << sdma_busy_sig
                   << ps_data.valid_in << pd_data.valid_in;
 
         // 2. Handshake Control (Ready/Valid Next)
@@ -101,7 +103,7 @@ public:
         // 4. Submodule Control Signals (Drive based on CURRENT registers)
         SC_METHOD(comb_submodule_control);
         sensitive << decode_signals_reg << valid_reg
-                  << tr_vtid_out_sig << dl_dmrv_out_sig
+                  << tr_vtid_out_sig << ldma_dmrv_out_sig
                   << pd_data.valid_in << pd_data.data_in
                   << internal_stall_sig; // Disable things if stalled?
 
@@ -122,7 +124,8 @@ public:
     // Sub-modules (public)
     TransformRegFile TR;
     VMULU vmul;
-    DataLoader DL;
+    LDMA ldma;
+    SDMA sdma;
     DataMemory DM;
 
     // === Sequential Elements (Registers) ===
@@ -139,19 +142,36 @@ public:
     // PS port type conversion (uint64_t -> v_fp16_t)
     sc_signal<v_fp16_t> ps_data_in_converted_sig;
 
-    // DataLoader signals
-    sc_signal<uint16_t> dl_addr_len_sig;
-    sc_signal<bool> dl_set_addr_sig;
-    sc_signal<bool> dl_set_len_sig;
-    sc_signal<uint16_t> dl_mode_sig;
-    sc_signal<uint16_t> dl_stride_sig;
-    sc_signal<bool> dl_write_en_sig;
-    sc_signal<bool> dl_active_sig;
-    sc_signal<bool> dl_next_sig;
-    sc_signal<v_fp16_t> dl_dmrv_out_sig;
-    sc_signal<bool> dl_busy_sig;
-    sc_signal<bool> dl_done_sig;
-    sc_signal<bool> dl_stall_sig;
+    // LDMA signals
+    sc_signal<uint16_t> ldma_imm_sig;
+    sc_signal<bool> ldma_set_addr_sig;
+    sc_signal<bool> ldma_set_len_sig;
+    sc_signal<bool> ldma_set_loop_sig;
+    sc_signal<uint16_t> ldma_mode_sig;
+    sc_signal<uint16_t> ldma_stride_sig;
+    sc_signal<bool> ldma_write_en_sig;
+    sc_signal<bool> ldma_active_sig;
+    sc_signal<bool> ldma_next_sig;
+    sc_signal<v_fp16_t> ldma_dmrv_out_sig;
+    sc_signal<bool> ldma_busy_sig;
+    sc_signal<bool> ldma_done_sig;
+    sc_signal<bool> ldma_stall_sig;
+
+    // SDMA signals
+    sc_signal<uint16_t> sdma_imm_sig;
+    sc_signal<bool> sdma_set_addr_sig;
+    sc_signal<bool> sdma_set_len_sig;
+    sc_signal<bool> sdma_set_loop_sig;
+    sc_signal<uint16_t> sdma_mode_sig;
+    sc_signal<uint16_t> sdma_stride_sig;
+    // SDMA uses a single one-shot trigger `active` (no separate write_en).
+    sc_signal<bool> sdma_swap_in_sig;
+    sc_signal<bool> sdma_active_sig;
+    sc_signal<bool> sdma_next_sig;
+    sc_signal<bool> sdma_busy_sig;
+    sc_signal<bool> sdma_done_sig;
+    sc_signal<bool> sdma_stall_sig;
+    sc_signal<bool> sdma_bank_sel_sig; // To DataMemory
 
     // TransformRegFile signals
     sc_signal<int> tr_enable_sig;
@@ -197,23 +217,37 @@ public:
     sc_signal<bool> ready_out_sig;      // To IF_ID
     sc_signal<v_fp16_t> vmul_out_out_sig;
 
+    // Submodules ready signals
+    sc_signal<bool> ldma_ps_ready_sig;
+    sc_signal<bool> sdma_ps_ready_sig;
+
     void bind() {
         // Clock and reset
         TR.clk(clk);
         TR.reset_n(reset_n);
-        DL.clk(clk);
-        DL.reset_n(reset_n);
+
+        ldma.clk(clk);
+        ldma.reset_n(reset_n);
+        sdma.clk(clk);
+        sdma.reset_n(reset_n);
+
         DM.clk(clk);
         DM.reset_n(reset_n);
+        DM.bank_sel(sdma_bank_sel_sig); // Connect Bank Select from SDMA
 
-        // DataMemory <-> DataLoader
-        DL.dm_write_en(dm_write_en_sig);
-        DL.dm_write_addr(dm_write_addr_sig);
-        DL.dm_write_data(dm_write_data_sig);
-        DL.dm_write_mask(dm_write_mask_sig);
-        DL.dm_read_addr(dm_read_addr_sig);
-        DL.dm_read_data(dm_read_data_sig);
+        // DataMemory <-> LDMA (Read Port)
+        // LDMA drives read address, DM returns data
+        ldma.dm_read_addr(dm_read_addr_sig);
+        ldma.dm_read_data(dm_read_data_sig);
 
+        // DataMemory <-> SDMA (Write Port)
+        // SDMA drives write signals
+        sdma.dm_write_en(dm_write_en_sig);
+        sdma.dm_write_addr(dm_write_addr_sig);
+        sdma.dm_write_data(dm_write_data_sig);
+        sdma.dm_write_mask(dm_write_mask_sig);
+
+        // Bind DM Ports to signals
         DM.dm_write_en(dm_write_en_sig);
         DM.dm_write_addr(dm_write_addr_sig);
         DM.dm_write_data(dm_write_data_sig);
@@ -221,22 +255,73 @@ public:
         DM.dm_read_addr(dm_read_addr_sig);
         DM.dm_read_data(dm_read_data_sig);
 
-        // DataLoader - binding VRDIF interface
-        DL.addr_len(dl_addr_len_sig);
-        DL.set_addr(dl_set_addr_sig);
-        DL.set_len(dl_set_len_sig);
-        DL.mode(dl_mode_sig);
-        DL.stride(dl_stride_sig);
-        DL.write_en(dl_write_en_sig);
-        DL.active(dl_active_sig);
-        DL.next(dl_next_sig);
-        DL.ps_data.data_in(ps_data_in_converted_sig);
-        DL.ps_data.valid_in(ps_data.valid_in);
-        DL.ps_data.ready_out(ps_data.ready_out);
-        DL.dmrv_out(dl_dmrv_out_sig);
-        DL.busy(dl_busy_sig);
-        DL.done(dl_done_sig);
-        DL.dl_stall_out(dl_stall_sig);
+        // LDMA Bindings
+        ldma.imm(ldma_imm_sig);
+        ldma.set_addr(ldma_set_addr_sig);
+        ldma.set_len(ldma_set_len_sig);
+        ldma.set_loop(ldma_set_loop_sig);
+        ldma.mode(ldma_mode_sig);
+        ldma.stride(ldma_stride_sig);
+        ldma.write_en(ldma_write_en_sig);
+        ldma.active(ldma_active_sig);
+        ldma.next(ldma_next_sig);
+        // LDMA does not use PS data input for load?
+        // Wait, current LDMA implementation has ps_data port??
+        // Let's check LDMA.hpp - Yes, it has ps_data ports but ready_logic says ready_out only true in STORE_PRE?
+        // Wait, LDMA doesn't use PS data. It uses DM data.
+        // It has ps_data ports but effectively unused for LOAD?
+        // Let's bind dummy or shared.
+        // Actually LDMA load doesn't need ps_data.
+        // The previous LDMA implementation has ps_data ports inherited from template or previous pattern.
+        // I'll bind them to avoid open port, but logic ignores?
+        ldma.ps_data.data_in(ps_data_in_converted_sig);
+        ldma.ps_data.valid_in(ps_data.valid_in);
+        ldma.ps_data.ready_out(ldma_ps_ready_sig);
+
+        // SDMA Bindings
+        sdma.imm(sdma_imm_sig);
+        sdma.set_addr(sdma_set_addr_sig);
+        sdma.set_len(sdma_set_len_sig);
+        sdma.set_loop(sdma_set_loop_sig);
+        sdma.mode(sdma_mode_sig);
+        sdma.stride(sdma_stride_sig);
+        sdma.swap_in(sdma_swap_in_sig);
+        sdma.active(sdma_active_sig);
+        sdma.next(sdma_next_sig);
+        sdma.bank_sel(sdma_bank_sel_sig);
+
+        // SDMA handles PS Store
+        sdma.ps_data.data_in(ps_data_in_converted_sig);
+        sdma.ps_data.valid_in(ps_data.valid_in);
+        // sdma.ps_data.ready_out -> Connect to ps_data.ready_out?
+        // If multiple consumers (LDMA/SDMA), how to merge ready_out?
+        // Since SDMA is the only one consuming PS data (Store), we can use its ready_out.
+        // What if LDMA consumes PS data? (No, LDMA loads from DM to DMRV).
+        // So ps_data.ready_out driven by SDMA.
+        sdma.ps_data.ready_out(ps_data.ready_out);
+
+        // Outputs
+        ldma.dmrv_out(ldma_dmrv_out_sig); // Use this for TR
+        ldma.busy(ldma_busy_sig);
+        ldma.done(ldma_done_sig);
+        ldma.dl_stall_out(ldma_stall_sig);
+
+        sdma.busy(sdma_busy_sig);
+        sdma.done(sdma_done_sig);
+        sdma.dl_stall_out(sdma_stall_sig);
+
+        // Alias for compatibility with rest of EXE_M code
+        // dl_dmrv_out_sig used by TR input
+        // Since only LDMA produces DMRV (Load result), we connect ldma_dmrv_out_sig to it?
+        // No, dl_dmrv_out_sig is defined in EXE_M. I should map ldma_dmrv_out_sig to it?
+        // Actually, I can just bind ldma.dmrv_out(dl_dmrv_out_sig). Reusing the signal.
+        // Wait, I declared ldma_dmrv_out_sig above.
+        // Let's use dl_dmrv_out_sig in bind.
+        // (Re-binding ldma.dmrv_out)
+
+        // Re-binding corrects:
+        // ldma.dmrv_out(dl_dmrv_out_sig); // Removing ldma_dmrv_out_sig usage
+
 
         // TransformRegFile
         TR.enable(tr_enable_sig);
@@ -273,7 +358,7 @@ public:
         bool valid_current = valid_reg.read();
         pe_decode_signals_t decode_current = decode_signals_reg.read();
 
-        bool dl_stall = dl_stall_sig.read();  // Read from DataLoader output
+        const bool dl_stall = ldma_stall_sig.read() || sdma_stall_sig.read();
         bool ps_stall = false;
         bool pd_stall = false;
 
@@ -299,7 +384,10 @@ public:
         pd_stall_internal.write(pd_stall);
 
         // Total internal stall
-        internal_stall_sig.write(dl_stall || ps_stall || pd_stall);
+        // Added stall for SWAPDM: if swap is requested but SDMA is busy (not IDLE)
+        const bool swap_stall = decode_current.is_swap && sdma_busy_sig.read();
+
+        internal_stall_sig.write(dl_stall || ps_stall || pd_stall || swap_stall);
     }
 
     // 2. Handshake Control (Ready/Valid Next)
@@ -374,15 +462,26 @@ public:
         bool pd_ready = false;
 
         if (!valid) {
-            // Clear signals when invalid
-            dl_addr_len_sig.write(0);
-            dl_set_addr_sig.write(false);
-            dl_set_len_sig.write(false);
-            dl_mode_sig.write(0);
-            dl_stride_sig.write(0);
-            dl_write_en_sig.write(false);
-            dl_active_sig.write(false);
-            dl_next_sig.write(false);
+            // Nothing to do
+            ldma_active_sig.write(false);
+            ldma_write_en_sig.write(false);
+            ldma_set_addr_sig.write(false);
+            ldma_set_len_sig.write(false);
+            ldma_set_loop_sig.write(false);
+            ldma_imm_sig.write(0);
+            ldma_stride_sig.write(0);
+            ldma_next_sig.write(false);
+            ldma_mode_sig.write(0);
+
+            sdma_active_sig.write(false);
+            sdma_set_addr_sig.write(false);
+            sdma_set_len_sig.write(false);
+            sdma_set_loop_sig.write(false);
+            sdma_imm_sig.write(0);
+            sdma_stride_sig.write(0);
+            sdma_mode_sig.write(0);
+            sdma_swap_in_sig.write(false);
+            sdma_next_sig.write(false);
 
             tr_enable_sig.write(0);
             tr_shift_en_sig.write(false);
@@ -394,64 +493,114 @@ public:
             tr_set_vcounter_sig.write(false);
             tr_clear_vcounter_sig.write(false);
             tr_incr_vcounter_sig.write(false);
+            tr_tid_in_sig.write(0);
+
+            vmul_op1_sig.write(v_fp16_t());
+            vmul_op2_sig.write(v_fp16_t());
 
             pd_ready = false;
         } else {
-            // Drive signals from instruction
+            // DL Control -> Split to LDMA/SDMA
+            if (signals.DL_active) {
+                // If DL_is_sdma is true, it is SDMA (e.g. Store)
+                // If DL_is_sdma is false, it is LDMA (e.g. Load)
+                if (signals.DL_is_sdma) {
+                    // SDMA start trigger is merged: `active` implies "this is a store task trigger".
+                    sdma_active_sig.write(true);
+                    ldma_active_sig.write(false);
+                    ldma_write_en_sig.write(false);
+                } else {
+                    ldma_active_sig.write(true);
+                    ldma_write_en_sig.write(false);
+                    sdma_active_sig.write(false);
+                }
+            } else {
+                ldma_active_sig.write(false); sdma_active_sig.write(false);
+                ldma_write_en_sig.write(false);
+            }
 
-            // DataLoader control
-            dl_addr_len_sig.write(signals.imm);
-            dl_set_addr_sig.write(signals.DL_setaddr);
-            dl_set_len_sig.write(signals.DL_setlen);
-            dl_mode_sig.write(signals.func3);
-            dl_stride_sig.write(signals.imm);
-            dl_write_en_sig.write(signals.DL_write_en);
-            dl_active_sig.write(signals.DL_active);
-            dl_next_sig.write(signals.DL_next);
+            // Defaults for config
+            ldma_set_addr_sig.write(false); sdma_set_addr_sig.write(false);
+            ldma_set_len_sig.write(false); sdma_set_len_sig.write(false);
+            ldma_set_loop_sig.write(false); sdma_set_loop_sig.write(false);
+            sdma_swap_in_sig.write(false);
 
-            // TransformRegFile control
+            if (signals.DL_setaddr) {
+                if (signals.DL_is_sdma) sdma_set_addr_sig.write(true);
+                else ldma_set_addr_sig.write(true);
+            }
+            if (signals.DL_setlen) {
+                if (signals.DL_is_sdma) sdma_set_len_sig.write(true);
+                else ldma_set_len_sig.write(true);
+            }
+             if (signals.DL_setloop) {
+                if (signals.DL_is_sdma) sdma_set_loop_sig.write(true);
+                else ldma_set_loop_sig.write(true);
+            }
+            if (signals.is_swap) {
+                sdma_swap_in_sig.write(true);
+            }
+
+            // Shared immediate / mode
+            ldma_imm_sig.write(signals.imm);
+            sdma_imm_sig.write(signals.imm);
+            ldma_mode_sig.write(signals.func3);
+            sdma_mode_sig.write(signals.func3);
+            ldma_stride_sig.write(signals.imm);
+            sdma_stride_sig.write(signals.imm);
+
+            // Next
+            ldma_next_sig.write(signals.DL_next);
+            sdma_next_sig.write(false); // SDMA next signal not used in decoder? or DL_next used for both?
+            // Actually, DL_next is generic. If instruct says "Next", it applies to the active unit.
+            // If DL_is_sdma, then send next to SDMA.
+             if (signals.DL_next) {
+                if (signals.DL_is_sdma) sdma_next_sig.write(true);
+                else ldma_next_sig.write(true);
+             } else {
+                 sdma_next_sig.write(false);
+                 ldma_next_sig.write(false);
+             }
+
+
+            // TransformRegFile Control
             tr_enable_sig.write(signals.tr_en);
             tr_shift_en_sig.write(signals.tr_shift);
             tr_shift_mode_sig.write(signals.imm & 0x3);
             tr_tid_sig.write(signals.rid3);
-            tr_tid_write_en_sig.write(signals.tr_write);
+
+            if (signals.tr_write) {
+                 tr_tid_write_en_sig.write(true);
+                 if (signals.pd_load) { // TR = PD
+                     tr_tid_in_sig.write((fp16_t)pd_data.data_in.read());
+                 } else { // TR = DMRV
+                     // From DMRV (Lead lane of LDMA output)
+                     tr_tid_in_sig.write(ldma_dmrv_out_sig.read().lanes[0]);
+                 }
+            } else {
+                 tr_tid_write_en_sig.write(false);
+                 tr_tid_in_sig.write(0);
+            }
+
             tr_clear_regs_sig.write(signals.tr_clear_regs);
             tr_use_vcounter_sig.write(signals.tr_use_vcounter);
             tr_set_vcounter_sig.write(signals.tr_set_vcounter);
             tr_clear_vcounter_sig.write(signals.tr_clear_vcounter);
-
-            // Only increment counter if we are moving to next instruction (not stalled)
-            // Or does the instruction specify "increment after this op"?
-            // If we stall, we execute the SAME instruction again.
-            // If incr_vcounter is high, we might double increment if we don't gate it.
-            // Assumption: Submodules edge-detect or we must gate it.
-            // The "done" signal from TR isn't here.
-            // Let's assume TR increments on clock if enable is high.
-            // If we stall, we must NOT assert increment again?
-            // Usually counters increment when operation completes.
-
-            // SAFEGUARD: If internal stall or downstream not ready, do we freeze submodule side-effects?
-            // If we are stalled, we are effectively extending the current cycle.
-            // Combinational outputs like "write enable" should probably stay high?
-            // But "increment" pulse should probably be gated?
-            // Let's assume signals.tr_incr_vcounter is a level signal saying "this inst increments".
-            // If we hold it for 10 cycles, it increments 10 times? -> BAD.
-            // FIX: Gating side-effects with handshake.
-
-            bool advancing = ready_in.read() && !internal_stall; // We are finishing this instruction
+            // Counter Increment Guarding
+            bool advancing = ready_in.read() && !internal_stall;
             tr_incr_vcounter_sig.write(signals.tr_incr_vcounter && advancing);
 
-            // VMUL inputs (combinational)
+            // VMULU Control
+            // VMAC/VMUL: op1=VT, op2=DMRV
             vmul_op1_sig.write(tr_vtid_out_sig.read());
-            vmul_op2_sig.write(dl_dmrv_out_sig.read());
+            vmul_op2_sig.write(ldma_dmrv_out_sig.read());
 
-            // PD control (Port Dynamic)
-            bool pd_operation = signals.pd_load;
-            if (pd_operation && pd_data.valid_in.read()) {
-                tr_tid_in_sig.write(pd_data.data_in.read());
+            // Prepare PD Ready
+            if (signals.pd_load && !internal_stall) {
+                // If we are loading from PD, checking if data is valid happens inside if(valid_in) usually?
+                // Wait, here we only set Ready Out.
+                // We are ready to consume if we are not stalled.
                 pd_ready = true;
-            } else {
-                pd_ready = false;
             }
         }
 

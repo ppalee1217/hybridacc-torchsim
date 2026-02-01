@@ -30,8 +30,6 @@ int sc_main(int argc, char* argv[]) {
             pe.reset();
 
             // Initialize router control signals
-            pe.set_router_enable(true);
-            pe.set_router_mode(PERouterMode::PLI_FROM_BUS_PLO_TO_BUS);
 
             // Check initial state
             assert(!pe.is_running());
@@ -46,8 +44,6 @@ int sc_main(int argc, char* argv[]) {
             pe.reset();
 
             // Initialize router
-            pe.set_router_enable(true);
-            pe.set_router_mode(PERouterMode::PLI_FROM_BUS_PLO_TO_BUS);
 
             // Create simple program: NOP + HALT
             std::vector<uint16_t> program = {
@@ -74,8 +70,6 @@ int sc_main(int argc, char* argv[]) {
             pe.reset();
 
             // Initialize router
-            pe.set_router_enable(true);
-            pe.set_router_mode(PERouterMode::PLI_FROM_BUS_PLO_TO_BUS);
 
             std::vector<uint16_t> program = {
                 NOP_INST,  // NOP
@@ -108,11 +102,9 @@ int sc_main(int argc, char* argv[]) {
             pe.reset();
 
             // Initialize router for LN mode
-            pe.set_router_enable(true);
-            pe.set_router_mode(PERouterMode::PLI_FROM_LN_PLO_TO_LN);
 
             std::vector<uint16_t> program = {
-                NOP_INST,  // Placeholder
+                VPSUM_INST,  // VPSUM - Expects PLI input, produces PLO output
                 NOP_INST,
                 HALT_INST  // HALT
             };
@@ -148,8 +140,6 @@ int sc_main(int argc, char* argv[]) {
             pe.reset();
 
             // Initialize router
-            pe.set_router_enable(true);
-            pe.set_router_mode(PERouterMode::PLI_FROM_BUS_PLO_TO_BUS);
 
             std::vector<uint16_t> program = {
                 NOP_INST,  // Placeholder
@@ -185,8 +175,6 @@ int sc_main(int argc, char* argv[]) {
             pe.reset();
 
             // Initialize router
-            pe.set_router_enable(true);
-            pe.set_router_mode(PERouterMode::PLI_FROM_BUS_PLO_TO_BUS);
 
             std::vector<uint16_t> program = {
                 NOP_INST,  // NOP
@@ -199,11 +187,10 @@ int sc_main(int argc, char* argv[]) {
             bool completed = pe.run_until_halt(100);
             assert(completed);
 
-            try {
-                pe.assert_completion(100, "Simple program should complete quickly");
-                std::cout << "✓ Completion assertion passed" << std::endl;
-            } catch (const std::exception& e) {
-                std::cout << "✗ Completion assertion failed: " << e.what() << std::endl;
+            if (completed) {
+                 std::cout << "✓ Completion assertion passed" << std::endl;
+            } else {
+                 std::cout << "✗ Completion assertion failed" << std::endl;
             }
 
             auto metrics = pe.get_performance_metrics();
@@ -211,11 +198,10 @@ int sc_main(int argc, char* argv[]) {
             std::cout << "  Instructions executed: " << metrics.instruction_count << std::endl;
             std::cout << "  Expected: 2 (NOP + HALT)" << std::endl;
 
-            try {
-                pe.assert_instruction_count(2, "Expected 2 instructions (NOP + HALT)");
+            if (metrics.instruction_count == 2) {
                 std::cout << "✓ Instruction count assertion passed" << std::endl;
-            } catch (const std::exception& e) {
-                std::cout << "Note: Instruction count assertion: " << e.what() << std::endl;
+            } else {
+                std::cout << "Note: Instruction count assertion failed: expected 2, got " << metrics.instruction_count << std::endl;
             }
 
             std::cout << "✓ Error handling test completed" << std::endl;

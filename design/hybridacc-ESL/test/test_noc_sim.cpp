@@ -114,10 +114,10 @@ public:
         noc.command_data(command_data);
 
         // Connect Valid-Ready Interfaces
-        connect_vr_signals(noc.req0_in, req0_sig);
-        connect_vr_signals(noc.req1_in, req1_sig);
-        connect_vr_signals(noc.req2_in, req2_sig);
-        connect_vr_signals(noc.resp2_out, resp2_sig);
+        connect_vr_signals(noc.noc_ps_in, req0_sig);
+        connect_vr_signals(noc.noc_pli_in, req1_sig);
+        connect_vr_signals(noc.noc_plo_in, req2_sig);
+        connect_vr_signals(noc.noc_plo_out, resp2_sig);
 
         SC_THREAD(test_main);
 
@@ -994,7 +994,7 @@ public:
         for(size_t p = 0; p < NUM_PORTS; ++p) {
             for(size_t q = 0; q < NUM_PES_PER_PORT; ++q) {
                 // check if PE is active (enabled)
-                if (!noc.pes[p][q].router_enable.read()) {
+                if (!noc.router_enable[p][q].read()) {
                     continue;
                 }
 

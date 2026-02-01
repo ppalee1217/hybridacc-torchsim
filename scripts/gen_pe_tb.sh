@@ -33,7 +33,7 @@ generate_testbench() {
 
     # Step 2: Generate PE ASM binary
     ASSEMBLER=design/hybridacc-pe-isa/tools/bin/ha-asm
-    $ASSEMBLER testbench/pe/$TB_NAME/pe_program.asm -o ./output/pe-sim/$TB_NAME/pe_program.bin
+    $ASSEMBLER testbench/pe/$TB_NAME/pe_program.asm -o ./output/pe-sim/$TB_NAME/pe_program.bin --json ./output/pe-sim/$TB_NAME/pe_program.json
 }
 
 TB_NAME=$1

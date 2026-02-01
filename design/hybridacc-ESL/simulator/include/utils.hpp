@@ -106,11 +106,12 @@ struct request_t {
     // 輸出運算符，SystemC 訊號需要
     friend std::ostream& operator<<(std::ostream& os, const request_t& req) {
         os << "request_t{data=" << std::hex << req.data
-           << ", addr=0x" << std::hex << req.addr << "}";
+           << ", addr=0x" << req.addr
+           << ", mask=" << req.mask << std::dec << "}";
         return os;
     }
 
-    // sc_trace for noc_request_t
+    // sc_trace for request_t
     friend void sc_trace(sc_core::sc_trace_file* tf, const request_t& req, const std::string& name) {
         sc_core::sc_trace(tf, req.data, name + ".data");
         sc_core::sc_trace(tf, req.addr, name + ".addr");
@@ -119,7 +120,7 @@ struct request_t {
 
 typedef request_t<uint64_t, uint16_t> noc_request_t;
 
-// struct for NoC 2 Read Request (only address)
+// struct for NoC Read Request (only address)
 struct noc_addr_req_t {
     uint16_t addr;
 
@@ -130,7 +131,7 @@ struct noc_addr_req_t {
     }
 
     friend std::ostream& operator<<(std::ostream& os, const noc_addr_req_t& req) {
-        os << "noc_addr_req_t{addr=0x" << std::hex << req.addr << "}";
+        os << "noc_addr_req_t{addr=0x" << std::hex << req.addr << std::dec << "}";
         return os;
     }
 
@@ -223,15 +224,18 @@ struct pe_decode_signals_t {
     bool loop_break;
     bool loop_end;
     bool jump_en;
+    // Swap Control
+    bool is_swap;
 
     // --- Stage EXE/M --- //
     // DL control signals
     bool DL_setaddr;
     bool DL_setlen;
-    bool DL_write_en;
     // DL_mode =  func3
     bool DL_active;
     bool DL_next;
+    bool DL_setloop;
+    bool DL_is_sdma;
     // TR control signals
     int rid3;
     int rid5;
@@ -277,7 +281,6 @@ inline std::ostream& operator<<(std::ostream& os, const pe_decode_signals_t& sig
        << "jump_en=" << sig.jump_en << ", "
        << "DL_setaddr=" << sig.DL_setaddr << ", "
        << "DL_setlen=" << sig.DL_setlen << ", "
-       << "DL_write_en=" << sig.DL_write_en << ", "
        << "DL_active=" << sig.DL_active << ", "
        << "DL_next=" << sig.DL_next << ", "
        << "rid3=" << sig.rid3 << ", "
@@ -323,7 +326,6 @@ inline void sc_trace(sc_core::sc_trace_file* tf, const pe_decode_signals_t& sig,
     sc_core::sc_trace(tf, sig.jump_en, name + ".jump_en");
     sc_core::sc_trace(tf, sig.DL_setaddr, name + ".DL_setaddr");
     sc_core::sc_trace(tf, sig.DL_setlen, name + ".DL_setlen");
-    sc_core::sc_trace(tf, sig.DL_write_en, name + ".DL_write_en");
     sc_core::sc_trace(tf, sig.DL_active, name + ".DL_active");
     sc_core::sc_trace(tf, sig.DL_next, name + ".DL_next");
     sc_core::sc_trace(tf, sig.rid3, name + ".rid3");

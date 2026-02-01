@@ -54,8 +54,8 @@ public:
 
     void reset() { loopstack.clear(); }
     void loopIn(uint16_t start_pc, uint16_t count){
-        if(count <= 1) return; // trivial loop 不建立
-        LoopFrame fr{start_pc, count};
+        if(count <= 0) return; // trivial loop 不建立
+        LoopFrame fr{start_pc, (uint16_t)(count+1)}; // N-1 encoding
         loopstack.push_back(fr);
     }
     void loopBreak(){ if(!loopstack.empty()) loopstack.pop_back(); }
