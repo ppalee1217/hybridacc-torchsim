@@ -137,11 +137,11 @@ public:
         pe.router_enable(router_enable);
         pe.router_mode(router_mode);
         pe.pe_busy(pe_busy);
-        connect_vr_signals(pe.noc_ps_req, ps_sig);
-        connect_vr_signals(pe.noc_pd_req, pd_sig);
-        connect_vr_signals(pe.noc_pli_req, pli_sig);
-        connect_vr_signals(pe.noc_plo_req, plo_req_sig);
-        connect_vr_signals(pe.noc_plo_resp, plo_resp_sig);
+        connect_vr_signals(pe.noc_ps_in, ps_sig);
+        connect_vr_signals(pe.noc_pd_in, pd_sig);
+        connect_vr_signals(pe.noc_pli_in, pli_sig);
+        connect_vr_signals(pe.noc_plo_in, plo_req_sig);
+        connect_vr_signals(pe.noc_plo_out, plo_resp_sig);
 
         connect_vr_signals(pe.ln_pli, ln_pli_sig);
         connect_vr_signals(pe.ln_plo, ln_plo_sig);
@@ -258,14 +258,14 @@ private:
     }
 
     void program_pe() {
-        // Load program through PS command messages (addr=0x100)
+        // Load program through PS command messages (addr=0x40)
         for (size_t i = 0; i < program.size(); i++) {
             uint64_t cmd = 2; // CMD_LOAD_PROGRAM
             cmd |= (static_cast<uint64_t>(i * sizeof(uint16_t)) << 4);
-            cmd |= (static_cast<uint64_t>(program[i]) << 20);
+            cmd |= (static_cast<uint64_t>(program[i]) << 16);
 
             noc_request_t req{};
-            req.addr = 0x0100;
+            req.addr = 0x40;
             req.data = cmd;
             req.mask = 0;
             send_req(ps_sig, req);
@@ -275,7 +275,7 @@ private:
     void start_pe() {
         // CMD_START_PE = 4
         noc_request_t req{};
-        req.addr = 0x0100;
+        req.addr = 0x40;
         req.data = 4;
         req.mask = 0;
         send_req(ps_sig, req);

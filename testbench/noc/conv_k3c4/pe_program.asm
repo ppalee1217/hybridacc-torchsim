@@ -51,7 +51,6 @@ calculate_psum:
     TSHIFT K3
     LOOPEND
 
-
     LOOPEND  # End global loop
 
     HALT

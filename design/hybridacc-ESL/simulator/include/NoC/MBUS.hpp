@@ -131,7 +131,12 @@ public:
     MBUS(sc_module_name name) : MBUS(name, NUM_PES_DEFAULT) {}
 
     void dump_state() {
-        // ... (unchanged)
+        std::cout << "=== MBUS Configuration Dump ===" << std::endl;
+        for (size_t i = 0; i < num_pes; ++i) {
+            ScanChainFormat config = pe_scan_chain_signals_reg[i].read();
+            std::cout << "PE[" << i << "] Config - " << config << std::endl;
+        }
+        std::cout << "=======================" << std::endl;
     }
 
 private:
@@ -194,14 +199,14 @@ private:
         bool command = (addr & 0x40); // addr[6] = 1 for command
         uint8_t tag = addr & 0x3F;    // addr[5:0] = PE ID tag
 
-        // Note: Command might broadcast or be specific.
-        // If command, maybe to specific ID? Or all?
-        // Usually command is specific.
-
         uint64_t mask = 0;
         for (size_t i = 0; i < num_pes; ++i) {
             ScanChainFormat config = pe_scan_chain_signals_reg[i].read();
             if (!config.enable) continue;
+            if (command) {
+                mask |= (1ULL << i);
+                continue; // Command goes to all enabled PEs, ignore tag
+            }
 
             uint8_t pe_channel_id = 0;
             switch (expected_channel) {
@@ -229,7 +234,7 @@ private:
         bool scan = scan_chain_enable.read();
         bool valid = noc_ps_to_bus_req.valid_in.read();
         noc_request_t req = noc_ps_to_bus_req.data_in.read();
-        uint64_t mask = (!scan && valid) ? calculate_target_pe_mask(req.addr, NOC_CHANNEL_PS) : 0;
+        uint64_t mask = (!scan) ? calculate_target_pe_mask(req.addr, NOC_CHANNEL_PS) : 0;
 
         bool all_ready = true;
         for(size_t i=0; i<num_pes; ++i) if(mask & (1ULL<<i)) if(!bus_to_pe_ps_req[i].ready_in.read()) all_ready=false;
@@ -247,7 +252,7 @@ private:
         bool scan = scan_chain_enable.read();
         bool valid = noc_pd_to_bus_req.valid_in.read();
         noc_request_t req = noc_pd_to_bus_req.data_in.read();
-        uint64_t mask = (!scan && valid) ? calculate_target_pe_mask(req.addr, NOC_CHANNEL_PD) : 0;
+        uint64_t mask = (!scan) ? calculate_target_pe_mask(req.addr, NOC_CHANNEL_PD) : 0;
 
         bool all_ready = true;
         for(size_t i=0; i<num_pes; ++i) if(mask & (1ULL<<i)) if(!bus_to_pe_pd_req[i].ready_in.read()) all_ready=false;
@@ -265,7 +270,7 @@ private:
         bool scan = scan_chain_enable.read();
         bool valid = noc_pli_to_bus_req.valid_in.read();
         noc_request_t req = noc_pli_to_bus_req.data_in.read();
-        uint64_t mask = (!scan && valid) ? calculate_target_pe_mask(req.addr, NOC_CHANNEL_PLI) : 0;
+        uint64_t mask = (!scan) ? calculate_target_pe_mask(req.addr, NOC_CHANNEL_PLI) : 0;
 
         bool all_ready = true;
         for(size_t i=0; i<num_pes; ++i) if(mask & (1ULL<<i)) if(!bus_to_pe_pli_req[i].ready_in.read()) all_ready=false;
@@ -283,7 +288,7 @@ private:
         bool scan = scan_chain_enable.read();
         bool valid = noc_plo_to_bus_req.valid_in.read();
         noc_addr_req_t req = noc_plo_to_bus_req.data_in.read();
-        uint64_t mask = (!scan && valid) ? calculate_target_pe_mask(req.addr, NOC_CHANNEL_PLO) : 0;
+        uint64_t mask = (!scan) ? calculate_target_pe_mask(req.addr, NOC_CHANNEL_PLO) : 0;
 
         // Update RX Mask for response cycle
         // Note: Logic simplified; implies atomic read-req then response wait?
@@ -332,11 +337,104 @@ private:
         }
     }
 
-    // Trace support placeholder
+    // Trace support
+    std::string last_state_scan = "SCAN_OFF";
+    std::string last_state_ps = "TX_IDLE";
+    std::string last_state_pd = "TX_IDLE";
+    std::string last_state_pli = "TX_IDLE";
+    std::string last_state_plo_req = "TX_IDLE";
+    std::string last_state_plo_resp = "RX_IDLE";
+    bool trace_init = false;
 public:
     int trace_id = -1;
     void set_trace_id(int id) { trace_id = id; }
-    void trace_process() {}
+    int get_trace_num() const { return 7; }
+    void trace_process() {
+        if (trace_id < 0) return;
+
+        uint32_t tid_scan = trace_id + 1;
+        uint32_t tid_ps = trace_id + 2;
+        uint32_t tid_pd = trace_id + 3;
+        uint32_t tid_pli = trace_id + 4;
+        uint32_t tid_plo_req = trace_id + 5;
+        uint32_t tid_plo_resp = trace_id + 6;
+
+        auto bool_to_json = [](bool v) { return v ? "true" : "false"; };
+        auto trace_state = [&](std::string& last, const std::string& current,
+                               const std::string& cat, uint32_t tid,
+                               const std::string& args) {
+            if (current != last) {
+                TRACE_EVENT(last, cat, TRACE_END, TRACE_PID::MBUS, tid, "{}");
+                TRACE_EVENT(current, cat, TRACE_BEGIN, TRACE_PID::MBUS, tid, args);
+                last = current;
+            }
+        };
+
+        if (!trace_init) {
+            TRACE_THREAD_NAME(TRACE_PID::MBUS, tid_scan, "MBUS ScanChain");
+            TRACE_THREAD_NAME(TRACE_PID::MBUS, tid_ps, "MBUS PS Routing");
+            TRACE_THREAD_NAME(TRACE_PID::MBUS, tid_pd, "MBUS PD Routing");
+            TRACE_THREAD_NAME(TRACE_PID::MBUS, tid_pli, "MBUS PLI Routing");
+            TRACE_THREAD_NAME(TRACE_PID::MBUS, tid_plo_req, "MBUS PLO Req Routing");
+            TRACE_THREAD_NAME(TRACE_PID::MBUS, tid_plo_resp, "MBUS PLO Resp");
+
+            TRACE_EVENT(last_state_scan, "MBUS_Scan", TRACE_BEGIN, TRACE_PID::MBUS, tid_scan, "{}");
+            TRACE_EVENT(last_state_ps, "MBUS_PS", TRACE_BEGIN, TRACE_PID::MBUS, tid_ps, "{}");
+            TRACE_EVENT(last_state_pd, "MBUS_PD", TRACE_BEGIN, TRACE_PID::MBUS, tid_pd, "{}");
+            TRACE_EVENT(last_state_pli, "MBUS_PLI", TRACE_BEGIN, TRACE_PID::MBUS, tid_pli, "{}");
+            TRACE_EVENT(last_state_plo_req, "MBUS_PLO_REQ", TRACE_BEGIN, TRACE_PID::MBUS, tid_plo_req, "{}");
+            TRACE_EVENT(last_state_plo_resp, "MBUS_PLO_RESP", TRACE_BEGIN, TRACE_PID::MBUS, tid_plo_resp, "{}");
+            trace_init = true;
+        }
+
+        // Scan-chain state
+        bool scan_en = scan_chain_enable.read();
+        std::string scan_state = scan_en ? "SCAN_ON" : "SCAN_OFF";
+        trace_state(last_state_scan, scan_state, "MBUS_Scan", tid_scan,
+                    std::string("{\"enable\": ") + bool_to_json(scan_en) + "}");
+
+        // PS routing state
+        bool ps_valid = noc_ps_to_bus_req.valid_in.read();
+        bool ps_ready = noc_ps_to_bus_req.ready_out.read();
+        std::string ps_state = ps_valid ? (ps_ready ? "TX_XFER" : "TX_WAIT_READY") : "TX_IDLE";
+        trace_state(last_state_ps, ps_state, "MBUS_PS", tid_ps,
+                    std::string("{\"valid\": ") + bool_to_json(ps_valid)
+                    + ", \"ready\": " + bool_to_json(ps_ready) + "}");
+
+        // PD routing state
+        bool pd_valid = noc_pd_to_bus_req.valid_in.read();
+        bool pd_ready = noc_pd_to_bus_req.ready_out.read();
+        std::string pd_state = pd_valid ? (pd_ready ? "TX_XFER" : "TX_WAIT_READY") : "TX_IDLE";
+        trace_state(last_state_pd, pd_state, "MBUS_PD", tid_pd,
+                    std::string("{\"valid\": ") + bool_to_json(pd_valid)
+                    + ", \"ready\": " + bool_to_json(pd_ready) + "}");
+
+        // PLI routing state
+        bool pli_valid = noc_pli_to_bus_req.valid_in.read();
+        bool pli_ready = noc_pli_to_bus_req.ready_out.read();
+        std::string pli_state = pli_valid ? (pli_ready ? "TX_XFER" : "TX_WAIT_READY") : "TX_IDLE";
+        trace_state(last_state_pli, pli_state, "MBUS_PLI", tid_pli,
+                    std::string("{\"valid\": ") + bool_to_json(pli_valid)
+                    + ", \"ready\": " + bool_to_json(pli_ready) + "}");
+
+        // PLO request routing state
+        bool plo_req_valid = noc_plo_to_bus_req.valid_in.read();
+        bool plo_req_ready = noc_plo_to_bus_req.ready_out.read();
+        std::string plo_req_state = plo_req_valid ? (plo_req_ready ? "TX_XFER" : "TX_WAIT_READY") : "TX_IDLE";
+        trace_state(last_state_plo_req, plo_req_state, "MBUS_PLO_REQ", tid_plo_req,
+                    std::string("{\"valid\": ") + bool_to_json(plo_req_valid)
+                    + ", \"ready\": " + bool_to_json(plo_req_ready)
+                    + ", \"rx_mask\": " + std::to_string(rx_mask_reg.read()) + "}");
+
+        // PLO response path (PE -> NoC)
+        bool plo_resp_valid = bus_to_noc_plo_resp.valid_out.read();
+        bool plo_resp_ready = bus_to_noc_plo_resp.ready_in.read();
+        std::string plo_resp_state = plo_resp_valid ? (plo_resp_ready ? "RX_XFER" : "RX_WAIT_READY") : "RX_IDLE";
+        trace_state(last_state_plo_resp, plo_resp_state, "MBUS_PLO_RESP", tid_plo_resp,
+                    std::string("{\"valid\": ") + bool_to_json(plo_resp_valid)
+                    + ", \"ready\": " + bool_to_json(plo_resp_ready)
+                    + ", \"rx_mask\": " + std::to_string(rx_mask_reg.read()) + "}");
+    }
 };
 
 } // namespace noc

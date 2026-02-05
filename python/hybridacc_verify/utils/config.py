@@ -1,8 +1,33 @@
 from dataclasses import dataclass
 from typing import Optional
 
-
 MAX_INPUT_WIDTH = 800
+
+SUPPORTED_CONV_MODES_DICR =  {
+            3: 4,
+            5: 2,
+            7: 1,
+            1: 12
+        }
+SUPPORTED_CONV_MODES = [f'k{k}c{c}' for k, c in SUPPORTED_CONV_MODES_DICR.items()]
+
+class ConvMode:
+    K = 3
+    C = 4
+    def __str__(self) -> str:
+        return f'k{self.K}c{self.C}'
+    def __call__(self, mode_str: str) -> None:
+        # Parse mode string like 'k3c4'
+        if not mode_str.startswith('k') or 'c' not in mode_str:
+            raise ValueError(f'Invalid mode string: {mode_str}')
+        k_part, c_part = mode_str[1:].split('c')
+        self.K = int(k_part)
+        self.C = int(c_part)
+    @staticmethod
+    def channels_from_kernel_size(k: int) -> int:
+        if k not in SUPPORTED_CONV_MODES_DICR:
+            raise ValueError(f"Unsupported kernel size: {k}")
+        return SUPPORTED_CONV_MODES_DICR[k]
 class PERouterMode:
     PLI_FROM_LN_PLO_TO_LN = 0
     PLI_FROM_BUS_PLO_TO_LN = 1
@@ -61,9 +86,11 @@ class ConvConfig:
     out_dir: str = './output'
 
     def validate(self):
-        valid_modes = ['k3c4', 'k5c2', 'k7c1', 'k1c12']
-        if self.mode not in valid_modes:
-            raise ValueError(f"mode 必須為 {valid_modes}, 收到: {self.mode}")
+        if self.mode not in SUPPORTED_CONV_MODES:
+            raise ValueError(f"mode 必須為 {SUPPORTED_CONV_MODES}, 收到: {self.mode}")
+
+        conv_mode = ConvMode()
+        conv_mode(self.mode)
         if not (1 <= self.out_ch <= 16):
             raise ValueError(f"out_ch 範圍 1~16, 收到: {self.out_ch}")
         if not (3 <= self.in_width <= MAX_INPUT_WIDTH):

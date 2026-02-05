@@ -2,7 +2,7 @@ import torch
 import math
 import numpy as np
 from typing import Dict, Any, List
-from ..utils.config import ScanChainConfig, PERouterMode, NocConvConfig, NocGemmConfig
+from ..utils.config import ScanChainConfig, PERouterMode, NocConvConfig, NocGemmConfig, ConvMode
 from ..utils.data import TestData
 from ..model.conv import golden_conv2d
 from ..model.gemm import golden_gemm
@@ -125,7 +125,13 @@ def generate_conv2d_test(config: NocConvConfig) -> List[TestData]:
                 return PERouterMode.PLI_FROM_LN_PLO_TO_LN
 
         num_pes_per_bus = num_pes // num_bus
-        temporal_wave_count = math.ceil(out_h_final / num_pes_per_bus)
+
+        # Temporal wave count split by output height, output channels, input channels
+        out_h_waves = math.ceil(out_h_final / num_pes_per_bus)
+        out_ch_waves = math.ceil(OC / 16) # Assuming PE processes 16 output channels per wave
+        channels_per_packet = ConvMode.channels_from_kernel_size(KW)
+        in_ch_waves = math.ceil(C / channels_per_packet)
+        temporal_wave_count = out_h_waves * out_ch_waves * in_ch_waves
 
         for i in range(num_bus):
             for j in range(num_pes_per_bus):
@@ -147,8 +153,8 @@ def generate_conv2d_test(config: NocConvConfig) -> List[TestData]:
 
                     ps_id = i if enable else 63
                     pd_id = (i+j)*stride if enable else 63
-                    pli_id = j if i==0 else 63
-                    plo_id = j if i==split_kh-1 else 63
+                    pli_id = j if (i==0 and enable) else 63
+                    plo_id = j if (i==split_kh-1 and enable) else 63
 
                 cfg = ScanChainConfig(
                     ps_id=ps_id,
@@ -163,6 +169,9 @@ def generate_conv2d_test(config: NocConvConfig) -> List[TestData]:
         test_config = {
             "mode": "conv2d",
             "temporal_wave_count": temporal_wave_count,
+            "temporal_wave_out_h": out_h_waves,
+            "temporal_wave_out_ch": out_ch_waves,
+            "temporal_wave_in_ch": in_ch_waves,
             "ultra_mode": config.ultra_mode,
             "kernel_size": split_kh,
             "in_ch": C,

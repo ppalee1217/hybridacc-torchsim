@@ -67,6 +67,7 @@ public:
         // Separate Combinational Processes
         SC_METHOD(comb_pc_next);
         sensitive << pc_reg << halted_reg << stage_reset << pe_running << ready_in
+              << valid_reg
                   << decoder_decode_signals_out_sig << loops_jump_sig << loops_pc_out_sig;
 
         SC_METHOD(comb_valid_next);
@@ -162,12 +163,14 @@ public:
         uint16_t incremented_pc = pc_current + sizeof(uint16_t);
         uint16_t next_pc_candidate = incremented_pc;
 
-        // Handle Branch/Loop Logic (Calculated combinationally)
-        if (decode_from_decoder.loop_end && ready_in.read()) {
+        const bool can_advance = ready_in.read() && valid_reg.read();
+
+        // Handle Branch/Loop Logic (only when issuing a valid instruction)
+        if (can_advance && decode_from_decoder.loop_end) {
             if (loops_jump_sig.read()) {
                 next_pc_candidate = loops_pc_out_sig.read();
             }
-        } else if (decode_from_decoder.jump_en) {
+        } else if (can_advance && decode_from_decoder.jump_en) {
             next_pc_candidate = decode_from_decoder.imm;
         }
 
@@ -184,17 +187,17 @@ public:
             pc_n = pc_current;
             halted_n = true;
         } else {
-            // Check for new halt
-            if (decode_from_decoder.halt) {
-                halted_n = true;
-                DEBUG_MSG("[IF_ID_Stage] HALT detected at PC=" << pc_current, DEBUG_LEVEL_PE_STAGE);
-            }
+            // Check for new halt only when issuing a valid instruction
+                if (can_advance && decode_from_decoder.halt) {
+                    halted_n = true;
+                    DEBUG_MSG("[IF_ID_Stage] HALT detected at PC=" << pc_current, DEBUG_LEVEL_PE_STAGE);
+                }
 
-            // Update PC if downstream is ready (No Stall)
-            if (ready_in.read()) {
+            // Update PC only when issuing a valid instruction
+            if (can_advance) {
                 pc_n = next_pc_candidate;
             } else {
-                // Stalled: Hold PC
+                // Bubble or stalled: Hold PC
                 pc_n = pc_current;
             }
         }
@@ -249,8 +252,10 @@ public:
     void comb_loop_controls() {
         pe_decode_signals_t decode = decoder_decode_signals_out_sig.read();
 
+        const bool can_advance = ready_in.read() && valid_reg.read();
+
         // Loop In
-        if (decode.loop_in && ready_in.read()) {
+        if (decode.loop_in && can_advance) {
             loops_pc_in_sig.write(pc_reg.read() + sizeof(uint16_t)); // Push next instruction address
             loops_count_in_sig.write(decode.imm);
             loops_loop_in_en_sig.write(true);
@@ -259,13 +264,13 @@ public:
         }
 
         // Loop Break
-        loops_loop_break_en_sig.write(decode.loop_break && ready_in.read());
+        loops_loop_break_en_sig.write(decode.loop_break && can_advance);
 
         // Loop End (Enable only if not stalled, as it might trigger a pop/jump)
         // If stalled, we re-execute the same loop_end instruction, checking condition again
         // But the LoopController state should only update once.
         // Actually, since loop controller is sequential, we should only enable it when we are advancing (ready_in=1)
-        loops_loop_end_en_sig.write(decode.loop_end && ready_in.read());
+        loops_loop_end_en_sig.write(decode.loop_end && can_advance);
     }
 
     // === Sequential Logic (Register Updates) ===

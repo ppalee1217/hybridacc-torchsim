@@ -292,9 +292,9 @@ public:
                 } else if (set_addr.read()) {
                     dma_base_next.write(imm.read());
                 } else if (set_len.read()) {
-                    dma_len_next.write(imm.read());
+                    dma_len_next.write((uint16_t)(imm.read()+1)); // len is 0-based
                 } else if (set_loop.read()) {
-                    dma_loop_next.write(imm.read());
+                    dma_loop_next.write((uint16_t)(imm.read()+1)); // loop count is 0-based
                 }
                 break;
 

@@ -42,6 +42,19 @@ enum DebugLevel {
     #define DEBUG_MSG(msg, level) do {} while (0)
 #endif
 
+// PE Router Command and ID field definitions
+#define PE_CMD_ADDRESS 0x40
+
+#define PE_CMD_OFFSET 0
+#define PE_CMD_BITS 4
+
+// Command - Load Program
+#define PE_ROUTER_IM_ADDR_OFFSET 4
+#define PE_ROUTER_IM_DATA_OFFSET 16
+
+#define PE_ROUTER_IM_ADDR_MASK 0xFFF // 12 bits
+#define PE_ROUTER_IM_DATA_MASK 0xFFFF // 16 bits
+
 // -----------------------------------------------------------------------------
 typedef uint16_t fp16_t; // 元素類型 (16-bit half precision)
 typedef uint16_t pe_inst_t; // 指令類型 (16-bit instruction)
@@ -609,6 +622,7 @@ private:
 #define TRACE_END "E"
 
 enum class TRACE_PID {
+    PE_ROUTER,
     PE,
     MBUS,
     NOC_ROUTER,

@@ -71,7 +71,7 @@ public:
         reset_signal_is(reset_n, false);
 
         SC_METHOD(combinational_process);
-        sensitive << write_ptr_reg << read_ptr_reg << count_reg << data_in << push << pop;
+        sensitive  << read_ptr_reg << count_reg << write_ptr_reg;
     }
 
     friend std::ostream& operator<<(std::ostream& os, const FIFO<T>& fifo) {
@@ -100,8 +100,6 @@ private:
     sc_signal<int> write_ptr_reg;
     sc_signal<int> read_ptr_reg;
     sc_signal<int> count_reg;
-    sc_signal<bool> empty_reg;
-    sc_signal<bool> full_reg;
 
     // Combinational logic (purely for data_out)
     void combinational_process() {
@@ -117,8 +115,6 @@ private:
         write_ptr_reg.write(0);
         read_ptr_reg.write(0);
         count_reg.write(0);
-        empty_reg.write(true);
-        full_reg.write(false);
         empty.write(true);
         full.write(false);
 
@@ -137,8 +133,8 @@ private:
             const bool want_push = push.read();
             const bool want_pop = pop.read();
 
-            const bool is_empty = (cnt == 0);
-            const bool is_full = (cnt == fifo_depth);
+            const bool is_empty = (cnt <= 0);
+            const bool is_full = (cnt >= fifo_depth);
 
             // Decide operations (synchronous semantics)
             bool do_pop = false;
@@ -155,30 +151,54 @@ private:
                 do_push = want_push;
             }
 
+            // pop first, then push, warning detection
+            if (want_pop && is_empty) {
+                SC_REPORT_WARNING(fifo_name.c_str(), "Attempting to pop from an empty FIFO. Operation ignored.");
+            }
+            if (want_push && is_full && !want_pop) {
+                std::stringstream warning_msg;
+                warning_msg << "Attempting to push into a full FIFO. Operation ignored. Data: 0x" << std::hex << data_in.read() << std::dec;
+                SC_REPORT_WARNING(fifo_name.c_str(), warning_msg.str().c_str());
+            }
+
+
             int next_wr_ptr = wr_ptr;
             int next_rd_ptr = rd_ptr;
             int next_cnt = cnt;
+            T popped_data = T();
 
+            // pop first, then push
+            if (do_pop) {
+                next_rd_ptr = (rd_ptr + 1) % fifo_depth;
+                next_cnt -= 1;
+                popped_data = storage[rd_ptr];
+            }
             if (do_push) {
                 storage[wr_ptr] = data_in.read();
                 next_wr_ptr = (wr_ptr + 1) % fifo_depth;
                 next_cnt += 1;
             }
-            if (do_pop) {
-                next_rd_ptr = (rd_ptr + 1) % fifo_depth;
-                next_cnt -= 1;
-            }
+
 
             write_ptr_reg.write(next_wr_ptr);
             read_ptr_reg.write(next_rd_ptr);
             count_reg.write(next_cnt);
 
-            const bool next_empty = (next_cnt == 0);
-            const bool next_full = (next_cnt == fifo_depth);
-            empty_reg.write(next_empty);
-            full_reg.write(next_full);
+            const bool next_empty = (next_cnt <= 0);
+            const bool next_full = (next_cnt >= fifo_depth);
             empty.write(next_empty);
             full.write(next_full);
+
+
+            if(do_pop) {
+                DEBUG_MSG("[" << fifo_name << "] Popped data: " << std::hex << popped_data << std::dec
+                          << " from index " << rd_ptr << ", cnt " << next_cnt << ", empty " << next_empty << ", full " << next_full, DEBUG_LEVEL_PE_COMPONENTS);
+            }
+            if(do_push) {
+                DEBUG_MSG("[" << fifo_name << "] Pushed data: " << std::hex << data_in.read() << std::dec
+                          << " to index " << wr_ptr << ", cnt " << next_cnt << ", empty " << next_empty << ", full " << next_full, DEBUG_LEVEL_PE_COMPONENTS);
+            }
+
             wait();
         }
     }

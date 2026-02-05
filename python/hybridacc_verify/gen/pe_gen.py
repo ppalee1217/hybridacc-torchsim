@@ -1,19 +1,15 @@
 import numpy as np
 from pathlib import Path
 from typing import Dict, Optional
-from ..utils.config import ConvConfig, GemmConfig
+from ..utils.config import ConvConfig, GemmConfig, ConvMode
 from ..model.conv import golden_conv1d
 from ..utils.io import save_array
 
 class DataGenerator:
     """資料生成器基類"""
 
-    MODES = {
-        # 直觀命名: k{kernel_size}c{in_channels}
-        'k3c4': dict(kernel_size=3, in_ch=4, stride=1),
-        'k5c2': dict(kernel_size=5, in_ch=2, stride=1),
-        'k7c1': dict(kernel_size=7, in_ch=1, stride=2),
-        'k1c12': dict(kernel_size=1, in_ch=12, stride=1),
+    STRIDE_BY_MODE = {
+        'k7c1': 2,
     }
 
     @staticmethod
@@ -78,11 +74,14 @@ class ConvGenerator(DataGenerator):
     def __init__(self, config: ConvConfig):
         self.config = config
         self.config.validate()
+        self.conv_mode = ConvMode()
+        self.conv_mode(self.config.mode)
 
     def generate(self):
         """生成 Conv1D 測試資料"""
-        cfg = self.MODES[self.config.mode]
-        k, in_ch, stride = cfg['kernel_size'], cfg['in_ch'], cfg['stride']
+        k = self.conv_mode.K
+        in_ch = self.conv_mode.C
+        stride = self.STRIDE_BY_MODE.get(self.config.mode, 1)
 
         if self.config.in_width < k:
             raise ValueError(f"input width ({self.config.in_width}) 需 >= kernel size ({k})")
@@ -117,17 +116,17 @@ class ConvGenerator(DataGenerator):
 
     def _pack_weight_channels_first(self, weight_cf: np.ndarray) -> np.ndarray:
         """Channels first layout 權重打包"""
-        if self.config.mode == 'k5c2':
+        if self.conv_mode.K == 5 and self.conv_mode.C == 2:
             return self.pack_weight_mode_b(weight_cf, 'channels_first')
-        elif self.config.mode == 'k7c1':
+        elif self.conv_mode.K == 7 and self.conv_mode.C == 1:
             return self.pack_weight_mode_c(weight_cf, 'channels_first')
         return weight_cf
 
     def _pack_weight_channels_last(self, weight_cf: np.ndarray) -> np.ndarray:
         """Channels last layout 權重打包"""
-        if self.config.mode == 'k5c2':
+        if self.conv_mode.K == 5 and self.conv_mode.C == 2:
             return self.pack_weight_mode_b(weight_cf, 'channels_last')
-        elif self.config.mode == 'k7c1':
+        elif self.conv_mode.K == 7 and self.conv_mode.C == 1:
             return self.pack_weight_mode_c(weight_cf, 'channels_last')
         return np.transpose(weight_cf, (0, 2, 1))
 

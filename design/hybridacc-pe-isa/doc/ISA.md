@@ -29,8 +29,10 @@ LE = loop-end (僅由偽指令設定)
 ## Data Movement
 | 指令 | 編碼重點 | 說明 |
 |------|----------|------|
-| LDMA.ADDR / LEN | opcode=00 f2=01 f1=0/1; value 10-bit | LDMA 設定 (Addr/Len) |
-| SDMA.ADDR / LEN | opcode=00 f2=00 f1=0/1; value 10-bit | SDMA 設定 (Addr/Len) |
+| LDMA.ADDR | opcode=00 f2=01 f1=0; value 10-bit | LDMA 設定 Addr |
+| SDMA.ADDR | opcode=00 f2=00 f1=0; value 10-bit | SDMA 設定 Addr |
+| LDMA.LEN | opcode=00 f2=01 f1=1; value 10-bit | LDMA 設定 Len |
+| SDMA.LEN | opcode=00 f2=00 f1=1; value 10-bit | SDMA 設定 Len |
 | LDMA.LOOP | opcode=01 f2=01 f1=0; value 10-bit | LDMA Loop 自動重置設定 |
 | SDMA.LOOP | opcode=01 f2=01 f1=1; value 10-bit | SDMA Loop 自動重置設定 |
 | LDMA.L* stride | opcode=00 f2=10 func3 區分型別 | LDMA 載入 / 廣播 (至 DMRV) |

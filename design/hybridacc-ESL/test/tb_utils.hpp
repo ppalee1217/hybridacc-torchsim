@@ -12,6 +12,18 @@
 #include <string>
 #include <map>
 
+// Verbose logging control
+static bool verbose_logging_enabled = false;
+inline void enable_verbose_logging(bool enable) {
+    verbose_logging_enabled = enable;
+}
+#define VERBOSE_LOG(msg) \
+    do { \
+        if (verbose_logging_enabled) { \
+            std::cout << msg << std::endl; \
+        } \
+    } while (0)
+
 // Helper: Read binary file into vector
 template<typename T>
 std::vector<T> read_binary_file(const std::string& filepath) {

@@ -184,11 +184,11 @@ private:
         router.command_data(command_data);
 
         // Bind external ports to router
-        bind_vr_interface(router.req_ps_in, noc_ps_in);
-        bind_vr_interface(router.req_pd_in, noc_pd_in);
-        bind_vr_interface(router.req_pli_in, noc_pli_in);
-        bind_vr_interface(router.req_plo_in, noc_plo_in);
-        bind_vr_interface(noc_plo_out, router.resp_plo_out);
+        bind_vr_interface(router.noc_ps_in, noc_ps_in);
+        bind_vr_interface(router.noc_pd_in, noc_pd_in);
+        bind_vr_interface(router.noc_pli_in, noc_pli_in);
+        bind_vr_interface(router.noc_plo_in, noc_plo_in);
+        bind_vr_interface(noc_plo_out, router.noc_plo_out);
 
         for (size_t i = 0; i < num_port; ++i) {
             // Connect NoC to MBUS request signals
@@ -248,8 +248,8 @@ private:
                 pe_inst.reset_n(reset_n);
 
                 // Router config ports
-                // pe_inst.router_enable(router_enable[i][j]); // Not present in PE
-                // pe_inst.router_mode(router_mode[i][j]);     // Not present in PE
+                pe_inst.router_enable(router_enable[i][j]);
+                pe_inst.router_mode(router_mode[i][j]);
 
                 // NoC interface
                 connect_vr_signals(pe_inst.noc_ps_in, bus_to_pe_ps_req[i][j]);
@@ -262,17 +262,25 @@ private:
                 pe_inst.pe_busy(pe_busy[i][j]);
 
                 // Connect Local Network signals (PE-to-PE communication)
-                // connect_vr_signals(pe_inst.ln_pli, ln_pli_plo[i][j]); // Not present in PE
+                connect_vr_signals(pe_inst.ln_pli, ln_pli_plo[i][j]);
+                connect_vr_signals(pe_inst.ln_plo, ln_pli_plo[i+1][j]);
 
             }
         }
+    }
 
+public:
+    void enable_perffeto_trace(){
         // Set Trace IDs
-        router.set_trace_id(0);
+        int trace_counter = 0;
+        router.set_trace_id(trace_counter);
+        trace_counter += router.get_trace_num();
         for (size_t i = 0; i < num_port; ++i) {
-            mbus[i].set_trace_id(i + 1);
+            mbus[i].set_trace_id(trace_counter);
+            trace_counter += mbus[i].get_trace_num();
             for (size_t j = 0; j < num_pes_per_port; ++j) {
-                pes[i][j].set_trace_id(i * num_pes_per_port + j);
+                pes[i][j].set_trace_id(trace_counter);
+                trace_counter += pes[i][j].get_trace_num();
             }
         }
     }

@@ -21,9 +21,12 @@ public:
     sc_signal<bool> command_mode;
     sc_signal<sc_uint<32>> command_data;
 
-    // New Valid-Ready Signals
-    VRDSIG<noc::router_req_t> req_sig;
-    VRDSIG<noc::router_resp_t> resp_sig;
+    // New Valid-Ready Signals (Split Channels)
+    VRDSIG<noc::router_req_t> ps_req_sig;
+    VRDSIG<noc::router_req_t> pd_req_sig;
+    VRDSIG<noc::router_req_t> pli_req_sig;
+    VRDSIG<noc_addr_req_t> plo_req_sig;
+    VRDSIG<noc::router_resp_t> plo_resp_sig;
 
     // NoC instance
     NetworkOnChip noc;
@@ -40,8 +43,11 @@ public:
           reset_n("reset_n"),
           command_mode("command_mode"),
           command_data("command_data"),
-          req_sig("req_sig"),
-          resp_sig("resp_sig"),
+                    ps_req_sig("ps_req_sig"),
+                    pd_req_sig("pd_req_sig"),
+                    pli_req_sig("pli_req_sig"),
+                    plo_req_sig("plo_req_sig"),
+                    plo_resp_sig("plo_resp_sig"),
           noc("NoC_DUT", NUM_PORTS, NUM_PES_PER_PORT)
     {
 
@@ -56,9 +62,12 @@ public:
         noc.command_mode(command_mode);
         noc.command_data(command_data);
 
-        // Connect Valid-Ready Interfaces
-        connect_vr_signals(noc.noc_ps_in, req_sig);
-        connect_vr_signals(noc.noc_plo_out, resp_sig);
+        // Connect Valid-Ready Interfaces (Split Channels)
+        connect_vr_signals(noc.noc_ps_in, ps_req_sig);
+        connect_vr_signals(noc.noc_pd_in, pd_req_sig);
+        connect_vr_signals(noc.noc_pli_in, pli_req_sig);
+        connect_vr_signals(noc.noc_plo_in, plo_req_sig);
+        connect_vr_signals(noc.noc_plo_out, plo_resp_sig);
 
         SC_THREAD(test_main);
         SC_THREAD(response_sink); // Add sink to accept responses
@@ -81,10 +90,21 @@ public:
         noc::router_req_t req;
         req.data = 0;
         req.addr = 0;
-        //req.is_w = false;
-        req_sig.data_sig.write(req);
-        req_sig.valid_sig.write(false);
-        resp_sig.ready_sig.write(true); // Always ready to receive
+        req.mask = 0;
+
+        ps_req_sig.data_sig.write(req);
+        ps_req_sig.valid_sig.write(false);
+
+        pd_req_sig.data_sig.write(req);
+        pd_req_sig.valid_sig.write(false);
+
+        pli_req_sig.data_sig.write(req);
+        pli_req_sig.valid_sig.write(false);
+
+        noc_addr_req_t addr_req;
+        addr_req.addr = 0;
+        plo_req_sig.data_sig.write(addr_req);
+        plo_req_sig.valid_sig.write(false);
 
         wait(20, SC_NS);
         reset_n.write(true);
@@ -94,14 +114,44 @@ public:
 
     // Always accept responses
     void response_sink() {
-        resp_sig.ready_sig.write(true);
+        plo_resp_sig.ready_sig.write(true);
         while (true) {
             wait();
-            if (resp_sig.valid_sig.read()) {
+            if (plo_resp_sig.valid_sig.read()) {
                 // Optional: Log response
-                // std::cout << "[TB] Received Response: " << resp_sig.data_sig.read() << std::endl;
+                // std::cout << "[TB] Received Response: " << plo_resp_sig.data_sig.read() << std::endl;
             }
         }
+    }
+
+    void send_router_req(VRDSIG<noc::router_req_t>& sig, const noc::router_req_t& req, const char* label) {
+        std::cout << "[TB] Sending " << label << " request: addr=0x" << std::hex << req.addr
+                  << ", mask=0x" << req.mask << std::dec << std::endl;
+
+        sig.data_sig.write(req);
+        sig.valid_sig.write(true);
+
+        do {
+            wait(clk.posedge_event());
+        } while (sig.ready_sig.read() == false);
+
+        sig.valid_sig.write(false);
+    }
+
+    void send_plo_read(uint16_t addr) {
+        noc_addr_req_t req;
+        req.addr = addr;
+
+        std::cout << "[TB] Sending PLO read request: addr=0x" << std::hex << addr << std::dec << std::endl;
+
+        plo_req_sig.data_sig.write(req);
+        plo_req_sig.valid_sig.write(true);
+
+        do {
+            wait(clk.posedge_event());
+        } while (plo_req_sig.ready_sig.read() == false);
+
+        plo_req_sig.valid_sig.write(false);
     }
 
     void send_command(message_command_t cmd, uint32_t param = 0) {
@@ -147,8 +197,12 @@ public:
         std::cout << "[TB] Loading program to all PEs (" << program.size() << " instructions)" << std::endl;
 
         for (size_t i = 0; i < program.size(); ++i) {
-            uint32_t instr = static_cast<uint32_t>(program[i]);
-            send_command(message_command_t::CMD_LOAD_PROGRAM , instr<<4);
+            uint32_t param = 0;
+            uint32_t pe_im_addr = static_cast<uint32_t>(i * sizeof(uint16_t)) & PE_ROUTER_IM_ADDR_MASK;
+            uint32_t pe_im_data = static_cast<uint32_t>(pe_program[i]) & PE_ROUTER_IM_DATA_MASK;
+            param |= (pe_im_addr << PE_ROUTER_IM_ADDR_OFFSET);  // Address
+            param |= (pe_im_data << PE_ROUTER_IM_DATA_OFFSET); // Instruction data
+            send_command(message_command_t::CMD_LOAD_PROGRAM , param);
         }
 
         std::cout << "[TB] Program loading complete" << std::endl;
@@ -254,21 +308,15 @@ public:
 
         std::cout << "[TB] Writing first data..." << std::endl;
 
-        sc_biguint<256> test_data_val = 0;
+        sc_biguint<192> test_data_val = 0;
         test_data_val.range(63, 0) = 0x123456789ABCDEF0ULL;
 
         noc::router_req_t req1;
         req1.data = test_data_val;
         req1.addr = 0x000;
-        //req1.is_w = true;
+        req1.mask = 0x1;
 
-        req_sig.data_sig.write(req1);
-        req_sig.valid_sig.write(true);
-
-        do {
-            wait(clk.posedge_event());
-        } while (req_sig.ready_sig.read() == false);
-        req_sig.valid_sig.write(false);
+        send_router_req(pli_req_sig, req1, "PLI");
 
         std::cout << "[TB] Data value: 0x" << std::hex << test_data_val.range(63, 0).to_uint64() << std::dec << std::endl;
 
@@ -281,15 +329,9 @@ public:
         noc::router_req_t req2;
         req2.data = test_data_val;
         req2.addr = 0x000;
-        //req2.is_w = true;
+        req2.mask = 0x1;
 
-        req_sig.data_sig.write(req2);
-        req_sig.valid_sig.write(true);
-
-        do {
-            wait(clk.posedge_event());
-        } while (req_sig.ready_sig.read() == false);
-        req_sig.valid_sig.write(false);
+        send_router_req(pli_req_sig, req2, "PLI");
 
         std::cout << "[TB] Data value: 0x" << std::hex << test_data_val.range(63, 0).to_uint64() << std::dec << std::endl;
 

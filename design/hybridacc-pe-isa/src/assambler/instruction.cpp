@@ -41,8 +41,8 @@ Assembler::Assembler(){
     // LDMA.LEN len (opcode=00 f2=01 f1=1)
     add("LDMA.LEN", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("LDMA.LEN expects 1 operand");
-        int len = parseInt(ops[0]);
-        if(len < 0 || len > 0x3FF) throw AsmError("len out of range (0..1023)");
+        int len = parseInt(ops[0]) - 1; // 0-based encoding
+        if(len < 0 || len > 0x3FF) throw AsmError("len out of range (1..1024)");
         uint16_t w = makeBase(0, 1); // opcode=00 funct2=01
         w |= ((len >> 7) & 0x7) << 13;       // bits 15:13 = len[9:7]
         w |= 1 << 12;                        // func1=1 (LDMA LEN)
@@ -67,8 +67,8 @@ Assembler::Assembler(){
     // SDMA.LEN len (opcode=00 f2=00 f1=1)
     add("SDMA.LEN", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("SDMA.LEN expects 1 operand");
-        int len = parseInt(ops[0]);
-        if(len < 0 || len > 0x3FF) throw AsmError("len out of range (0..1023)");
+        int len = parseInt(ops[0]) - 1; // 0-based encoding
+        if(len < 0 || len > 0x3FF) throw AsmError("len out of range (1..1024)");
         uint16_t w = makeBase(0, 0); // opcode=00 funct2=00
         w |= ((len >> 7) & 0x7) << 13;       // bits 15:13 = len[9:7]
         w |= 1 << 12;                        // func1=1 (SDMA LEN)
@@ -633,13 +633,15 @@ std::string Disassembler::disasmWord(uint16_t w) const {
         int bits6_1 = payload & 0x3F;
         int bit0   = (payload >> 6) & 0x1;
         int val = (func3 << 7) | (bits6_1 << 1) | bit0;
-        if(func1==0) os<<"SDMA.ADDR "<<val; else os<<"SDMA.LEN "<<val;
+        if(func1==0) os<<"SDMA.ADDR "<<val;
+        else os<<"SDMA.LEN "<<val+1;
     }
     else if(opcode==0 && funct2==1){
         int bits6_1 = payload & 0x3F;           // payload bits5:0 -> [10:5] => value[6:1]
         int bit0   = (payload >> 6) & 0x1;      // payload bit6   -> [11]   => value[0]
         int val = (func3 << 7) | (bits6_1 << 1) | bit0; // 10-bit
-        if(func1==0) os<<"LDMA.ADDR "<<val; else os<<"LDMA.LEN "<<val;
+        if(func1==0) os<<"LDMA.ADDR "<<val;
+        else os<<"LDMA.LEN "<<val+1;
     }
     else if(opcode==0 && funct2==2){
         static const char* names[7] = {"LDMA.LB","LDMA.LH","LDMA.LW","LDMA.LD","LDMA.LBB","LDMA.LHB","LDMA.LWB"};
@@ -676,7 +678,8 @@ std::string Disassembler::disasmWord(uint16_t w) const {
         int bit0   = (payload >> 6) & 0x1;
         int val = (func3 << 7) | (bits6_1 << 1) | bit0;
         val += 1; // 0-based decoding
-        if(func1==0) os<<"LDMA.LOOP "<<val; else os<<"SDMA.LOOP "<<val;
+        if(func1==0) os<<"LDMA.LOOP "<<val;
+        else os<<"SDMA.LOOP "<<val;
     }
     else if(opcode==1 && funct2==2){
         int imm = ((func3 & 0x7)<<7) | (func1<<10) | (((w>>11)&1)) | ((payload & 0x3F)<<1);

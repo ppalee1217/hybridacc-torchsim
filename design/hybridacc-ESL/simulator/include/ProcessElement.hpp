@@ -25,11 +25,11 @@ public:
     sc_in<PERouterMode> router_mode;
 
     // NoC interface ports - using VRDIF/VRDOF
-    VRDIF<noc_request_t> noc_ps_req;
-    VRDIF<noc_request_t> noc_pd_req;
-    VRDIF<noc_request_t> noc_pli_req;
-    VRDIF<noc_addr_req_t> noc_plo_req;
-    VRDOF<noc_response_t> noc_plo_resp;
+    VRDIF<noc_request_t> noc_ps_in;
+    VRDIF<noc_request_t> noc_pd_in;
+    VRDIF<noc_request_t> noc_pli_in;
+    VRDIF<noc_addr_req_t> noc_plo_in;
+    VRDOF<noc_response_t> noc_plo_out;
 
     // Control ports
     sc_out<bool> pe_busy;
@@ -44,11 +44,11 @@ public:
           reset_n("reset_n"),
           router_enable("router_enable"),
           router_mode("router_mode"),
-          noc_ps_req("noc_ps_req"),
-          noc_pd_req("noc_pd_req"),
-          noc_pli_req("noc_pli_req"),
-          noc_plo_req("noc_plo_req"),
-          noc_plo_resp("noc_plo_resp"),
+          noc_ps_in("noc_ps_in"),
+          noc_pd_in("noc_pd_in"),
+          noc_pli_in("noc_pli_in"),
+          noc_plo_in("noc_plo_in"),
+          noc_plo_out("noc_plo_out"),
           pe_busy("pe_busy"),
           ln_pli("ln_pli"),
           ln_plo("ln_plo"),
@@ -74,7 +74,7 @@ public:
         sensitive << pe_running_reg << cycles_reg << instr_count_reg << stage_reset_reg
                   << router_pe_reset << router_pe_start << router_pe_program
                   << if_id_halted_sig << exe_m_halted_sig << exe_a_halted_sig
-                  << exe_m_to_exe_a_valid << exe_a_to_exe_m_ready << exe_a_stall_adder << exe_a_stall_port_io;
+                  << exe_m_to_exe_a_valid << exe_a_to_exe_m_ready << exe_a_stall_adder << exe_a_stall_port_pli << exe_a_stall_port_plo;
 
         // 2. Output Logic
         SC_METHOD(comb_outputs);
@@ -84,7 +84,7 @@ public:
         SC_METHOD(comb_monitoring);
         sensitive << exe_m_to_if_id_ready << exe_a_to_exe_m_ready
                   << exe_m_stall_dl << exe_m_stall_ps << exe_m_stall_pd
-                  << exe_a_stall_adder << exe_a_stall_port_io;
+                  << exe_a_stall_adder << exe_a_stall_port_pli << exe_a_stall_port_plo;
 
         SC_METHOD(trace_process);
         sensitive << clk.pos();
@@ -133,7 +133,8 @@ public:
     sc_signal<bool> exe_m_stall_pd;
 
     sc_signal<bool> exe_a_stall_adder;
-    sc_signal<bool> exe_a_stall_port_io;
+    sc_signal<bool> exe_a_stall_port_pli;
+    sc_signal<bool> exe_a_stall_port_plo;
 
     // PE control signals
     sc_signal<uint16_t> pc_init_value;
@@ -166,11 +167,11 @@ public:
         router.route_mode(router_mode);
 
         // NoC interface - using bind_vr_interface
-        bind_vr_interface(router.noc_ps_req_in_if, noc_ps_req);
-        bind_vr_interface(router.noc_pd_req_in_if, noc_pd_req);
-        bind_vr_interface(router.noc_pli_req_in_if, noc_pli_req);
-        bind_vr_interface(router.noc_plo_req_in_if, noc_plo_req);
-        bind_vr_interface(noc_plo_resp, router.noc_plo_resp_out_if);
+        bind_vr_interface(router.noc_ps_req_in_if, noc_ps_in);
+        bind_vr_interface(router.noc_pd_req_in_if, noc_pd_in);
+        bind_vr_interface(router.noc_pli_req_in_if, noc_pli_in);
+        bind_vr_interface(router.noc_plo_req_in_if, noc_plo_in);
+        bind_vr_interface(noc_plo_out, router.noc_plo_resp_out_if);
 
         // Local Network interface - using bind_vr_interface
         bind_vr_interface(router.ln_pli_in_if, ln_pli);
@@ -268,7 +269,8 @@ public:
 
         // Stall outputs (debug)
         // exe_a_stage.stall_adder(exe_a_stall_adder); // Removed from port list
-        exe_a_stage.stall_port_io(exe_a_stall_port_io);
+        exe_a_stage.stall_port_pli(exe_a_stall_port_pli);
+        exe_a_stage.stall_port_plo(exe_a_stall_port_plo);
 
         // PLI port (Port Local Input)
         connect_vr_signals(exe_a_stage.pli, router_pe_pli_sig);
@@ -380,8 +382,9 @@ public:
         // Derive legacy stall signals from ready signals where possible
         // If EXE_A is not ready, and it's not waiting for Port IO, we assume it's busy with computation (Adder/VMAC)
         bool a_not_ready = !exe_a_to_exe_m_ready.read();
-        bool a_port_io_stall = exe_a_stall_port_io.read();
-        exe_a_stall_adder.write(a_not_ready && !a_port_io_stall);
+        bool a_port_pli_stall = exe_a_stall_port_pli.read();
+        bool a_port_plo_stall = exe_a_stall_port_plo.read();
+        exe_a_stall_adder.write(a_not_ready && !a_port_pli_stall && !a_port_plo_stall);
 
         if (pipeline_stalled && pe_running_reg.read()) {
              // We can use the debug flags to see WHY it is stalled (internal flags)
@@ -457,7 +460,8 @@ public:
         std::cout << "  Valid In: " << (exe_m_to_exe_a_valid.read() ? "Yes" : "No") << std::endl;
         std::cout << "  Halted: " << (exe_a_halted_sig.read() ? "Yes" : "No") << std::endl;
         std::cout << "  VADDU Stall: " << (exe_a_stall_adder.read() ? "Yes" : "No") << std::endl;
-        std::cout << "  Port IO Stall: " << (exe_a_stall_port_io.read() ? "Yes" : "No") << std::endl;
+        std::cout << "  Port PLI Stall: " << (exe_a_stall_port_pli.read() ? "Yes" : "No") << std::endl;
+        std::cout << "  Port PLO Stall: " << (exe_a_stall_port_plo.read() ? "Yes" : "No") << std::endl;
         std::cout << std::endl;
 
         // === Overall Status ===
@@ -475,7 +479,8 @@ public:
     std::string last_state = "IDLE";
     bool trace_init = false;
 
-    void set_trace_id(int id) { trace_id = id; }
+    void set_trace_id(int id) { trace_id = id;}
+    int get_trace_num() const { return 1;}
 
     void trace_process() {
         if (trace_id == -1) return;
@@ -493,10 +498,22 @@ public:
             current_state = "HALTED";
         } else if (!pe_running_reg.read()) {
             current_state = "IDLE";
-        } else if (exe_m_stall_dl.read() || exe_m_stall_ps.read() || exe_m_stall_pd.read() ||
-                   exe_a_stall_adder.read() || exe_a_stall_port_io.read() ||
-                   !exe_m_to_if_id_ready.read() || !exe_a_to_exe_m_ready.read()) {
-            current_state = "STALL";
+        } else if (exe_m_stall_dl.read()) {
+            current_state = "STALL_M_DL";
+        } else if (exe_m_stall_ps.read()) {
+            current_state = "STALL_M_PS";
+        } else if (exe_m_stall_pd.read()) {
+            current_state = "STALL_M_PD";
+        } else if (exe_a_stall_adder.read()) {
+            current_state = "STALL_A_ADDER";
+        } else if (exe_a_stall_port_pli.read()) {
+            current_state = "STALL_A_PORT_PLI";
+        } else if (exe_a_stall_port_plo.read()) {
+            current_state = "STALL_A_PORT_PLO";
+        } else if (!exe_m_to_if_id_ready.read()) {
+            current_state = "STALL_EXE_M";
+        } else if (!exe_a_to_exe_m_ready.read()) {
+            current_state = "STALL_EXE_A";
         } else {
             current_state = "RUNNING";
         }

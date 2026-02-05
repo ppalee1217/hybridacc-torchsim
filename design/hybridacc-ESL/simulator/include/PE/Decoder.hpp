@@ -146,7 +146,8 @@ public:
             signals.imm = val;
             signals.DL_setloop = true;
             // func1=0: LDMA.LOOP, func1=1: SDMA.LOOP
-            if(func1==0) signals.DL_is_sdma = false; else signals.DL_is_sdma = true;
+            if(func1==0) signals.DL_is_sdma = false;
+            else signals.DL_is_sdma = true;
             return;
         }
 

@@ -2,7 +2,7 @@
 # noc_sim.sh [run|build|clean|run-all]
 
 MODE=$1
-TB_NAME="conv_k3c4h8"  # Default testbench name
+TB_NAME="conv_k3c4"  # Default testbench name
 
 # if $2 is provided, use it as TB_NAME
 if [ ! -z "$2" ]; then
@@ -37,11 +37,12 @@ usage() {
 Usage:
   noc_sim.sh clean
   noc_sim.sh build
-  noc_sim.sh run [-d tb_dir] tb_name
-  noc_sim.sh run-all [-d tb_dir]
+        noc_sim.sh run [-d tb_dir] [-v] [-f] tb_name
+        noc_sim.sh run-all [-d tb_dir] [-v] [-f]
 
 Examples:
-  noc_sim.sh run -d output/noc-sim conv_k3c4h8
+    noc_sim.sh run -d output/noc-sim conv_k3c4h8
+        noc_sim.sh run -v -f -d output/noc-sim conv_k3c4h8
   noc_sim.sh run-all -d output/noc-sim
 EOF
 }
@@ -50,23 +51,27 @@ EOF
 run_single_tb() {
     local tb="$1"
     local tb_dir_base="$2"
+    local verbose_flag="$3"
+    local trace_enable="$4"
     local sim_data_dir="$tb_dir_base/$tb"
-    local trace_candidates=(
-        "$tb_dir_base/trace-$tb.json"
-        "$OUTPUT_DIR/trace-$tb.json"
-        "$TOP_DIR/output/trace-$tb.json"
-        "./output/trace-$tb.json"
-    )
     local trace=""
-    for p in "${trace_candidates[@]}"; do
-        if [ -f "$p" ]; then
-            trace="$p"
-            break
+    if [ "$trace_enable" == "1" ]; then
+        local trace_candidates=(
+            "$tb_dir_base/trace-$tb.json"
+            "$OUTPUT_DIR/trace-$tb.json"
+            "$TOP_DIR/output/trace-$tb.json"
+            "./output/trace-$tb.json"
+        )
+        for p in "${trace_candidates[@]}"; do
+            if [ -f "$p" ]; then
+                trace="$p"
+                break
+            fi
+        done
+        if [ -z "$trace" ]; then
+            warn "Trace for '$tb' not found (checked: ${trace_candidates[*]}). Skipping."
+            return 1
         fi
-    done
-    if [ -z "$trace" ]; then
-        warn "Trace for '$tb' not found (checked: ${trace_candidates[*]}). Skipping."
-        return 1
     fi
 
     if [ ! -x "$BUILD_DIR/test_noc_sim" ]; then
@@ -76,10 +81,18 @@ run_single_tb() {
 
     local out_log="$OUTPUT_DIR/out-$tb.log"
     info "Running TB='$tb'"
-    info "  trace='$trace'"
+    if [ "$trace_enable" == "1" ]; then
+        info "  trace='$trace'"
+    else
+        info "  trace=disabled"
+    fi
     info "  sim_data='$sim_data_dir'"
     info "  log: $out_log"
-    "$BUILD_DIR"/test_noc_sim -c 1 -t "$trace" "$sim_data_dir" > "$out_log" 2>&1
+    if [ "$trace_enable" == "1" ]; then
+        "$BUILD_DIR"/test_noc_sim -c 1 -f "$trace" $verbose_flag "$sim_data_dir" > "$out_log" 2>&1
+    else
+        "$BUILD_DIR"/test_noc_sim -c 1 $verbose_flag "$sim_data_dir" > "$out_log" 2>&1
+    fi
     local rc=$?
     if [ $rc -ne 0 ]; then
         err "Simulation failed for '$tb' (rc=$rc). See $out_log"
@@ -95,6 +108,8 @@ if [ "$MODE" == "run" ]; then
     shift
     # parse optional -d
     TB_DIR="$SIM_DATA_BASE"
+    VERBOSE_FLAG=""
+    TRACE_ENABLE=0
     while [ $# -gt 0 ]; do
         case "$1" in
             -d)
@@ -105,6 +120,14 @@ if [ "$MODE" == "run" ]; then
                 fi
                 TB_DIR="$2"
                 shift 2
+                ;;
+            -v)
+                VERBOSE_FLAG="-v"
+                shift
+                ;;
+            -f)
+                TRACE_ENABLE=1
+                shift
                 ;;
             -*)
                 echo "Unknown option: $1"
@@ -124,12 +147,14 @@ if [ "$MODE" == "run" ]; then
         exit 1
     fi
 
-    run_single_tb "$TB_NAME" "$TB_DIR"
+    run_single_tb "$TB_NAME" "$TB_DIR" "$VERBOSE_FLAG" "$TRACE_ENABLE"
 
 elif [ "$MODE" == "run-all" ]; then
     # shift off MODE
     shift
     TB_DIR="$SIM_DATA_BASE"
+    VERBOSE_FLAG=""
+    TRACE_ENABLE=0
     while [ $# -gt 0 ]; do
         case "$1" in
             -d)
@@ -140,6 +165,14 @@ elif [ "$MODE" == "run-all" ]; then
                 fi
                 TB_DIR="$2"
                 shift 2
+                ;;
+            -v)
+                VERBOSE_FLAG="-v"
+                shift
+                ;;
+            -f)
+                TRACE_ENABLE=1
+                shift
                 ;;
             -*)
                 echo "Unknown option: $1"
@@ -172,7 +205,7 @@ elif [ "$MODE" == "run-all" ]; then
             name=$(basename "$t")
             tbname=${name#trace-}
             tbname=${tbname%.json}
-            run_single_tb "$tbname" "$TB_DIR"
+            run_single_tb "$tbname" "$TB_DIR" "$VERBOSE_FLAG" "$TRACE_ENABLE"
             rc=$?
             total=$((total+1))
             if [ $rc -eq 0 ]; then
@@ -187,7 +220,7 @@ elif [ "$MODE" == "run-all" ]; then
         for d in "$TB_DIR"/*/; do
             [ -d "$d" ] || continue
             tbname=$(basename "$d")
-            run_single_tb "$tbname" "$TB_DIR"
+            run_single_tb "$tbname" "$TB_DIR" "$VERBOSE_FLAG" "$TRACE_ENABLE"
             rc=$?
             total=$((total+1))
             if [ $rc -eq 0 ]; then
@@ -208,6 +241,7 @@ elif [ "$MODE" == "build" ]; then
     mkdir -p "$BUILD_DIR"
     cd "$BUILD_DIR"
     # cmake -DENABLE_DEBUG_UTILS=ON -DDEBUG_LEVEL_MIN=DEBUG_LEVEL_PE_COMPONENTS $CMAKEFILE_DIR
+    # cmake -DENABLE_DEBUG_UTILS=ON -DDEBUG_LEVEL_MIN=DEBUG_LEVEL_PE_STAGE $CMAKEFILE_DIR
     # cmake -DENABLE_DEBUG_UTILS=ON -DDEBUG_LEVEL_MIN=DEBUG_LEVEL_PE_TOP $CMAKEFILE_DIR
     # cmake -DENABLE_DEBUG_UTILS=ON -DDEBUG_LEVEL_MIN=DEBUG_LEVEL_NOC_COMPONENTS $CMAKEFILE_DIR
     cmake -DENABLE_DEBUG_UTILS=OFF $CMAKEFILE_DIR

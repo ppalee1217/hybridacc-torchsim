@@ -8,19 +8,6 @@
 
 using namespace sc_core;
 
-// PE Router Command and ID field definitions
-#define PE_CMD_ADDRESS 0x100
-
-#define PE_CMD_OFFSET 0
-#define PE_CMD_BITS 4
-
-// Command - Load Program
-#define PE_ROUTER_IM_ADDR_OFFSET 4
-#define PE_ROUTER_IM_DATA_OFFSET 20
-
-#define PE_ROUTER_IM_ADDR_MASK 0xFFFF // 16 bits
-#define PE_ROUTER_IM_DATA_MASK 0xFFFF // 16 bits
-
 namespace hybridacc {
 namespace pe {
 
@@ -177,42 +164,42 @@ public:
         SC_METHOD(comb_noc_ps);
         sensitive << reset_n << enable
               << noc_ps_req_in_if.valid_in << noc_ps_req_in_if.data_in
-              << ps_fifo_full_sampled;
+              << ps_fifo_full_sig << ps_fifo_pop_sig << router_running_reg;
 
         SC_METHOD(comb_noc_pd);
         sensitive << reset_n << enable
               << noc_pd_req_in_if.valid_in << noc_pd_req_in_if.data_in
-              << pd_fifo_full_sampled;
+              << pd_fifo_full_sig << pd_fifo_pop_sig << router_running_reg;
 
         SC_METHOD(comb_noc_pli);
         sensitive << reset_n << enable << route_mode
                   << noc_pli_req_in_if.valid_in << noc_pli_req_in_if.data_in
                   << ln_pli_in_if.valid_in << ln_pli_in_if.data_in
-              << pli_fifo_full_sampled;
+              << pli_fifo_full_sig << pli_fifo_pop_sig << router_running_reg;
 
         SC_METHOD(comb_noc_plo_req);
         sensitive << reset_n << enable << route_mode << state_reg
                   << noc_plo_req_in_if.valid_in << noc_plo_req_in_if.data_in
-                  << plo_fifo_empty_sig;
+                  << plo_fifo_empty_sig << router_running_reg;
 
         SC_METHOD(comb_pe_collect);
         sensitive << reset_n << enable
                   << pe_plo_in_if.valid_in << pe_plo_in_if.data_in
-                  << plo_fifo_full_sig;
+                  << plo_fifo_full_sig << router_running_reg;
 
         SC_METHOD(comb_pe_feed);
         sensitive << reset_n << enable
                   << pe_ps_out_if.ready_in << pe_pd_out_if.ready_in << pe_pli_out_if.ready_in
                   << ps_fifo_empty_sig << ps_fifo_data_out_sig
                   << pd_fifo_empty_sig << pd_fifo_data_out_sig
-                  << pli_fifo_empty_sig << pli_fifo_data_out_sig;
+                  << pli_fifo_empty_sig << pli_fifo_data_out_sig << router_running_reg;
 
         SC_METHOD(comb_output_and_state);
         sensitive << reset_n << enable << route_mode
                   << state_reg << pending_noc_resp_reg << noc_plo_resp_reg
                   << noc_plo_req_in_if.valid_in
                   << plo_fifo_empty_sig << plo_fifo_data_out_sig
-                  << noc_plo_resp_out_if.ready_in << ln_plo_out_if.ready_in;
+                  << noc_plo_resp_out_if.ready_in << ln_plo_out_if.ready_in << router_running_reg;
 
         // -----------------------------------------------------------------
         // Single sequential process (all regs/pulses updated here)
@@ -255,11 +242,7 @@ public:
     sc_signal<uint16_t> cmd_im_addr;
     sc_signal<pe_inst_t> cmd_im_data;
 
-    // Sampled FIFO status (cycle-stable) to avoid delta feedback loops
-    // These are sampled in seq_process and used for ready decisions.
-    sc_signal<bool> ps_fifo_full_sampled;
-    sc_signal<bool> pd_fifo_full_sampled;
-    sc_signal<bool> pli_fifo_full_sampled;
+    sc_signal<bool> router_running_reg; // signal to indicate PE router is running
 
     // Channel-specific data queues (these are not registers in HDL sense)
     const int max_queue_size = 4;
@@ -354,13 +337,14 @@ public:
 
         // Commands are accepted regardless of FIFO availability.
         // Data is accepted when enabled and PS FIFO is not full.
-        bool ready = false;
-        if (is_cmd) {
-            ready = true;
+
+        bool ready;
+        if(is_cmd){
+            ready = enable.read();
         } else {
-            // Use sampled full to avoid ready changing within the same cycle due to this transfer.
-            ready = enable.read() && !ps_fifo_full_sampled.read();
+            ready = enable.read() && router_running_reg.read() && (!ps_fifo_full_sig.read() || ps_fifo_pop_sig.read());
         }
+
         noc_ps_req_in_if.ready_out.write(ready);
 
         const bool fire = noc_ps_req_in_if.valid_in.read() && ready;
@@ -405,7 +389,7 @@ public:
 
         if (!reset_n.read()) return;
 
-        const bool ready = enable.read() && !pd_fifo_full_sampled.read();
+        const bool ready = enable.read() && router_running_reg.read() &&    (!pd_fifo_full_sig.read());
         noc_pd_req_in_if.ready_out.write(ready);
 
         const bool fire = noc_pd_req_in_if.valid_in.read() && ready;
@@ -427,8 +411,8 @@ public:
 
         if (!reset_n.read()) return;
 
-        const bool enabled = enable.read();
-        const bool fifo_has_space = !pli_fifo_full_sampled.read();
+        const bool enabled = enable.read() && router_running_reg.read();
+        const bool fifo_has_space = (!pli_fifo_full_sig.read() || pli_fifo_pop_sig.read());
         const bool allow_bus = enabled && can_route_to_bus(NOC_CHANNEL_PLI) && fifo_has_space;
         const bool allow_ln = enabled && can_route_from_ln(NOC_CHANNEL_PLI) && fifo_has_space;
 
@@ -456,10 +440,14 @@ public:
         noc_plo_req_in_if.ready_out.write(false);
 
         if (!reset_n.read()) return;
-        if (state_reg.read() != PErouterState::IDLE) return;
+        if (!enable.read()) return;
+        if (!router_running_reg.read()) return;
+        bool stage_valid = (state_reg.read() == PErouterState::IDLE);
+        if (!stage_valid) return;
+        if (!can_route_to_bus(NOC_CHANNEL_PLO)) return;
+        if (plo_fifo_empty_sig.read()) return;
 
-        const bool ready = enable.read() && can_route_to_bus(NOC_CHANNEL_PLO) && !plo_fifo_empty_sig.read();
-        noc_plo_req_in_if.ready_out.write(ready);
+        noc_plo_req_in_if.ready_out.write(true);
     }
 
     // PE->PLO collect: direct ingress into FIFO
@@ -470,6 +458,7 @@ public:
 
         if (!reset_n.read()) return;
         if (!enable.read()) return;
+        if (!router_running_reg.read()) return;
 
         const bool ready = !plo_fifo_full_sig.read();
         pe_plo_in_if.ready_out.write(ready);
@@ -495,6 +484,7 @@ public:
 
         if (!reset_n.read()) return;
         if (!enable.read()) return;
+        if (!router_running_reg.read()) return;
 
         // PS
         if (!ps_fifo_empty_sig.read()) {
@@ -543,7 +533,7 @@ public:
             state_next.write(PErouterState::IDLE);
             return;
         }
-        if (!enable.read()) {
+        if (!enable.read() || !router_running_reg.read()) {
             state_next.write(PErouterState::IDLE);
             return;
         }
@@ -593,21 +583,15 @@ public:
         // IMPORTANT: Never assert valid based on pending_noc_resp_next while driving data from noc_plo_resp_reg;
         // that creates a spurious extra response in the same cycle a new request is accepted.
         const bool have_reg_resp = pending_noc_resp_reg.read();
-        const bool have_new_resp = new_noc_resp_valid && !have_reg_resp;
 
-        if (have_reg_resp || have_new_resp) {
+        if (have_reg_resp) {
             noc_plo_resp_out_if.valid_out.write(true);
-            noc_plo_resp_out_if.data_out.write(have_reg_resp ? noc_plo_resp_reg.read() : new_noc_resp);
+            noc_plo_resp_out_if.data_out.write(noc_plo_resp_reg.read());
 
             if (noc_plo_resp_out_if.ready_in.read()) {
-                if (have_reg_resp) {
-                    // Registered response consumed this cycle.
-                    // If we also accepted a new read this cycle, keep pending for the new response.
-                    if (!noc_plo_fire) {
-                        pending_noc_resp_next.write(false);
-                    }
-                } else {
-                    // New response was consumed immediately in the same cycle it was generated.
+                // Registered response consumed this cycle.
+                // If we also accepted a new read this cycle, keep pending for the new response.
+                if (!noc_plo_fire) {
                     pending_noc_resp_next.write(false);
                 }
                 state_next.write(PErouterState::IDLE);
@@ -615,6 +599,7 @@ public:
                 state_next.write(PErouterState::WAIT_RESP);
             }
         } else {
+            // No registered response to send this cycle. New responses are stored and sent next cycle.
             if (state_reg.read() == PErouterState::WAIT_RESP) {
                 state_next.write(PErouterState::IDLE);
             }
@@ -629,29 +614,22 @@ public:
         pending_noc_resp_reg.write(false);
         noc_plo_resp_reg.write(noc_response_t());
 
-        ps_fifo_full_sampled.write(false);
-        pd_fifo_full_sampled.write(false);
-        pli_fifo_full_sampled.write(false);
-
         im_write_en_reg.write(false);
         im_write_addr_reg.write(0);
         im_write_data_reg.write(0);
         pe_reset_reg.write(false);
         pe_start_reg.write(false);
         pe_program_reg.write(false);
+        router_running_reg.write(false);
 
         wait();
 
         while (true) {
-            // Sample FIFO status once per cycle (pre-update view at this clock edge)
-            ps_fifo_full_sampled.write(ps_fifo_full_sig.read());
-            pd_fifo_full_sampled.write(pd_fifo_full_sig.read());
-            pli_fifo_full_sampled.write(pli_fifo_full_sig.read());
-
             // ---- State / response regs ----
             state_reg.write(state_next.read());
             pending_noc_resp_reg.write(pending_noc_resp_next.read());
             noc_plo_resp_reg.write(noc_plo_resp_next.read());
+
 
             // ---- Command-derived pulses (registered one-cycle) ----
             pe_reset_reg.write(cmd_reset_pulse.read());
@@ -661,6 +639,13 @@ public:
             if (cmd_im_write_pulse.read()) {
                 im_write_addr_reg.write(cmd_im_addr.read());
                 im_write_data_reg.write(cmd_im_data.read());
+            }
+
+            if(cmd_start_pulse.read()) {
+                router_running_reg.write(true);
+            }
+            if(cmd_reset_pulse.read()) {
+                router_running_reg.write(false);
             }
 
             // Output registered control signals

@@ -533,7 +533,7 @@ public:
                 if (signals.DL_is_sdma) sdma_set_len_sig.write(true);
                 else ldma_set_len_sig.write(true);
             }
-             if (signals.DL_setloop) {
+            if (signals.DL_setloop) {
                 if (signals.DL_is_sdma) sdma_set_loop_sig.write(true);
                 else ldma_set_loop_sig.write(true);
             }

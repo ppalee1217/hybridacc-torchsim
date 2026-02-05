@@ -195,9 +195,11 @@ PESimulator::ExecStatus PESimulator::execute(uint16_t w) {
         int val = (func3<<7) | (bits6_1<<1) | bit0; // 10-bit
 
         if(funct2==1) { // LDMA
-            if(func1==0) S.LDMA.updateBase(val); else S.LDMA.updateLen(val);
+            if(func1==0) S.LDMA.updateBase(val);
+            else S.LDMA.updateLen(val+1); // len is 0-based
         } else { // SDMA
-            if(func1==0) S.SDMA.updateBase(val); else S.SDMA.updateLen(val);
+            if(func1==0) S.SDMA.updateBase(val);
+            else S.SDMA.updateLen(val+1); // len is 0-based
         }
         return ExecStatus::NEXT;
     }

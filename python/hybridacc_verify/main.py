@@ -2,7 +2,7 @@ import argparse
 import sys
 from .gen.noc_gen import generate_conv2d_test as gen_noc_conv, generate_gemm_test as gen_noc_gemm
 from .gen.pe_gen import ConvGenerator, GemmGenerator
-from .utils.config import ConvConfig, GemmConfig, ConfigLoader, NocConvConfig, NocGemmConfig
+from .utils.config import ConvConfig, GemmConfig, ConfigLoader, NocConvConfig, NocGemmConfig, SUPPORTED_CONV_MODES
 from .check.comparator import run_check_with_args
 
 def main():
@@ -17,7 +17,7 @@ def main():
 
     # Conv 子命令
     pc = sub.add_parser("conv", help="generate Conv2d test data")
-    pc.add_argument('--mode', choices=['k3c4','k5c2','k7c1','k1c12'],
+    pc.add_argument('--mode', choices=SUPPORTED_CONV_MODES,
                    required=True, help='mode')
     pc.add_argument('--out-ch', type=int, required=True, help='output channel count (1~16)')
     pc.add_argument('--in-width', type=int, required=True, help='input width (3~800)')

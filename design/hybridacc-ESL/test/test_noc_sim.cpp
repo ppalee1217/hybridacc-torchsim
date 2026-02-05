@@ -5,6 +5,7 @@
 #include <string>
 #include <sstream>
 #include <map>
+#include <algorithm>
 #include <iomanip>
 #include <filesystem>
 #include <functional>
@@ -18,6 +19,86 @@ using namespace sc_core;
 using namespace sc_dt;
 namespace fs = std::filesystem;
 
+namespace {
+
+struct ConvParams {
+    int kernel_size = 0;
+    int in_ch = 0;
+    int out_ch = 0;
+    int in_height = 0;
+    int in_width = 0;
+    int out_height = 0;
+    int out_width = 0;
+    int stride = 0;
+    bool partial_sum_zero = false;
+    bool ultra_mode = false;
+
+    int temporal_wave_count = 0;
+    int temporal_wave_out_h = 0;
+    int temporal_wave_out_ch = 0;
+    int temporal_wave_in_ch = 0;
+};
+
+int get_cfg_int(const std::map<std::string, std::string>& cfg, const std::string& key, int default_val = 0) {
+    auto it = cfg.find(key);
+    if (it == cfg.end()) {
+        return default_val;
+    }
+    return std::stoi(it->second);
+}
+
+bool get_cfg_bool(const std::map<std::string, std::string>& cfg, const std::string& key, bool default_val = false) {
+    auto it = cfg.find(key);
+    if (it == cfg.end()) {
+        return default_val;
+    }
+    return (it->second == "True" || it->second == "true" || it->second == "1");
+}
+
+ConvParams parse_conv_params_from_config(const std::map<std::string, std::string>& cfg) {
+    ConvParams p;
+    p.kernel_size = get_cfg_int(cfg, "kernel_size");
+    p.in_ch = get_cfg_int(cfg, "in_ch");
+    p.out_ch = get_cfg_int(cfg, "out_ch");
+    p.in_height = get_cfg_int(cfg, "in_height");
+    p.in_width = get_cfg_int(cfg, "in_width");
+    p.out_height = get_cfg_int(cfg, "out_height");
+    p.out_width = get_cfg_int(cfg, "out_width");
+    p.stride = get_cfg_int(cfg, "stride");
+    p.partial_sum_zero = get_cfg_bool(cfg, "partial_sum_zero");
+    p.ultra_mode = get_cfg_bool(cfg, "ultra_mode");
+
+    p.temporal_wave_count = get_cfg_int(cfg, "temporal_wave_count");
+    p.temporal_wave_out_h = get_cfg_int(cfg, "temporal_wave_out_h");
+    p.temporal_wave_out_ch = get_cfg_int(cfg, "temporal_wave_out_ch");
+    p.temporal_wave_in_ch = get_cfg_int(cfg, "temporal_wave_in_ch");
+    return p;
+}
+
+size_t ceil_div(size_t a, size_t b) {
+    return (b == 0) ? 0 : ((a + b - 1) / b);
+}
+
+struct WaveRange {
+    size_t start = 0;
+    size_t end = 0;
+};
+
+WaveRange get_wave_range(size_t total, int waves, int wave_idx) {
+    if (waves <= 0) {
+        return {0, total};
+    }
+    size_t chunk = ceil_div(total, static_cast<size_t>(waves));
+    size_t start = static_cast<size_t>(wave_idx) * chunk;
+    if (start >= total) {
+        return {total, total};
+    }
+    size_t end = std::min(total, start + chunk);
+    return {start, end};
+}
+
+} // namespace
+
 // -----------------------------------------------------------------------------
 // TestBench
 class NoCSimTestBench : public sc_module {
@@ -30,10 +111,11 @@ public:
     sc_signal<sc_uint<32>> command_data;
 
     // New Valid-Ready Signals (Triple Plane)
-    VRDSIG<noc::router_req_t> req0_sig; // NoC-0 (Push Plane)
-    VRDSIG<noc::router_req_t> req1_sig; // NoC-1 (Local Network Plane - Write)
-    VRDSIG<noc_addr_req_t>    req2_sig; // NoC-2 (Local Network Plane - Read)
-    VRDSIG<noc::router_resp_t> resp2_sig; // NoC-2 Response
+    VRDSIG<noc::router_req_t> noc_ps_sig;  // NoC-PS
+    VRDSIG<noc::router_req_t> noc_pd_sig;  // NoC-PD
+    VRDSIG<noc::router_req_t> noc_pli_sig; // NoC-PLI (Local Network Plane - Write)
+    VRDSIG<noc_addr_req_t>    noc_plo_sig; // NoC-PLO (Local Network Plane - Read)
+    VRDSIG<noc::router_resp_t> noc_plo_resp_sig; // NoC-PLO Response
 
     // DUT
     NetworkOnChip noc;
@@ -48,6 +130,8 @@ public:
     std::vector<fp16_t> expected_output;
     std::vector<fp16_t> output_partial_sum;
     std::vector<uint16_t> pe_program;
+
+    ConvParams conv;
 
     // Response handling
     struct RespMeta {
@@ -76,14 +160,22 @@ public:
 
     // Synchronization
     sc_event start_traffic_event;
-    sc_event noc0_done_event;
-    sc_event noc1_done_event;
-    sc_event noc2_done_event;
+    sc_event scan_chain_event;
+    sc_event scan_chain_done_event;
+    sc_event program_event;
+    sc_event program_done_event;
+    sc_event pe_start_event;
+    sc_event pe_start_done_event;
+    sc_event ps_done_event;
+    sc_event pd_done_event;
+    sc_event pli_done_event;
+    sc_event plo_done_event;
 
     // Parameters
     static constexpr size_t NUM_PORTS = 3;
     static constexpr size_t NUM_PES_PER_PORT = 16;
     static constexpr size_t TOTAL_PES = NUM_PORTS * NUM_PES_PER_PORT;
+    static constexpr uint64_t MAX_WAIT_CYCLES = 5000;
     int clock_period_ns;
 
     SC_HAS_PROCESS(NoCSimTestBench);
@@ -94,10 +186,11 @@ public:
           reset_n("reset_n"),
           command_mode("command_mode"),
           command_data("command_data"),
-          req0_sig("req0_sig"),
-          req1_sig("req1_sig"),
-          req2_sig("req2_sig"),
-          resp2_sig("resp2_sig"),
+          noc_ps_sig("noc_ps_sig"),
+          noc_pd_sig("noc_pd_sig"),
+          noc_pli_sig("noc_pli_sig"),
+          noc_plo_sig("noc_plo_sig"),
+          noc_plo_resp_sig("noc_plo_resp_sig"),
           noc("NoC_DUT", NUM_PORTS, NUM_PES_PER_PORT),
           test_data_dir(data_dir),
           rx_idx_fifo("rx_idx_fifo", 1024),
@@ -114,23 +207,27 @@ public:
         noc.command_data(command_data);
 
         // Connect Valid-Ready Interfaces
-        connect_vr_signals(noc.noc_ps_in, req0_sig);
-        connect_vr_signals(noc.noc_pli_in, req1_sig);
-        connect_vr_signals(noc.noc_plo_in, req2_sig);
-        connect_vr_signals(noc.noc_plo_out, resp2_sig);
+        connect_vr_signals(noc.noc_ps_in, noc_ps_sig);
+        connect_vr_signals(noc.noc_pd_in, noc_pd_sig);
+        connect_vr_signals(noc.noc_pli_in, noc_pli_sig);
+        connect_vr_signals(noc.noc_plo_in, noc_plo_sig);
+        connect_vr_signals(noc.noc_plo_out, noc_plo_resp_sig);
 
         SC_THREAD(test_main);
 
         SC_THREAD(response_sink); // Add sink to accept responses
         sensitive << clk.posedge_event();
 
-        SC_THREAD(noc0_thread);
+        SC_THREAD(ps_sender);
         sensitive << clk.posedge_event();
 
-        SC_THREAD(noc1_thread);
+        SC_THREAD(pd_sender);
         sensitive << clk.posedge_event();
 
-        SC_THREAD(noc2_thread);
+        SC_THREAD(pli_sender);
+        sensitive << clk.posedge_event();
+
+        SC_THREAD(plo_sender);
         sensitive << clk.posedge_event();
     }
 
@@ -142,6 +239,7 @@ public:
     void load_test_data() {
         std::cout << "[TB] Loading test data from " << test_data_dir << std::endl;
         config = read_config_file(test_data_dir + "/config.txt");
+        conv = parse_conv_params_from_config(config);
 
         scan_chain_data = read_binary_file<int32_t>(test_data_dir + "/scan_chain.bin");
         input_activation = read_binary_file<fp16_t>(test_data_dir + "/input_activation.bin");
@@ -156,6 +254,12 @@ public:
         std::cout << "  Activation: " << input_activation.size() << " floats" << std::endl;
         std::cout << "  Weight: " << input_weight.size() << " floats" << std::endl;
         std::cout << "  PE program: " << pe_program.size() << " instructions" << std::endl;
+        if (config.count("mode") && config.at("mode") == "conv2d") {
+            std::cout << "  Wave Info: count=" << conv.temporal_wave_count
+                      << " out_h=" << conv.temporal_wave_out_h
+                      << " out_ch=" << conv.temporal_wave_out_ch
+                      << " in_ch=" << conv.temporal_wave_in_ch << std::endl;
+        }
     }
 
     void send_command(message_command_t cmd, uint32_t param = 0) {
@@ -166,58 +270,98 @@ public:
         command_mode.write(false);
     }
 
-    void send_data_noc0(uint16_t channel, uint16_t tag, const sc_biguint<256>& data_val, bool ultra_mode = false, size_t mask = 0xF) {
+    bool wait_ready(sc_signal<bool>& ready_sig, const char* name) {
+        for (uint64_t waited = 0; waited < MAX_WAIT_CYCLES; ++waited) {
+            wait(clk.negedge_event());
+            if (ready_sig.read()) {
+                wait(clk.posedge_event());
+                return true;
+            }
+        }
+        std::cerr << "[TB] ERROR: Timeout waiting ready on " << name << std::endl;
+        return false;
+    }
+
+    void send_data_ps(uint16_t tag, const sc_biguint<256>& data_val, bool ultra_mode = false, size_t mask = 0xF) {
         noc::router_req_t req;
         req.data = data_val;
-        req.addr = (static_cast<uint16_t>(channel) << 6) | (static_cast<uint16_t>(tag)) | (ultra_mode ? 0x100 : 0x000);
+        req.addr = (static_cast<uint16_t>(tag) & 0x3F) | (ultra_mode ? 0x40 : 0x00);
         req.mask = mask;
         // req.is_w = true;
 
-        req0_sig.data_sig.write(req);
-        req0_sig.valid_sig.write(true);
+        noc_ps_sig.data_sig.write(req);
+        noc_ps_sig.valid_sig.write(true);
 
-        do {
-            wait(clk.posedge_event());
-        } while (req0_sig.ready_sig.read() == false);
+        if (!wait_ready(noc_ps_sig.ready_sig, "noc_ps")) {
+            noc_ps_sig.valid_sig.write(false);
+            std::cerr << "[TB] req=" << req << std::endl;
+            sc_stop();
+            return;
+        }
 
-        req0_sig.valid_sig.write(false);
+        noc_ps_sig.valid_sig.write(false);
         total_sent_bytes += (ultra_mode ? (8 * NUM_PORTS) : 8); // Ultra: NUM_PORTS * 64 bits; Normal: 64 bits
     }
 
-    void send_data_noc1(uint16_t channel, uint16_t tag, const sc_biguint<256>& data_val, bool ultra_mode = false, size_t mask = 0xF) {
+    void send_data_pd(uint16_t tag, const sc_biguint<256>& data_val, bool ultra_mode = false, size_t mask = 0xF) {
         noc::router_req_t req;
         req.data = data_val;
-        req.addr = (static_cast<uint16_t>(channel) << 6) | (static_cast<uint16_t>(tag)) | (ultra_mode ? 0x0100 : 0x0000);
+        req.addr = (static_cast<uint16_t>(tag) & 0x3F) | (ultra_mode ? 0x40 : 0x00);
+        req.mask = mask;
+
+        noc_pd_sig.data_sig.write(req);
+        noc_pd_sig.valid_sig.write(true);
+
+        if (!wait_ready(noc_pd_sig.ready_sig, "noc_pd")) {
+            noc_pd_sig.valid_sig.write(false);
+            std::cerr << "[TB] req=" << req << std::endl;
+            return;
+        }
+
+        noc_pd_sig.valid_sig.write(false);
+        total_sent_bytes += (ultra_mode ? (8 * NUM_PORTS) : 8); // Ultra: NUM_PORTS * 64 bits; Normal: 64 bits
+    }
+
+    void send_data_pli(uint16_t tag, const sc_biguint<256>& data_val, bool ultra_mode = false, size_t mask = 0xF) {
+        noc::router_req_t req;
+        req.data = data_val;
+        req.addr = (static_cast<uint16_t>(tag) & 0x3F) | (ultra_mode ? 0x40 : 0x00);
         req.mask = mask;
         // req.is_w = true; // NoC1 is always write
 
-        req1_sig.data_sig.write(req);
-        req1_sig.valid_sig.write(true);
+        noc_pli_sig.data_sig.write(req);
+        noc_pli_sig.valid_sig.write(true);
 
-        do {
-            wait(clk.posedge_event());
-        } while (req1_sig.ready_sig.read() == false);
+        if (!wait_ready(noc_pli_sig.ready_sig, "noc_pli")) {
+            noc_pli_sig.valid_sig.write(false);
+            std::cerr << "[TB] req=" << req << std::endl;
+            sc_stop();
+            return;
+        }
 
-        req1_sig.valid_sig.write(false);
+        noc_pli_sig.valid_sig.write(false);
         total_sent_bytes += (ultra_mode ? (8 * NUM_PORTS) : 8); // Ultra: NUM_PORTS * 64 bits; Normal: 64 bits
     }
 
-    void recv_data_noc2(uint16_t& channel, uint16_t& tag, uint64_t base_idx, bool ultra_mode = false, uint64_t per_port_stride = 0, uint8_t ports = NUM_PORTS) {
+    void recv_data_plo(uint16_t tag, uint64_t base_idx, bool ultra_mode = false, uint64_t per_port_stride = 0, uint8_t ports = NUM_PORTS) {
         // Send Read Request via NoC2
         noc_addr_req_t req;
         // req.data = 0; // No data for NoC2
-        req.addr = (static_cast<uint16_t>(channel) << 6) | (static_cast<uint16_t>(tag)) | (ultra_mode ? 0x0100 : 0x0000);
+        req.addr = (static_cast<uint16_t>(tag) & 0x3F) | (ultra_mode ? 0x40 : 0x00);
         // req.mask = 0;
         // req.is_w = false;
 
-        req2_sig.data_sig.write(req);
-        req2_sig.valid_sig.write(true);
+        noc_plo_sig.data_sig.write(req);
+        noc_plo_sig.valid_sig.write(true);
 
-        do {
-            wait(clk.posedge_event());
-        } while (req2_sig.ready_sig.read() == false);
+        if (!wait_ready(noc_plo_sig.ready_sig, "noc_plo")) {
+            noc_plo_sig.valid_sig.write(false);
+            std::cerr << "[TB] req=" << req << std::endl;
+            sc_stop();
+            return;
+        }
 
-        req2_sig.valid_sig.write(false);
+        noc_plo_sig.valid_sig.write(false);
 
         // Use blocking write to ensure we don't drop requests if FIFO is full
         RespMeta meta;
@@ -235,11 +379,11 @@ public:
         // wait for reset deassertion
         wait(start_traffic_event);
         while (true) {
-            resp2_sig.ready_sig.write(rx_idx_fifo.num_free() > 0);
+            noc_plo_resp_sig.ready_sig.write(rx_idx_fifo.num_free() > 0);
             wait();
-            if (resp2_sig.valid_sig.read() && resp2_sig.ready_sig.read()) {
+            if (noc_plo_resp_sig.valid_sig.read() && noc_plo_resp_sig.ready_sig.read()) {
                 // receive response
-                noc::router_resp_t resp = resp2_sig.data_sig.read();
+                noc::router_resp_t resp = noc_plo_resp_sig.data_sig.read();
                 RespMeta meta;
                 if(rx_idx_fifo.nb_read(meta)) {
                     // GEMM-specific handling: variable-length response mapping
@@ -251,8 +395,8 @@ public:
                         // column index is base % N (since base = m * N + n)
                         size_t col = (N > 0) ? (base % N) : 0;
 
-                        std::cout << "[TB] Received response (GEMM): meta=" << meta << ", data=0x" << std::hex << resp.data << std::dec
-                                  << ", status=" << static_cast<int>(resp.status) << std::endl;
+
+                        VERBOSE_LOG("[TB] Received response (GEMM): meta=" << meta << ", data=0x" << std::hex << resp.data << std::dec << ", status=" << static_cast<int>(resp.status));
 
                         if (!meta.ultra) {
                             // Limit to at most 4 words (one port returns 64 bits == 4x16)
@@ -270,7 +414,7 @@ public:
                             }
                         } else {
                             // Ultra mode: treat each port chunk and place with per_port_stride
-                            std::cout << "[TB] GEMM Ultra response: ports=" << static_cast<int>(meta.ports) << ", per_port_stride=" << meta.per_port_stride << std::endl;
+                            VERBOSE_LOG("[TB] GEMM Ultra response: ports=" << static_cast<int>(meta.ports) << ", per_port_stride=" << meta.per_port_stride);
                             for (uint8_t port = 0; port < meta.ports; ++port) {
                                 sc_biguint<64> chunk = resp.data.range(64*port + 63, 64*port);
                                 for (size_t och_offset = 0; och_offset < 4; ++och_offset) {
@@ -303,6 +447,7 @@ public:
                                 fp16_t ps = static_cast<fp16_t>(data_packet.to_uint64());
                                 output_partial_sum[idx] = ps;
                             }
+                            VERBOSE_LOG("[TB] Received response: data=0x" << std::hex << resp.data << std::dec << ", meta = " << meta);
                         } else {
                             // Ultra mode: resp.data contains NUM_PORTS chunks of 64-bit each
                             for (uint8_t port = 0; port < meta.ports; ++port) {
@@ -344,215 +489,388 @@ public:
         std::cout << "[TB] Loading PE Program..." << std::endl;
         // Create load program command
         for (int i = 0; i < pe_program.size(); i++) {
-            std::cout << "[TB] Loading instruction " << i << ": 0x"
-                      << std::hex << std::setw(4) << std::setfill('0') << pe_program[i] << std::dec << std::endl;
+            VERBOSE_LOG("[TB] Loading instruction " << i << ": 0x"
+                      << std::hex << std::setw(4) << std::setfill('0') << pe_program[i] << std::dec);
             uint32_t param = 0;
-            param |= (static_cast<uint32_t>(i * sizeof(uint16_t)) << 4);  // Address
-            param |= (static_cast<uint32_t>(pe_program[i]) << 16); // Instruction data
+            uint32_t pe_im_addr = static_cast<uint32_t>(i * sizeof(uint16_t)) & PE_ROUTER_IM_ADDR_MASK;
+            uint32_t pe_im_data = static_cast<uint32_t>(pe_program[i]) & PE_ROUTER_IM_DATA_MASK;
+            param |= (pe_im_addr << PE_ROUTER_IM_ADDR_OFFSET);  // Address
+            param |= (pe_im_data << PE_ROUTER_IM_DATA_OFFSET); // Instruction data
             send_command(message_command_t::CMD_LOAD_PROGRAM, param);
         }
     }
-
-    void noc0_thread() {
-        while(true) {
-            wait(start_traffic_event);
-            std::string mode = config["mode"];
-            if (mode == "conv2d") {
-                distribute_conv2d_noc0();
-            } else if (mode == "gemm") {
-                distribute_gemm_noc0();
-            }
-            noc0_done_event.notify();
+    void ps_sender() {
+        // Ensure reset is released before any bus activity
+        while (!reset_n.read()) {
+            wait(reset_n.value_changed_event());
         }
+
+        // Step 1: configure scan-chain via command bus
+        wait(scan_chain_event);
+        configure_scan_chain();
+        scan_chain_done_event.notify(SC_ZERO_TIME);
+
+        // Step 2: load program via command bus
+        wait(program_event);
+        load_pe_program();
+        program_done_event.notify(SC_ZERO_TIME);
+
+        // Step 3: start PEs via command bus
+        wait(pe_start_event);
+        std::cout << "[TB] Starting PEs..." << std::endl;
+        send_command(message_command_t::CMD_START_PE);
+        pe_start_done_event.notify(SC_ZERO_TIME);
+
+        // Step 4: stream PS data after traffic starts
+        wait(start_traffic_event);
+        std::string mode = config["mode"];
+        if (mode == "conv2d") {
+            distribute_conv2d_ps();
+        } else if (mode == "gemm") {
+            distribute_gemm_ps();
+        }
+        ps_done_event.notify(SC_ZERO_TIME);
     }
 
-    void noc1_thread() {
-        while(true) {
-            wait(start_traffic_event);
-            std::string mode = config["mode"];
-            if (mode == "conv2d") {
-                distribute_conv2d_noc1();
-            } else if (mode == "gemm") {
-                distribute_gemm_noc1();
-            }
-            noc1_done_event.notify();
+    void pd_sender() {
+        wait(start_traffic_event);
+        std::string mode = config["mode"];
+        if (mode == "conv2d") {
+            distribute_conv2d_pd();
+        } else if (mode == "gemm") {
+            distribute_gemm_pd();
         }
+        pd_done_event.notify(SC_ZERO_TIME);
     }
 
-    void noc2_thread() {
-        while(true) {
-            wait(start_traffic_event);
-            std::string mode = config["mode"];
-            if (mode == "conv2d") {
-                distribute_conv2d_noc2();
-            } else if (mode == "gemm") {
-                distribute_gemm_noc2();
-            }
-            noc2_done_event.notify();
+    void pli_sender() {
+        wait(start_traffic_event);
+        std::string mode = config["mode"];
+        if (mode == "conv2d") {
+            distribute_conv2d_pli();
+        } else if (mode == "gemm") {
+            distribute_gemm_pli();
         }
+        pli_done_event.notify(SC_ZERO_TIME);
     }
 
-    void distribute_conv2d_noc0() {
-        std::cout << "[TB-NoC0] Distributing Conv2D Data (Weights & Activations)..." << std::endl;
+    void plo_sender() {
+        wait(start_traffic_event);
+        std::string mode = config["mode"];
+        if (mode == "conv2d") {
+            distribute_conv2d_plo();
+        } else if (mode == "gemm") {
+            distribute_gemm_plo();
+        }
+        plo_done_event.notify(SC_ZERO_TIME);
+    }
 
-        int kernel_size = std::stoi(config["kernel_size"]);
-        int in_ch = std::stoi(config["in_ch"]);
-        int out_ch = std::stoi(config["out_ch"]);
-        int in_height = std::stoi(config["in_height"]);
-        int in_width = std::stoi(config["in_width"]);
-        bool ultra_mode = (config["ultra_mode"] == "True");
+    void distribute_conv2d_ps() {
+        std::cout << "[TB-NoC-PS] Distributing Conv2D Weights (PS)..." << std::endl;
 
-        std::cout << "[TB-NoC0] Kernel Size: " << kernel_size << std::endl;
-        std::cout << "[TB-NoC0] Input Channels: " << in_ch << std::endl;
-        std::cout << "[TB-NoC0] Output Channels: " << out_ch << std::endl;
-        std::cout << "[TB-NoC0] Input Height: " << in_height << std::endl;
-        std::cout << "[TB-NoC0] Input Width: " << in_width << std::endl;
+        int kernel_size = conv.kernel_size;
+        int in_ch = conv.in_ch;
+        int out_ch = conv.out_ch;
+        int in_height = conv.in_height;
+        int in_width = conv.in_width;
+        bool ultra_mode = conv.ultra_mode;
 
-        // 1. Weights (PS)
-        std::cout << "[TB-NoC0] Sending Weights..." << std::endl;
+        int wave_out_h = std::max(1, conv.temporal_wave_out_h);
+        int wave_out_ch = std::max(1, conv.temporal_wave_out_ch);
+        int wave_in_ch = std::max(1, conv.temporal_wave_in_ch);
+
+        std::cout << "[TB-NoC-PS] Kernel Size: " << kernel_size << std::endl;
+        std::cout << "[TB-NoC-PS] Input Channels: " << in_ch << std::endl;
+        std::cout << "[TB-NoC-PS] Output Channels: " << out_ch << std::endl;
+        std::cout << "[TB-NoC-PS] Input Height: " << in_height << std::endl;
+        std::cout << "[TB-NoC-PS] Input Width: " << in_width << std::endl;
 
         // index helpers
         Index4D weight_idx(out_ch, kernel_size, 3, 4);
         Index3D act_idx(in_height, in_width, in_ch);
 
-        for(size_t och = 0; och < out_ch; ++och) {
-            for(size_t kh = 0; kh < kernel_size; ++kh) {
-                for(size_t kw = 0; kw < 3; ++kw) { // Assume kernel width is 3 for simplicity
-                    sc_biguint<256> data_packet = 0;
-                    for(size_t ich = 0; ich < 4; ++ich) {
-                        size_t idx = weight_idx(och, kh, kw, ich);
-                        fp16_t w = input_weight[idx];
-                        data_packet.range((ich * 16) + 15, ich * 16) = w;
-                    }
-                    uint16_t channel = NOC_CHANNEL_PS; // PS
-                    uint16_t tag = kh;
-                    send_data_noc0(channel, tag, data_packet, false, 0xF);
-                }
-            }
-        }
-
-
-        // 2. Activations (PD)
-        std::cout << "[TB-NoC0] Sending Activations..." << std::endl;
-
         size_t loop_in_height;
         if (ultra_mode) {
-            loop_in_height = in_height / NUM_PORTS; // Split height among ports
+            loop_in_height = static_cast<size_t>(in_height) / NUM_PORTS; // Split height among ports
         } else {
-            loop_in_height = in_height;
+            loop_in_height = static_cast<size_t>(in_height);
         }
+
+        size_t loop_out_height = ultra_mode ? (static_cast<size_t>(conv.out_height) / NUM_PORTS)
+                                            : static_cast<size_t>(conv.out_height);
 
         // Determine max channels per packet based on mode
         // Ultra Mode: 3 ports share 192 bits -> 64 bits/port -> 4 fp16 channels/port
         // Normal Mode: 1 port uses 192 bits -> 12 fp16 channels
         size_t channels_per_packet = ultra_mode ? 4 : 12;
 
-        for(size_t iw = 0; iw < in_width; ++iw) {
-            std::cout << "[TB-NoC0] Processing input width index: " << iw << "/" << in_width << std::endl;
-            for(size_t ih = 0; ih < loop_in_height; ++ih) {
+        for (int wave_h = 0; wave_h < wave_out_h; ++wave_h) {
+            WaveRange oh_range = get_wave_range(loop_out_height, wave_out_h, wave_h);
+            if (oh_range.start >= oh_range.end) {
+                continue;
+            }
 
-                // Iterate over channel chunks
-                for (size_t ich_base = 0; ich_base < in_ch; ich_base += channels_per_packet) {
-                    sc_biguint<256> data_packet = 0;
-                    size_t mask = 0;
-                    size_t current_chunk_size = std::min(channels_per_packet, (size_t)(in_ch - ich_base));
+            size_t ih_start = oh_range.start * static_cast<size_t>(conv.stride);
+            size_t ih_end = std::min(loop_in_height,
+                                     oh_range.end * static_cast<size_t>(conv.stride) + static_cast<size_t>(kernel_size) - 1);
 
-                    if (ultra_mode) { // Ultra Mode: Each bus handles a chunk of the input height
-                        for(size_t ih_u = 0; ih_u < NUM_PORTS; ++ih_u) {
-                            for(size_t c_off = 0; c_off < current_chunk_size; ++c_off) {
-                                size_t ich = ich_base + c_off;
-                                size_t base_h = ih_u * loop_in_height + ih;
-                                size_t idx = act_idx(base_h, iw, ich);
-                                fp16_t a = input_activation[idx];
-                                // Pack based on fixed 4-channel slots per port in Ultra Mode
-                                size_t slot_idx = ih_u * 4 + c_off;
-                                data_packet.range((slot_idx * 16) + 15, slot_idx * 16) = a;
-                                mask |= (1 << slot_idx);
+            for (int wave_oc = 0; wave_oc < wave_out_ch; ++wave_oc) {
+                WaveRange och_range = get_wave_range(static_cast<size_t>(out_ch), wave_out_ch, wave_oc);
+                if (och_range.start >= och_range.end) {
+                    continue;
+                }
+
+                for (int wave_ic = 0; wave_ic < wave_in_ch; ++wave_ic) {
+                    WaveRange ich_range = get_wave_range(static_cast<size_t>(in_ch), wave_in_ch, wave_ic);
+                    if (ich_range.start >= ich_range.end) {
+                        continue;
+                    }
+
+                    // 1. Weights (PS)
+                    VERBOSE_LOG("[TB-NoC-PS] Sending Weights (wave h=" << wave_h
+                              << " oc=" << wave_oc << " ic=" << wave_ic << ")");
+
+                    for(size_t och = och_range.start; och < och_range.end; ++och) {
+                        for(size_t kh = 0; kh < static_cast<size_t>(kernel_size); ++kh) {
+                            for(size_t kw = 0; kw < 3; ++kw) { // Assume kernel width is 3 for simplicity
+                                sc_biguint<256> data_packet = 0;
+                                size_t mask = 0;
+                                for(size_t ich = 0; ich < 4; ++ich) {
+                                    size_t ich_global = ich_range.start + ich;
+                                    if (ich_global >= static_cast<size_t>(in_ch) || ich_global >= 4) {
+                                        continue;
+                                    }
+                                    size_t idx = weight_idx(och, kh, kw, ich_global);
+                                    fp16_t w = input_weight[idx];
+                                    data_packet.range((ich * 16) + 15, ich * 16) = w;
+                                    mask |= (1 << ich);
+                                }
+                                if (mask == 0) {
+                                    continue;
+                                }
+                                uint16_t tag = kh;
+                                send_data_ps(tag, data_packet, false, mask);
                             }
-                        }
-                    } else { // Normal Mode: Single bus handles all channels for the given (ih, iw)
-                        for(size_t c_off = 0; c_off < current_chunk_size; ++c_off) {
-                            size_t ich = ich_base + c_off;
-                            size_t idx = act_idx(ih, iw, ich);
-                            fp16_t a = input_activation[idx];
-                            size_t slot_idx = c_off;
-                            data_packet.range((slot_idx * 16) + 15, slot_idx * 16) = a;
-                            mask |= (1 << slot_idx);
                         }
                     }
 
-                    uint16_t channel = NOC_CHANNEL_PD; // PD
-                    uint16_t tag = ih;
-                    send_data_noc0(channel, tag, data_packet, ultra_mode, mask);
+                    VERBOSE_LOG("[TB-NoC-PS] Weights sent for wave h=" << wave_h
+                              << " oc=" << wave_oc << " ic=" << wave_ic);
+
                 }
             }
         }
     }
 
-    void distribute_conv2d_noc1() {
-        std::cout << "[TB-NoC1] Distributing Conv2D Data (Partial Sums - Write)..." << std::endl;
+    void distribute_conv2d_pd() {
+        std::cout << "[TB-NoC-PD] Distributing Conv2D Activations (PD)..." << std::endl;
 
-        int kernel_size = std::stoi(config["kernel_size"]);
-        int stride = std::stoi(config["stride"]);
-        int out_ch = std::stoi(config["out_ch"]);
-        int out_height = std::stoi(config["out_height"]);
-        int out_width = std::stoi(config["out_width"]);
-        bool partial_sum_zero = (config["partial_sum_zero"] == "True");
+        int kernel_size = conv.kernel_size;
+        int in_ch = conv.in_ch;
+        int in_height = conv.in_height;
+        int in_width = conv.in_width;
+        bool ultra_mode = conv.ultra_mode;
+
+        int wave_out_h = std::max(1, conv.temporal_wave_out_h);
+        int wave_out_ch = std::max(1, conv.temporal_wave_out_ch);
+        int wave_in_ch = std::max(1, conv.temporal_wave_in_ch);
+
+        // index helpers
+        Index3D act_idx(in_height, in_width, in_ch);
+
+        size_t loop_in_height;
+        if (ultra_mode) {
+            loop_in_height = static_cast<size_t>(in_height) / NUM_PORTS; // Split height among ports
+        } else {
+            loop_in_height = static_cast<size_t>(in_height);
+        }
+
+        size_t loop_out_height = ultra_mode ? (static_cast<size_t>(conv.out_height) / NUM_PORTS)
+                                            : static_cast<size_t>(conv.out_height);
+
+        // Determine max channels per packet based on mode
+        size_t channels_per_packet = ultra_mode ? 4 : 12;
+
+        for (int wave_h = 0; wave_h < wave_out_h; ++wave_h) {
+            WaveRange oh_range = get_wave_range(loop_out_height, wave_out_h, wave_h);
+            if (oh_range.start >= oh_range.end) {
+                continue;
+            }
+
+            size_t ih_start = oh_range.start * static_cast<size_t>(conv.stride);
+            size_t ih_end = std::min(loop_in_height,
+                                        oh_range.end * static_cast<size_t>(conv.stride) + static_cast<size_t>(kernel_size) - 1);
+
+            for (int wave_oc = 0; wave_oc < wave_out_ch; ++wave_oc) {
+                (void)wave_oc; // Activations are independent of out_ch in current mapping
+
+                for (int wave_ic = 0; wave_ic < wave_in_ch; ++wave_ic) {
+                    WaveRange ich_range = get_wave_range(static_cast<size_t>(in_ch), wave_in_ch, wave_ic);
+                    if (ich_range.start >= ich_range.end) {
+                        continue;
+                    }
+
+                    VERBOSE_LOG("[TB-NoC-PD] Sending Activations (wave h=" << wave_h
+                                << " ic=" << wave_ic << ")");
+
+                    for(size_t iw = 0; iw < static_cast<size_t>(in_width); ++iw) {
+                        VERBOSE_LOG("[TB-NoC-PD] Processing input width index: " << iw << "/" << in_width);
+                        for(size_t ih = ih_start; ih < ih_end; ++ih) {
+                            // Iterate over channel chunks
+                            for (size_t ich_base = ich_range.start; ich_base < ich_range.end; ich_base += channels_per_packet) {
+                                sc_biguint<256> data_packet = 0;
+                                size_t mask = 0;
+                                size_t current_chunk_size = std::min(channels_per_packet, ich_range.end - ich_base);
+
+                                if (ultra_mode) { // Ultra Mode: Each bus handles a chunk of the input height
+                                    for(size_t ih_u = 0; ih_u < NUM_PORTS; ++ih_u) {
+                                        for(size_t c_off = 0; c_off < current_chunk_size; ++c_off) {
+                                            size_t ich = ich_base + c_off;
+                                            if (ich >= static_cast<size_t>(in_ch)) {
+                                                continue;
+                                            }
+                                            size_t base_h = ih_u * loop_in_height + ih;
+                                            size_t idx = act_idx(base_h, iw, ich);
+                                            fp16_t a = input_activation[idx];
+                                            size_t slot_idx = ih_u * 4 + c_off;
+                                            data_packet.range((slot_idx * 16) + 15, slot_idx * 16) = a;
+                                            mask |= (1 << slot_idx);
+                                        }
+                                    }
+                                } else { // Normal Mode
+                                    for(size_t c_off = 0; c_off < current_chunk_size; ++c_off) {
+                                        size_t ich = ich_base + c_off;
+                                        if (ich >= static_cast<size_t>(in_ch)) {
+                                            continue;
+                                        }
+                                        size_t idx = act_idx(ih, iw, ich);
+                                        fp16_t a = input_activation[idx];
+                                        size_t slot_idx = c_off;
+                                        data_packet.range((slot_idx * 16) + 15, slot_idx * 16) = a;
+                                        mask |= (1 << slot_idx);
+                                    }
+                                }
+
+                                if (mask == 0) {
+                                    continue;
+                                }
+
+                                uint16_t tag = ih;
+                                send_data_pd(tag, data_packet, ultra_mode, mask);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void distribute_conv2d_pli() {
+        std::cout << "[TB-NoC-PLI] Distributing Conv2D Data (Partial Sums - Write)..." << std::endl;
+
+        int out_ch = conv.out_ch;
+        int out_height = conv.out_height;
+        int out_width = conv.out_width;
+        bool partial_sum_zero = conv.partial_sum_zero;
+
+        int wave_out_h = std::max(1, conv.temporal_wave_out_h);
+        int wave_out_ch = std::max(1, conv.temporal_wave_out_ch);
+        int wave_in_ch = std::max(1, conv.temporal_wave_in_ch);
 
         size_t loop_out_height;
-        bool ultra_mode = (config["ultra_mode"] == "True");
+        bool ultra_mode = conv.ultra_mode;
         if (ultra_mode) {
-            loop_out_height = out_height / NUM_PORTS; // Split height among ports
+            loop_out_height = static_cast<size_t>(out_height) / NUM_PORTS; // Split height among ports
         } else {
-            loop_out_height = out_height;
+            loop_out_height = static_cast<size_t>(out_height);
         }
 
         // index helper for partial sums
         Index3D ps_idx(out_height, out_width, out_ch);
 
-        for(size_t ow = 0; ow < out_width; ++ow) {
-            // Partial Sum In (PLI) - Write via NoC1
-            std::cout << "[TB-NoC1] Sending Partial Sum In (PLI) for ow=" << ow << std::endl;
-            for(size_t oh = 0; oh < loop_out_height; ++oh) {
-                for(size_t och = 0; och < out_ch; och+=4) {
-                    sc_biguint<256> data_packet = 0;
-                    if (ultra_mode) {
-                        for(size_t oh_u = 0; oh_u < NUM_PORTS; ++oh_u) {
-                            for(size_t och_offset = 0; och_offset < 4; ++och_offset) {
-                                size_t base_h = oh_u * loop_out_height + oh;
-                                size_t idx = ps_idx(base_h, ow, (och + och_offset));
-                                fp16_t ps = partial_sum_zero ? fp16_t(0) : input_partial_sum[idx];
-                                data_packet.range(((oh_u * 4 + och_offset) * 16) + 15, (oh_u * 4 + och_offset) * 16) = ps;
+        for (int wave_h = 0; wave_h < wave_out_h; ++wave_h) {
+            WaveRange oh_range = get_wave_range(loop_out_height, wave_out_h, wave_h);
+            if (oh_range.start >= oh_range.end) {
+                continue;
+            }
+
+            for (int wave_oc = 0; wave_oc < wave_out_ch; ++wave_oc) {
+                WaveRange och_range = get_wave_range(static_cast<size_t>(out_ch), wave_out_ch, wave_oc);
+                if (och_range.start >= och_range.end) {
+                    continue;
+                }
+
+                for (int wave_ic = 0; wave_ic < wave_in_ch; ++wave_ic) {
+                    if (wave_ic != 0) {
+                        continue; // Only seed partial sums on the first in_ch wave
+                    }
+
+                    for(size_t ow = 0; ow < static_cast<size_t>(out_width); ++ow) {
+                        // Partial Sum In (PLI) - Write via NoC1
+                        VERBOSE_LOG("[TB-NoC-PLI] Sending Partial Sum In (PLI) for ow=" << ow
+                                  << " (wave h=" << wave_h << " oc=" << wave_oc << ")");
+                        for(size_t oh = oh_range.start; oh < oh_range.end; ++oh) {
+                            for(size_t och = och_range.start; och < och_range.end; och+=4) {
+                                sc_biguint<256> data_packet = 0;
+                                size_t mask = 0;
+                                if (ultra_mode) {
+                                    for(size_t oh_u = 0; oh_u < NUM_PORTS; ++oh_u) {
+                                        for(size_t och_offset = 0; och_offset < 4; ++och_offset) {
+                                            size_t och_idx = och + och_offset;
+                                            if (och_idx >= static_cast<size_t>(out_ch) || och_idx >= och_range.end) {
+                                                continue;
+                                            }
+                                            size_t base_h = oh_u * loop_out_height + oh;
+                                            size_t idx = ps_idx(base_h, ow, och_idx);
+                                            fp16_t ps = partial_sum_zero ? fp16_t(0) : input_partial_sum[idx];
+                                            size_t slot_idx = oh_u * 4 + och_offset;
+                                            data_packet.range((slot_idx * 16) + 15, slot_idx * 16) = ps;
+                                            mask |= (1 << slot_idx);
+                                        }
+                                    }
+                                } else {
+                                    for(size_t och_offset = 0; och_offset < 4; ++och_offset) {
+                                        size_t och_idx = och + och_offset;
+                                        if (och_idx >= static_cast<size_t>(out_ch) || och_idx >= och_range.end) {
+                                            continue;
+                                        }
+                                        size_t idx = ps_idx(oh, ow, och_idx);
+                                        fp16_t ps = partial_sum_zero ? fp16_t(0) : input_partial_sum[idx];
+                                        data_packet.range(((och_offset) * 16) + 15, (och_offset) * 16) = ps;
+                                        mask |= (1 << och_offset);
+                                    }
+                                }
+
+                                if (mask == 0) {
+                                    continue;
+                                }
+                                uint16_t tag = oh;
+                                send_data_pli(tag, data_packet, ultra_mode, mask);
                             }
                         }
-                    } else {
-                        for(size_t och_offset = 0; och_offset < 4; ++och_offset) {
-                            size_t idx = ps_idx(oh, ow, (och + och_offset));
-                            fp16_t ps = partial_sum_zero ? fp16_t(0) : input_partial_sum[idx];
-                            data_packet.range(((och_offset) * 16) + 15, (och_offset) * 16) = ps;
-                        }
                     }
-                    uint16_t channel = NOC_CHANNEL_PLI; // PLI (NoC1 Channel 0)
-                    uint16_t tag = oh;
-                    send_data_noc1(channel, tag, data_packet, ultra_mode, 0xF);
                 }
             }
         }
     }
 
-    void distribute_conv2d_noc2() {
-        std::cout << "[TB-NoC2] Distributing Conv2D Requests (Partial Sums - Read)..." << std::endl;
+    void distribute_conv2d_plo() {
+        std::cout << "[TB-NoC-PLO] Distributing Conv2D Requests (Partial Sums - Read)..." << std::endl;
 
-        int out_ch = std::stoi(config["out_ch"]);
-        int out_height = std::stoi(config["out_height"]);
-        int out_width = std::stoi(config["out_width"]);
+        int out_ch = conv.out_ch;
+        int out_height = conv.out_height;
+        int out_width = conv.out_width;
+
+        int wave_out_h = std::max(1, conv.temporal_wave_out_h);
+        int wave_out_ch = std::max(1, conv.temporal_wave_out_ch);
+        int wave_in_ch = std::max(1, conv.temporal_wave_in_ch);
 
         size_t loop_out_height;
-        bool ultra_mode = (config["ultra_mode"] == "True");
+        bool ultra_mode = conv.ultra_mode;
         if (ultra_mode) {
-            loop_out_height = out_height / NUM_PORTS; // Split height among ports
+            loop_out_height = static_cast<size_t>(out_height) / NUM_PORTS; // Split height among ports
         } else {
-            loop_out_height = out_height;
+            loop_out_height = static_cast<size_t>(out_height);
         }
 
         // helper index for Partial Sums
@@ -560,201 +878,193 @@ public:
 
         uint64_t plo_per_port_stride = static_cast<uint64_t>(loop_out_height) * out_width * out_ch;
 
-        for(size_t ow = 0; ow < out_width; ++ow) {
-             // Partial Sum Out (PLO) - Read via NoC2
-            std::cout << "[TB-NoC2] Receiving Partial Sum Out (PLO) for ow=" << ow << std::endl;
-            for(size_t oh = 0; oh < loop_out_height; ++oh) {
-                for(size_t och = 0; och < out_ch; och+=4) {
-                    uint16_t channel = NOC_CHANNEL_PLO; // PLO (NoC1 Channel 1)
-                    uint16_t tag = oh;
-                    size_t base_idx = ps_idx(oh, ow, och);
-                    recv_data_noc2(channel, tag, base_idx, ultra_mode, (ultra_mode ? plo_per_port_stride : 0), NUM_PORTS);
+        for (int wave_h = 0; wave_h < wave_out_h; ++wave_h) {
+            WaveRange oh_range = get_wave_range(loop_out_height, wave_out_h, wave_h);
+            if (oh_range.start >= oh_range.end) {
+                continue;
+            }
+
+            for (int wave_oc = 0; wave_oc < wave_out_ch; ++wave_oc) {
+                WaveRange och_range = get_wave_range(static_cast<size_t>(out_ch), wave_out_ch, wave_oc);
+                if (och_range.start >= och_range.end) {
+                    continue;
+                }
+
+                for (int wave_ic = 0; wave_ic < wave_in_ch; ++wave_ic) {
+                    if (wave_ic != wave_in_ch - 1) {
+                        continue; // Only read after the final in_ch wave
+                    }
+
+                    for(size_t ow = 0; ow < static_cast<size_t>(out_width); ++ow) {
+                        // Partial Sum Out (PLO) - Read via NoC2
+                        VERBOSE_LOG("[TB-NoC-PLO] Receiving Partial Sum Out (PLO) for ow=" << ow
+                                  << " (wave h=" << wave_h << " oc=" << wave_oc << ")");
+                        for(size_t oh = oh_range.start; oh < oh_range.end; ++oh) {
+                            for(size_t och = och_range.start; och < och_range.end; och+=4) {
+                                if (och >= static_cast<size_t>(out_ch)) {
+                                    continue;
+                                }
+                                uint16_t tag = oh;
+                                size_t base_idx = ps_idx(oh, ow, och);
+                                recv_data_plo(tag, base_idx, ultra_mode, (ultra_mode ? plo_per_port_stride : 0), NUM_PORTS);
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    void distribute_gemm_noc0() {
-        std::cout << "[TB-NoC0] Distributing GEMM Data (Weights & Activations)..." << std::endl;
+    void distribute_gemm_ps() {
+        std::cout << "[TB-NoC-PS] Distributing GEMM Weights (PS)..." << std::endl;
 
-        int M = config.count("M") ? std::stoi(config["M"]) : std::stoi(config["in_height"]);
         int K = config.count("K") ? std::stoi(config["K"]) : std::stoi(config["in_ch"]);
         int N = config.count("N") ? std::stoi(config["N"]) : std::stoi(config["out_ch"]);
 
-        int grid_rows = config.count("grid_rows") ? std::stoi(config["grid_rows"]) : 1;
         int grid_cols = config.count("grid_cols") ? std::stoi(config["grid_cols"]) : 1;
-        int grid_k = config.count("grid_k") ? std::stoi(config["grid_k"]) : 1;
 
         // PE Tile Sizes (Software/Arch definition)
-        // Ensure these match the logic in noc_gen.py
-        int PE_M = 12;
         int PE_N = 8;
         int PE_K = 32;
 
         // prepare index helpers
         Index2D weight_idx(K, N);
-        Index2D act_idx(M, K);
 
         // 1. Weights (Matrix B) -> Port Static (PS)
-        // ps_id = k_idx * grid_n + n_idx
         bool ultra_mode = (config["ultra_mode"] == "True");
 
         if (ultra_mode) {
-             // In Ultra Mode (K-split GEMM), we distribute K different slices to different ports.
-            // Port 0 gets K-tile 0, Port 1 gets K-tile 1, etc.
-            // Packet format packs data for Port 0, Port 1, Port 2...
-            // Tag = n_idx (shared).
-
-            // Iterate through the depth of K-tile (PE_K)
             for(size_t k_offset = 0; k_offset < PE_K; ++k_offset) {
-                for(size_t n_base = 0; n_base < N; n_base += 4) {
+                for(size_t n_base = 0; n_base < static_cast<size_t>(N); n_base += 4) {
                     sc_biguint<256> data_packet = 0;
 
-                    // For each port, we fill 4 fp16 values corresponding to its K-tile
-                    // Total packet: [Port0 64b | Port1 64b | Port2 64b | ...]
                     for (size_t port = 0; port < NUM_PORTS; ++port) {
-                        // Calculate global K for this port
-                        // Assuming 1-to-1 mapping: Port P handles K-tile P.
                         int k_tile = port;
                         size_t k_global = k_tile * PE_K + k_offset;
 
-                        if (k_global >= K) continue; // Padding or out of bounds
+                        if (k_global >= static_cast<size_t>(K)) continue;
 
-                        // Fill 4 elements along N
                         for(size_t n_offset = 0; n_offset < 4; ++n_offset) {
                             size_t n = n_base + n_offset;
-                            if (n >= N) break;
+                            if (n >= static_cast<size_t>(N)) break;
 
                             size_t idx = weight_idx(k_global, n);
                             fp16_t w = input_weight[idx];
 
-                            // Map to packet bits
-                            // Port 0: bits 0-63. Port 1: bits 64-127...
-                            // Within port: standard order
                             int bit_offset = (port * 64) + (n_offset * 16);
                             data_packet.range(bit_offset + 15, bit_offset) = w;
                         }
                     }
 
-                    // Determine Tag (Shared n_idx)
-                    int n_idx = n_base / PE_N;
-                    // k_idx is not in tag for ultra mode (implicit by port)
-
-                    uint16_t channel = NOC_CHANNEL_PS;
+                    int n_idx = static_cast<int>(n_base / PE_N);
                     uint16_t tag = n_idx;
 
-                    send_data_noc0(channel, tag, data_packet, true, 0xF);
-                    std::cout << "[TB-NoC0] Sent Weight Packet (ULTRA) - n_idx:" << n_idx
-                              << ", Tag: " << tag  << ", n_base:" << n_base << ", k_offset:" << k_offset << std::endl;
+                    send_data_ps(tag, data_packet, true, 0xF);
+                    VERBOSE_LOG("[TB-NoC-PS] Sent Weight Packet (ULTRA) - n_idx:" << n_idx
+                              << ", Tag: " << tag  << ", n_base:" << n_base << ", k_offset:" << k_offset);
                 }
             }
         } else {
-            for(size_t k = 0; k < K; ++k) {
-                for(size_t n_base = 0; n_base < N; n_base += 4) {
+            for(size_t k = 0; k < static_cast<size_t>(K); ++k) {
+                for(size_t n_base = 0; n_base < static_cast<size_t>(N); n_base += 4) {
                     sc_biguint<256> data_packet = 0;
                     for(size_t n_offset = 0; n_offset < 4; ++n_offset) {
                         size_t n = n_base + n_offset;
-                        if (n >= N) break;
+                        if (n >= static_cast<size_t>(N)) break;
                         size_t idx = weight_idx(k, n);
                         fp16_t w = input_weight[idx];
                         data_packet.range((n_offset * 16) + 15, n_offset * 16) = w;
                     }
 
-                    // Determine Tag based on Scan Chain ID
-                    // Map current data slice (n, k_base) to Grid ID
-                    int n_idx = n_base / PE_N;
-                    int k_idx = k / PE_K;
+                    int n_idx = static_cast<int>(n_base / PE_N);
+                    int k_idx = static_cast<int>(k / PE_K);
 
-                    uint16_t channel = NOC_CHANNEL_PS;
                     uint16_t tag = k_idx * grid_cols + n_idx;
-                    send_data_noc0(channel, tag, data_packet);
-                    std::cout << "[TB-NoC0] Sent Weight Packet - n_idx:" << n_idx << ", k_idx:" << k_idx
-                            << ", Tag: " << tag  << ", n_base:" << n_base << ", k:" << k << std::endl;
+                    send_data_ps(tag, data_packet);
+                    VERBOSE_LOG("[TB-NoC-PS] Sent Weight Packet - n_idx:" << n_idx << ", k_idx:" << k_idx
+                            << ", Tag: " << tag  << ", n_base:" << n_base << ", k:" << k << ")");
                 }
             }
         }
-        std::cout << "[TB-NoC0] Weights Distribution Complete." << std::endl;
+        std::cout << "[TB-NoC-PS] Weights Distribution Complete." << std::endl;
+    }
 
-        std::cout << "[TB-NoC0] Sending Activations..." << std::endl;
-        // 2. Activations (Matrix A) -> Port Dynamic (PD)
-        // pd_id = m_idx * grid_k + k_idx
-        // bool ultra_mode = (config["ultra_mode"] == "True"); // Already read above
-        size_t rows_per_port = ultra_mode ? (M / NUM_PORTS) : M;
+    void distribute_gemm_pd() {
+        std::cout << "[TB-NoC-PD] Distributing GEMM Activations (PD)..." << std::endl;
 
-        for(size_t k_offset = 0; k_offset < PE_K; k_offset++) {
+        int M = config.count("M") ? std::stoi(config["M"]) : std::stoi(config["in_height"]);
+        int K = config.count("K") ? std::stoi(config["K"]) : std::stoi(config["in_ch"]);
+
+        int grid_rows = config.count("grid_rows") ? std::stoi(config["grid_rows"]) : 1;
+        int grid_k = config.count("grid_k") ? std::stoi(config["grid_k"]) : 1;
+
+        int PE_M = 12;
+        int PE_K = 32;
+
+        Index2D act_idx(M, K);
+
+        bool ultra_mode = (config["ultra_mode"] == "True");
+
+        for(size_t k_offset = 0; k_offset < static_cast<size_t>(PE_K); k_offset++) {
             if (ultra_mode) {
-                // In Ultra GEMM K-split mode:
-                // We broadcast M to all ports (or split M? No, usually M is tiled).
-                // Wait, previous logic for Ultra was M-split.
-                // But K-split logic requires sending different K data to different ports.
-                // The current gemm_ultra config uses grid_rows=4 (M=48 / 12).
-                // It maps (M, N) grid to EACH bus.
-                // So M is NOT split across buses. M is replicated/local to bus.
-                // But each bus handles different K.
-                // So we need to feed A[m, k(port)] to Port P.
-                // We pack Data for Port 0 (k0), Port 1 (k1)...
+                for(size_t m_base = 0; m_base < static_cast<size_t>(M); m_base += 4) {
+                    sc_biguint<256> data_packet = 0;
 
-                for(size_t m_base = 0; m_base < M; m_base += 4) {
-                     sc_biguint<256> data_packet = 0;
-
-                     for (size_t port = 0; port < NUM_PORTS; ++port) {
+                    for (size_t port = 0; port < NUM_PORTS; ++port) {
                         int k_tile = port;
                         size_t k_global = k_tile * PE_K + k_offset;
-                        if (k_global >= K) continue;
+                        if (k_global >= static_cast<size_t>(K)) continue;
 
                         for(size_t m_offset = 0; m_offset < 4; ++m_offset) {
-                             size_t m = m_base + m_offset;
-                             if (m >= M) break;
-                             size_t idx = act_idx(m, k_global);
-                             fp16_t a = input_activation[idx];
+                            size_t m = m_base + m_offset;
+                            if (m >= static_cast<size_t>(M)) break;
+                            size_t idx = act_idx(m, k_global);
+                            fp16_t a = input_activation[idx];
 
-                             int bit_offset = (port * 64) + (m_offset * 16);
-                             data_packet.range(bit_offset + 15, bit_offset) = a;
+                            int bit_offset = (port * 64) + (m_offset * 16);
+                            data_packet.range(bit_offset + 15, bit_offset) = a;
                         }
-                     }
+                    }
 
-                     int m_idx = m_base / PE_M;
-                     uint16_t channel = NOC_CHANNEL_PD;
-                     uint16_t tag = m_idx; // Shared tag
+                    int m_idx = static_cast<int>(m_base / PE_M);
+                    uint16_t tag = m_idx;
 
-                     send_data_noc0(channel, tag, data_packet, true, 0xF);
-                     std::cout << "[TB-NoC0] Sent Activation Packet (ULTRA) - m_idx:" << m_idx
-                               << ", Tag: " << tag  << ", m_base:" << m_base << ", k:" << k_offset << std::endl;
+                    send_data_pd(tag, data_packet, true, 0xF);
+                    VERBOSE_LOG("[TB-NoC-PD] Sent Activation Packet (ULTRA) - m_idx:" << m_idx
+                              << ", Tag: " << tag  << ", m_base:" << m_base << ", k:" << k_offset << ")");
                 }
             } else {
-                for(size_t m_base = 0; m_base < M; m_base += 4) {
+                for(size_t m_base = 0; m_base < static_cast<size_t>(M); m_base += 4) {
                     for(int k_tile = 0; k_tile < grid_k; ++k_tile) {
-                        size_t k_global = k_tile * PE_K + k_offset;
-                        if (k_global >= K) {
-                            throw std::runtime_error("[TB-NoC0] Error: k_global exceeds K dimension!, k_global=" + std::to_string(k_global) + ", K=" + std::to_string(K) + ", k_tile=" + std::to_string(k_tile) + ", k_offset=" + std::to_string(k_offset));
+                        size_t k_global = static_cast<size_t>(k_tile) * PE_K + k_offset;
+                        if (k_global >= static_cast<size_t>(K)) {
+                            throw std::runtime_error("[TB-NoC-PD] Error: k_global exceeds K dimension!, k_global=" + std::to_string(k_global) + ", K=" + std::to_string(K) + ", k_tile=" + std::to_string(k_tile) + ", k_offset=" + std::to_string(k_offset));
                         }
                         sc_biguint<256> data_packet = 0;
                         for(size_t m_offset = 0; m_offset < 4; ++m_offset) {
                             size_t m = m_base + m_offset;
-                            if (m >= M) break;
+                            if (m >= static_cast<size_t>(M)) break;
                             size_t idx = act_idx(m, k_global);
                             fp16_t a = input_activation[idx];
                             data_packet.range((m_offset * 16) + 15, m_offset * 16) = a;
                         }
 
-                        // Determine Tag
-                        int m_idx = m_base / PE_M;
+                        int m_idx = static_cast<int>(m_base / PE_M);
                         int k_idx = k_tile;
 
-                        uint16_t channel = NOC_CHANNEL_PD;
                         uint16_t tag = k_idx * grid_rows + m_idx;
-                        send_data_noc0(channel, tag, data_packet, false, 0xF);
-                        std::cout << "[TB-NoC0] Sent Activation Packet - m_idx:" << m_idx << ", k_idx:" << k_idx
-                                << ", Tag: " << tag  << ", m_base:" << m_base << ", k:" << k_offset << std::endl;
+                        send_data_pd(tag, data_packet, false, 0xF);
+                        VERBOSE_LOG("[TB-NoC-PD] Sent Activation Packet - m_idx:" << m_idx << ", k_idx:" << k_idx
+                                << ", Tag: " << tag  << ", m_base:" << m_base << ", k:" << k_offset << ")");
                     }
                 }
             }
         }
-        std::cout << "[TB-NoC0] Activations Distribution Complete." << std::endl;
+        std::cout << "[TB-NoC-PD] Activations Distribution Complete." << std::endl;
     }
 
-    void distribute_gemm_noc1() {
-        std::cout << "[TB-NoC1] Distributing GEMM Data (Partial Sums Input)..." << std::endl;
+    void distribute_gemm_pli() {
+        std::cout << "[TB-NoC-PLI] Distributing GEMM Data (Partial Sums Input)..." << std::endl;
 
         int M = config.count("M") ? std::stoi(config["M"]) : std::stoi(config["in_height"]);
         int N = config.count("N") ? std::stoi(config["N"]) : std::stoi(config["out_ch"]);
@@ -790,11 +1100,10 @@ public:
                     }
                     int m_idx = m / PE_M;
                     int n_idx = n / PE_N;
-                    uint16_t channel = NOC_CHANNEL_PLI;
                     uint16_t tag = m_idx * grid_cols + n_idx;
 
-                    send_data_noc1(channel, tag, data_packet, true, 0x1);
-                    std::cout << "[TB-NoC1] Sent K-Split PS Input (ULTRA Port 0) - m:" << m << ", n:" << n << ", Tag:" << tag << std::endl;
+                    send_data_pli(tag, data_packet, true, 0x1);
+                    VERBOSE_LOG("[TB-NoC-PLI] Sent K-Split PS Input (ULTRA Port 0) - m:" << m << ", n:" << n << ", Tag:" << tag);
                 }
             } else if (ultra_mode) {
                 // Send PLI per port region so each port receives its local rows
@@ -812,11 +1121,10 @@ public:
                         int m_idx = (static_cast<int>(port) * static_cast<int>(rows_per_port) + static_cast<int>(m_local)) / PE_M;
                         int n_idx = n / PE_N;
 
-                        uint16_t channel = NOC_CHANNEL_PLI;
                         uint16_t tag = m_idx * grid_cols + n_idx;
 
                         // Send with ULTRA flag so router distributes across ports
-                        send_data_noc1(channel, tag, data_packet, true, 0xF);
+                        send_data_pli(tag, data_packet, true, 0xF);
                     }
                 }
             } else {
@@ -833,19 +1141,18 @@ public:
                     int m_idx = m / PE_M;
                     int n_idx = n / PE_N;
 
-                    uint16_t channel = NOC_CHANNEL_PLI;
                     uint16_t tag = m_idx * grid_cols + n_idx;
 
-                    send_data_noc1(channel, tag, data_packet);
-                    std::cout << "[TB-NoC1] Sent Partial Sum Input Packet - m_idx: " << m_idx << ", n_idx: " << n_idx << ", m: " << m << ", n: " << n
-                              << ", Tag: " << tag << std::endl;
+                    send_data_pli(tag, data_packet);
+                    VERBOSE_LOG("[TB-NoC-PLI] Sent Partial Sum Input Packet - m_idx: " << m_idx << ", n_idx: " << n_idx << ", m: " << m << ", n: " << n
+                              << ", Tag: " << tag << ")");
                 }
             }
         }
     }
 
-    void distribute_gemm_noc2() {
-        std::cout << "[TB-NoC2] Distributing GEMM Requests (Partial Sums Output)..." << std::endl;
+    void distribute_gemm_plo() {
+        std::cout << "[TB-NoC-PLO] Distributing GEMM Requests (Partial Sums Output)..." << std::endl;
 
         int M = config.count("M") ? std::stoi(config["M"]) : std::stoi(config["in_height"]);
         int N = config.count("N") ? std::stoi(config["N"]) : std::stoi(config["out_ch"]);
@@ -868,43 +1175,38 @@ public:
                 // K-Split Ultra: Read from Bus 2 (Port 2) only.
                 // Standard packet expected.
                 for(size_t m = 0; m < M; m+=4) {
-                    uint16_t channel = NOC_CHANNEL_PLO;
                     int m_idx = m / PE_M;
                     int n_idx = n / PE_N;
                     uint16_t tag = m_idx * grid_cols + n_idx;
                     size_t base_idx = ps_idx(m, n);
 
-                    recv_data_noc2(channel, tag, base_idx);
-                    std::cout << "[TB-NoC2] Requested K-Split PS Output (Port 2/Normal) - m:" << m << ", n:" << n << ", Tag:" << tag << std::endl;
+                    recv_data_plo(tag, base_idx);
+                    VERBOSE_LOG("[TB-NoC-PLO] Requested K-Split PS Output (Port 2/Normal) - m:" << m << ", n:" << n << ", Tag:" << tag);
                 }
             } else if (ultra_mode && grid_k == 1) {
                 // Request only the local base rows for port0; router will return NUM_PORTS chunks
                 for (size_t m_local = 0; m_local < rows_per_port; m_local += 4) {
-                    uint16_t channel = NOC_CHANNEL_PLO;
-
                     int m_idx = m_local / PE_M; // local tile index
                     int n_idx = n / PE_N;
                     uint16_t tag = m_idx * grid_cols + n_idx;
 
                     size_t base_idx = ps_idx(m_local, n);
-                    recv_data_noc2(channel, tag, base_idx, true, per_port_stride, NUM_PORTS);
-                    std::cout << "[TB-NoC2] Requested Partial Sum Output Packet (ULTRA) - m_idx: " << m_idx << ", n_idx: " << n_idx
+                    recv_data_plo(tag, base_idx, true, per_port_stride, NUM_PORTS);
+                    VERBOSE_LOG("[TB-NoC-PLO] Requested Partial Sum Output Packet (ULTRA) - m_idx: " << m_idx << ", n_idx: " << n_idx
                               << ", m_local: " << m_local << ", N base: " << n
-                              << ", Tag: " << tag << ", per_port_stride: " << per_port_stride << std::endl;
+                              << ", Tag: " << tag << ", per_port_stride: " << per_port_stride << ")");
                 }
             } else {
                 for(size_t m = 0; m < M; m+=4) {
-                    uint16_t channel = NOC_CHANNEL_PLO;
-
                     int m_idx = m / PE_M;
                     int n_idx = n / PE_N;
                     uint16_t tag = m_idx * grid_cols + n_idx;
 
                     size_t base_idx = ps_idx(m, n);
-                    recv_data_noc2(channel, tag, base_idx);
-                    std::cout << "[TB-NoC2] Requested Partial Sum Output Packet - m_idx: " << m_idx << ", n_idx: " << n_idx
+                    recv_data_plo(tag, base_idx);
+                    VERBOSE_LOG("[TB-NoC-PLO] Requested Partial Sum Output Packet - m_idx: " << m_idx << ", n_idx: " << n_idx
                               << ", m: " << m << ", N base: " << n
-                              << ", Tag: " << tag << std::endl;
+                              << ", Tag: " << tag << ")");
                 }
             }
         }
@@ -1053,26 +1355,36 @@ public:
         // 2. Load Data
         load_test_data();
 
-        // 3. Configure NoC
-        configure_scan_chain();
+        if (config.count("mode") && config["mode"] == "conv2d") {
+            if (conv.kernel_size <= 0 || conv.in_ch <= 0 || conv.out_ch <= 0 || conv.in_height <= 0 || conv.in_width <= 0 || conv.out_height <= 0 || conv.out_width <= 0) {
+                std::cerr << "[TB] Invalid conv2d config in config.txt" << std::endl;
+                sc_stop();
+                return;
+            }
+        }
+
+        // 3. Configure NoC (via events)
+        scan_chain_event.notify(SC_ZERO_TIME);
+        wait(scan_chain_done_event);
         noc.dump_state();
 
-        // 4. Load Program
-        load_pe_program();
+        // 4. Load Program (via events)
+        program_event.notify(SC_ZERO_TIME);
+        wait(program_done_event);
 
-        // 5. Start PEs
-        std::cout << "[TB] Starting PEs..." << std::endl;
-        send_command(message_command_t::CMD_START_PE);
+        // 5. Start PEs (via events)
+        pe_start_event.notify(SC_ZERO_TIME);
+        wait(pe_start_done_event);
 
         // 6. Distribute Data (Parallel)
         // Calculate MACs for stats
         std::string mode = config["mode"];
         if (mode == "conv2d") {
-            int kernel_size = std::stoi(config["kernel_size"]);
-            int in_ch = std::stoi(config["in_ch"]);
-            int out_ch = std::stoi(config["out_ch"]);
-            int out_height = std::stoi(config["out_height"]);
-            int out_width = std::stoi(config["out_width"]);
+            int kernel_size = conv.kernel_size;
+            int in_ch = conv.in_ch;
+            int out_ch = conv.out_ch;
+            int out_height = conv.out_height;
+            int out_width = conv.out_width;
             total_macs = out_ch * out_height * out_width * kernel_size * kernel_size * in_ch;
         } else if (mode == "gemm") {
             int M = config.count("M") ? std::stoi(config["M"]) : std::stoi(config["in_height"]);
@@ -1087,10 +1399,10 @@ public:
         // 7. Wait for completion
         std::cout << "[TB] Running Simulation..." << std::endl;
 
-        // Wait for all threads to finish sending/receiving with timeout
+        // Wait for all sender threads to finish with timeout
         sc_time start_wait = sc_time_stamp();
         sc_time timeout = sc_time(500, SC_MS);
-        wait(timeout, noc0_done_event & noc1_done_event & noc2_done_event);
+        wait(timeout, ps_done_event & pd_done_event & pli_done_event & plo_done_event);
 
         if (sc_time_stamp() - start_wait >= timeout) {
              std::cerr << "[TB] ERROR: Simulation Timed Out waiting for NoC completion!" << std::endl;
@@ -1099,8 +1411,16 @@ public:
         }
 
         // Wait until all expected responses are received (rx_idx_fifo should be empty)
-        while (rx_idx_fifo.num_available() > 0) {
-            wait(clock_period_ns, SC_NS);
+        uint64_t waited_cycles = 0;
+        while (rx_idx_fifo.num_available() > 0 && waited_cycles < MAX_WAIT_CYCLES) {
+            wait(clk.posedge_event());
+            waited_cycles++;
+        }
+        if (rx_idx_fifo.num_available() > 0) {
+            std::cerr << "[TB] ERROR: Timeout waiting for responses to drain (remaining="
+                      << rx_idx_fifo.num_available() << ")" << std::endl;
+            sc_stop();
+            return;
         }
 
         // 8. Check Results
@@ -1120,8 +1440,9 @@ void print_usage() {
     std::cout << "Usage: ./test_noc_sim [options] <data_dir>" << std::endl;
     std::cout << "Options:" << std::endl;
     std::cout << "  -c <clock_period_ns>   Set clock period in nanoseconds (default: 10)" << std::endl;
-    std::cout << "  -v <tolerance>   Set verification tolerance (default: 0.02)" << std::endl;
-    std::cout << "  -t <trace_file>  Set trace file path (default: trace.json)" << std::endl;
+    std::cout << "  -t <tolerance>   Set verification tolerance (default: 0.02)" << std::endl;
+    std::cout << "  -f <trace_file>  Set trace file path (default: trace.json)" << std::endl;
+    std::cout << "  -v               Enable verbose logging" << std::endl;
     std::cout << "  <data_dir>       Path to the test data directory (default: output/noc/conv2d)" << std::endl;
 }
 
@@ -1129,18 +1450,22 @@ int sc_main(int argc, char* argv[]) {
     // Default parameters
     std::string data_dir = "output/noc/conv2d";
     std::string trace_file = "trace.json";
+    bool enable_trace = false;
     float verify_tolerance = 0.02f;
     int clock_period_ns = 10;
 
     // Parse command-line arguments
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "-v" && i + 1 < argc) {
+        if (arg == "-t" && i + 1 < argc) {
             verify_tolerance = std::stof(argv[++i]);
         } else if (arg == "-c" && i + 1 < argc) {
             clock_period_ns = std::stoi(argv[++i]);
-        } else if (arg == "-t" && i + 1 < argc) {
+        } else if (arg == "-f" && i + 1 < argc) {
             trace_file = argv[++i];
+            enable_trace = true;
+        } else if (arg == "-v") {
+           enable_verbose_logging(true); // Enable verbose logging
         } else if (arg == "-h" || arg == "--help") {
             print_usage();
             return 0;
@@ -1152,13 +1477,20 @@ int sc_main(int argc, char* argv[]) {
     // Instantiate TestBench
     NoCSimTestBench tb("NoCSimTestBench", data_dir, verify_tolerance, clock_period_ns);
 
-    // Open trace file
-    PerfettoTrace::getInstance().open(trace_file);
+    if (enable_trace) {
+        tb.noc.enable_perffeto_trace(); // Enable tracing in the NetworkOnChip
+        // Open trace file
+        PerfettoTrace::getInstance().open(trace_file);
+    }
+
+
 
     sc_start();
 
-    // Close trace file
-    PerfettoTrace::getInstance().close();
+    if (enable_trace) {
+        // Close trace file
+        PerfettoTrace::getInstance().close();
+    }
 
     return 0;
 }

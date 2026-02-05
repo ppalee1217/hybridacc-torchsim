@@ -81,7 +81,8 @@ public:
 
     // Status outputs
     sc_out<bool> halted_out;
-    sc_out<bool> stall_port_io; // Debug output
+    sc_out<bool> stall_port_pli; // Debug output
+    sc_out<bool> stall_port_plo; // Debug output
 
     // Local Network ports (PLI/PLO) - using VRDIF/VRDOF
     VRDIF<uint64_t> pli;
@@ -99,7 +100,8 @@ public:
           valid_in("signal_valid_in"),
           ready_out("stall_adder"), // Map to old stall signal pin location if needed, but logical meaning is inverted
           halted_out("halted_out"),
-          stall_port_io("stall_port_io"),
+          stall_port_pli("stall_port_pli"),
+          stall_port_plo("stall_port_plo"),
           pli("pli"), plo("plo"),
           vaddu("vaddu"), PR("PR")
     {
@@ -113,7 +115,8 @@ public:
 
         // 1. Ready Out Logic (Backpressure calculation)
         SC_METHOD(comb_ready_out);
-        sensitive << state_reg << valid_in << EXE_M_decode_signals_in;
+        sensitive << state_reg << valid_in << EXE_M_decode_signals_in
+              << plo_buf_valid_reg << plo.ready_in;
 
         // 2. Next State Logic
         SC_METHOD(comb_next_state);
@@ -123,7 +126,7 @@ public:
                   << pli.valid_in << pli.data_in << plo.ready_in
                   << s1_reg0 << s1_reg1 << s2_reg << vaddu_result_reg
                   << vaddu_result_sig
-                  << ready_out_sig; // State transitions depend on if we accepted data
+                  << ready_out_sig << plo_buf_valid_reg; // State transitions depend on if we accepted data
 
         // VADDU Control
         SC_METHOD(comb_vaddu_op1);
@@ -153,11 +156,18 @@ public:
 
         // Outputs
         SC_METHOD(comb_outputs_misc);
-        sensitive << state_reg << vaddu_result_reg << halted_reg;
+        sensitive << state_reg << vaddu_result_reg << halted_reg
+              << plo_buf_valid_reg << plo_buf_data_reg;
 
         SC_METHOD(comb_pli_handshake);
         sensitive << state_reg << valid_in << EXE_M_decode_signals_in
                   << pli.valid_in << ready_out_sig;
+
+        // PLO buffer update
+        SC_METHOD(comb_plo_buffer);
+        sensitive << state_reg << vaddu_result_sig
+                  << plo.ready_in << stage_reset
+              << plo_buf_valid_reg << plo_buf_data_reg;
 
         bind_submodules();
     }
@@ -173,6 +183,10 @@ private:
     sc_signal<v_fp16_t> vaddu_result_reg;
     sc_signal<bool> halted_reg;
 
+    // PLO push pipeline buffer (decouple VPSUM from PLO ready)
+    sc_signal<bool> plo_buf_valid_reg;
+    sc_signal<uint64_t> plo_buf_data_reg;
+
     // VMAC 3-stage pipeline registers
     sc_signal<fp16_t> s1_reg0;  // Stage 1: vmul_out[0] + vmul_out[1]
     sc_signal<fp16_t> s1_reg1;  // Stage 1: vmul_out[2] + vmul_out[3]
@@ -187,6 +201,9 @@ private:
     sc_signal<v_fp16_t> pli_data_reg_next;
     sc_signal<v_fp16_t> vaddu_result_reg_next;
     sc_signal<bool> halted_reg_next;
+
+    sc_signal<bool> plo_buf_valid_reg_next;
+    sc_signal<uint64_t> plo_buf_data_reg_next;
 
     // VMAC pipeline next-state signals
     sc_signal<fp16_t> s1_reg0_next;
@@ -252,6 +269,8 @@ private:
         pli_data_reg.write(v_fp16_t());
         vaddu_result_reg.write(v_fp16_t());
         halted_reg.write(false);
+        plo_buf_valid_reg.write(false);
+        plo_buf_data_reg.write(0);
         s1_reg0.write(0);
         s1_reg1.write(0);
         s2_reg.write(0);
@@ -267,6 +286,8 @@ private:
             pli_data_reg.write(pli_data_reg_next.read());
             vaddu_result_reg.write(vaddu_result_reg_next.read());
             halted_reg.write(halted_reg_next.read());
+            plo_buf_valid_reg.write(plo_buf_valid_reg_next.read());
+            plo_buf_data_reg.write(plo_buf_data_reg_next.read());
             s1_reg0.write(s1_reg0_next.read());
             s1_reg1.write(s1_reg1_next.read());
             s2_reg.write(s2_reg_next.read());
@@ -288,11 +309,21 @@ private:
         bool ready = false;
 
         if (state == EXE_A_State::IDLE) {
-            // In IDLE, we are ready for new instruction
-            ready = true;
+            // In IDLE, we are ready for new instruction (unless VPSUM would overflow PLO buffer)
+            if (valid_in.read() && EXE_M_decode_signals_in.read().pli_plo_operation
+                && plo_buf_valid_reg.read() && !plo.ready_in.read()) {
+                ready = false;
+            } else {
+                ready = true;
+            }
         } else if (state == EXE_A_State::NORMAL_MODE) {
             // Normal mode is 1-cycle execution, so we are ready for next instruction
-            ready = true;
+            if (valid_in.read() && EXE_M_decode_signals_in.read().pli_plo_operation
+                && plo_buf_valid_reg.read() && !plo.ready_in.read()) {
+                ready = false;
+            } else {
+                ready = true;
+            }
         } else if (state == EXE_A_State::VMAC_S1) {
             // In VMAC_S1 (Pipeline Active), we check if we can accept the next instruction
             if (valid_in.read()) {
@@ -308,6 +339,13 @@ private:
                  // No valid input, we are ready (to accept a bubble or new valid)
                  ready = true;
             }
+        } else if (state == EXE_A_State::EXEC_PLI_VADDU) {
+            // VPSUM execution can accept next instruction if PLO buffer can take output
+            bool can_push = !plo_buf_valid_reg.read() || plo.ready_in.read();
+            ready = can_push;
+        } else if (state == EXE_A_State::WAIT_PLO) {
+            // Can accept next instruction only when PLO handshake will complete
+            ready = plo.ready_in.read();
         } else {
             // Other states (VMAC_S2, VMAC_S3, NORMAL, EXEC_PLI, WAIT_*, etc.) are busy
             ready = false;
@@ -329,7 +367,7 @@ private:
 
     // 處理 IDLE 狀態的轉換
     void handle_idle_state(StateTransitionResult& result) {
-        if (valid_in.read()) { // Only process if we have valid input
+        if (valid_in.read() && ready_out_sig.read()) { // Only process if we accepted input
              // Check downstream backpressure?
              // EXE_A is last stage usually. But WAIT_PLO needs handshake.
              // Assume no downstream stall for general logic unless explicit IO.
@@ -341,13 +379,13 @@ private:
             result.next_decode_s1 = pe_decode_signals_t();
             result.next_decode_s2 = pe_decode_signals_t();
 
-            DEBUG_MSG("[EXE_A_stage] New instruction, vmul_data = " << vmul_out_in.read(), DEBUG_LEVEL_PE_STAGE);
+            DEBUG_MSG("[EXE_A_Stage] New instruction, vmul_data = " << vmul_out_in.read(), DEBUG_LEVEL_PE_STAGE);
 
             // 檢查 HALT
             if (result.next_decode.halt) {
                 result.next_halted = true;
                 result.next_state = EXE_A_State::IDLE;
-                DEBUG_MSG("[EXE_A_stage] HALT detected", DEBUG_LEVEL_PE_STAGE);
+                DEBUG_MSG("[EXE_A_Stage] HALT detected", DEBUG_LEVEL_PE_STAGE);
             }
             // PLI-PLO 操作 (VPSUM/VPSUMR)
             else if (result.next_decode.pli_plo_operation) {
@@ -359,22 +397,22 @@ private:
                 }else{
                     result.next_state = EXE_A_State::WAIT_PLI;
                 }
-                DEBUG_MSG("[EXE_A_stage] Start PLI-PLO operation", DEBUG_LEVEL_PE_STAGE);
+                DEBUG_MSG("[EXE_A_Stage] Start PLI-PLO operation", DEBUG_LEVEL_PE_STAGE);
             }
             // VMAC 模式 (vaddu_mode==0 表示 ACCUMULATE)
             else if (result.next_decode.vaddu_en && result.next_decode.vaddu_mode == 0) {
                 result.next_state = EXE_A_State::VMAC_S1;
-                DEBUG_MSG("[EXE_A_stage] Start VMAC mode (Pipeline Active)", DEBUG_LEVEL_PE_STAGE);
+                DEBUG_MSG("[EXE_A_Stage] Start VMAC mode (Pipeline Active)", DEBUG_LEVEL_PE_STAGE);
             }
             // Normal 模式 (VMUL/VMULR 等, vaddu_mode==1 表示 ADD)
             else if (result.next_decode.vaddu_en) {
                 result.next_state = EXE_A_State::NORMAL_MODE;
-                DEBUG_MSG("[EXE_A_stage] Start Normal mode (1-stage)", DEBUG_LEVEL_PE_STAGE);
+                DEBUG_MSG("[EXE_A_Stage] Start Normal mode (1-stage)", DEBUG_LEVEL_PE_STAGE);
             }
             // 其他指令 (只操作 PR,不需要運算)
             else {
                 result.next_state = EXE_A_State::IDLE;
-                DEBUG_MSG("[EXE_A_stage] Execute PR-only operation", DEBUG_LEVEL_PE_STAGE);
+                DEBUG_MSG("[EXE_A_Stage] Execute PR-only operation", DEBUG_LEVEL_PE_STAGE);
             }
         }
     }
@@ -392,25 +430,25 @@ private:
         result.next_decode_s2 = decode_s1_reg.read();
 
         // Check for new instruction to fill Stage 1
-        if (valid_in.read()) {
+        if (valid_in.read() && ready_out_sig.read()) {
             pe_decode_signals_t next_decode = EXE_M_decode_signals_in.read();
             // If next is VMAC, accept it and stay in VMAC_S1
             if (next_decode.vaddu_en && next_decode.vaddu_mode == 0) {
                 result.next_decode = next_decode;
                 result.next_vmul_data = vmul_out_in.read();
                 result.next_state = EXE_A_State::VMAC_S1;
-                DEBUG_MSG("[EXE_A_stage] Pipeline: Accept new VMAC", DEBUG_LEVEL_PE_STAGE);
+                DEBUG_MSG("[EXE_A_Stage] Pipeline: Accept new VMAC", DEBUG_LEVEL_PE_STAGE);
             } else {
                 // Next is NOT VMAC, start draining (we blocked upstream in ready_out logic)
                 result.next_decode = pe_decode_signals_t(); // Bubble
                 result.next_state = EXE_A_State::VMAC_S2;
-                DEBUG_MSG("[EXE_A_stage] Pipeline: Next not VMAC, drain (Go to S2)", DEBUG_LEVEL_PE_STAGE);
+                DEBUG_MSG("[EXE_A_Stage] Pipeline: Next not VMAC, drain (Go to S2)", DEBUG_LEVEL_PE_STAGE);
             }
         } else {
             // No valid input, start draining
             result.next_decode = pe_decode_signals_t(); // Bubble
             result.next_state = EXE_A_State::VMAC_S2;
-            DEBUG_MSG("[EXE_A_stage] Pipeline: No input, drain (Go to S2)", DEBUG_LEVEL_PE_STAGE);
+            DEBUG_MSG("[EXE_A_Stage] Pipeline: No input, drain (Go to S2)", DEBUG_LEVEL_PE_STAGE);
         }
     }
 
@@ -431,7 +469,7 @@ private:
         result.next_decode = pe_decode_signals_t();
 
         result.next_state = EXE_A_State::VMAC_S3;
-        DEBUG_MSG("[EXE_A_stage] VMAC S2: Draining...", DEBUG_LEVEL_PE_STAGE);
+        DEBUG_MSG("[EXE_A_Stage] VMAC S2: Draining...", DEBUG_LEVEL_PE_STAGE);
     }
 
     // 處理 VMAC Stage 3 (Draining Stage 2)
@@ -444,7 +482,7 @@ private:
         result.next_decode_s2 = decode_s1_reg.read(); // Should be bubble
 
         result.next_state = EXE_A_State::IDLE;
-        DEBUG_MSG("[EXE_A_stage] VMAC S3: Draining complete, go IDLE", DEBUG_LEVEL_PE_STAGE);
+        DEBUG_MSG("[EXE_A_Stage] VMAC S3: Draining complete, go IDLE", DEBUG_LEVEL_PE_STAGE);
     }
 
     // 處理 Normal Mode (1-stage)
@@ -452,7 +490,7 @@ private:
         // Normal mode execution happens combinationally in current cycle
 
         // Check for next instruction immediately
-        if (valid_in.read()) {
+        if (valid_in.read() && ready_out_sig.read()) {
             result.next_decode = EXE_M_decode_signals_in.read();
             result.next_vmul_data = vmul_out_in.read();
 
@@ -460,7 +498,7 @@ private:
             result.next_decode_s1 = pe_decode_signals_t();
             result.next_decode_s2 = pe_decode_signals_t();
 
-            DEBUG_MSG("[EXE_A_stage] Normal Mode: Accept new instruction", DEBUG_LEVEL_PE_STAGE);
+            DEBUG_MSG("[EXE_A_Stage] Normal Mode: Accept new instruction", DEBUG_LEVEL_PE_STAGE);
 
             if (result.next_decode.halt) {
                 result.next_halted = true;
@@ -487,7 +525,7 @@ private:
             }
         } else {
             result.next_state = EXE_A_State::IDLE;
-            DEBUG_MSG("[EXE_A_stage] Normal mode complete, no new input", DEBUG_LEVEL_PE_STAGE);
+            DEBUG_MSG("[EXE_A_Stage] Normal mode complete, no new input", DEBUG_LEVEL_PE_STAGE);
         }
     }
 
@@ -498,7 +536,6 @@ private:
             captured_pli_data.fromUint64(pli.data_in.read());
             result.next_pli_data = captured_pli_data;
             result.next_state = EXE_A_State::EXEC_PLI_VADDU;
-            DEBUG_MSG("[EXE_A_stage] PLI data captured: 0x" << std::hex << pli.data_in.read(), DEBUG_LEVEL_PE_STAGE);
         }
     }
 
@@ -507,16 +544,89 @@ private:
         // PLI + PR (使用 VADDU)
         v_fp16_t vaddu_out = vaddu_result_sig.read();
         result.next_vaddu_result = vaddu_out;
-        result.next_state = EXE_A_State::WAIT_PLO;
-        DEBUG_MSG("[EXE_A_stage] PLI VADDU complete: " << vaddu_out, DEBUG_LEVEL_PE_STAGE);
+
+        const bool can_push = !plo_buf_valid_reg.read() || plo.ready_in.read();
+        if (!can_push) {
+            result.next_state = EXE_A_State::WAIT_PLO;
+            return;
+        }
+        DEBUG_MSG("[EXE_A_Stage] PLI VADDU complete: " << vaddu_out, DEBUG_LEVEL_PE_STAGE);
+
+        const bool accepting_new = ready_out_sig.read() && valid_in.read();
+        if (accepting_new) {
+            pe_decode_signals_t next_decode = EXE_M_decode_signals_in.read();
+            result.next_decode = next_decode;
+            result.next_vmul_data = vmul_out_in.read();
+
+            // Clear pipeline registers
+            result.next_decode_s1 = pe_decode_signals_t();
+            result.next_decode_s2 = pe_decode_signals_t();
+
+            if (next_decode.halt) {
+                result.next_halted = true;
+                result.next_state = EXE_A_State::IDLE;
+            } else if (next_decode.pli_plo_operation) {
+                if (pli.valid_in.read()) {
+                    v_fp16_t captured_pli_data;
+                    captured_pli_data.fromUint64(pli.data_in.read());
+                    result.next_pli_data = captured_pli_data;
+                    result.next_state = EXE_A_State::EXEC_PLI_VADDU;
+                } else {
+                    result.next_state = EXE_A_State::WAIT_PLI;
+                }
+            } else if (next_decode.vaddu_en && next_decode.vaddu_mode == 0) {
+                result.next_state = EXE_A_State::VMAC_S1;
+            } else if (next_decode.vaddu_en) {
+                result.next_state = EXE_A_State::NORMAL_MODE;
+            } else {
+                result.next_state = EXE_A_State::IDLE;
+            }
+        } else {
+            result.next_state = EXE_A_State::IDLE;
+        }
     }
 
     // 處理 WAIT_PLO 狀態的轉換
     void handle_wait_plo_state(StateTransitionResult& result) {
-        if (plo.ready_in.read()) {
-            result.next_state = EXE_A_State::IDLE;
-            DEBUG_MSG("[EXE_A_stage] PLO handshake done", DEBUG_LEVEL_PE_STAGE);
+        if (!plo.ready_in.read()) {
+            result.next_state = EXE_A_State::WAIT_PLO;
+            return;
         }
+
+        const bool accepting_new = ready_out_sig.read() && valid_in.read();
+        if (accepting_new) {
+            pe_decode_signals_t next_decode = EXE_M_decode_signals_in.read();
+            result.next_decode = next_decode;
+            result.next_vmul_data = vmul_out_in.read();
+
+            // Clear pipeline registers
+            result.next_decode_s1 = pe_decode_signals_t();
+            result.next_decode_s2 = pe_decode_signals_t();
+
+            if (next_decode.halt) {
+                result.next_halted = true;
+                result.next_state = EXE_A_State::IDLE;
+            } else if (next_decode.pli_plo_operation) {
+                if (pli.valid_in.read()) {
+                    v_fp16_t captured_pli_data;
+                    captured_pli_data.fromUint64(pli.data_in.read());
+                    result.next_pli_data = captured_pli_data;
+                    result.next_state = EXE_A_State::EXEC_PLI_VADDU;
+                } else {
+                    result.next_state = EXE_A_State::WAIT_PLI;
+                }
+            } else if (next_decode.vaddu_en && next_decode.vaddu_mode == 0) {
+                result.next_state = EXE_A_State::VMAC_S1;
+            } else if (next_decode.vaddu_en) {
+                result.next_state = EXE_A_State::NORMAL_MODE;
+            } else {
+                result.next_state = EXE_A_State::IDLE;
+            }
+        } else {
+            result.next_state = EXE_A_State::IDLE;
+        }
+
+        DEBUG_MSG("[EXE_A_Stage] PLO handshake done", DEBUG_LEVEL_PE_STAGE);
     }
 
     // 主要的 next state 邏輯
@@ -622,6 +732,8 @@ private:
                 op1 = vmul;
                 break;
             case EXE_A_State::EXEC_PLI_VADDU:
+            case EXE_A_State::WAIT_PLI:
+            case EXE_A_State::WAIT_PLO:
                 op1 = pli_data;
                 break;
             default:
@@ -644,6 +756,8 @@ private:
                 break;
             case EXE_A_State::NORMAL_MODE:
             case EXE_A_State::EXEC_PLI_VADDU:
+            case EXE_A_State::WAIT_PLI:
+            case EXE_A_State::WAIT_PLO:
                 op2 = pr_vp_out_sig.read();
                 break;
             default:
@@ -729,6 +843,37 @@ private:
         pr_incr_pcounter_sig.write(incr);
     }
 
+    // ========================= Comb: PLO Buffer =========================
+    void comb_plo_buffer() {
+        // Default hold
+        plo_buf_valid_reg_next.write(plo_buf_valid_reg.read());
+        plo_buf_data_reg_next.write(plo_buf_data_reg.read());
+
+        if (stage_reset.read()) {
+            plo_buf_valid_reg_next.write(false);
+            plo_buf_data_reg_next.write(0);
+            return;
+        }
+
+        const bool pop = plo_buf_valid_reg.read() && plo.ready_in.read();
+        const bool can_push = !plo_buf_valid_reg.read() || plo.ready_in.read();
+        const bool produce = (state_reg.read() == EXE_A_State::EXEC_PLI_VADDU || state_reg.read() == EXE_A_State::WAIT_PLO) && can_push;
+
+        const uint64_t vpsum_data = (state_reg.read() == EXE_A_State::WAIT_PLO)
+            ? vaddu_result_reg.read().toUint64()
+            : vaddu_result_sig.read().toUint64();
+
+        if (pop && !produce) {
+            plo_buf_valid_reg_next.write(false);
+        } else if (!pop && produce) {
+            plo_buf_valid_reg_next.write(true);
+            plo_buf_data_reg_next.write(vpsum_data);
+        } else if (pop && produce) {
+            plo_buf_valid_reg_next.write(true);
+            plo_buf_data_reg_next.write(vpsum_data);
+        }
+    }
+
     // ========================= Comb: Output Signals =========================
     // Replaces comb_stall_adder, comb_halted, etc.
 
@@ -738,14 +883,14 @@ private:
 
         // Port IO Stall (Debug/Profiling)
         EXE_A_State state = state_reg.read();
-        bool port_stall = (state == EXE_A_State::WAIT_PLI) || (state == EXE_A_State::WAIT_PLO);
-        stall_port_io.write(port_stall);
+        stall_port_pli.write(state == EXE_A_State::WAIT_PLI);
+        stall_port_plo.write(state == EXE_A_State::WAIT_PLO);
 
         // PLO Valid Output
-        plo.valid_out.write(state == EXE_A_State::WAIT_PLO);
+        plo.valid_out.write(plo_buf_valid_reg.read());
 
         // PLO Data Output
-        plo.data_out.write(vaddu_result_reg.read().toUint64());
+        plo.data_out.write(plo_buf_data_reg.read());
     }
 
     // ========================= Comb: PLI Handshake =========================
@@ -760,14 +905,20 @@ private:
 
         // Only trigger early capture if we are actually accepting the instruction
         bool accepting_new = ready_out_sig.read() && valid_in.read();
+        bool next_is_vpsum = EXE_M_decode_signals_in.read().pli_plo_operation;
 
-        bool need_pli_early = (state == EXE_A_State::IDLE && accepting_new &&
-                               EXE_M_decode_signals_in.read().pli_plo_operation);
+        bool accept_vpsum = accepting_new && next_is_vpsum;
 
-        // Note: No downstream stall check here because we assume if we are accepting new,
-        // we handle flow control via ready_out_sig.
-
-        bool pli_ready = (state == EXE_A_State::WAIT_PLI) || need_pli_early;
+        bool pli_ready = false;
+        if (state == EXE_A_State::WAIT_PLI) {
+            pli_ready = true;
+        } else if (state == EXE_A_State::IDLE ||
+                   state == EXE_A_State::EXEC_PLI_VADDU ||
+                   state == EXE_A_State::WAIT_PLO) {
+            pli_ready = accept_vpsum;
+        } else {
+            pli_ready = false;
+        }
 
         pli.ready_out.write(pli_ready);
     }
