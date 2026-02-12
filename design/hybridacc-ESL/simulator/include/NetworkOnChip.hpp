@@ -12,6 +12,21 @@ using namespace sc_dt;
 
 namespace hybridacc {
 
+struct NetWorkOnChipConfig {
+    size_t num_port = 3;
+    size_t num_pes_per_port = 16;
+    size_t noc_fifo_depth = 4;
+    size_t pe_fifo_depth = 4;
+
+    NetWorkOnChipConfig() = default;
+    NetWorkOnChipConfig(size_t num_port, size_t num_pes_per_port, size_t noc_fifo_depth = 4, size_t pe_fifo_depth = 4)
+        : num_port(num_port),
+          num_pes_per_port(num_pes_per_port),
+          noc_fifo_depth(noc_fifo_depth),
+          pe_fifo_depth(pe_fifo_depth)
+    {}
+};
+
 SC_MODULE(NetworkOnChip) {
 public:
     // Ports
@@ -31,9 +46,8 @@ public:
 
     // ---------------------------------------------
     // parameters
-    size_t num_port;
-    size_t num_pes_per_port;
-    size_t num_pes() const { return num_port * num_pes_per_port; }
+    NetWorkOnChipConfig config;
+    size_t num_pes() const { return config.num_port * config.num_pes_per_port; }
 
     // Internal modules
     noc::NoCRouter router;
@@ -66,8 +80,8 @@ public:
     //  Internal signals - PE/PE
     sc_vector<sc_vector<VRDSIG<uint64_t>>> ln_pli_plo;
 
-
-    NetworkOnChip(sc_module_name name, size_t num_port, size_t num_pes_per_port)
+    SC_HAS_PROCESS(NetworkOnChip);
+    NetworkOnChip(sc_module_name name, NetWorkOnChipConfig config)
         : sc_module(name),
           clk("clk"),
           reset_n("reset_n"),
@@ -78,19 +92,18 @@ public:
           noc_pli_in("noc_pli_in"),
           noc_plo_in("noc_plo_in"),
           noc_plo_out("noc_plo_out"),
-          num_port(num_port),
-          num_pes_per_port(num_pes_per_port),
-          router("NoC_Router", num_port),
+          config(config),
+          router("NoC_Router", config.num_port, config.noc_fifo_depth),
           mbus("mbus"),
           pes("pes"),
-          noc_ps_to_bus_req("noc_ps_to_bus_req", num_port),
-          noc_pd_to_bus_req("noc_pd_to_bus_req", num_port),
-          noc_pli_to_bus_req("noc_pli_to_bus_req", num_port),
-          noc_plo_to_bus_req("noc_plo_to_bus_req", num_port),
-          bus_to_noc_plo_resp("bus_to_noc_plo_resp", num_port),
+          noc_ps_to_bus_req("noc_ps_to_bus_req", config.num_port),
+          noc_pd_to_bus_req("noc_pd_to_bus_req", config.num_port),
+          noc_pli_to_bus_req("noc_pli_to_bus_req", config.num_port),
+          noc_plo_to_bus_req("noc_plo_to_bus_req", config.num_port),
+          bus_to_noc_plo_resp("bus_to_noc_plo_resp", config.num_port),
           scan_chain_enable("scan_chain_enable"),
-          router_scan_chain_out("router_scan_chain_out", num_port),
-          mbus_scan_chain_out("mbus_scan_chain_out", num_port),
+          router_scan_chain_out("router_scan_chain_out", config.num_port),
+          mbus_scan_chain_out("mbus_scan_chain_out", config.num_port),
           router_enable("router_enable"),
           router_mode("router_mode"),
           bus_to_pe_ps_req("bus_to_pe_ps_req"),
@@ -101,60 +114,60 @@ public:
           pe_busy("pe_busy"),
           ln_pli_plo("ln_pli_plo")
     {
-        DEBUG_MSG("[Create] NetworkOnChip with " << num_port << " ports, "
-                  << num_pes_per_port << " PEs per port", DEBUG_LEVEL_NOC_TOP);
+        DEBUG_MSG("[Create] NetworkOnChip with " << config.num_port << " ports, "
+                  << config.num_pes_per_port << " PEs per port", DEBUG_LEVEL_NOC_TOP);
 
         std::cout << "NetworkOnChip: Initializing with "
-                  << num_port << " ports, "
-                  << num_pes_per_port << " PEs per port" << std::endl;
+                  << config.num_port << " ports, "
+                  << config.num_pes_per_port << " PEs per port" << std::endl;
 
         // 初始化 MBUS 向量
-        mbus.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
-            return new noc::MBUS(n, num_pes_per_port);
+        mbus.init(config.num_port, [this, config](const char* n, size_t i) {
+            return new noc::MBUS(n, config.num_pes_per_port);
         });
 
         // 初始化 PE 二維向量
-        pes.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
-            return new sc_vector<pe::ProcessElement>(n, num_pes_per_port, [](const char* m, size_t j) {
-                return new pe::ProcessElement(m);
+        pes.init(config.num_port, [this, config](const char* n, size_t i) {
+            return new sc_vector<pe::ProcessElement>(n, config.num_pes_per_port, [config](const char* m, size_t j) {
+                return new pe::ProcessElement(m, config.pe_fifo_depth);
             });
         });
 
         // 初始化內部信號二維向量
-        router_enable.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
-            return new sc_vector<sc_signal<bool>>(n, num_pes_per_port);
+        router_enable.init(config.num_port, [this, config](const char* n, size_t i) {
+            return new sc_vector<sc_signal<bool>>(n, config.num_pes_per_port);
         });
 
-        router_mode.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
-            return new sc_vector<sc_signal<PERouterMode>>(n, num_pes_per_port);
+        router_mode.init(config.num_port, [this, config](const char* n, size_t i) {
+            return new sc_vector<sc_signal<PERouterMode>>(n, config.num_pes_per_port);
         });
 
-        bus_to_pe_ps_req.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
-            return new sc_vector<VRDSIG<noc_request_t>>(n, num_pes_per_port);
+        bus_to_pe_ps_req.init(config.num_port, [this, config](const char* n, size_t i) {
+            return new sc_vector<VRDSIG<noc_request_t>>(n, config.num_pes_per_port);
         });
 
-        bus_to_pe_pd_req.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
-            return new sc_vector<VRDSIG<noc_request_t>>(n, num_pes_per_port);
+        bus_to_pe_pd_req.init(config.num_port, [this, config](const char* n, size_t i) {
+            return new sc_vector<VRDSIG<noc_request_t>>(n, config.num_pes_per_port);
         });
 
-        bus_to_pe_pli_req.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
-            return new sc_vector<VRDSIG<noc_request_t>>(n, num_pes_per_port);
+        bus_to_pe_pli_req.init(config.num_port, [this, config](const char* n, size_t i) {
+            return new sc_vector<VRDSIG<noc_request_t>>(n, config.num_pes_per_port);
         });
 
-        bus_to_pe_plo_req.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
-            return new sc_vector<VRDSIG<noc_addr_req_t>>(n, num_pes_per_port);
+        bus_to_pe_plo_req.init(config.num_port, [this, config](const char* n, size_t i) {
+            return new sc_vector<VRDSIG<noc_addr_req_t>>(n, config.num_pes_per_port);
         });
 
-        pe_to_bus_plo_resp.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
-            return new sc_vector<VRDSIG<noc_response_t>>(n, num_pes_per_port);
+        pe_to_bus_plo_resp.init(config.num_port, [this, config](const char* n, size_t i) {
+            return new sc_vector<VRDSIG<noc_response_t>>(n, config.num_pes_per_port);
         });
 
-        pe_busy.init(num_port, [this, num_pes_per_port](const char* n, size_t i) {
-            return new sc_vector<sc_signal<bool>>(n, num_pes_per_port);
+        pe_busy.init(config.num_port, [this, config](const char* n, size_t i) {
+            return new sc_vector<sc_signal<bool>>(n, config.num_pes_per_port);
         });
 
-        ln_pli_plo.init(num_port+1, [this, num_pes_per_port](const char* n, size_t i) {
-            return new sc_vector<VRDSIG<uint64_t>>(n, num_pes_per_port);
+        ln_pli_plo.init(config.num_port+1, [this, config](const char* n, size_t i) {
+            return new sc_vector<VRDSIG<uint64_t>>(n, config.num_pes_per_port);
         });
 
         // Bind internal modules
@@ -162,7 +175,7 @@ public:
     }
 
     NetworkOnChip(sc_module_name name)
-        : NetworkOnChip(name, 3, 16) // Default to 3 ports, 16 PEs per port
+        : NetworkOnChip(name, NetWorkOnChipConfig()) // Delegate to main constructor with default config
     {}
 
     // Debug: Dump internal state
@@ -190,7 +203,7 @@ private:
         bind_vr_interface(router.noc_plo_in, noc_plo_in);
         bind_vr_interface(noc_plo_out, router.noc_plo_out);
 
-        for (size_t i = 0; i < num_port; ++i) {
+        for (size_t i = 0; i < config.num_port; ++i) {
             // Connect NoC to MBUS request signals
             connect_vr_signals(router.noc_ps_to_bus_req[i], noc_ps_to_bus_req[i]);
             connect_vr_signals(router.noc_pd_to_bus_req[i], noc_pd_to_bus_req[i]);
@@ -205,7 +218,7 @@ private:
         router.scan_chain_enable(scan_chain_enable);
 
         // MBUS bindings
-        for (size_t i = 0; i < num_port; ++i) {
+        for (size_t i = 0; i < config.num_port; ++i) {
             noc::MBUS& mbus_inst = mbus[i];
 
             mbus_inst.clk(clk);
@@ -224,7 +237,7 @@ private:
             mbus_inst.scan_chain_out(mbus_scan_chain_out[i]);
 
             // Connect PE interface signals
-            for (size_t j = 0; j < num_pes_per_port; ++j) {
+            for (size_t j = 0; j < config.num_pes_per_port; ++j) {
                 mbus_inst.router_enable[j](router_enable[i][j]);
                 mbus_inst.router_mode[j](router_mode[i][j]);
 
@@ -239,8 +252,8 @@ private:
         }
 
         // PEs bindings
-        for (size_t i = 0; i < num_port; ++i) {
-            for (size_t j = 0; j < num_pes_per_port; ++j) {
+        for (size_t i = 0; i < config.num_port; ++i) {
+            for (size_t j = 0; j < config.num_pes_per_port; ++j) {
                 pe::ProcessElement& pe_inst = pes[i][j];
 
                 // Connect clock and reset
@@ -275,10 +288,10 @@ public:
         int trace_counter = 0;
         router.set_trace_id(trace_counter);
         trace_counter += router.get_trace_num();
-        for (size_t i = 0; i < num_port; ++i) {
+        for (size_t i = 0; i < config.num_port; ++i) {
             mbus[i].set_trace_id(trace_counter);
             trace_counter += mbus[i].get_trace_num();
-            for (size_t j = 0; j < num_pes_per_port; ++j) {
+            for (size_t j = 0; j < config.num_pes_per_port; ++j) {
                 pes[i][j].set_trace_id(trace_counter);
                 trace_counter += pes[i][j].get_trace_num();
             }

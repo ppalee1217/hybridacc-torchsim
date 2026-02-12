@@ -14,9 +14,9 @@
 
 namespace hybridacc {
 
-// 16-bit 指令格式 (bit 0 = loop_end flag)
-// [15:13] func3, [12] func1, [11:5] payload, [4:3] funct2, [2:1] opcode, [0] loop_end
-// payload 7 bits 在不同指令中再細分
+// 16-bit 指令格式 (v3, bit0 = loop_end flag)
+// [15:6] payload, [5] func1, [4:3] func2, [2:1] opcode, [0] loop_end
+// payload 10 bits 在不同指令中再細分 (部分指令使用 payload[8:6] 當作 func3)
 
 struct AsmError : public std::runtime_error { using std::runtime_error::runtime_error; };
 
@@ -32,6 +32,8 @@ inline std::vector<std::string> splitOperands(const std::string &rest){
     std::string cur;
     int par=0;
     for(char c: rest){
+        if(c=='(') par++;
+        if(c==')' && par>0) par--;
         if(c==',' && par==0){
             std::string t = trim(cur);
             if(!t.empty()) out.push_back(t);
@@ -89,19 +91,19 @@ struct TemplateResult {
 };
 
 // 寫入通用欄位 helper
-inline uint16_t makeBase(uint8_t opcode, uint8_t funct2){
+inline uint16_t makeBase(uint8_t opcode, uint8_t funct2, uint8_t func1=0){
     uint16_t v=0;
     v |= (opcode & 0x3) << 1;
     v |= (funct2 & 0x3) << 3;
+    v |= (func1 & 0x1) << 5;
     return v;
 }
 
-inline void setFunc3Func1(uint16_t &v, int func3, int func1){
-    v |= (func3 & 0x7) << 13;
-    v |= (func1 & 0x1) << 12;
+inline void setFunc1(uint16_t &v, int func1){
+    v |= (func1 & 0x1) << 5;
 }
 inline void setPayload(uint16_t &v, int payload){
-    v |= (payload & 0x7F) << 5;
+    v |= (payload & 0x3FF) << 6;
 }
 
 // 解析寄存器 (P*, VP*, T*, VT*) 轉數值, 僅檢查範圍不做型別差異
@@ -157,7 +159,6 @@ private:
     std::map<std::string, int> templateParams; // param name -> index during parsing
     std::vector<TemplatePatch> templatePatches; // patches for template parameters
 
-    void applyPatches(std::vector<uint16_t> &words);
     bool parseTemplateHeader(const std::string &line, std::string &templateName, std::vector<TemplateParam> &params);
     std::optional<int> extractTemplateParam(const std::string &operand);
 };

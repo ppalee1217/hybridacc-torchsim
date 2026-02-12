@@ -127,7 +127,11 @@ def generate_conv2d_test(config: NocConvConfig) -> List[TestData]:
         num_pes_per_bus = num_pes // num_bus
 
         # Temporal wave count split by output height, output channels, input channels
-        out_h_waves = math.ceil(out_h_final / num_pes_per_bus)
+        if config.ultra_mode:
+            out_h_waves = math.ceil(out_h_final / (num_pes_per_bus * num_bus))
+        else:
+            out_h_waves = math.ceil(out_h_final / num_pes_per_bus)
+
         out_ch_waves = math.ceil(OC / 16) # Assuming PE processes 16 output channels per wave
         channels_per_packet = ConvMode.channels_from_kernel_size(KW)
         in_ch_waves = math.ceil(C / channels_per_packet)
@@ -233,16 +237,44 @@ def generate_gemm_test(config: NocGemmConfig) -> TestData:
     pes_per_bus = num_pes // num_bus
     pes_per_layer = grid_m * grid_n # PEs needed for one K-slice (one bus)
 
-    # Number of waves needed inside a bus to cover M*N grid
-    mn_waves = math.ceil(pes_per_layer / pes_per_bus)
+    # Choose M/N tile shape per wave to fit PE budget
+    def choose_mn_tiles(grid_m: int, grid_n: int, pe_budget: int):
+        best = None
+        for m_tiles in range(min(grid_m, pe_budget), 0, -1):
+            max_n = min(grid_n, pe_budget // m_tiles)
+            for n_tiles in range(max_n, 0, -1):
+                waves_m = math.ceil(grid_m / m_tiles)
+                waves_n = math.ceil(grid_n / n_tiles)
+                waves = waves_m * waves_n
+                area = m_tiles * n_tiles
+                aspect = abs((grid_m / max(grid_n, 1)) - (m_tiles / max(n_tiles, 1)))
+                score = (waves, -n_tiles, -m_tiles, -area, aspect)
+                if best is None or score < best[0]:
+                    best = (score, m_tiles, n_tiles, waves_m, waves_n)
+        if best is None:
+            return 1, 1, grid_m, grid_n
+        _, m_tiles, n_tiles, waves_m, waves_n = best
+        return m_tiles, n_tiles, waves_m, waves_n
+
+    m_tiles_per_wave, n_tiles_per_wave, wave_m, wave_n = choose_mn_tiles(grid_m, grid_n, pes_per_bus)
+
+    def split_tiles(total_tiles: int, waves: int) -> List[int]:
+        if waves <= 0:
+            return []
+        base = total_tiles // waves
+        rem = total_tiles % waves
+        tiles = [base + 1 if i < rem else base for i in range(waves)]
+        return tiles
 
     # Number of waves needed for K-dimension (if K-splits > Buses)
-    if num_bus > 0:
-        k_waves = math.ceil(grid_k / num_bus)
-    else:
-        k_waves = 1
+    k_tiles_per_wave = num_bus if num_bus > 0 else 1
+    wave_k = math.ceil(grid_k / k_tiles_per_wave)
 
-    temporal_wave_count = mn_waves * k_waves
+    grid_m_per_wave = split_tiles(grid_m, wave_m)
+    grid_n_per_wave = split_tiles(grid_n, wave_n)
+    grid_k_per_wave = split_tiles(grid_k, wave_k)
+
+    temporal_wave_count = wave_m * wave_n * wave_k
 
     # We map K-splits to Buses.
     # Requirement: We need at least grid_k buses to chain them vertically efficiently.
@@ -324,15 +356,15 @@ def generate_gemm_test(config: NocGemmConfig) -> TestData:
                 # plo_id: PS Output (C_mn) -> Only for last bus (k=last), Shared by (m, n)
 
                 if config.ultra_mode:
-                     # Ultra Mode: Reuse tags across buses
-                     ps_id = n_idx
-                     pd_id = m_idx
+                    # Ultra Mode: Reuse tags across buses
+                    ps_id = n_idx
+                    pd_id = m_idx
                 else:
-                     # Normal Mode
-                     # ps_id (Weight B)
-                     ps_id = k_idx * grid_n + n_idx
-                     # pd_id (Input A)
-                     pd_id = k_idx * grid_m + m_idx
+                    # Normal Mode
+                    # ps_id (Weight B)
+                    ps_id = k_idx * grid_n + n_idx
+                    # pd_id (Input A)
+                    pd_id = k_idx * grid_m + m_idx
 
                 # pli_id (PS Input) - used only if route_mode reads from BUS
                 pli_id = (m_idx * grid_n + n_idx) if k_idx == 0 else 63
@@ -360,19 +392,26 @@ def generate_gemm_test(config: NocGemmConfig) -> TestData:
 
     print(f"GEMM K-Split Scan-Chain Generated.")
     print(f"  Mapping: K-split {grid_k} layers mapped to first {grid_k} buses.")
-    print(f"  Temporal Waves: {temporal_wave_count} (MN waves: {mn_waves}, K waves: {k_waves})")
+    print(f"  Temporal Waves: {temporal_wave_count} (M waves: {wave_m}, N waves: {wave_n}, K waves: {wave_k})")
+    print(f"  Wave Tile Size: M={m_tiles_per_wave}, N={n_tiles_per_wave}, K={k_tiles_per_wave}")
+    print(f"  Per-wave tiles: M={grid_m_per_wave}, N={grid_n_per_wave}, K={grid_k_per_wave}")
 
     test_config = {
         "mode": "gemm",
-        "temporal_wave_count": temporal_wave_count,
         "M": M,
         "N": N,
         "K": K,
         "partial_sum_zero": False,
         "seed": config.seed,
-        "grid_rows": grid_m,
-        "grid_cols": grid_n,
+        "grid_m": grid_m,
+        "grid_n": grid_n,
         "grid_k": grid_k,
+        "wave_m": wave_m,
+        "wave_n": wave_n,
+        "wave_k": wave_k,
+        "grid_m_per_wave": grid_m_per_wave,
+        "grid_n_per_wave": grid_n_per_wave,
+        "grid_k_per_wave": grid_k_per_wave,
         "ultra_mode": "True" if config.ultra_mode else "False"
     }
 

@@ -60,7 +60,6 @@ run_single_tb() {
             "$tb_dir_base/trace-$tb.json"
             "$OUTPUT_DIR/trace-$tb.json"
             "$TOP_DIR/output/trace-$tb.json"
-            "./output/trace-$tb.json"
         )
         for p in "${trace_candidates[@]}"; do
             if [ -f "$p" ]; then
@@ -69,8 +68,7 @@ run_single_tb() {
             fi
         done
         if [ -z "$trace" ]; then
-            warn "Trace for '$tb' not found (checked: ${trace_candidates[*]}). Skipping."
-            return 1
+            trace="${trace_candidates[-1]}"
         fi
     fi
 

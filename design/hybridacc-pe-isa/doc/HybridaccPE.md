@@ -1,7 +1,12 @@
 # Hybridacc PE and Instruction Set Architecture (ISA) Documentation
 
 ## Overview
-This document describes the instruction set architecture (ISA) for a custom processor. Each instruction is represented by a 16-bit binary encoding, with specific fields defining the operation, operands, and additional parameters.
+This document describes the instruction set architecture (ISA) for the HybridAcc PE. Each instruction is 16 bits and uses fixed bit-fields to encode the operation, operands, and parameters.
+
+## Recent Revisions (2026-02)
+1. ISA v3 bit-frame: payload[15:6], func1[5], func2[4:3], opcode[2:1], LE[0].
+2. SYSCTRL/SYS.SYNC flag-based system control and SWAPDM sync.
+3. DMA uses Static/Active registers; ACT flag triggers copy+start.
 
 
 ---
@@ -9,7 +14,7 @@ This document describes the instruction set architecture (ISA) for a custom proc
 - SRAM
     - Data Memmory (DM), 16-bit, 256 words (Ping-pong buffer, LDMA sees one bank, SDMA manages Mux)
     - Instruction Memory (IM), 16-bit, 256 words
-- ALU (fp16 *4, int8 *4, int4 *16)
+- ALU (fp16 *4)
     - VMAC Unit
     - VMUL Unit
     - VPSUM Unit
@@ -35,219 +40,181 @@ This document describes the instruction set architecture (ISA) for a custom proc
 ---
 ## Instruction Categories
 
-### Bit-fielding
+### Bit-fielding (ISA v3)
 Each instruction is encoded in a 16-bit format, with specific fields for:
-- loop-end: inst[0]
+- loop-end: inst[0] (LOOPEND marker)
 - opcode: inst[2:1]
-- function code: inst[4:3]
-- additional parameters
-- func3: inst[15:13]
-- func1: inst[12]
+- func2: inst[4:3]
+- func1: inst[5]
+- payload: inst[15:6] (10 bits; some ops reuse payload[8:6] as func3)
 
-### 1. **Data Movement Instructions**
+#### Bit-field Overview
+```
+15        6 5 4  3 2  1 0
+[ payload ][f1][f2][opcode][LE]
+```
+
+### 1. **Data Movement Instructions (opcode=00)**
 These instructions handle data transfer between memory and registers.
 - **LDMA.ADDR, start_addr**: Load the starting address for LDMA operations.
-    - Opcode: `00`, Function code: `01`, func1 = `0`
-    - Fields: `start_addr[9:7]` (inst[15:13]),`start_addr[0|6:1]` (inst[11:5])
+    - Opcode: `00`, func2: `00`, func1: `0`
+    - Fields: `payload = start_addr[9:0]`
     - Notes: Sets the LDMA starting address.
 
 - **LDMA.LEN, len**: Load the length for LDMA operations.
-    - Opcode: `00`, Function code: `01`, func1 = `1`
-    - Fields: `len[9:7]` (inst[15:13]),`len[0|6:1]` (inst[11:5])
+    - Opcode: `00`, func2: `01`, func1: `0`
+    - Fields: `payload = len[9:0]`
     - Notes: Specifies the length of the LDMA transfer.
 
 - **LDMA.LOOP, count**: Set loop count for LDMA auto-reset.
-    - Opcode: `01`, Function code: `01`, func1 = `0`
-    - Fields: `count[9:7]` (inst[15:13]),`count[0|6:1]` (inst[11:5])
+    - Opcode: `00`, func2: `10`, func1: `0`
+    - Fields: `payload = loop_count[9:0]`
     - Notes: Sets loop count for LDMA.
 
 - **SDMA.ADDR, start_addr**: Load the starting address for SDMA operations.
-    - Opcode: `00`, Function code: `00`, func1 = `0`
-    - Fields: `start_addr[9:7]` (inst[15:13]),`start_addr[0|6:1]` (inst[11:5])
+    - Opcode: `00`, func2: `00`, func1: `1`
+    - Fields: `payload = start_addr[9:0]`
     - Notes: Sets the SDMA starting address.
 
 - **SDMA.LEN, len**: Load the length for SDMA operations.
-    - Opcode: `00`, Function code: `00`, func1 = `1`
-    - Fields: `len[9:7]` (inst[15:13]),`len[0|6:1]` (inst[11:5])
+    - Opcode: `00`, func2: `01`, func1: `1`
+    - Fields: `payload = len[9:0]`
     - Notes: Specifies the length of the SDMA transfer.
 
 - **SDMA.LOOP, count**: Set loop count for SDMA auto-reset.
-    - Opcode: `01`, Function code: `01`, func1 = `1`
-    - Fields: `count[9:7]` (inst[15:13]),`count[0|6:1]` (inst[11:5])
+    - Opcode: `00`, func2: `10`, func1: `1`
+    - Fields: `payload = loop_count[9:0]`
     - Notes: Sets loop count for SDMA.
 
-- **LDMA.LB, stride**: Load a byte to DMRV (nonblocking, LDMA).
-    - Opcode: `00`, Function code: `10`, func3: `000`
-    - Fields: `stride` (inst[12:10])
+- **LDMA.LB/LH/LW/LD/LBB/LHB/LWB, stride**: Load to DMRV (nonblocking, LDMA).
+    - Opcode: `00`, func2: `11`, func1: `0`
+    - Fields: `payload[11:9]=stride`, `payload[8:6]=func3`
     - Notes: Transfers a byte from memory to DMRV.
 
-- **LDMA.LH, stride**: Load a half-word (16bits) to DMRV (nonblocking, LDMA).
-    - Opcode: `00`, Function code: `10`, func3: `001`
-    - Fields: `stride` (inst[12:10])
-    - Notes: Transfers a half-word from memory to DMRV.
-
-- **LDMA.LW, stride**: Load a word (32bits) to DMRV (nonblocking, LDMA).
-    - Opcode: `00`, Function code: `10`, func3: `010`
-    - Fields: `stride` (inst[12:10])
-    - Notes: Transfers a word from memory to DMRV.
-
-- **LDMA.LD, stride**: Load a double-word (64bits) to DMRV (nonblocking, LDMA).
-    - Opcode: `00`, Function code: `10`, func3: `011`
-    - Fields: `stride` (inst[12:10])
-    - Notes: Transfers a double-word from memory to DMRV.
-
-- **LDMA.LBB, stride**: Load a byte and broadcast to DMRV (nonblocking, LDMA).
-    - Opcode: `00`, Function code: `10`, func3: `100`
-    - Fields: `stride` (inst[12:10])
-    - Notes: Transfers a byte and broadcasts it to DMRV.
-
-- **LDMA.LHB, stride**: Load a half-word and broadcast to DMRV (nonblocking, LDMA).
-    - Opcode: `00`, Function code: `10`, func3: `101`
-    - Fields: `stride` (inst[12:10])
-    - Notes: Transfers a half-word and broadcasts it to DMRV.
-
-- **LDMA.LWB, stride**: Load a word and broadcast to DMRV (nonblocking, LDMA).
-    - Opcode: `00`, Function code: `10`, func3: `110`
-    - Fields: `stride` (inst[12:10])
-    - Notes: Transfers a word and broadcasts it to DMRV.
-
 - **SDMA.SD, stride**: Store a double-word from PS port (blocking, SDMA).
-    - Opcode: `00`, Function code: `11`, func3: `011`
-    - Fields: `stride` (inst[12:10])
+    - Opcode: `00`, func2: `11`, func1: `0`, func3: `111`
+    - Fields: `payload[11:9]=stride`
     - Notes: Transfers a double-word from PS port using SDMA.
 
 - **TSTORE, trd**: Store data from PD port.
-    - Opcode: `01`, Function code: `00`, func3: `000`
-    - Fields: `trd` (inst[7:5])
+    - Opcode: `00`, func2: `11`, func1: `1`, func3: `000`
+    - Fields: `payload[15:12]=trd`
     - Notes: Transfers data from PD port.
 
+- **VTSTORE, vtrd**: Store vector data from PD port.
+    - Opcode: `00`, func2: `11`, func1: `1`, func3: `001`
+    - Fields: `payload[10:9]=vtrd`
+    - Notes: Loads 4 lanes into VT registers.
+
 - **TSHIFT, kernel_size**: Kernel size shift operation.
-    - Opcode: `01`, Function code: `00`, func3: `001`
-    - Fields: `kernel_size[2:0]` (inst[12:10])
+    - Opcode: `00`, func2: `11`, func1: `1`, func3: `010`
+    - Fields: `payload[11:9]=kernel_size (3/5/7)`
     - Notes: Performs kernel size shift.
-        (K3: `000`, K5: `001`, K7: `010`)
+        (K3/K5/K7 直接填入數值 3/5/7)
 
 ---
 
-### 2. **Arithmetic Instructions**
+### 2. **Arithmetic Instructions (opcode=01)**
 These instructions perform mathematical operations.
 
 - **VMAC, prd, vtrs**: Multiply-accumulate with fixed DMA out.
-    - Opcode: `10`, Function code: `01`, func3: `000`, func1: `0`
-    - Fields: `prd` (inst[9:5]), `vtrs` (inst[11:10])
+    - Opcode: `01`, func2: `00`, func3: `000`, func1: `0`
+    - Fields: `payload[15:11]=prd`, `payload[10:9]=vtrs`
     - Notes: Performs MAC operation and outputs fixed DMRV.
 
 - **VMACN, prd, vtrs**: Multiply-accumulate and trigger next DMA out.
-    - Opcode: `10`, Function code: `01`, func3: `000`, func1: `1`
-    - Fields: `prd` (inst[9:5]) , `vtrs` (inst[11:10])
+    - Opcode: `01`, func2: `00`, func3: `000`, func1: `1`
+    - Fields: `payload[15:11]=prd`, `payload[10:9]=vtrs`
     - Notes: Performs MAC operation and triggers next DMA out.
 
 - **VMACR, pstride, vtstride**: Multiply-accumulate with register control.
-    - Opcode: `10`, Function code: `01`, func3: `001`, func1: `0`
-    - Fields: `pstride` (inst[9:5]), `vtstride` (inst[11:10])
-    - Notes: Resets `pid` if `pstride == 31`, resets `vtid` if `vtstride == 3`.
+    - Opcode: `01`, func2: `00`, func3: `001`, func1: `0`
+    - Fields: `payload[15:11]=pstride`, `payload[10:9]=vtstride`
+    - Notes: Stride control with reset conditions.
 
 - **VMACRN, pstride, vtstride**: Multiply-accumulate with register control and next DMA.
-    - Opcode: `10`, Function code: `01`, func3: `001`, func1: `1`
-    - Fields: `pstride` (inst[9:5]), `vtstride` (inst[11:10])
-    - Notes: Resets `pid` if `pstride == 31`, resets `vtid` if `vtstride == 3`, triggers next DMA.
+    - Opcode: `01`, func2: `00`, func3: `001`, func1: `1`
+    - Fields: `payload[15:11]=pstride`, `payload[10:9]=vtstride`
+    - Notes: Stride control with reset conditions, triggers next DMA.
 
 - **VMUL, vprd, vtrs**: Multiply with fixed DMA out.
-    - Opcode: `10`, Function code: `01`, func3: `010`, func1: `0`
-    - Fields: `vprd` (inst[9:5]), `vtrs` (inst[11:10])
+    - Opcode: `01`, func2: `01`, func3: `000`, func1: `0`
+    - Fields: `payload[15:11]=vprd`, `payload[10:9]=vtrs`
     - Notes: Performs multiplication and outputs fixed DMA.
 
 - **VMULN, vprd, vtrs**: Multiply and trigger next DMA out.
-    - Opcode: `10`, Function code: `01`, func3: `010`, func1: `1`
-    - Fields: `vprd` (inst[9:5]), `vtrs` (inst[11:10])
+    - Opcode: `01`, func2: `01`, func3: `000`, func1: `1`
+    - Fields: `payload[15:11]=vprd`, `payload[10:9]=vtrs`
     - Notes: Performs multiplication and triggers next DMA.
 
 - **VMULR, vpstride, vtstride**: Multiply with register control.
-    - Opcode: `10`, Function code: `01`, func3: `011`, func1: `0`
-    - Fields: `vpstride` (inst[9:5]), `vtstride` (inst[11:10])
-    - Notes: Resets `pid` if `pstride == 31`, resets `vtid` if `vtstride == 3`.
+    - Opcode: `01`, func2: `01`, func3: `001`, func1: `0`
+    - Fields: `payload[15:11]=vpstride`, `payload[10:9]=vtstride`
+    - Notes: Multiply with stride control.
 
 - **VMULRN, vpstride, vtstride**: Multiply with register control and next DMA.
-    - Opcode: `10`, Function code: `10`, func3: `011`, func1: `1`
-    - Fields: `vpstride` (inst[9:5]), `vtstride` (inst[11:10])
-    - Notes: Resets `pid` if `pstride == 31`, resets `vtid` if `vtstride == 3`, triggers next DMA.
+    - Opcode: `01`, func2: `01`, func3: `001`, func1: `1`
+    - Fields: `payload[15:11]=vpstride`, `payload[10:9]=vtstride`
+    - Notes: Multiply with stride control, triggers next DMA.
 
 - **VPSUM, vprs**: Vector sum operation.
-    - Opcode: `10`, Function code: `01`, func3: `100`
-    - Fields: `vprs` (inst[9:5])
+    - Opcode: `01`, func2: `10`, func3: `000`
+    - Fields: `payload[15:11]=vprs`
     - Notes: Computes `PLO = PLI + psum[vprs]`.
 
 - **VPSUMR, vpstride**: Vector sum with stride update.
-    - Opcode: `10`, Function code: `01`, func3: `101`
-    - Fields: `vpstride` (inst[9:5])
+    - Opcode: `01`, func2: `10`, func3: `001`
+    - Fields: `payload[15:11]=vpstride`
     - Notes: Computes `PLO = PLI + psum[vpidx]`, updates `vpidx += vpstride`.
 
 ---
 
-### 3. **Control Flow Instructions**
+### 3. **Control Flow Instructions (opcode=10)**
 These instructions manage program flow and loops.
 
-- **J, imm**: Jump to a specific address.
-    - Opcode: `01`, Function code: `10`
-    - Fields: `imm[9:7|10|0|6:1]` (inst[15:5])
-    - Notes: Performs an unconditional jump.
-
 - **LOOPIN, loop_count**: Push loop count and store next PC.
-    - Opcode: `01`, Function code: `11`, func1: `0`
-    - Fields: `loop_count[9:7]` (inst[15:13]), `loop_count[0|6:1]` (inst[11:5])
+    - Opcode: `10`, func2: `00`, func1: `0`
+    - Fields: `payload = loop_count[9:0]`
     - Notes: Initializes a loop and stores the next program counter.)
 
 - **LOOPBREAK**: Pop loop count.
-    - Opcode: `01`, Function code: `11`, func1: `1`
+    - Opcode: `10`, func2: `00`, func1: `1`
     - Notes: Exits the current loop.
 
 - **LOOPEND**: Virtual assembly code for loop termination.
-    - Notes: Marks the end of a loop.
-    - Set previous machine code's LSB to 1 to indicate loop end.
+    - Notes: Marks the end of a loop by setting bit0 of the previous word.
 
 ---
 
-### 4. **System-Level Instructions**
-These instructions handle system-level operations.
+### 4. **System-Level Instructions (opcode=10)**
 
-- **NOP**: No operation. ()
-    - Opcode: `10`, Function code: `00`
+        - Fields: `payload = (len-1)[9:0]`
+    - Opcode: `10`, func2: `10`, func1: `0`
     - Notes: Performs no operation.
-
-- **SWAPDM**: Swap Data Memory banks.
-    - Opcode: `11`, Function code: `11`, func3: `100`
-    - Notes: Waits for SDMA to finish, then swaps DM banks. If SDMA is busy, it stalls.
-
-- **SETRID.PT, pid, vtid**: Set resource ID for PID and VTID.
-    - Opcode: `10`, Function code: `10`, func3: `011`
-    - Fields: `pid` (inst[9:5]), `vtid` (inst[11:10])
-    - Notes: Sets resource IDs for PID and VTID.
-
-- **SETRID.P, pid**: Set resource ID for PID.
-    - Opcode: `10`, Function code: `10`, func3: `001`
-    - Fields: `pid` (inst[9:5])
-    - Notes: Sets resource ID for PID.
-
-- **SETRID.T, vtid**: Set resource ID for VTID.
-    - Opcode: `10`, Function code: `10`, func3: `010`
-    - Fields: `vtid` (inst[11:10])
-    - Notes: Sets resource ID for VTID.
-
-- **CLEAR.T**: Clear VTID.
-    - Opcode: `10`, Function code: `11`, func3: `000`
-    - Notes: Clears VTID.
-
-- **CLEAR.P**: Clear PID.
-    - Opcode: `10`, Function code: `11`, func3: `001`
-    - Notes: Clears PID.
-
+- **SYS.CTRL (flags)**: System control flags.
+        - Fields: `payload = (len-1)[9:0]`
+    - Fields (payload bits):
+        - bit7 `SDMA.ACT`, bit6 `SDMA.RST`, bit5 `LDMA.ACT`, bit4 `LDMA.RST`
+    - Notes: ACT 會將 Static Registers 複製到 Active 並啟動 DMA。
+        - Fields: `payload = (loop_count-1)[9:0]`
+- **SYS.SYNC (SWAPDM)**: System sync / DM swap.
+    - Opcode: `10`, func2: `01`, func1: `1`
+    - Notes: 等待 SDMA 完成後交換 DM bank。
+        - Fields: `payload = (loop_count-1)[9:0]`
 - **HALT**: Halt the processor.
-    - Opcode: `11`, Function code: `11`, func3: `000`
-    - Notes: Stops processor execution.
+    - Opcode: `10`, func2: `11`, func1: `0`
 
----
+        - Fields: `payload[10:9]=kernel_size_code (K3/K5/K7 -> 0/1/2)`
 
-## Notes
+                (assembler accepts K3/K5/K7 or 3/5/7; encoded as 0/1/2)
+- pstride == 31 resets pid
+- vpstride == 31 resets vpidx
+
+        - Fields: `payload = (loop_count-1)[9:0]`
+- LOOPEND only sets bit0 of the previous instruction; it does not affect other fields.
+
 - Each instruction is encoded in 16 bits.
-- Fields are used to specify operands and parameters.
-- Some instructions include reset conditions for specific fields.
+        - Notes: Exits the current loop (implemented in simulator decode path; assembler mnemonic pending).
+- ISA v3 移除 J；SETRID/CLEAR 指令改為 SYS.CTRL 旗標別名。
+
+ - LEN/LOOP/LOOPIN 類計數欄位在機器碼層皆採 `N-1` 編碼。

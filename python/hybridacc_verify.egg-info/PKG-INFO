@@ -1,8 +1,0 @@
-Metadata-Version: 2.4
-Name: hybridacc_verify
-Version: 0.1.0
-Summary: Verification tools for HybridAcc
-Requires-Python: >=3.8
-Requires-Dist: numpy
-Requires-Dist: torch
-Requires-Dist: pyyaml

@@ -229,7 +229,6 @@ private:
     sc_signal<v_fp16_t> pr_vp_out_sig;
     sc_signal<bool> pr_clear_regs_sig;
     sc_signal<bool> pr_use_pcounter_sig;
-    sc_signal<bool> pr_set_pcounter_sig;
     sc_signal<bool> pr_clear_pcounter_sig;
     sc_signal<bool> pr_incr_pcounter_sig;
 
@@ -253,7 +252,6 @@ private:
         PR.vp_out(pr_vp_out_sig);
         PR.clear_regs(pr_clear_regs_sig);
         PR.use_pcounter(pr_use_pcounter_sig);
-        PR.set_pcounter(pr_set_pcounter_sig);
         PR.clear_pcounter(pr_clear_pcounter_sig);
         PR.incr_pcounter(pr_incr_pcounter_sig);
     }
@@ -784,8 +782,7 @@ private:
         pr_pid_sig.write(decode.rid5);
         pr_use_pcounter_sig.write(decode.pr_use_vcounter);
         pr_clear_regs_sig.write(decode.pr_clear_regs);
-        pr_set_pcounter_sig.write(decode.pr_set_vcounter);
-        pr_clear_pcounter_sig.write(decode.pr_clear_vcounter);
+        pr_clear_pcounter_sig.write(decode.sys_rst_pid);
     }
 
     void comb_pr_mode() {

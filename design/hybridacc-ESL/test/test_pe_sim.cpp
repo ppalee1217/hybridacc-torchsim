@@ -338,7 +338,7 @@ private:
 
         // Wait for halt (bounded)
         std::cout << "\n[Step 4] Waiting for PE halt..." << std::endl;
-        const uint64_t halt_timeout = 200000;
+        const uint64_t halt_timeout = 200;
         uint64_t halt_waited = 0;
         while (!pe.is_halted() && halt_waited < halt_timeout) {
             wait(clk.posedge_event());
@@ -360,7 +360,7 @@ private:
         std::cout << "Expected fp16: " << expected_fp16.size() << std::endl;
         std::cout << "Received fp16: " << received_fp16.size() << std::endl;
 
-        auto stats = verify_fp16_vectors(expected_fp16, received_fp16, verify_tolerance);
+        auto stats = verify_fp16_vectors(expected_fp16, received_fp16, verify_tolerance, true);
         std::cout << "----------------------------------------" << std::endl;
         std::cout << "Verification Results:" << std::endl;
         std::cout << "  Total Elements: " << stats.total_elements << std::endl;

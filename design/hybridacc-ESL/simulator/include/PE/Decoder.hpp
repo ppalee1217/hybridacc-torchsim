@@ -10,11 +10,11 @@ using namespace sc_core;
 namespace hybridacc {
 namespace pe {
 
-static inline int getOpcode(uint16_t w){ return (w>>1) & 0x3; }
-static inline int getFunct2(uint16_t w){ return (w>>3) & 0x3; }
-static inline int getFunc3(uint16_t w){ return (w>>13)&0x7; }
-static inline int getFunc1(uint16_t w){ return (w>>12)&0x1; }
-static inline int getPayload(uint16_t w){ return (w>>5)&0x7F; }
+static inline int getOpcode(uint16_t w){ return (w >> 1) & 0x3; }
+static inline int getFunct2(uint16_t w){ return (w >> 3) & 0x3; }
+static inline int getFunc1(uint16_t w){ return (w >> 5) & 0x1; }
+static inline int getPayload(uint16_t w){ return (w >> 6) & 0x3FF; }
+static inline int getFunc3(uint16_t w){ return getPayload(w) & 0x7; }
 
 SC_MODULE(Decoder) {
 public:
@@ -56,34 +56,36 @@ public:
             .func3 = 0,
             .imm = 0,
             .loop_in = false,
-            .loop_break = false,
             .loop_end = false,
-            .jump_en = false,
             .is_swap = false,
-            .DL_setaddr = false,
-            .DL_setlen = false,
-            .DL_active = false,
-            .DL_next = false,
-            .DL_setloop = false,
-            .DL_is_sdma = false,
+            .sys_sdma_act = false,
+            .sys_sdma_rst = false,
+            .sys_ldma_act = false,
+            .sys_ldma_rst = false,
+            .sys_rst_pid = false,
+            .sys_rst_tid = false,
+            .DMA_setaddr = false,
+            .DMA_setlen = false,
+            .DMA_setloop = false,
+            .DMA_setmode = false,
+            .LDMA_next = false,
+            .DMA_is_sdma = false,
             .rid3 = 0,
             .rid5 = 0,
             .pd_load = false,
+            .pd_load_v = false,
             .tr_en = false,
             .tr_write = false,
+            .tr_write_v = false,
             .tr_shift = false,
             .tr_clear_regs = false,
             .tr_use_vcounter = false,
-            .tr_set_vcounter = false,
-            .tr_clear_vcounter = false,
             .tr_incr_vcounter = false,
             .pli_plo_operation = false,
             .pr_write = false,
             .pr_mode = false,
             .pr_clear_regs = false,
             .pr_use_vcounter = false,
-            .pr_set_vcounter = false,
-            .pr_clear_vcounter = false,
             .pr_incr_vcounter = false,
             .vaddu_en = false,
             .vaddu_mode = 0
@@ -93,197 +95,248 @@ public:
         // parse instruction fields
         int opcode = getOpcode(w);
         int funct2 = getFunct2(w);
-        int func3  = getFunc3(w);
         int func1  = getFunc1(w);
         int payload= getPayload(w);
+        int func3  = payload & 0x7; // payload[2:0]
 
         signals.inst = w;
         signals.func3 = func3;
         signals.loop_end = (w & 1); // loop end flag
 
-        // HALT (Opcode 3, Funct2 3, Func3 0)
-        if(opcode==3 && funct2==3){
-            if(func3 == 0) {
-                 signals.halt = true; signals.loop_end = false; return;
-            }
-            // SWAPDM (Opcode 3, Funct2 3, Func3 4)
-            else if(func3 == 4) {
-                 signals.is_swap = true; return;
-            }
+        // HALT (opcode=10 func2=11 func1=0)
+        if (opcode == 2 && funct2 == 3 && func1 == 0) {
+            signals.halt = true;
+            signals.loop_end = false;
             return;
         }
 
-        // NOP
-        if(opcode==2 && funct2==0){ signals.nop = true; return;}
-
-        // SDMA.ADDR / SDMA.LEN (Opcode 0, Funct2 0)
-        if(opcode==0 && funct2==0){
-            int bits6_1 = payload & 0x3F;
-            int bit0 = (payload >> 6) & 0x1;
-            int val = (func3<<7) | (bits6_1<<1) | bit0; // 10-bit imm
-            signals.imm = val;
-            signals.DL_is_sdma = true;
-            if(func1==0) signals.DL_setaddr = true; else signals.DL_setlen = true;
+        // SYS.SYNC (opcode=10 func2=01 func1=1)
+        if (opcode == 2 && funct2 == 1 && func1 == 1) {
+            signals.is_swap = (payload & 0x1) == 0x1;
             return;
         }
 
-        // LDMA.ADDR / LDMA.LEN (Opcode 0, Funct2 1)
-        if(opcode==0 && funct2==1){
-            int bits6_1 = payload & 0x3F;
-            int bit0 = (payload >> 6) & 0x1;
-            int val = (func3<<7) | (bits6_1<<1) | bit0; // 10-bit imm
-            signals.imm = val;
-            signals.DL_is_sdma = false;
-            if(func1==0) signals.DL_setaddr = true; else signals.DL_setlen = true;
+        // SYS.CTRL (opcode=10 func2=01 func1=0)
+        if (opcode == 2 && funct2 == 1 && func1 == 0) {
+            signals.sys_sdma_act = (payload >> 7) & 0x1;
+            signals.sys_sdma_rst = (payload >> 6) & 0x1;
+            signals.sys_ldma_act = (payload >> 5) & 0x1;
+            signals.sys_ldma_rst = (payload >> 4) & 0x1;
+            signals.sys_rst_pid = (payload >> 3) & 0x1;
+            signals.sys_rst_tid = (payload >> 2) & 0x1;
+            signals.tr_clear_regs = (payload >> 1) & 0x1; // CLEAR.T
+            signals.pr_clear_regs = (payload >> 0) & 0x1; // CLEAR.P
             return;
         }
 
-        // LDMA.LOOP / SDMA.LOOP (Opcode 1, Funct2 1)
-        if(opcode==1 && funct2==1){
-            int bits6_1 = payload & 0x3F;
-            int bit0 = (payload >> 6) & 0x1;
-            int val = (func3<<7) | (bits6_1<<1) | bit0; // 10-bit imm
-            signals.imm = val;
-            signals.DL_setloop = true;
-            // func1=0: LDMA.LOOP, func1=1: SDMA.LOOP
-            if(func1==0) signals.DL_is_sdma = false;
-            else signals.DL_is_sdma = true;
+        // NOP (opcode=10 func2=10 func1=0)
+        if (opcode == 2 && funct2 == 2 && func1 == 0) {
+            signals.nop = true;
             return;
         }
 
-        // DL Loads / Broadcast Loads (LDMA.L*)
-        if(opcode==0 && funct2==2){
-            int stride = (w>>10)&0x7;
-            signals.imm = stride;
-            signals.DL_active = true;
-            signals.DL_is_sdma = false; // LDMA
-        }
-
-        // DL Store (only SD simplified -> just advance base) (SDMA.SD)
-        if(opcode==0 && funct2==3 && func3==3){
-            int stride = (w>>10)&0x7;
-            signals.imm = stride;
-            signals.DL_active = true;
-            signals.DL_is_sdma = true; // SDMA
+        // LOOPIN (opcode=10 func2=00)
+        if (opcode == 2 && funct2 == 0 && func1 == 0) {
+            signals.imm = payload;
+            signals.loop_in = true;
             return;
         }
 
-        // TSTORE / TSHIFT
-        if(opcode==1 && funct2==0){
-            if(func3==0){ // TSTORE trd
-                int trd = (w>>5)&0xf; // bits 8:5
+        // LDMA/SDMA ADDR (opcode=00 func2=00)
+        if (opcode == 0 && funct2 == 0) {
+            signals.imm = payload;
+            signals.DMA_setaddr = true;
+            signals.DMA_is_sdma = (func1 != 0);
+            return;
+        }
+
+        // LDMA/SDMA LEN (opcode=00 func2=01)
+        if (opcode == 0 && funct2 == 1) {
+            signals.imm = payload;
+            signals.DMA_setlen = true;
+            signals.DMA_is_sdma = (func1 != 0);
+            return;
+        }
+
+        // LDMA/SDMA LOOP (opcode=00 func2=10)
+        if (opcode == 0 && funct2 == 2) {
+            signals.imm = payload;
+            signals.DMA_setloop = true;
+            signals.DMA_is_sdma = (func1 != 0);
+            return;
+        }
+
+        // LDMA/SDMA MODE (opcode=00 func2=11 func1=0)
+        if (opcode == 0 && funct2 == 3 && func1 == 0) {
+            signals.imm = (payload >> 3) & 0x7; // stride
+            signals.DMA_setmode = true;
+            signals.DMA_is_sdma = (func3 == 0x7);
+            return;
+        }
+
+        // DMA Ops / TSTORE / VTSTORE / TSHIFT (opcode=00 func2=11)
+        if (opcode == 0 && funct2 == 3 && func1 == 1) {
+            if (func3 == 0) { // TSTORE
+                int trd = (payload >> 6) & 0xF;
                 signals.rid3 = trd;
                 signals.tr_en = true;
                 signals.tr_write = true;
                 signals.pd_load = true;
-            }
-            else if(func3==1){ // TSHIFT k
-                int code = (w>>10)&0x7; // kernel size code (0:K3 1:K5 2:K7)
-                signals.imm = code;
+            } else if (func3 == 1) { // VTSTORE
+                int vtrd = (payload >> 3) & 0x3;
+                signals.rid3 = vtrd;
+                signals.tr_en = true;
+                signals.tr_write_v = true;
+                signals.pd_load_v = true;
+            } else if (func3 == 2) { // TSHIFT
+                signals.imm = (payload >> 3) & 0x3;
                 signals.tr_en = true;
                 signals.tr_shift = true;
             }
             return;
         }
 
-        // Arithmetic Group
-        if(opcode==2 && funct2==1){
-            signals.rid5 = (w>>5)&0x1F;
-            signals.rid3 = (w>>10)&0x3;
-            int pstride = (w>>5)&0x1F;
-            int tstride = (w>>10)&0x3;
-            switch(func3){
-                case 0: // VMAC / VMACN : P[prd] += dot(VT, DMRV)
-                case 2: { // VMUL / VMULN : VP64[prd] = VT * DMRV + VP64[prd]
-                    signals.pr_mode = (func3==2) ? 1 : 0; // 0: scalar(VMAC), 1: vector64(VMUL)
-                    signals.DL_next = func1; // N 變形: 允許下一個 DMA
+        // Arithmetic Group (opcode=01)
+        if (opcode == 1) {
+            const int reg5 = (payload >> 5) & 0x1F;
+            const int vtbits = (payload >> 3) & 0x3;
+            const int pstride = reg5;
+            const int vtstride = vtbits;
+
+            if (funct2 == 0) {
+                if (func3 == 0) { // VMAC / VMACN
+                    signals.rid5 = reg5;
+                    signals.rid3 = vtbits;
+                    signals.pr_en = true;
+                    signals.pr_write = true;
+                    signals.pr_mode = 0;
+                    signals.tr_en = true;
                     signals.vaddu_en = true;
-                    signals.vaddu_mode = (func3==2) ? 1 : 0; // 0: ACCUMUATE(VMAC), 1: ADD(VMUL)
-                } break;
-                case 1: // VMACR / VMACRN : P[psum_cnt] += dot(VT[vtid_cnt], DMRV)
-                case 3: { // VMULR / VMULRN : VP[vpsum_cnt] += mul(VT[vtid_cnt], DMRV)
+                    signals.vaddu_mode = 0;
+                    signals.LDMA_next = func1;
+                } else if (func3 == 1) { // VMACR / VMACRN
+                    signals.rid5 = reg5;
+                    signals.rid3 = vtbits;
                     signals.pr_use_vcounter = true;
                     signals.tr_use_vcounter = true;
                     signals.tr_en = true;
                     signals.pr_en = true;
                     signals.pr_write = true;
-                    signals.DL_next = func1; // N 變形: 允許下一個 DMA
-                    signals.pr_mode = (func3==3) ? 1 : 0; // 0: scalar(VMAC), 1: vector64(VMUL)
+                    signals.pr_mode = 0;
                     signals.vaddu_en = true;
-                    signals.vaddu_mode = (func3==3) ? 1 : 0; // 0: ACCUMUATE(VMAC), 1: ADD(VMUL)
+                    signals.vaddu_mode = 0;
+                    signals.LDMA_next = func1;
 
-                    if(pstride==31) signals.pr_clear_vcounter = true;
+                    if (pstride == 31) signals.sys_rst_pid = true;
                     else signals.pr_incr_vcounter = true;
 
-                    if(tstride==3) signals.tr_clear_vcounter = true;
+                    if (vtstride == 3) signals.sys_rst_tid = true;
                     else signals.tr_incr_vcounter = true;
-                } break;
-                case 4: { // VPSUM : PLO = PLI + P[psum_cnt]
-                    signals.pli_plo_operation = true;
+                }
+                return;
+            }
+
+            if (funct2 == 1) {
+                if (func3 == 0) { // VMUL / VMULN
+                    signals.rid5 = reg5;
+                    signals.rid3 = vtbits;
                     signals.pr_en = true;
-                    signals.pr_mode = 1; // vector 64-bit
+                    signals.pr_write = true;
+                    signals.pr_mode = 1;
+                    signals.tr_en = true;
                     signals.vaddu_en = true;
-                    signals.vaddu_mode = 1; // ADD
-                } break;
-                case 5: { // VPSUMR : PLO = PLI + P[psum_cnt] 並移動 psum_cnt
-                    signals.pli_plo_operation = true;
+                    signals.vaddu_mode = 1;
+                    signals.LDMA_next = func1;
+                } else if (func3 == 1) { // VMULR / VMULRN
+                    signals.rid5 = reg5;
+                    signals.rid3 = vtbits;
                     signals.pr_use_vcounter = true;
+                    signals.tr_use_vcounter = true;
+                    signals.tr_en = true;
                     signals.pr_en = true;
-                    signals.pr_mode = 1; // vector 64-bit
+                    signals.pr_write = true;
+                    signals.pr_mode = 1;
                     signals.vaddu_en = true;
-                    signals.vaddu_mode = 1; // ADD
+                    signals.vaddu_mode = 1;
+                    signals.LDMA_next = func1;
 
-                    if(pstride==31) signals.pr_clear_vcounter = true;
+                    if (pstride == 31) signals.sys_rst_pid = true;
                     else signals.pr_incr_vcounter = true;
-                } break;
-                default: break;
-            }
-            return;
-        }
 
-        // SETRID
-        if(opcode==2 && funct2==2){
-            switch(func3){
-                case 1: signals.pr_set_vcounter = true; break;          // SETRID.P
-                case 2: signals.tr_set_vcounter = true; break;           // SETRID.T
-                case 3: signals.pr_set_vcounter = true; signals.tr_set_vcounter = true; break; // SETRID.PT
-                default: break;
+                    if (vtstride == 3) signals.sys_rst_tid = true;
+                    else signals.tr_incr_vcounter = true;
+                }
+                return;
             }
-            return;
-        }
 
-         // CLEAR
-        if(opcode==2 && funct2==3){
-            switch(func3){
-                case 0: signals.tr_clear_regs = true; break; // CLEAR.T
-                case 1: signals.pr_clear_regs = true; break; // CLEAR.P
-                default: break;
+            if (funct2 == 2) {
+                if (func3 == 0) { // VPSUM
+                    signals.rid5 = reg5;
+                    signals.pli_plo_operation = true;
+                    signals.pr_en = true;
+                    signals.pr_mode = 1;
+                    signals.vaddu_en = true;
+                    signals.vaddu_mode = 1;
+                } else if (func3 == 1) { // VPSUMR
+                    signals.rid5 = reg5;
+                    signals.pr_use_vcounter = true;
+                    signals.pli_plo_operation = true;
+                    signals.pr_en = true;
+                    signals.pr_mode = 1;
+                    signals.vaddu_en = true;
+                    signals.vaddu_mode = 1;
+
+                    if (pstride == 31) signals.sys_rst_pid = true;
+                    else signals.pr_incr_vcounter = true;
+                }
+                return;
             }
-            return;
+
+            if (funct2 == 3) {
+                if (func3 == 0 || func3 == 2) { // VPSUM (VPSUM_VTSTORE, VPSUM_TSHIFT)
+                    // VPSUM
+                    signals.rid5 = reg5;
+                    signals.pli_plo_operation = true;
+                    signals.pr_en = true;
+                    signals.pr_mode = 1;
+                    signals.vaddu_en = true;
+                    signals.vaddu_mode = 1;
+                }
+
+                if (func3 == 1 || func3 == 3) { // VPSUMR (VPSUMR_VTSTORE, VPSUMR_TSHIFT)
+                    // VPSUMR
+                    signals.rid5 = reg5;
+                    signals.pr_use_vcounter = true;
+                    signals.pli_plo_operation = true;
+                    signals.pr_en = true;
+                    signals.pr_mode = 1;
+                    signals.vaddu_en = true;
+                    signals.vaddu_mode = 1;
+                    if (pstride == 31) signals.sys_rst_pid = true;
+                    else signals.pr_incr_vcounter = true;
+                }
+
+                if (func3 == 0 || func3 == 1) { // VTSTORE (VPSUM_VTSTORE, VPSUMR_VTSTORE)
+                    // VTSTORE
+                    int vtrd = (payload >> 3) & 0x3;
+                    signals.rid3 = vtrd;
+                    signals.tr_en = true;
+                    signals.tr_write_v = true;
+                    signals.pd_load_v = true;
+                }
+
+                if (func3 == 2 || func3 == 3) { // TSHIFT (VPSUM_TSHIFT, VPSUMR_TSHIFT)
+                    // TSHIFT
+                    signals.imm = (payload >> 3) & 0x3;
+                    signals.tr_en = true;
+                    signals.tr_shift = true;
+                }
+                return;
+            }
         }
 
         // loop end is disabled for following instructions
         signals.loop_end = false;
-
-        // JUMP (J)
-        if(opcode==1 && funct2==2){
-            int imm = ((func3 & 0x7)<<7) | (func1<<10) | (((w>>11)&1)) | ((payload & 0x3F)<<1);
-            signals.imm = imm;
-            signals.jump_en = true;
-            return;
-        }
-
-        // LOOPIN / LOOPBREAK
-        if(opcode==1 && funct2==3){
-            if(func1==0){ // LOOPIN
-                int lc = ((func3 &0x7)<<7) | (((w>>11)&1)) | ((payload & 0x3F)<<1);
-                signals.imm = lc;
-                signals.loop_in = true;
-            } else { // LOOPBREAK
-                signals.loop_break = true;
-            }
-            return;
-        }
 
         // no matching instruction - NOP
         signals.nop = true;

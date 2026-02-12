@@ -206,17 +206,18 @@ public:
     DMAController(): dm(nullptr), dmrv(nullptr), dmwv(nullptr), latency(1) {}
     void init(DataMemory* dm_, Vector* dmrv_, Vector* dmwv_,int lat){ dm = dm_; dmrv = dmrv_; dmwv = dmwv_; latency = lat; }
 
-    void setBase(uint16_t base){ dma_base = base; if(dma_offset==0) init_base=base; dma_offset = 0; } // Note: Simple reset logic, refined in next step
-    void setLen(uint16_t len){ dma_len = len; init_len=len;}
-    void setLoop(uint16_t count){ loop_count = count; }
+    void setBase(uint16_t base){ updateBase(base); }
+    void setLen(uint16_t len){ updateLen(len); }
+    void setLoop(uint16_t count){ static_loop = count; }
 
-    // Explicit setup for init values (called by ADDR/LEN instructions)
-    void updateBase(uint16_t base) { dma_base = base; init_base = base; dma_offset = 0; }
-    void updateLen(uint16_t len) { dma_len = len; init_len = len; }
+    // Static registers (config stage)
+    void updateBase(uint16_t base) { static_base = base; }
+    void updateLen(uint16_t len) { static_len = len; }
+    void setStride(uint16_t stride){ static_stride = stride; }
+    void setBroadcast(bool broadcast){ static_broadcast = broadcast; }
+    void setRequestType(DMARequestType type){ static_request_type = type; }
 
-    void setStride(uint16_t stride){ dma_stride = stride; }
-    void setBroadcast(bool broadcast){ dma_broadcast = broadcast; }
-    void setRequestType(DMARequestType type){ request_type = type; }
+    // Active registers (execution stage)
     uint16_t base() const { return dma_base; }
     uint16_t len() const { return dma_len; }
     uint16_t stride() const { return dma_stride; }
@@ -230,8 +231,10 @@ public:
         setRequestType(type);
         setStride(stride);
         setBroadcast(broadcast);
-        activate();
     }
+
+    void activateFromStatic();
+    void resetActive();
 
     // SDMA specific methods
     void checkLoopReset();
@@ -259,9 +262,17 @@ private:
     uint32_t bytes_transferred = 0;
 
     bool dma_broadcast = false;
-    DMARequestType request_type;
+    DMARequestType request_type = DMARequestType::LOAD_BYTE;
     bool dma_active = false;
     int latency; // 保留 latency 欄位
+
+    // Static registers (config stage)
+    uint16_t static_base = 0;
+    uint16_t static_len = 0;
+    uint16_t static_stride = 0;
+    uint16_t static_loop = 0;
+    bool static_broadcast = false;
+    DMARequestType static_request_type = DMARequestType::LOAD_BYTE;
 };
 
 struct PEState {
@@ -283,6 +294,7 @@ struct PEState {
     uint16_t pc = 0;         // 程式計數器
     bool halted = false;
     uint64_t cycles = 0;
+    std::array<uint64_t, 4> opcode_exec_count{}; // opcode 0..3 執行次數
 };
 
 } // namespace hybridacc

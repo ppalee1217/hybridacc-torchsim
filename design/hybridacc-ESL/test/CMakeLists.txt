@@ -5,6 +5,9 @@ project(HybridAcc_PE_Tests)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Optimization flags for Release build
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+
 # Debug options
 option(ENABLE_DEBUG_UTILS "Enable DEBUG_UTILS debug messages" OFF)
 set(DEBUG_LEVEL_MIN "0" CACHE STRING "Minimum debug level")

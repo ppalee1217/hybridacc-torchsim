@@ -234,33 +234,37 @@ struct pe_decode_signals_t {
     uint16_t imm; // stride/addr/len/kernel immediate
     // Loop control signals
     bool loop_in;
-    bool loop_break;
     bool loop_end;
-    bool jump_en;
     // Swap Control
     bool is_swap;
 
+    // SYS.CTRL flags
+    bool sys_sdma_act;
+    bool sys_sdma_rst;
+    bool sys_ldma_act;
+    bool sys_ldma_rst;
+    bool sys_rst_pid;
+    bool sys_rst_tid;
+
     // --- Stage EXE/M --- //
     // DL control signals
-    bool DL_setaddr;
-    bool DL_setlen;
-    // DL_mode =  func3
-    bool DL_active;
-    bool DL_next;
-    bool DL_setloop;
-    bool DL_is_sdma;
+    bool DMA_setaddr;
+    bool DMA_setlen;
+    bool DMA_setloop;
+    bool DMA_setmode; // func3
+    bool LDMA_next;
+    bool DMA_is_sdma;
     // TR control signals
     int rid3;
     int rid5;
     bool pd_load;
+    bool pd_load_v;
     bool tr_en;
     bool tr_write;
+    bool tr_write_v;
     bool tr_shift;
-    // tr_shift_mask = func3
     bool tr_clear_regs;
     bool tr_use_vcounter;
-    bool tr_set_vcounter;
-    bool tr_clear_vcounter;
     bool tr_incr_vcounter;
 
     // --- Stage EXE/A --- //
@@ -272,8 +276,6 @@ struct pe_decode_signals_t {
     bool pr_mode; // 0: scalar, 1: vector 64-bit
     bool pr_clear_regs;
     bool pr_use_vcounter;
-    bool pr_set_vcounter;
-    bool pr_clear_vcounter;
     bool pr_incr_vcounter;
     // VADDU control signals
     bool vaddu_en;
@@ -289,23 +291,30 @@ inline std::ostream& operator<<(std::ostream& os, const pe_decode_signals_t& sig
        << "func3=" << sig.func3 << ", "
        << "imm=0x" << std::hex << sig.imm << std::dec << ", "
        << "loop_in=" << sig.loop_in << ", "
-       << "loop_break=" << sig.loop_break << ", "
        << "loop_end=" << sig.loop_end << ", "
-       << "jump_en=" << sig.jump_en << ", "
-       << "DL_setaddr=" << sig.DL_setaddr << ", "
-       << "DL_setlen=" << sig.DL_setlen << ", "
-       << "DL_active=" << sig.DL_active << ", "
-       << "DL_next=" << sig.DL_next << ", "
+       << "is_swap=" << sig.is_swap << ", "
+       << "sys_sdma_act=" << sig.sys_sdma_act << ", "
+       << "sys_sdma_rst=" << sig.sys_sdma_rst << ", "
+       << "sys_ldma_act=" << sig.sys_ldma_act << ", "
+       << "sys_ldma_rst=" << sig.sys_ldma_rst << ", "
+       << "sys_rst_pid=" << sig.sys_rst_pid << ", "
+       << "sys_rst_tid=" << sig.sys_rst_tid << ", "
+       << "DMA_setaddr=" << sig.DMA_setaddr << ", "
+       << "DMA_setlen=" << sig.DMA_setlen << ", "
+       << "DMA_setloop=" << sig.DMA_setloop << ", "
+       << "DMA_setmode=" << sig.DMA_setmode << ", "
+       << "LDMA_next=" << sig.LDMA_next << ", "
+       << "DMA_is_sdma=" << sig.DMA_is_sdma << ", "
        << "rid3=" << sig.rid3 << ", "
        << "rid5=" << sig.rid5 << ", "
        << "pd_load=" << sig.pd_load << ", "
+       << "pd_load_v=" << sig.pd_load_v << ", "
        << "tr_en=" << sig.tr_en << ", "
        << "tr_write=" << sig.tr_write << ", "
+       << "tr_write_v=" << sig.tr_write_v << ", "
        << "tr_shift=" << sig.tr_shift << ", "
        << "tr_clear_regs=" << sig.tr_clear_regs << ", "
        << "tr_use_vcounter=" << sig.tr_use_vcounter << ", "
-       << "tr_set_vcounter=" << sig.tr_set_vcounter << ", "
-       << "tr_clear_vcounter=" << sig.tr_clear_vcounter << ", "
        << "tr_incr_vcounter=" << sig.tr_incr_vcounter << ", "
        << "pli_plo_operation=" << sig.pli_plo_operation << ", "
        << "pr_en=" << sig.pr_en << ", "
@@ -313,8 +322,6 @@ inline std::ostream& operator<<(std::ostream& os, const pe_decode_signals_t& sig
        << "pr_mode=" << sig.pr_mode << ", "
        << "pr_clear_regs=" << sig.pr_clear_regs << ", "
        << "pr_use_vcounter=" << sig.pr_use_vcounter << ", "
-       << "pr_set_vcounter=" << sig.pr_set_vcounter << ", "
-       << "pr_clear_vcounter=" << sig.pr_clear_vcounter << ", "
        << "pr_incr_vcounter=" << sig.pr_incr_vcounter << ", "
        << "vaddu_en=" << sig.vaddu_en << ", "
        << "vaddu_mode=" << sig.vaddu_mode
@@ -334,23 +341,29 @@ inline void sc_trace(sc_core::sc_trace_file* tf, const pe_decode_signals_t& sig,
     sc_core::sc_trace(tf, sig.func3, name + ".func3");
     sc_core::sc_trace(tf, sig.imm, name + ".imm");
     sc_core::sc_trace(tf, sig.loop_in, name + ".loop_in");
-    sc_core::sc_trace(tf, sig.loop_break, name + ".loop_break");
     sc_core::sc_trace(tf, sig.loop_end, name + ".loop_end");
-    sc_core::sc_trace(tf, sig.jump_en, name + ".jump_en");
-    sc_core::sc_trace(tf, sig.DL_setaddr, name + ".DL_setaddr");
-    sc_core::sc_trace(tf, sig.DL_setlen, name + ".DL_setlen");
-    sc_core::sc_trace(tf, sig.DL_active, name + ".DL_active");
-    sc_core::sc_trace(tf, sig.DL_next, name + ".DL_next");
+    sc_core::sc_trace(tf, sig.is_swap, name + ".is_swap");
+    sc_core::sc_trace(tf, sig.sys_sdma_act, name + ".sys_sdma_act");
+    sc_core::sc_trace(tf, sig.sys_sdma_rst, name + ".sys_sdma_rst");
+    sc_core::sc_trace(tf, sig.sys_ldma_act, name + ".sys_ldma_act");
+    sc_core::sc_trace(tf, sig.sys_ldma_rst, name + ".sys_ldma_rst");
+    sc_core::sc_trace(tf, sig.sys_rst_pid, name + ".sys_rst_pid");
+    sc_core::sc_trace(tf, sig.sys_rst_tid, name + ".sys_rst_tid");
+    sc_core::sc_trace(tf, sig.DMA_setaddr, name + ".DMA_setaddr");
+    sc_core::sc_trace(tf, sig.DMA_setlen, name + ".DMA_setlen");
+    sc_core::sc_trace(tf, sig.DMA_setloop, name + ".DMA_setloop");
+    sc_core::sc_trace(tf, sig.DMA_setmode, name + ".DMA_setmode");
+    sc_core::sc_trace(tf, sig.LDMA_next, name + ".LDMA_next");
     sc_core::sc_trace(tf, sig.rid3, name + ".rid3");
     sc_core::sc_trace(tf, sig.rid5, name + ".rid5");
     sc_core::sc_trace(tf, sig.pd_load, name + ".pd_load");
+    sc_core::sc_trace(tf, sig.pd_load_v, name + ".pd_load_v");
     sc_core::sc_trace(tf, sig.tr_en, name + ".tr_en");
     sc_core::sc_trace(tf, sig.tr_write, name + ".tr_write");
+    sc_core::sc_trace(tf, sig.tr_write_v, name + ".tr_write_v");
     sc_core::sc_trace(tf, sig.tr_shift, name + ".tr_shift");
     sc_core::sc_trace(tf, sig.tr_clear_regs, name + ".tr_clear_regs");
     sc_core::sc_trace(tf, sig.tr_use_vcounter, name + ".tr_use_vcounter");
-    sc_core::sc_trace(tf, sig.tr_set_vcounter, name + ".tr_set_vcounter");
-    sc_core::sc_trace(tf, sig.tr_clear_vcounter, name + ".tr_clear_vcounter");
     sc_core::sc_trace(tf, sig.tr_incr_vcounter, name + ".tr_incr_vcounter");
     sc_core::sc_trace(tf, sig.pli_plo_operation, name + ".pli_plo_operation");
     sc_core::sc_trace(tf, sig.pr_en, name + ".pr_en");
@@ -358,8 +371,6 @@ inline void sc_trace(sc_core::sc_trace_file* tf, const pe_decode_signals_t& sig,
     sc_core::sc_trace(tf, sig.pr_mode, name + ".pr_mode");
     sc_core::sc_trace(tf, sig.pr_clear_regs, name + ".pr_clear_regs");
     sc_core::sc_trace(tf, sig.pr_use_vcounter, name + ".pr_use_vcounter");
-    sc_core::sc_trace(tf, sig.pr_set_vcounter, name + ".pr_set_vcounter");
-    sc_core::sc_trace(tf, sig.pr_clear_vcounter, name + ".pr_clear_vcounter");
     sc_core::sc_trace(tf, sig.pr_incr_vcounter, name + ".pr_incr_vcounter");
     sc_core::sc_trace(tf, sig.vaddu_en, name + ".vaddu_en");
     sc_core::sc_trace(tf, sig.vaddu_mode, name + ".vaddu_mode");

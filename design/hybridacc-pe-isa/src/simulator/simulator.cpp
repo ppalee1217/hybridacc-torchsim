@@ -21,9 +21,8 @@ namespace hybridacc {
 // Helper field extractors
 static inline int getOpcode(uint16_t w){ return (w>>1) & 0x3; }
 static inline int getFunct2(uint16_t w){ return (w>>3) & 0x3; }
-static inline int getFunc3(uint16_t w){ return (w>>13)&0x7; }
-static inline int getFunc1(uint16_t w){ return (w>>12)&0x1; }
-static inline int getPayload(uint16_t w){ return (w>>5)&0x7F; }
+static inline int getFunc1(uint16_t w){ return (w>>5) & 0x1; }
+static inline int getPayload(uint16_t w){ return (w>>6) & 0x3FF; }
 
 
 bool PortIO::popPD(uint16_t &v) {
@@ -142,6 +141,7 @@ PESimulator::PESimulator(const PEConfig &cfg){
     state.pc = 0;
     state.halted = false;
     state.cycles = 0;
+    state.opcode_exec_count = {0,0,0,0};
 }
 
 void PESimulator::loadProgram(const std::vector<uint16_t>& prog){
@@ -149,6 +149,7 @@ void PESimulator::loadProgram(const std::vector<uint16_t>& prog){
     state.pc = 0;
     state.halted = false;
     state.cycles = 0;
+    state.opcode_exec_count = {0,0,0,0};
 }
 
 PEState& PESimulator::getState(){ return state; }
@@ -163,249 +164,251 @@ void PESimulator::run(uint64_t max_cycles){
 PESimulator::ExecStatus PESimulator::execute(uint16_t w) {
     int opcode = getOpcode(w);
     int funct2 = getFunct2(w);
-    int func3  = getFunc3(w);
     int func1  = getFunc1(w);
     int payload= getPayload(w);
+    int func3  = payload & 0x7;
+    int reg5   = (payload >> 5) & 0x1F;
+    int vtbits = (payload >> 3) & 0x3;
+    int stride = (payload >> 3) & 0x7;
 
     auto &S = state;
 
-    // HALT
-    if(opcode==3 && funct2==3 && func3==0){ S.halted = true; return ExecStatus::NEXT; }
-    // SWAPDM
-    if(opcode==3 && funct2==3 && func3==4){ // opcode 11 funct2 11 func3 100
-        // Wait for SDMA busy or Back buffer not valid (not yet filled)
-        if(S.SDMA.busy() || !S.DM.isValid(S.DM.getBackBank())){
-            return ExecStatus::STALL; // Stall, do not advance PC
-        }
-        S.DM.swap();
-        return ExecStatus::NEXT;
-        // Advance PC (fall through to end of function)
-    } else if(opcode==3 && funct2==3) {
-        // Other system instructions handled or reserved
-    }
+    // HALT (opcode=10 func2=11)
+    if(opcode==2 && funct2==3 && func1==0){ S.halted = true; return ExecStatus::NEXT; }
 
-    // NOP
-    if(opcode==2 && funct2==0){ return ExecStatus::NEXT; }
-
-    // DMA Setup (Opcode 00)
-    // f2=00: SDMA, f2=01: LDMA
-    if(opcode==0 && (funct2==0 || funct2==1)){
-        int bits6_1 = payload & 0x3F;
-        int bit0 = (payload >> 6) & 0x1;
-        int val = (func3<<7) | (bits6_1<<1) | bit0; // 10-bit
-
-        if(funct2==1) { // LDMA
-            if(func1==0) S.LDMA.updateBase(val);
-            else S.LDMA.updateLen(val+1); // len is 0-based
-        } else { // SDMA
-            if(func1==0) S.SDMA.updateBase(val);
-            else S.SDMA.updateLen(val+1); // len is 0-based
+    // SYS.SYNC (opcode=10 func2=01 func1=1)
+    if(opcode==2 && funct2==1 && func1==1){
+        if(payload & 0x1){
+            if(S.SDMA.busy() || !S.DM.isValid(S.DM.getBackBank())){
+                return ExecStatus::STALL; // Stall, do not advance PC
+            }
+            S.DM.swap();
         }
         return ExecStatus::NEXT;
     }
 
-    // LDMA Operations (Opcode 00, f2=10)
-    if(opcode==0 && funct2==2){
-        int stride = (w>>10)&0x7;
-        switch(func3){
-            case 0: S.LDMA.issue(DMARequestType::LOAD_BYTE, stride, false); break; // LB
-            case 1: S.LDMA.issue(DMARequestType::LOAD_HALF, stride, false); break; // LH
-            case 2: S.LDMA.issue(DMARequestType::LOAD_WORD, stride, false); break; // LW
-            case 3: S.LDMA.issue(DMARequestType::LOAD_DWORD, stride, false); break; // LD
-            case 4: S.LDMA.issue(DMARequestType::LOAD_BYTE, stride, true ); break; // LBB
-            case 5: S.LDMA.issue(DMARequestType::LOAD_HALF, stride, true ); break; // LHB
-            case 6: S.LDMA.issue(DMARequestType::LOAD_WORD, stride, true ); break; // LWB
-            default: break;
-        }
-        return ExecStatus::NEXT;
-    }
+    // SYS.CTRL (opcode=10 func2=01 func1=0)
+    if(opcode==2 && funct2==1 && func1==0){
+        bool sdma_act = payload & (1<<7);
+        bool sdma_rst = payload & (1<<6);
+        bool ldma_act = payload & (1<<5);
+        bool ldma_rst = payload & (1<<4);
+        bool rst_pid  = payload & (1<<3);
+        bool rst_tid  = payload & (1<<2);
+        bool clr_t    = payload & (1<<1);
+        bool clr_p    = payload & (1<<0);
 
-    // SDMA Operations (Opcode 00, f2=11)
-    if(opcode==0 && funct2==3){
-        if(func3==3){
-            int stride = (w>>10)&0x7;
+        if(clr_t) S.TR.clear();
+        if(clr_p) S.PS.clear();
+        if(rst_pid){ S.PS.psum_cnt = 0; S.PS.vpsum_cnt = 0; }
+        if(rst_tid){ S.TR.tid_cnt = 0; S.TR.vtid_cnt = 0; }
+
+        if(ldma_rst) S.LDMA.resetActive();
+        if(sdma_rst) S.SDMA.resetActive();
+
+        if(ldma_act) S.LDMA.activateFromStatic();
+        if(sdma_act){
             uint64_t ps_word = 0;
             if (!port_io || !port_io->popPS(ps_word)) {
                 throw std::runtime_error("Blocking read failed: PS port is empty");
             }
-            S.dmwv.fromUint64(ps_word); // Get data from PS port
-
-            S.SDMA.issue(DMARequestType::STORE_DWORD, stride, false); // SD
-
-            // Note: In blocking design, we might spin here. But to support concurrent execution
-            // SDMA should ideally run in background. For now, we keep blocking behavior for data consumption
-            // but tracking transfer size needs care.
+            S.dmwv.fromUint64(ps_word);
+            S.SDMA.activateFromStatic();
             while(S.SDMA.busy()) {
-                 if (!port_io->popPS(ps_word)) {
-                     throw std::runtime_error("Blocking read failed: PS port is empty");
-                 }
-                 S.dmwv.fromUint64(ps_word);
-                 S.SDMA.next();
+                if (!port_io->popPS(ps_word)) {
+                    throw std::runtime_error("Blocking read failed: PS port is empty");
+                }
+                S.dmwv.fromUint64(ps_word);
+                S.SDMA.next();
             }
         }
         return ExecStatus::NEXT;
     }
 
-    // Config LOOP (Opcode 01, f2=01)
-    if(opcode==1 && funct2==1){
-        int bits6_1 = payload & 0x3F;
-        int bit0 = (payload >> 6) & 0x1;
-        int val = (func3<<7) | (bits6_1<<1) | bit0; // 10-bit
-        val += 1; // 0-based
-        if(func1==0) S.LDMA.setLoop(val); // LDMA.LOOP
-        else S.SDMA.setLoop(val);         // SDMA.LOOP
+    // NOP (opcode=10 func2=10)
+    if(opcode==2 && funct2==2 && func1==0){ return ExecStatus::NEXT; }
+
+    // DMA Setup (Opcode 00)
+    if(opcode==0 && funct2==0){
+        if(func1==0) S.LDMA.updateBase(payload);
+        else S.SDMA.updateBase(payload);
+        return ExecStatus::NEXT;
+    }
+    if(opcode==0 && funct2==1){
+        if(func1==0) S.LDMA.updateLen(payload+1);
+        else S.SDMA.updateLen(payload+1);
+        return ExecStatus::NEXT;
+    }
+    if(opcode==0 && funct2==2){
+        if(func1==0) S.LDMA.setLoop(payload+1);
+        else S.SDMA.setLoop(payload+1);
         return ExecStatus::NEXT;
     }
 
-    // TSTORE / TSHIFT
-    if(opcode==1 && funct2==0){
-        if(func3==0){ // TSTORE trd
-            int trd = (w>>5)&0xf; // bits 8:5
-            uint16_t val = 0;
-            port_io->popPD(val); // 從 PD 佇列讀取值
-            state.TR.setT(trd, val);
-        }
-        else if(func3==1){ // TSHIFT k
-            int code = (w>>10)&0x7; // kernel size code (0:K3 1:K5 2:K7)
-            uint16_t maskBits = 0;
-            switch(code){
-                case 0: // K3 -> 011011011011b (11 ~ 0)
-                    maskBits = 0b011011011011; break;
-                case 1: // K5 -> 001111001111b (11 ~ 0)
-                    maskBits = 0b001111001111; break;
-                case 2: // K7 -> 000000111111b (11 ~ 0)
-                    maskBits = 0b000000111111; break;
-                default: maskBits = 0; break; // 未定義 code 清空
+    // DMA Operations / TSTORE / VTSTORE / TSHIFT (Opcode 00, func2=11)
+    if(opcode==0 && funct2==3){
+        if(func1==0){
+            switch(func3){
+                case 0: S.LDMA.issue(DMARequestType::LOAD_BYTE, stride, false); break; // LB
+                case 1: S.LDMA.issue(DMARequestType::LOAD_HALF, stride, false); break; // LH
+                case 2: S.LDMA.issue(DMARequestType::LOAD_WORD, stride, false); break; // LW
+                case 3: S.LDMA.issue(DMARequestType::LOAD_DWORD, stride, false); break; // LD
+                case 4: S.LDMA.issue(DMARequestType::LOAD_BYTE, stride, true ); break; // LBB
+                case 5: S.LDMA.issue(DMARequestType::LOAD_HALF, stride, true ); break; // LHB
+                case 6: S.LDMA.issue(DMARequestType::LOAD_WORD, stride, true ); break; // LWB
+                case 7: S.SDMA.issue(DMARequestType::STORE_DWORD, stride, false); break; // SD
+                default: break;
             }
-            state.TR.shift(maskBits); // 將 T registers 向右移動
+            return ExecStatus::NEXT;
+        } else {
+            if(func3==0){ // TSTORE
+                int trd = (payload>>6)&0xF;
+                uint16_t val = 0;
+                port_io->popPD(val);
+                state.TR.setT(trd, val);
+            } else if(func3==1){ // VTSTORE
+                int vtrd = (payload>>3)&0x3;
+                for(int i=0;i<4;++i){
+                    uint16_t val = 0;
+                    port_io->popPD(val);
+                    state.TR.setT(vtrd + i*3, val);
+                }
+            } else if(func3==2){ // TSHIFT
+                int k = (payload>>3)&0x7;
+                uint16_t maskBits = 0;
+                switch(k){
+                    case 0: maskBits = 0b011011011011; break; // k3
+                    case 1: maskBits = 0b001111001111; break; // k5
+                    case 2: maskBits = 0b000000111111; break; // k7
+                    default: maskBits = 0; break;
+                }
+                state.TR.shift(maskBits);
+            }
+            return ExecStatus::NEXT;
         }
-        return ExecStatus::NEXT;
     }
 
-    // Arithmetic Group
-    if(opcode==2 && funct2==1){
-        switch(func3){
-            case 0: // VMAC / VMACN : P[prd] += dot(VT, DMRV)
-            case 2: { // VMUL / VMULN : VP64[prd] = VT * DMRV + VP64[prd]
-                int prd = (w>>5)&0x1F;
-                int vtrs = (w>>10)&0x3;
-                // 取得向量 VT
+    // Arithmetic Group (opcode=01)
+    if(opcode==1){
+        if(funct2==0){
+            if(func3==0){ // VMAC / VMACN
+                int prd = reg5;
+                int vtrs = vtbits;
                 Vector vt = state.TR.getVT(vtrs);
-                if(func3==2){ // VMUL family => 向量輸出
-                    Vector oldv = state.PS.getVP64(prd);
-                    Vector newv = state.valu.vmul(vt, state.dmrv, oldv);
-                    state.PS.setVP64(prd, newv);
-                } else { // VMAC family => 累加到標量 P
-                    Element oldp = state.PS.getP(prd);
-                    Element newp = state.valu.vmac(vt, state.dmrv, oldp);
-                    state.PS.setP(prd, newp);
-                }
-                if(func1){ S.LDMA.next(); } // N 變形: 允許下一個 DMA (Usually LDMA)
-            } break;
-            case 1: // VMACR / VMACRN : P[psum_cnt] += dot(VT[vtid_cnt], DMRV)
-            case 3: { // VMULR / VMULRN : VP[vpsum_cnt] += mul(VT[vtid_cnt], DMRV)
-                int pstride = (w>>5)&0x1F;
-                int vpstride = (w>>5)&0x1F;
-                int vtstride = (w>>10)&0x3;
-                // 取得向量 VT
-                int prd = state.PS.psum_cnt; // 使用 psum_cnt 作為 P 索引
-                int vtrs = state.TR.vtid_cnt; // 使用 vtid_cnt 作為 VT 索引
-                // int vprd = state.PS.vpsum_cnt; // 使用 vpsum_cnt 作為 VP 索引
-
+                Element oldp = state.PS.getP(prd);
+                Element newp = state.valu.vmac(vt, state.dmrv, oldp);
+                state.PS.setP(prd, newp);
+                if(func1){ S.LDMA.next(); }
+            } else if(func3==1){ // VMACR / VMACRN
+                int pstride = reg5;
+                int vtstride = vtbits;
+                int prd = state.PS.psum_cnt;
+                int vtrs = state.TR.vtid_cnt;
                 Vector vt = state.TR.getVT(vtrs);
-                if(func3==3){ // VMUL family => 向量輸出
-                    Vector oldv = state.PS.getVP64(prd);
-                    Vector newv = state.valu.vmul(vt, state.dmrv, oldv);
-                    state.PS.setVP64(prd, newv);
-                    // 更新動態計數器 VP
-                    if(vpstride==31) state.PS.psum_cnt = 0;
-                    else state.PS.psum_cnt = (state.PS.psum_cnt + vpstride) & 0x1F;
-
-                } else { // VMAC family => 累加到標量 P
-                    Element oldp = state.PS.getP(prd);
-                    Element newp = state.valu.vmac(vt, state.dmrv, oldp);
-                    state.PS.setP(prd, newp);
-
-                    // std::cerr << "[PESimulator] VMACR/VMACRN: P[" << prd << "] = 0x" << std::hex <<  newp << std::dec;
-                    // std::cerr << ", VT[" << vtrs << "] = " << std::hex << vt.toUint64() << ", DMRV = " << state.dmrv.toUint64() << std::dec << "\n";
-
-                    // 更新動態計數器 P
-                    if(pstride==31) state.PS.psum_cnt = 0;
-                    else state.PS.psum_cnt = (state.PS.psum_cnt + pstride) & 0x1F;
-                }
-
-                // 更新動態計數器 VT
+                Element oldp = state.PS.getP(prd);
+                Element newp = state.valu.vmac(vt, state.dmrv, oldp);
+                state.PS.setP(prd, newp);
+                if(pstride==31) state.PS.psum_cnt = 0;
+                else state.PS.psum_cnt = (state.PS.psum_cnt + pstride) & 0x1F;
                 if(vtstride==3) state.TR.vtid_cnt = 0;
                 else state.TR.vtid_cnt = (state.TR.vtid_cnt + vtstride) % 3;
-
                 if(func1){ S.LDMA.next(); }
-            } break;
-            case 4: { // VPSUM : PLO = PLI + P[psum_cnt]
-                int vprs = (w>>5)&0x1F;
-                Vector vt;
-                Vector psum = state.PS.getVP64(vprs);
-                uint64_t pil_word=0;
-                if(!port_io || !port_io->popPIL(pil_word)) throw std::runtime_error("PIL empty");
-                vt.fromUint64(pil_word);
-                Vector pout = state.valu.vadd(psum, vt);
-                if(port_io) port_io->pushPOL(pout.toUint64());
-            } break;
-            case 5: { // VPSUMR : PLO = PLI + P[psum_cnt] 並移動 psum_cnt
-                int vpstride = (w>>5)&0x1F;
-                int vprs = state.PS.psum_cnt; // 使用 vpsum_cnt 作為 VP 索引
-
-                Vector vt;
-                Vector psum = state.PS.getVP64(vprs);
-                uint64_t pil_word=0;
-                if(!port_io || !port_io->popPIL(pil_word)) throw std::runtime_error("PIL empty");
-                vt.fromUint64(pil_word);
-                Vector pout = state.valu.vadd(psum, vt);
-                if(port_io) port_io->pushPOL(pout.toUint64());
-
-                // 更新動態計數器 VP
+            }
+        } else if(funct2==1){
+            if(func3==0){ // VMUL / VMULN
+                int prd = reg5;
+                int vtrs = vtbits;
+                Vector vt = state.TR.getVT(vtrs);
+                Vector oldv = state.PS.getVP64(prd);
+                Vector newv = state.valu.vmul(vt, state.dmrv, oldv);
+                state.PS.setVP64(prd, newv);
+                if(func1){ S.LDMA.next(); }
+            } else if(func3==1){ // VMULR / VMULRN
+                int vpstride = reg5;
+                int vtstride = vtbits;
+                int prd = state.PS.psum_cnt;
+                int vtrs = state.TR.vtid_cnt;
+                Vector vt = state.TR.getVT(vtrs);
+                Vector oldv = state.PS.getVP64(prd);
+                Vector newv = state.valu.vmul(vt, state.dmrv, oldv);
+                state.PS.setVP64(prd, newv);
                 if(vpstride==31) state.PS.psum_cnt = 0;
                 else state.PS.psum_cnt = (state.PS.psum_cnt + vpstride) & 0x1F;
-            } break;
-            default: break;
+                if(vtstride==3) state.TR.vtid_cnt = 0;
+                else state.TR.vtid_cnt = (state.TR.vtid_cnt + vtstride) % 3;
+                if(func1){ S.LDMA.next(); }
+            }
+        } else if(funct2==2){
+            if(func3==0){ // VPSUM
+                int vprs = reg5;
+                Vector vt;
+                Vector psum = state.PS.getVP64(vprs);
+                uint64_t pil_word=0;
+                if(!port_io || !port_io->popPIL(pil_word)) throw std::runtime_error("PIL empty");
+                vt.fromUint64(pil_word);
+                Vector pout = state.valu.vadd(psum, vt);
+                if(port_io) port_io->pushPOL(pout.toUint64());
+            } else if(func3==1){ // VPSUMR
+                int vpstride = reg5;
+                int vprs = state.PS.psum_cnt;
+                Vector vt;
+                Vector psum = state.PS.getVP64(vprs);
+                uint64_t pil_word=0;
+                if(!port_io || !port_io->popPIL(pil_word)) throw std::runtime_error("PIL empty");
+                vt.fromUint64(pil_word);
+                Vector pout = state.valu.vadd(psum, vt);
+                if(port_io) port_io->pushPOL(pout.toUint64());
+                if(vpstride==31) state.PS.psum_cnt = 0;
+                else state.PS.psum_cnt = (state.PS.psum_cnt + vpstride) & 0x1F;
+            }
+        } else if(funct2==3){
+            if(func3==0){ // VPSUM_VTSTORE
+                // VPSUM
+                int vprs = reg5;
+                Vector vt;
+                Vector psum = state.PS.getVP64(vprs);
+                uint64_t pil_word=0;
+                if(!port_io || !port_io->popPIL(pil_word)) throw std::runtime_error("PIL empty");
+                vt.fromUint64(pil_word);
+                Vector pout = state.valu.vadd(psum, vt);
+                if(port_io) port_io->pushPOL(pout.toUint64());
+                // VTSTORE
+                int vtrd = (payload>>3)&0x3;
+                for(int i=0;i<4;++i){
+                    uint16_t val = 0;
+                    port_io->popPD(val);
+                    state.TR.setT(vtrd + i*3, val);
+                }
+            } else if(func3==1){ // VPSUMR_VTSTORE
+                // VPSUMR
+                int vpstride = reg5;
+                int vprs = state.PS.psum_cnt;
+                Vector vt;
+                Vector psum = state.PS.getVP64(vprs);
+                uint64_t pil_word=0;
+                if(!port_io || !port_io->popPIL(pil_word)) throw std::runtime_error("PIL empty");
+                vt.fromUint64(pil_word);
+                Vector pout = state.valu.vadd(psum, vt);
+                if(port_io) port_io->pushPOL(pout.toUint64());
+                if(vpstride==31) state.PS.psum_cnt = 0;
+                else state.PS.psum_cnt = (state.PS.psum_cnt + vpstride) & 0x1F;
+                // VTSTORE
+                int vtrd = (payload>>3)&0x3;
+                for(int i=0;i<4;++i){
+                    uint16_t val = 0;
+                    port_io->popPD(val);
+                    state.TR.setT(vtrd + i*3, val);
+                }
+            }
         }
         return ExecStatus::NEXT;
     }
 
-    // SETRID
-    if(opcode==2 && funct2==2){
-        switch(func3){
-            case 1: state.PS.psum_cnt = (w>>5)&0x1F; break;          // SETRID.P
-            case 2: state.TR.vtid_cnt = (w>>10)&0x3; break;           // SETRID.T
-            case 3: state.PS.psum_cnt = (w>>5)&0x1F; state.TR.vtid_cnt = (w>>10)&0x3; break; // SETRID.PT
-            default: break;
-        }
-        return ExecStatus::NEXT;
-    }
-
-    // CLEAR
-    if(opcode==2 && funct2==3){
-        switch(func3){
-            case 0: state.TR.clear(); break; // CLEAR.T
-            case 1: state.PS.clear(); break; // CLEAR.P
-            default: break;
-        }
-        return ExecStatus::NEXT;
-    }
-
-    // JUMP (J)
-    if(opcode==1 && funct2==2){
-        int imm = ((func3 & 0x7)<<7) | (getFunc1(w)<<10) | (((w>>11)&1)) | ((payload & 0x3F)<<1);
-        state.pc = imm;
-        return ExecStatus::JUMP;
-    }
-
-    // LOOPIN / LOOPBREAK
-    if(opcode==1 && funct2==3){
-        if(getFunc1(w)==0){ // LOOPIN
-            int lc = ((func3 &0x7)<<7) | (((w>>11)&1)) | ((payload & 0x3F)<<1);
-            lc += 1; // 0-based
-            state.loops.loopIn(state.pc+2, lc);
-        } else { // LOOPBREAK
+    // LOOPIN / LOOPBREAK (opcode=10 func2=00)
+    if(opcode==2 && funct2==0){
+        if(func1==0){
+            state.loops.loopIn(state.pc+2, payload+1);
+        } else {
             state.loops.loopBreak();
         }
         return ExecStatus::NEXT;
@@ -435,6 +438,10 @@ void PESimulator::step(){
     ExecStatus status = execute(inst);
 
     if(status == ExecStatus::NEXT){
+        int opcode = getOpcode(inst);
+        if(opcode >= 0 && opcode < 4){
+            state.opcode_exec_count[opcode] += 1;
+        }
         // 2. PC = PC + 2
         // 注意：這裡假設指令是 16-bit 對齊
         state.pc += 2;
@@ -559,6 +566,18 @@ int run_simulator_cli(int argc, char **argv){
     std::cout << "Final PC: 0x" << std::hex << S.pc << std::dec << "\n";
     std::cout << "Loop Stack is empty: " << (S.loops.empty() ? "Yes" : "No") << "\n";
     std::cout << "Halted State: " << (S.halted ? "Yes" : "No") << "\n";
+    {
+        uint64_t total_exec = 0;
+        for(auto c : S.opcode_exec_count) total_exec += c;
+        const char* labels[4] = {"Data Movement", "Arithmetic", "Control Flow", "System-Level"};
+        std::cout << "Opcode Execute Count/Ratio:\n";
+        for(int op=0; op<4; ++op){
+            double ratio = (total_exec==0) ? 0.0 : (100.0 * (double)S.opcode_exec_count[op] / (double)total_exec);
+            std::cout << "  opcode " << op << " (" << labels[op] << "): " << S.opcode_exec_count[op]
+                      << " (" << std::fixed << std::setprecision(2) << ratio << "%)\n";
+        }
+        std::cout.unsetf(std::ios::floatfield);
+    }
     std::cout << "------------------\n";
     return 0;
 }

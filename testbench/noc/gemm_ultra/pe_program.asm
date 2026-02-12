@@ -1,56 +1,52 @@
-gemv:
+gemm_tiled:
 
+    # 1) C tile store prefetch
     SDMA.LOOP 4
     SDMA.ADDR 0
-    SDMA.LEN 64  # STORE 64 steps of kernel data (4out * 2vector * 32dim)
+    SDMA.LEN 64  # STORE C-tile (example: 4out * 2vector * 32dim)
     SDMA.SD 4 # start DMA store operation
 
-    LOOPIN 4  # Global loop for 4x data volume
-
-load_kernel:
-    SWAPDM
-
+    # 2) A/B tile load prefetch
     LDMA.ADDR 0
-    LDMA.LEN 256 # LOAD 256 steps of input data (32dim * 8input)
-    LDMA.LHB 1 # start DMA load operation (fp16, broadcasted to 4out)
+    LDMA.LEN 256 # LOAD A/B tile data (example: 32dim * 8input)
+    LDMA.LHB 1 # start DMA load operation (fp16, broadcasted)
 
-loop_in_dim:
-    LOOPIN 32  # Loop for 32 input dimensions
+    SYS.CTRL (SDMA.ACT)
+load_ab_tile:
+    # Global tile loop: iterate over M tiles for a fixed (N,K) tile
+    LOOPIN 4  # N-tiles (example: 2)
+    SYS.SYNC (SWAPDM) # Wait for A/B tile to be ready
 
-load_input:
-    TSTORE t0
-    TSTORE t3
-    TSTORE t6
-    TSTORE t9
-    TSTORE t1
-    TSTORE t4
-    TSTORE t7
-    TSTORE t10
-    TSTORE t2
-    TSTORE t5
-    TSTORE t8
-    TSTORE t11
+    LOOPIN 4  # M-tiles (example: 2)
+    SYS.CTRL (CLEAR.P, RST.PID, RST.TID, LDMA.ACT) # Start loading next A/B slice
 
-    SETRID.PT 0, 0
-compute_gemv:
-    LOOPIN 8 # Loop for 8 output dimensions
-    VMULR 1, 1
-    VMULR 1, 1
-    VMULRN 1, VTRST # reset vector register id
-    LOOPEND # compute_gemv
+    loop_k_dim:
+        LOOPIN 32  # K dimension within tile
 
-    SETRID.P 0
+        load_a_b:
+            VTSTORE vt0
+            VTSTORE vt1
+            VTSTORE vt2
 
-    LOOPEND # loop_in_dim
+        compute_outer:
+            LOOPIN 7 # N dimension within tile
+                VMULR 1, 1
+                VMULR 1, 1
+                VMULRN 1, VTRST # reset vector register id
+            LOOPEND # compute_outer
+            VMULR 1, 1
+            VMULR 1, 1
+            VMULRN PRST, VTRST # reset vector register id
+        LOOPEND # loop_k_dim
 
-psum:
-    # Calculate the partial sum for each output dimension
-    LOOPIN 24 # Loop for 24 partial sums
-    VPSUMR 1
-    LOOPEND # psum
-    CLEAR.P # Clear the partial sum register
+    accumulate_c:
+        # Partial sum for C tile
+        LOOPIN 23 # number of partial sums in tile
+            VPSUMR 1
+        LOOPEND # accumulate_c
+        VPSUM vp23
 
-
-    LOOPEND  # End global loop
+    LOOPEND  # End M-tiles loop
+    LOOPEND
 
     HALT

@@ -39,6 +39,28 @@ struct ConvParams {
     int temporal_wave_in_ch = 0;
 };
 
+struct GEMMParams {
+    int M = 0;
+    int N = 0;
+    int K = 0;
+    int grid_m = 1;
+    int grid_n = 1;
+    int grid_k = 1;
+    int pe_m = 12;
+    int pe_n = 8;
+    int pe_k = 32;
+    bool partial_sum_zero = false;
+    bool ultra_mode = false;
+
+    int wave_m = 1;
+    int wave_n = 1;
+    int wave_k = 1;
+
+    std::vector<int> grid_m_per_wave;
+    std::vector<int> grid_n_per_wave;
+    std::vector<int> grid_k_per_wave;
+};
+
 int get_cfg_int(const std::map<std::string, std::string>& cfg, const std::string& key, int default_val = 0) {
     auto it = cfg.find(key);
     if (it == cfg.end()) {
@@ -53,6 +75,29 @@ bool get_cfg_bool(const std::map<std::string, std::string>& cfg, const std::stri
         return default_val;
     }
     return (it->second == "True" || it->second == "true" || it->second == "1");
+}
+
+std::vector<int> parse_int_list(const std::string& raw) {
+    std::string s = raw;
+    s.erase(std::remove_if(s.begin(), s.end(), [](char c) {
+        return c == '[' || c == ']' || c == '(' || c == ')';
+    }), s.end());
+    std::replace(s.begin(), s.end(), ',', ' ');
+    std::stringstream ss(s);
+    std::vector<int> out;
+    int val = 0;
+    while (ss >> val) {
+        out.push_back(val);
+    }
+    return out;
+}
+
+std::vector<int> get_cfg_list_int(const std::map<std::string, std::string>& cfg, const std::string& key) {
+    auto it = cfg.find(key);
+    if (it == cfg.end()) {
+        return {};
+    }
+    return parse_int_list(it->second);
 }
 
 ConvParams parse_conv_params_from_config(const std::map<std::string, std::string>& cfg) {
@@ -72,6 +117,30 @@ ConvParams parse_conv_params_from_config(const std::map<std::string, std::string
     p.temporal_wave_out_h = get_cfg_int(cfg, "temporal_wave_out_h");
     p.temporal_wave_out_ch = get_cfg_int(cfg, "temporal_wave_out_ch");
     p.temporal_wave_in_ch = get_cfg_int(cfg, "temporal_wave_in_ch");
+    return p;
+}
+
+GEMMParams parse_gemm_params_from_config(const std::map<std::string, std::string>& cfg) {
+    GEMMParams p;
+    p.M = get_cfg_int(cfg, "M");
+    p.N = get_cfg_int(cfg, "N");
+    p.K = get_cfg_int(cfg, "K");
+    p.grid_m = get_cfg_int(cfg, "grid_m", 1);
+    p.grid_n = get_cfg_int(cfg, "grid_n", 1);
+    p.grid_k = get_cfg_int(cfg, "grid_k", 1);
+    p.pe_m = get_cfg_int(cfg, "pe_m", 12);
+    p.pe_n = get_cfg_int(cfg, "pe_n", 8);
+    p.pe_k = get_cfg_int(cfg, "pe_k", 32);
+    p.partial_sum_zero = get_cfg_bool(cfg, "partial_sum_zero");
+    p.ultra_mode = get_cfg_bool(cfg, "ultra_mode");
+
+    p.wave_m = get_cfg_int(cfg, "wave_m", 1);
+    p.wave_n = get_cfg_int(cfg, "wave_n", 1);
+    p.wave_k = get_cfg_int(cfg, "wave_k", 1);
+
+    p.grid_m_per_wave = get_cfg_list_int(cfg, "grid_m_per_wave");
+    p.grid_n_per_wave = get_cfg_list_int(cfg, "grid_n_per_wave");
+    p.grid_k_per_wave = get_cfg_list_int(cfg, "grid_k_per_wave");
     return p;
 }
 
@@ -95,6 +164,50 @@ WaveRange get_wave_range(size_t total, int waves, int wave_idx) {
     }
     size_t end = std::min(total, start + chunk);
     return {start, end};
+}
+
+WaveRange get_wave_tile_range(const std::vector<int>& tiles_per_wave, int wave_idx, size_t total_tiles, int fallback_waves) {
+    if (tiles_per_wave.empty()) {
+        return get_wave_range(total_tiles, fallback_waves, wave_idx);
+    }
+    if (wave_idx < 0 || static_cast<size_t>(wave_idx) >= tiles_per_wave.size()) {
+        return {total_tiles, total_tiles};
+    }
+    size_t start = 0;
+    for (int i = 0; i < wave_idx; ++i) {
+        start += static_cast<size_t>(tiles_per_wave[i]);
+    }
+    size_t end = start + static_cast<size_t>(tiles_per_wave[wave_idx]);
+    if (start > total_tiles) {
+        start = total_tiles;
+    }
+    if (end > total_tiles) {
+        end = total_tiles;
+    }
+    return {start, end};
+}
+
+size_t sum_tiles(const std::vector<int>& tiles) {
+    size_t sum = 0;
+    for (int v : tiles) {
+        if (v > 0) {
+            sum += static_cast<size_t>(v);
+        }
+    }
+    return sum;
+}
+
+int max_tile_or_default(const std::vector<int>& tiles, int default_val) {
+    if (tiles.empty()) {
+        return default_val;
+    }
+    int max_val = 0;
+    for (int v : tiles) {
+        if (v > max_val) {
+            max_val = v;
+        }
+    }
+    return max_val;
 }
 
 } // namespace
@@ -132,6 +245,7 @@ public:
     std::vector<uint16_t> pe_program;
 
     ConvParams conv;
+    GEMMParams gemm;
 
     // Response handling
     struct RespMeta {
@@ -175,7 +289,7 @@ public:
     static constexpr size_t NUM_PORTS = 3;
     static constexpr size_t NUM_PES_PER_PORT = 16;
     static constexpr size_t TOTAL_PES = NUM_PORTS * NUM_PES_PER_PORT;
-    static constexpr uint64_t MAX_WAIT_CYCLES = 5000;
+    static constexpr uint64_t MAX_WAIT_CYCLES = 10000;
     int clock_period_ns;
 
     SC_HAS_PROCESS(NoCSimTestBench);
@@ -191,7 +305,7 @@ public:
           noc_pli_sig("noc_pli_sig"),
           noc_plo_sig("noc_plo_sig"),
           noc_plo_resp_sig("noc_plo_resp_sig"),
-          noc("NoC_DUT", NUM_PORTS, NUM_PES_PER_PORT),
+          noc("NoC_DUT", NetWorkOnChipConfig(NUM_PORTS, NUM_PES_PER_PORT, 4, 32)),
           test_data_dir(data_dir),
           rx_idx_fifo("rx_idx_fifo", 1024),
           verify_tolerance(verify_tolerance),
@@ -238,8 +352,7 @@ public:
     */
     void load_test_data() {
         std::cout << "[TB] Loading test data from " << test_data_dir << std::endl;
-        config = read_config_file(test_data_dir + "/config.txt");
-        conv = parse_conv_params_from_config(config);
+        config = read_config_file(test_data_dir + "/config.txt");;
 
         scan_chain_data = read_binary_file<int32_t>(test_data_dir + "/scan_chain.bin");
         input_activation = read_binary_file<fp16_t>(test_data_dir + "/input_activation.bin");
@@ -254,12 +367,6 @@ public:
         std::cout << "  Activation: " << input_activation.size() << " floats" << std::endl;
         std::cout << "  Weight: " << input_weight.size() << " floats" << std::endl;
         std::cout << "  PE program: " << pe_program.size() << " instructions" << std::endl;
-        if (config.count("mode") && config.at("mode") == "conv2d") {
-            std::cout << "  Wave Info: count=" << conv.temporal_wave_count
-                      << " out_h=" << conv.temporal_wave_out_h
-                      << " out_ch=" << conv.temporal_wave_out_ch
-                      << " in_ch=" << conv.temporal_wave_in_ch << std::endl;
-        }
     }
 
     void send_command(message_command_t cmd, uint32_t param = 0) {
@@ -270,8 +377,8 @@ public:
         command_mode.write(false);
     }
 
-    bool wait_ready(sc_signal<bool>& ready_sig, const char* name) {
-        for (uint64_t waited = 0; waited < MAX_WAIT_CYCLES; ++waited) {
+    bool wait_ready(sc_signal<bool>& ready_sig, const char* name, uint64_t timeout_cycles = MAX_WAIT_CYCLES) {
+        for (uint64_t waited = 0; waited < timeout_cycles; ++waited) {
             wait(clk.negedge_event());
             if (ready_sig.read()) {
                 wait(clk.posedge_event());
@@ -292,7 +399,7 @@ public:
         noc_ps_sig.data_sig.write(req);
         noc_ps_sig.valid_sig.write(true);
 
-        if (!wait_ready(noc_ps_sig.ready_sig, "noc_ps")) {
+        if (!wait_ready(noc_ps_sig.ready_sig, "noc_ps", MAX_WAIT_CYCLES * 100)) { // Allow longer timeout for PS which may have more processing
             noc_ps_sig.valid_sig.write(false);
             std::cerr << "[TB] req=" << req << std::endl;
             sc_stop();
@@ -312,7 +419,7 @@ public:
         noc_pd_sig.data_sig.write(req);
         noc_pd_sig.valid_sig.write(true);
 
-        if (!wait_ready(noc_pd_sig.ready_sig, "noc_pd")) {
+        if (!wait_ready(noc_pd_sig.ready_sig, "noc_pd", MAX_WAIT_CYCLES * 100)) { // Allow longer timeout for PD which may have more processing
             noc_pd_sig.valid_sig.write(false);
             std::cerr << "[TB] req=" << req << std::endl;
             return;
@@ -389,8 +496,8 @@ public:
                     // GEMM-specific handling: variable-length response mapping
                     if (config["mode"] == "gemm") {
                         // Compute dimensions and column offset from base_idx (base_idx = m * N + n)
-                        size_t M = config.count("M") ? static_cast<size_t>(std::stoul(config["M"])) : 0;
-                        size_t N = config.count("N") ? static_cast<size_t>(std::stoul(config["N"])) : 0;
+                        size_t M = static_cast<size_t>(gemm.M);
+                        size_t N = static_cast<size_t>(gemm.N);
                         size_t base = meta.base_idx;
                         // column index is base % N (since base = m * N + n)
                         size_t col = (N > 0) ? (base % N) : 0;
@@ -433,7 +540,7 @@ public:
                                 }
                             }
                         }
-                    } else {
+                    } else { // Conv2D handling: fixed mapping based on output channel and spatial location
                         // Default: conv2d-style handling (fixed 4x16 in low 64 bits)
                         if (!meta.ultra) {
                             // Store received data (normal mode: resp contains 4x16bit in low 64 bits)
@@ -447,7 +554,6 @@ public:
                                 fp16_t ps = static_cast<fp16_t>(data_packet.to_uint64());
                                 output_partial_sum[idx] = ps;
                             }
-                            VERBOSE_LOG("[TB] Received response: data=0x" << std::hex << resp.data << std::dec << ", meta = " << meta);
                         } else {
                             // Ultra mode: resp.data contains NUM_PORTS chunks of 64-bit each
                             for (uint8_t port = 0; port < meta.ports; ++port) {
@@ -702,8 +808,6 @@ public:
                                         oh_range.end * static_cast<size_t>(conv.stride) + static_cast<size_t>(kernel_size) - 1);
 
             for (int wave_oc = 0; wave_oc < wave_out_ch; ++wave_oc) {
-                (void)wave_oc; // Activations are independent of out_ch in current mapping
-
                 for (int wave_ic = 0; wave_ic < wave_in_ch; ++wave_ic) {
                     WaveRange ich_range = get_wave_range(static_cast<size_t>(in_ch), wave_in_ch, wave_ic);
                     if (ich_range.start >= ich_range.end) {
@@ -711,7 +815,7 @@ public:
                     }
 
                     VERBOSE_LOG("[TB-NoC-PD] Sending Activations (wave h=" << wave_h
-                                << " ic=" << wave_ic << ")");
+                                << " oc=" << wave_oc << " ic=" << wave_ic << "), ultra_mode=" << ultra_mode << ")" );
 
                     for(size_t iw = 0; iw < static_cast<size_t>(in_width); ++iw) {
                         VERBOSE_LOG("[TB-NoC-PD] Processing input width index: " << iw << "/" << in_width);
@@ -755,7 +859,7 @@ public:
                                     continue;
                                 }
 
-                                uint16_t tag = ih;
+                                uint16_t tag = (ih - ih_start);
                                 send_data_pd(tag, data_packet, ultra_mode, mask);
                             }
                         }
@@ -808,7 +912,7 @@ public:
                     for(size_t ow = 0; ow < static_cast<size_t>(out_width); ++ow) {
                         // Partial Sum In (PLI) - Write via NoC1
                         VERBOSE_LOG("[TB-NoC-PLI] Sending Partial Sum In (PLI) for ow=" << ow
-                                  << " (wave h=" << wave_h << " oc=" << wave_oc << ")");
+                                  << " (wave h=" << wave_h << " oc=" << wave_oc << "), ultra_mode=" << ultra_mode);
                         for(size_t oh = oh_range.start; oh < oh_range.end; ++oh) {
                             for(size_t och = och_range.start; och < och_range.end; och+=4) {
                                 sc_biguint<256> data_packet = 0;
@@ -844,7 +948,7 @@ public:
                                 if (mask == 0) {
                                     continue;
                                 }
-                                uint16_t tag = oh;
+                                uint16_t tag = (oh - oh_range.start);
                                 send_data_pli(tag, data_packet, ultra_mode, mask);
                             }
                         }
@@ -898,13 +1002,13 @@ public:
                     for(size_t ow = 0; ow < static_cast<size_t>(out_width); ++ow) {
                         // Partial Sum Out (PLO) - Read via NoC2
                         VERBOSE_LOG("[TB-NoC-PLO] Receiving Partial Sum Out (PLO) for ow=" << ow
-                                  << " (wave h=" << wave_h << " oc=" << wave_oc << ")");
+                                  << " (wave h=" << wave_h << " oc=" << wave_oc << "), ultra_mode=" << ultra_mode);
                         for(size_t oh = oh_range.start; oh < oh_range.end; ++oh) {
                             for(size_t och = och_range.start; och < och_range.end; och+=4) {
                                 if (och >= static_cast<size_t>(out_ch)) {
                                     continue;
                                 }
-                                uint16_t tag = oh;
+                                uint16_t tag = (oh - oh_range.start);
                                 size_t base_idx = ps_idx(oh, ow, och);
                                 recv_data_plo(tag, base_idx, ultra_mode, (ultra_mode ? plo_per_port_stride : 0), NUM_PORTS);
                             }
@@ -918,71 +1022,124 @@ public:
     void distribute_gemm_ps() {
         std::cout << "[TB-NoC-PS] Distributing GEMM Weights (PS)..." << std::endl;
 
-        int K = config.count("K") ? std::stoi(config["K"]) : std::stoi(config["in_ch"]);
-        int N = config.count("N") ? std::stoi(config["N"]) : std::stoi(config["out_ch"]);
+        int K = gemm.K;
+        int N = gemm.N;
 
-        int grid_cols = config.count("grid_cols") ? std::stoi(config["grid_cols"]) : 1;
+        int grid_n = gemm.grid_n;
 
         // PE Tile Sizes (Software/Arch definition)
-        int PE_N = 8;
-        int PE_K = 32;
+        int PE_N = gemm.pe_n;
+        int PE_K = gemm.pe_k;
 
         // prepare index helpers
         Index2D weight_idx(K, N);
 
         // 1. Weights (Matrix B) -> Port Static (PS)
-        bool ultra_mode = (config["ultra_mode"] == "True");
+        bool ultra_mode = gemm.ultra_mode;
+        int wave_k = gemm.grid_k_per_wave.empty() ? std::max(1, gemm.wave_k)
+                               : static_cast<int>(gemm.grid_k_per_wave.size());
+        int wave_n = gemm.grid_n_per_wave.empty() ? std::max(1, gemm.wave_n)
+                               : static_cast<int>(gemm.grid_n_per_wave.size());
 
-        if (ultra_mode) {
-            for(size_t k_offset = 0; k_offset < PE_K; ++k_offset) {
-                for(size_t n_base = 0; n_base < static_cast<size_t>(N); n_base += 4) {
-                    sc_biguint<256> data_packet = 0;
+        for (int wave_k_idx = 0; wave_k_idx < wave_k; ++wave_k_idx) {
+            WaveRange k_tile_range = get_wave_tile_range(gemm.grid_k_per_wave, wave_k_idx, static_cast<size_t>(gemm.grid_k), wave_k);
+            size_t k_start = k_tile_range.start * static_cast<size_t>(PE_K);
+            size_t k_end = std::min(static_cast<size_t>(K), k_tile_range.end * static_cast<size_t>(PE_K));
+            if (k_start >= k_end) {
+                continue;
+            }
 
-                    for (size_t port = 0; port < NUM_PORTS; ++port) {
-                        int k_tile = port;
-                        size_t k_global = k_tile * PE_K + k_offset;
+            for (int wave_n_idx = 0; wave_n_idx < wave_n; ++wave_n_idx) {
+                WaveRange n_range = get_wave_tile_range(gemm.grid_n_per_wave, wave_n_idx, static_cast<size_t>(grid_n), wave_n);
+                size_t n_start = n_range.start * static_cast<size_t>(PE_N);
+                size_t n_end = std::min(static_cast<size_t>(N), n_range.end * static_cast<size_t>(PE_N));
+                if (n_start >= n_end) {
+                    continue;
+                }
 
-                        if (k_global >= static_cast<size_t>(K)) continue;
+                if (ultra_mode) {
+                    for (size_t k_offset = 0; k_offset < PE_K; ++k_offset) {
+                        for (size_t n_base = 0; n_base < static_cast<size_t>(N); n_base += 4) {
+                            size_t n_end_local = std::min(n_base + static_cast<size_t>(4), static_cast<size_t>(N));
+                            if (n_end_local <= n_start || n_base >= n_end) {
+                                continue;
+                            }
 
-                        for(size_t n_offset = 0; n_offset < 4; ++n_offset) {
-                            size_t n = n_base + n_offset;
-                            if (n >= static_cast<size_t>(N)) break;
+                            sc_biguint<256> data_packet = 0;
+                            size_t mask = 0;
 
-                            size_t idx = weight_idx(k_global, n);
-                            fp16_t w = input_weight[idx];
+                            for (size_t port = 0; port < NUM_PORTS; ++port) {
+                                size_t k_tile = k_tile_range.start + port;
+                                if (k_tile >= k_tile_range.end) {
+                                    continue;
+                                }
+                                size_t k_global = k_tile * static_cast<size_t>(PE_K) + k_offset;
 
-                            int bit_offset = (port * 64) + (n_offset * 16);
-                            data_packet.range(bit_offset + 15, bit_offset) = w;
+                                if (k_global < k_start || k_global >= k_end) {
+                                    continue;
+                                }
+
+                                for (size_t n_offset = 0; n_offset < 4; ++n_offset) {
+                                    size_t n = n_base + n_offset;
+                                    if (n >= n_end_local || n < n_start || n >= n_end) {
+                                        continue;
+                                    }
+
+                                    size_t idx = weight_idx(k_global, n);
+                                    fp16_t w = input_weight[idx];
+
+                                    int bit_offset = (port * 64) + (n_offset * 16);
+                                    data_packet.range(bit_offset + 15, bit_offset) = w;
+                                    mask |= (1 << n_offset);
+                                }
+                            }
+
+                            if (mask == 0) {
+                                continue;
+                            }
+
+                            int n_idx = static_cast<int>(n_base / PE_N);
+                            uint16_t tag = static_cast<int>((n_base - n_start) / PE_N);
+
+                            send_data_ps(tag, data_packet, true, mask);
+                            VERBOSE_LOG("[TB-NoC-PS] Sent Weight Packet (ULTRA) - n_idx:" << n_idx
+                                      << ", Tag: " << tag  << ", n_base:" << n_base << ", k_offset:" << k_offset);
                         }
                     }
+                } else {
+                    for (size_t k = k_start; k < k_end; ++k) {
+                        for (size_t n_base = 0; n_base < static_cast<size_t>(N); n_base += 4) {
+                            size_t n_end_local = std::min(n_base + static_cast<size_t>(4), static_cast<size_t>(N));
+                            if (n_end_local <= n_start || n_base >= n_end) {
+                                continue;
+                            }
 
-                    int n_idx = static_cast<int>(n_base / PE_N);
-                    uint16_t tag = n_idx;
+                            sc_biguint<256> data_packet = 0;
+                            size_t mask = 0;
+                            for (size_t n_offset = 0; n_offset < 4; ++n_offset) {
+                                size_t n = n_base + n_offset;
+                                if (n >= n_end_local || n < n_start || n >= n_end) {
+                                    continue;
+                                }
+                                size_t idx = weight_idx(k, n);
+                                fp16_t w = input_weight[idx];
+                                data_packet.range((n_offset * 16) + 15, n_offset * 16) = w;
+                                mask |= (1 << n_offset);
+                            }
 
-                    send_data_ps(tag, data_packet, true, 0xF);
-                    VERBOSE_LOG("[TB-NoC-PS] Sent Weight Packet (ULTRA) - n_idx:" << n_idx
-                              << ", Tag: " << tag  << ", n_base:" << n_base << ", k_offset:" << k_offset);
-                }
-            }
-        } else {
-            for(size_t k = 0; k < static_cast<size_t>(K); ++k) {
-                for(size_t n_base = 0; n_base < static_cast<size_t>(N); n_base += 4) {
-                    sc_biguint<256> data_packet = 0;
-                    for(size_t n_offset = 0; n_offset < 4; ++n_offset) {
-                        size_t n = n_base + n_offset;
-                        if (n >= static_cast<size_t>(N)) break;
-                        size_t idx = weight_idx(k, n);
-                        fp16_t w = input_weight[idx];
-                        data_packet.range((n_offset * 16) + 15, n_offset * 16) = w;
+                            if (mask == 0) {
+                                continue;
+                            }
+
+                            int n_idx = static_cast<int>(n_base / PE_N);
+                            int k_idx = static_cast<int>(k / PE_K);
+
+                            uint16_t tag = static_cast<int>(k_idx * grid_n + n_idx);
+                            send_data_ps(tag, data_packet, false, mask);
+                            VERBOSE_LOG("[TB-NoC-PS] Sent Weight Packet - n_idx:" << n_idx << ", k_idx:" << k_idx
+                                    << ", Tag: " << tag  << ", n_base:" << n_base << ", k:" << k << ")");
+                        }
                     }
-
-                    int n_idx = static_cast<int>(n_base / PE_N);
-                    int k_idx = static_cast<int>(k / PE_K);
-
-                    uint16_t tag = k_idx * grid_cols + n_idx;
-                    send_data_ps(tag, data_packet);
-                    VERBOSE_LOG("[TB-NoC-PS] Sent Weight Packet - n_idx:" << n_idx << ", k_idx:" << k_idx
-                            << ", Tag: " << tag  << ", n_base:" << n_base << ", k:" << k << ")");
                 }
             }
         }
@@ -992,70 +1149,116 @@ public:
     void distribute_gemm_pd() {
         std::cout << "[TB-NoC-PD] Distributing GEMM Activations (PD)..." << std::endl;
 
-        int M = config.count("M") ? std::stoi(config["M"]) : std::stoi(config["in_height"]);
-        int K = config.count("K") ? std::stoi(config["K"]) : std::stoi(config["in_ch"]);
+        int M = gemm.M;
+        int K = gemm.K;
 
-        int grid_rows = config.count("grid_rows") ? std::stoi(config["grid_rows"]) : 1;
-        int grid_k = config.count("grid_k") ? std::stoi(config["grid_k"]) : 1;
+        int grid_m = gemm.grid_m;
+        int grid_k = gemm.grid_k;
+        int grid_n = gemm.grid_n;
 
-        int PE_M = 12;
-        int PE_K = 32;
+        int PE_M = gemm.pe_m;
+        int PE_K = gemm.pe_k;
 
         Index2D act_idx(M, K);
 
-        bool ultra_mode = (config["ultra_mode"] == "True");
+        bool ultra_mode = gemm.ultra_mode;
+        int wave_k = gemm.grid_k_per_wave.empty() ? std::max(1, gemm.wave_k)
+                       : static_cast<int>(gemm.grid_k_per_wave.size());
+        int wave_n = gemm.grid_n_per_wave.empty() ? std::max(1, gemm.wave_n)
+                       : static_cast<int>(gemm.grid_n_per_wave.size());
+        int wave_m = gemm.grid_m_per_wave.empty() ? std::max(1, gemm.wave_m)
+                       : static_cast<int>(gemm.grid_m_per_wave.size());
+        for (int wave_k_idx = 0; wave_k_idx < wave_k; ++wave_k_idx) {
+            WaveRange k_tile_range = get_wave_tile_range(gemm.grid_k_per_wave, wave_k_idx, static_cast<size_t>(gemm.grid_k), wave_k);
+            size_t k_start = k_tile_range.start * static_cast<size_t>(PE_K);
+            size_t k_end = std::min(static_cast<size_t>(K), k_tile_range.end * static_cast<size_t>(PE_K));
+            if (k_start >= k_end) {
+                continue;
+            }
 
-        for(size_t k_offset = 0; k_offset < static_cast<size_t>(PE_K); k_offset++) {
-            if (ultra_mode) {
-                for(size_t m_base = 0; m_base < static_cast<size_t>(M); m_base += 4) {
-                    sc_biguint<256> data_packet = 0;
+            for (int wave_n_idx = 0; wave_n_idx < wave_n; ++wave_n_idx) {
+                WaveRange n_range = get_wave_tile_range(gemm.grid_n_per_wave, wave_n_idx, static_cast<size_t>(grid_n), wave_n);
+                size_t n_tiles = n_range.end - n_range.start;
 
-                    for (size_t port = 0; port < NUM_PORTS; ++port) {
-                        int k_tile = port;
-                        size_t k_global = k_tile * PE_K + k_offset;
-                        if (k_global >= static_cast<size_t>(K)) continue;
+                int max_m_tiles = 0;
+                if (ultra_mode && n_tiles > 0) {
+                    max_m_tiles = static_cast<int>(NUM_PES_PER_PORT / n_tiles);
+                }
 
-                        for(size_t m_offset = 0; m_offset < 4; ++m_offset) {
-                            size_t m = m_base + m_offset;
-                            if (m >= static_cast<size_t>(M)) break;
-                            size_t idx = act_idx(m, k_global);
-                            fp16_t a = input_activation[idx];
-
-                            int bit_offset = (port * 64) + (m_offset * 16);
-                            data_packet.range(bit_offset + 15, bit_offset) = a;
-                        }
+                for (int wave_m_idx = 0; wave_m_idx < wave_m; ++wave_m_idx) {
+                    WaveRange m_range = get_wave_tile_range(gemm.grid_m_per_wave, wave_m_idx, static_cast<size_t>(grid_m), wave_m);
+                    size_t m_start = m_range.start * static_cast<size_t>(PE_M);
+                    size_t m_end = std::min(static_cast<size_t>(M), m_range.end * static_cast<size_t>(PE_M));
+                    if (m_start >= m_end) {
+                        continue;
                     }
 
-                    int m_idx = static_cast<int>(m_base / PE_M);
-                    uint16_t tag = m_idx;
+                    for (size_t k_offset = 0; k_offset < static_cast<size_t>(PE_K); k_offset++) {
+                        if (ultra_mode) {
+                            for (size_t m_base = m_start; m_base < m_end; m_base += 4) {
+                                sc_biguint<256> data_packet = 0;
 
-                    send_data_pd(tag, data_packet, true, 0xF);
-                    VERBOSE_LOG("[TB-NoC-PD] Sent Activation Packet (ULTRA) - m_idx:" << m_idx
-                              << ", Tag: " << tag  << ", m_base:" << m_base << ", k:" << k_offset << ")");
-                }
-            } else {
-                for(size_t m_base = 0; m_base < static_cast<size_t>(M); m_base += 4) {
-                    for(int k_tile = 0; k_tile < grid_k; ++k_tile) {
-                        size_t k_global = static_cast<size_t>(k_tile) * PE_K + k_offset;
-                        if (k_global >= static_cast<size_t>(K)) {
-                            throw std::runtime_error("[TB-NoC-PD] Error: k_global exceeds K dimension!, k_global=" + std::to_string(k_global) + ", K=" + std::to_string(K) + ", k_tile=" + std::to_string(k_tile) + ", k_offset=" + std::to_string(k_offset));
+                                for (size_t port = 0; port < NUM_PORTS; ++port) {
+                                    size_t k_tile = k_tile_range.start + port;
+                                    if (k_tile >= k_tile_range.end) {
+                                        continue;
+                                    }
+                                    size_t k_global = k_tile * static_cast<size_t>(PE_K) + k_offset;
+                                    if (k_global < k_start || k_global >= k_end) {
+                                        continue;
+                                    }
+
+                                    for (size_t m_offset = 0; m_offset < 4; ++m_offset) {
+                                        size_t m = m_base + m_offset;
+                                        if (m >= static_cast<size_t>(M)) break;
+                                        size_t idx = act_idx(m, k_global);
+                                        fp16_t a = input_activation[idx];
+
+                                        int bit_offset = (port * 64) + (m_offset * 16);
+                                        data_packet.range(bit_offset + 15, bit_offset) = a;
+                                    }
+                                }
+
+                                int m_idx_local = static_cast<int>((m_base - m_start) / PE_M);
+                                if (max_m_tiles > 0 && m_idx_local >= max_m_tiles) {
+                                    std::cerr << "[TB-NoC-PD] Warning: wave-local m_idx out of range: " << m_idx_local << " (max " << max_m_tiles << ")" << std::endl;
+                                    continue;
+                                }
+                                uint16_t tag = static_cast<uint16_t>(m_idx_local);
+
+                                send_data_pd(tag, data_packet, true, 0xF);
+                                VERBOSE_LOG("[TB-NoC-PD] Sent Activation Packet (ULTRA) - m_idx:" << m_idx_local
+                                          << ", Tag: " << tag  << ", m_base:" << m_base << ", k:" << k_offset << ")");
+                            }
+                        } else {
+                            for (size_t m_base = m_start; m_base < m_end; m_base += 4) {
+                                for (int k_tile = 0; k_tile < grid_k; ++k_tile) {
+                                    size_t k_global = static_cast<size_t>(k_tile) * PE_K + k_offset;
+                                    if (k_global >= static_cast<size_t>(K)) {
+                                        throw std::runtime_error("[TB-NoC-PD] Error: k_global exceeds K dimension!, k_global=" + std::to_string(k_global) + ", K=" + std::to_string(K) + ", k_tile=" + std::to_string(k_tile) + ", k_offset=" + std::to_string(k_offset));
+                                    }
+                                    if (k_global < k_start || k_global >= k_end) {
+                                        continue;
+                                    }
+
+                                    sc_biguint<256> data_packet = 0;
+                                    for (size_t m_offset = 0; m_offset < 4; ++m_offset) {
+                                        size_t m = m_base + m_offset;
+                                        if (m >= static_cast<size_t>(M)) break;
+                                        size_t idx = act_idx(m, k_global);
+                                        fp16_t a = input_activation[idx];
+                                        data_packet.range((m_offset * 16) + 15, m_offset * 16) = a;
+                                    }
+
+                                    int m_idx = static_cast<int>(m_base / PE_M);
+                                    int k_idx = k_tile;
+
+                                    uint16_t tag = static_cast<uint16_t>(k_idx * grid_m + m_idx);
+                                    send_data_pd(tag, data_packet, false, 0xF);
+                                    VERBOSE_LOG("[TB-NoC-PD] Sent Activation Packet - m_idx:" << m_idx << ", k_idx:" << k_idx << ", Tag: " << tag  << ", m_base:" << m_base << ", k:" << k_offset << ")");
+                                }
+                            }
                         }
-                        sc_biguint<256> data_packet = 0;
-                        for(size_t m_offset = 0; m_offset < 4; ++m_offset) {
-                            size_t m = m_base + m_offset;
-                            if (m >= static_cast<size_t>(M)) break;
-                            size_t idx = act_idx(m, k_global);
-                            fp16_t a = input_activation[idx];
-                            data_packet.range((m_offset * 16) + 15, m_offset * 16) = a;
-                        }
-
-                        int m_idx = static_cast<int>(m_base / PE_M);
-                        int k_idx = k_tile;
-
-                        uint16_t tag = k_idx * grid_rows + m_idx;
-                        send_data_pd(tag, data_packet, false, 0xF);
-                        VERBOSE_LOG("[TB-NoC-PD] Sent Activation Packet - m_idx:" << m_idx << ", k_idx:" << k_idx
-                                << ", Tag: " << tag  << ", m_base:" << m_base << ", k:" << k_offset << ")");
                     }
                 }
             }
@@ -1066,15 +1269,15 @@ public:
     void distribute_gemm_pli() {
         std::cout << "[TB-NoC-PLI] Distributing GEMM Data (Partial Sums Input)..." << std::endl;
 
-        int M = config.count("M") ? std::stoi(config["M"]) : std::stoi(config["in_height"]);
-        int N = config.count("N") ? std::stoi(config["N"]) : std::stoi(config["out_ch"]);
-        bool partial_sum_zero = (config["partial_sum_zero"] == "True");
+        int M = gemm.M;
+        int N = gemm.N;
+        bool partial_sum_zero = gemm.partial_sum_zero;
 
-        int grid_cols = config.count("grid_cols") ? std::stoi(config["grid_cols"]) : 1;
-        int grid_k = config.count("grid_k") ? std::stoi(config["grid_k"]) : 1;
+        int grid_n = gemm.grid_n;
+        int grid_k = gemm.grid_k;
 
-        int PE_M = 12;
-        int PE_N = 8;
+        int PE_M = gemm.pe_m;
+        int PE_N = gemm.pe_n;
         // int PE_K = 32;
 
         Index2D ps_idx(M, N);
@@ -1084,68 +1287,128 @@ public:
         // Packets are D_mn. Since K is vertical, the D matrix enters at top K layer (k=0).
         // Tag should match pli_id.
 
-        bool ultra_mode = (config["ultra_mode"] == "True");
+        bool ultra_mode = gemm.ultra_mode;
         size_t rows_per_port = ultra_mode ? (M / NUM_PORTS) : M;
+        int wave_k = gemm.grid_k_per_wave.empty() ? std::max(1, gemm.wave_k)
+                               : static_cast<int>(gemm.grid_k_per_wave.size());
+        int wave_n = gemm.grid_n_per_wave.empty() ? std::max(1, gemm.wave_n)
+                               : static_cast<int>(gemm.grid_n_per_wave.size());
+        int wave_m = gemm.grid_m_per_wave.empty() ? std::max(1, gemm.wave_m)
+                               : static_cast<int>(gemm.grid_m_per_wave.size());
 
-        for(size_t n = 0; n < N; n++) {
-            if (ultra_mode && grid_k > 1) {
-                // K-Split Ultra Mode: PS Input goes to Bus 0 (Port 0) only via ULTRA packet (Mask 1)
-                for(size_t m = 0; m < M; m+=4) {
-                    sc_biguint<256> data_packet = 0;
-                    for(size_t m_offset = 0; m_offset < 4; ++m_offset) {
-                        if (m + m_offset >= M) break;
-                        size_t idx = ps_idx(m + m_offset, n);
-                        fp16_t ps = partial_sum_zero ? fp16_t(0) : input_partial_sum[idx];
-                        data_packet.range((m_offset * 16) + 15, m_offset * 16) = ps;
-                    }
-                    int m_idx = m / PE_M;
-                    int n_idx = n / PE_N;
-                    uint16_t tag = m_idx * grid_cols + n_idx;
+        for (int wave_k_idx = 0; wave_k_idx < wave_k; ++wave_k_idx) {
+            if (wave_k_idx != 0) {
+                continue;
+            }
 
-                    send_data_pli(tag, data_packet, true, 0x1);
-                    VERBOSE_LOG("[TB-NoC-PLI] Sent K-Split PS Input (ULTRA Port 0) - m:" << m << ", n:" << n << ", Tag:" << tag);
+            for (int wave_n_idx = 0; wave_n_idx < wave_n; ++wave_n_idx) {
+                WaveRange n_range = get_wave_tile_range(gemm.grid_n_per_wave, wave_n_idx, static_cast<size_t>(grid_n), wave_n);
+                size_t n_start = n_range.start * static_cast<size_t>(PE_N);
+                size_t n_end = std::min(static_cast<size_t>(N), n_range.end * static_cast<size_t>(PE_N));
+                if (n_start >= n_end) {
+                    continue;
                 }
-            } else if (ultra_mode) {
-                // Send PLI per port region so each port receives its local rows
-                for (size_t port = 0; port < NUM_PORTS; ++port) {
-                    for(size_t m_local = 0; m_local < rows_per_port; m_local += 4) {
-                        sc_biguint<256> data_packet = 0;
-                        for(size_t m_offset = 0; m_offset < 4; ++m_offset) {
-                            size_t m_global = port * rows_per_port + m_local + m_offset;
-                            if (m_global >= M) break;
-                            size_t idx = ps_idx(m_global, n);
-                            fp16_t ps = partial_sum_zero ? fp16_t(0) : input_partial_sum[idx];
-                            data_packet.range((m_offset * 16) + 15, m_offset * 16) = ps;
+
+                size_t n_tiles = 0;
+                int max_m_tiles = 0;
+                if (ultra_mode) {
+                    n_tiles = n_range.end - n_range.start;
+                    if (n_tiles > 0) {
+                        max_m_tiles = static_cast<int>(NUM_PES_PER_PORT / n_tiles);
+                    }
+                }
+
+                for (int wave_m_idx = 0; wave_m_idx < wave_m; ++wave_m_idx) {
+                    WaveRange m_range = get_wave_tile_range(gemm.grid_m_per_wave, wave_m_idx, static_cast<size_t>(gemm.grid_m), wave_m);
+                    size_t m_start = m_range.start * static_cast<size_t>(PE_M);
+                    size_t m_end = std::min(static_cast<size_t>(M), m_range.end * static_cast<size_t>(PE_M));
+                    if (m_start >= m_end) {
+                        continue;
+                    }
+
+                    for (size_t n = n_start; n < n_end; ++n) {
+
+                    if (ultra_mode && grid_k > 1) {
+                        // K-Split Ultra Mode: PS Input goes to Bus 0 (Port 0) only via ULTRA packet (Mask 1)
+                        for (size_t m = m_start; m < m_end; m += 4) {
+                            sc_biguint<256> data_packet = 0;
+                            for (size_t m_offset = 0; m_offset < 4; ++m_offset) {
+                                if (m + m_offset >= M) break;
+                                size_t idx = ps_idx(m + m_offset, n);
+                                fp16_t ps = partial_sum_zero ? fp16_t(0) : input_partial_sum[idx];
+                                data_packet.range((m_offset * 16) + 15, m_offset * 16) = ps;
+                            }
+                            int m_idx_local = static_cast<int>((m - m_start) / PE_M);
+                            if (max_m_tiles > 0 && m_idx_local >= max_m_tiles) {
+                                std::cerr << "[TB-NoC-PLI] Warning: wave-local m_idx out of range: " << m_idx_local
+                                          << " (max " << max_m_tiles << ")" << std::endl;
+                                continue;
+                            }
+
+                            int n_idx_local = static_cast<int>((n - n_start) / PE_N);
+                            uint16_t tag = static_cast<uint16_t>(m_idx_local * n_tiles + n_idx_local);
+
+                            send_data_pli(tag, data_packet, true, 0x1);
+                            VERBOSE_LOG("[TB-NoC-PLI] Sent K-Split PS Input (ULTRA Port 0) - m:" << m << ", n:" << n << ", Tag:" << tag);
                         }
+                    } else if (ultra_mode) {
+                        // Send PLI per port region so each port receives its local rows
+                        for (size_t port = 0; port < NUM_PORTS; ++port) {
+                            size_t port_base = port * rows_per_port;
+                            if (port_base >= static_cast<size_t>(M)) {
+                                continue;
+                            }
+                            size_t m_local_start = (m_start > port_base) ? (m_start - port_base) : 0;
+                            size_t m_local_end = (m_end > port_base) ? std::min(rows_per_port, m_end - port_base) : 0;
+                            if (m_local_start >= m_local_end) {
+                                continue;
+                            }
+                            for (size_t m_local = m_local_start; m_local < m_local_end; m_local += 4) {
+                                sc_biguint<256> data_packet = 0;
+                                for (size_t m_offset = 0; m_offset < 4; ++m_offset) {
+                                    size_t m_global = port * rows_per_port + m_local + m_offset;
+                                    if (m_global >= M) break;
+                                    size_t idx = ps_idx(m_global, n);
+                                    fp16_t ps = partial_sum_zero ? fp16_t(0) : input_partial_sum[idx];
+                                    data_packet.range((m_offset * 16) + 15, m_offset * 16) = ps;
+                                }
 
-                        int m_idx = (static_cast<int>(port) * static_cast<int>(rows_per_port) + static_cast<int>(m_local)) / PE_M;
-                        int n_idx = n / PE_N;
+                                int m_idx_local = static_cast<int>((m_local - m_local_start) / PE_M);
+                                if (max_m_tiles > 0 && m_idx_local >= max_m_tiles) {
+                                    std::cerr << "[TB-NoC-PLI] Warning: wave-local m_idx out of range: " << m_idx_local
+                                              << " (max " << max_m_tiles << ")" << std::endl;
+                                    continue;
+                                }
 
-                        uint16_t tag = m_idx * grid_cols + n_idx;
+                                int n_idx_local = static_cast<int>((n - n_start) / PE_N);
+                                uint16_t tag = static_cast<uint16_t>(m_idx_local * n_tiles + n_idx_local);
 
-                        // Send with ULTRA flag so router distributes across ports
-                        send_data_pli(tag, data_packet, true, 0xF);
+                                // Send with ULTRA flag so router distributes across ports
+                                send_data_pli(tag, data_packet, true, 0xF);
+                            }
+                        }
+                    } else {
+                        for (size_t m = m_start; m < m_end; m += 4) {
+                            // Prepare packet
+                            sc_biguint<256> data_packet = 0;
+                            for (size_t m_offset = 0; m_offset < 4; ++m_offset) {
+                                if (m + m_offset >= M) break;
+                                size_t idx = ps_idx(m + m_offset, n);
+                                fp16_t ps = partial_sum_zero ? fp16_t(0) : input_partial_sum[idx];
+                                data_packet.range((m_offset * 16) + 15, m_offset * 16) = ps;
+                            }
+
+                            int m_idx = m / PE_M;
+                            int n_idx = n / PE_N;
+
+                            uint16_t tag = m_idx * grid_n + n_idx;
+
+                            send_data_pli(tag, data_packet);
+                            VERBOSE_LOG("[TB-NoC-PLI] Sent Partial Sum Input Packet - m_idx: " << m_idx << ", n_idx: " << n_idx << ", m: " << m << ", n: " << n
+                                      << ", Tag: " << tag << ")");
+                        }
                     }
-                }
-            } else {
-                for(size_t m = 0; m < M; m+=4) {
-                    // Prepare packet
-                    sc_biguint<256> data_packet = 0;
-                    for(size_t m_offset = 0; m_offset < 4; ++m_offset) {
-                        if (m + m_offset >= M) break;
-                        size_t idx = ps_idx(m + m_offset, n);
-                        fp16_t ps = partial_sum_zero ? fp16_t(0) : input_partial_sum[idx];
-                        data_packet.range((m_offset * 16) + 15, m_offset * 16) = ps;
                     }
-
-                    int m_idx = m / PE_M;
-                    int n_idx = n / PE_N;
-
-                    uint16_t tag = m_idx * grid_cols + n_idx;
-
-                    send_data_pli(tag, data_packet);
-                    VERBOSE_LOG("[TB-NoC-PLI] Sent Partial Sum Input Packet - m_idx: " << m_idx << ", n_idx: " << n_idx << ", m: " << m << ", n: " << n
-                              << ", Tag: " << tag << ")");
                 }
             }
         }
@@ -1154,59 +1417,126 @@ public:
     void distribute_gemm_plo() {
         std::cout << "[TB-NoC-PLO] Distributing GEMM Requests (Partial Sums Output)..." << std::endl;
 
-        int M = config.count("M") ? std::stoi(config["M"]) : std::stoi(config["in_height"]);
-        int N = config.count("N") ? std::stoi(config["N"]) : std::stoi(config["out_ch"]);
+        int M = gemm.M;
+        int N = gemm.N;
 
-        int grid_cols = config.count("grid_cols") ? std::stoi(config["grid_cols"]) : 1;
-        int grid_k = config.count("grid_k") ? std::stoi(config["grid_k"]) : 1;
-        int PE_M = 12;
-        int PE_N = 8;
+        int grid_n = gemm.grid_n;
+        int grid_k = gemm.grid_k;
+        int PE_M = gemm.pe_m;
+        int PE_N = gemm.pe_n;
 
         Index2D ps_idx(M, N);
 
-        bool ultra_mode = (config["ultra_mode"] == "True");
+        bool ultra_mode = gemm.ultra_mode;
         size_t rows_per_port = ultra_mode ? (M / NUM_PORTS) : M;
         size_t per_port_stride = ultra_mode ? (rows_per_port * static_cast<size_t>(N)) : 0;
+        int wave_k = gemm.grid_k_per_wave.empty() ? std::max(1, gemm.wave_k)
+                               : static_cast<int>(gemm.grid_k_per_wave.size());
+        int wave_n = gemm.grid_n_per_wave.empty() ? std::max(1, gemm.wave_n)
+                               : static_cast<int>(gemm.grid_n_per_wave.size());
+        int wave_m = gemm.grid_m_per_wave.empty() ? std::max(1, gemm.wave_m)
+                               : static_cast<int>(gemm.grid_m_per_wave.size());
 
-        for(size_t n = 0; n < N; ++n) {
-             // Output Partial Sums -> PLO (Read)
-             // plo_id = (m_idx * grid_n + n_idx) ONLY FOR k_idx == last
-            if (ultra_mode && grid_k > 1) {
-                // K-Split Ultra: Read from Bus 2 (Port 2) only.
-                // Standard packet expected.
-                for(size_t m = 0; m < M; m+=4) {
-                    int m_idx = m / PE_M;
-                    int n_idx = n / PE_N;
-                    uint16_t tag = m_idx * grid_cols + n_idx;
-                    size_t base_idx = ps_idx(m, n);
+        for (int wave_k_idx = 0; wave_k_idx < wave_k; ++wave_k_idx) {
+            if (wave_k_idx != (wave_k - 1)) {
+                continue;
+            }
 
-                    recv_data_plo(tag, base_idx);
-                    VERBOSE_LOG("[TB-NoC-PLO] Requested K-Split PS Output (Port 2/Normal) - m:" << m << ", n:" << n << ", Tag:" << tag);
+            for (int wave_n_idx = 0; wave_n_idx < wave_n; ++wave_n_idx) {
+                WaveRange n_range = get_wave_tile_range(gemm.grid_n_per_wave, wave_n_idx, static_cast<size_t>(grid_n), wave_n);
+                size_t n_start = n_range.start * static_cast<size_t>(PE_N);
+                size_t n_end = std::min(static_cast<size_t>(N), n_range.end * static_cast<size_t>(PE_N));
+                if (n_start >= n_end) {
+                    continue;
                 }
-            } else if (ultra_mode && grid_k == 1) {
-                // Request only the local base rows for port0; router will return NUM_PORTS chunks
-                for (size_t m_local = 0; m_local < rows_per_port; m_local += 4) {
-                    int m_idx = m_local / PE_M; // local tile index
-                    int n_idx = n / PE_N;
-                    uint16_t tag = m_idx * grid_cols + n_idx;
 
-                    size_t base_idx = ps_idx(m_local, n);
-                    recv_data_plo(tag, base_idx, true, per_port_stride, NUM_PORTS);
-                    VERBOSE_LOG("[TB-NoC-PLO] Requested Partial Sum Output Packet (ULTRA) - m_idx: " << m_idx << ", n_idx: " << n_idx
-                              << ", m_local: " << m_local << ", N base: " << n
-                              << ", Tag: " << tag << ", per_port_stride: " << per_port_stride << ")");
+                int max_m_tiles = 0;
+                size_t n_tiles = 0;
+                if (ultra_mode) {
+                    n_tiles = n_range.end - n_range.start;
+                    if (n_tiles > 0) {
+                        max_m_tiles = static_cast<int>(NUM_PES_PER_PORT / n_tiles);
+                    }
                 }
-            } else {
-                for(size_t m = 0; m < M; m+=4) {
-                    int m_idx = m / PE_M;
-                    int n_idx = n / PE_N;
-                    uint16_t tag = m_idx * grid_cols + n_idx;
 
-                    size_t base_idx = ps_idx(m, n);
-                    recv_data_plo(tag, base_idx);
-                    VERBOSE_LOG("[TB-NoC-PLO] Requested Partial Sum Output Packet - m_idx: " << m_idx << ", n_idx: " << n_idx
-                              << ", m: " << m << ", N base: " << n
-                              << ", Tag: " << tag << ")");
+                for (int wave_m_idx = 0; wave_m_idx < wave_m; ++wave_m_idx) {
+                    WaveRange m_range = get_wave_tile_range(gemm.grid_m_per_wave, wave_m_idx, static_cast<size_t>(gemm.grid_m), wave_m);
+                    size_t m_start = m_range.start * static_cast<size_t>(PE_M);
+                    size_t m_end = std::min(static_cast<size_t>(M), m_range.end * static_cast<size_t>(PE_M));
+                    if (m_start >= m_end) {
+                        continue;
+                    }
+
+                    for (size_t n = n_start; n < n_end; ++n) {
+                    // Output Partial Sums -> PLO (Read)
+                    // plo_id = (m_idx * grid_n + n_idx) ONLY FOR k_idx == last
+
+                    if (ultra_mode && grid_k > 1) {
+                        // K-Split Ultra: Read from Bus 2 (Port 2) only.
+                        // Standard packet expected.
+                        for (size_t m = m_start; m < m_end; m += 4) {
+                            int m_idx_local = static_cast<int>((m - m_start) / PE_M);
+                            if (max_m_tiles > 0 && m_idx_local >= max_m_tiles) {
+                                std::cerr << "[TB-NoC-PLO] Warning: wave-local m_idx out of range: " << m_idx_local
+                                          << " (max " << max_m_tiles << ")" << std::endl;
+                                continue;
+                            }
+                            int n_idx_local = static_cast<int>((n - n_start) / PE_N);
+                            uint16_t tag = static_cast<uint16_t>(m_idx_local * n_tiles + n_idx_local);
+                            size_t base_idx = ps_idx(m, n);
+
+                            recv_data_plo(tag, base_idx);
+                            VERBOSE_LOG("[TB-NoC-PLO] Requested K-Split PS Output (Port 2/Normal) - m:" << m << ", n:" << n << ", Tag:" << tag);
+                        }
+                    } else if (ultra_mode && grid_k == 1) {
+                        // Request only the local base rows for port0; router will return NUM_PORTS chunks
+                        for (size_t port = 0; port < NUM_PORTS; ++port) {
+                            size_t port_base = port * rows_per_port;
+                            if (port_base >= static_cast<size_t>(M)) {
+                                continue;
+                            }
+                            size_t m_local_start = (m_start > port_base) ? (m_start - port_base) : 0;
+                            size_t m_local_end = (m_end > port_base) ? std::min(rows_per_port, m_end - port_base) : 0;
+                            if (m_local_start >= m_local_end) {
+                                continue;
+                            }
+                            for (size_t m_local = m_local_start; m_local < m_local_end; m_local += 4) {
+                                int m_idx_local = static_cast<int>((m_local - m_local_start) / PE_M);
+                                if (max_m_tiles > 0 && m_idx_local >= max_m_tiles) {
+                                    std::cerr << "[TB-NoC-PLO] Warning: wave-local m_idx out of range: " << m_idx_local
+                                              << " (max " << max_m_tiles << ")" << std::endl;
+                                    continue;
+                                }
+                                int n_idx_local = static_cast<int>((n - n_start) / PE_N);
+                                uint16_t tag = static_cast<uint16_t>(n_idx_local);
+
+                                size_t m_global = port_base + m_local;
+                                size_t base_idx = ps_idx(m_global, n);
+                                recv_data_plo(tag, base_idx, true, per_port_stride, NUM_PORTS);
+                                VERBOSE_LOG("[TB-NoC-PLO] Requested Partial Sum Output Packet (ULTRA) - m_idx: " << m_idx_local << ", n_idx: " << n_idx_local
+                                          << ", m_local: " << m_local << ", N base: " << n
+                                          << ", Tag: " << tag << ", per_port_stride: " << per_port_stride << ")");
+                            }
+                        }
+                    } else {
+                        for (size_t m = m_start; m < m_end; m += 4) {
+                            int m_idx_local = static_cast<int>((m - m_start) / PE_M);
+                            if (max_m_tiles > 0 && m_idx_local >= max_m_tiles) {
+                                std::cerr << "[TB-NoC-PLO] Warning: wave-local m_idx out of range: " << m_idx_local
+                                          << " (max " << max_m_tiles << ")" << std::endl;
+                                continue;
+                            }
+                            int n_idx_local = static_cast<int>((n - n_start) / PE_N);
+                            uint16_t tag = static_cast<uint16_t>(m_idx_local * n_tiles + n_idx_local);
+
+                            size_t base_idx = ps_idx(m, n);
+                            recv_data_plo(tag, base_idx);
+                            VERBOSE_LOG("[TB-NoC-PLO] Requested Partial Sum Output Packet - m_idx: " << m_idx_local << ", n_idx: " << n_idx_local
+                                      << ", m: " << m << ", N base: " << n
+                                      << ", Tag: " << tag << ")");
+                        }
+                    }
+                    }
                 }
             }
         }
@@ -1355,11 +1685,52 @@ public:
         // 2. Load Data
         load_test_data();
 
-        if (config.count("mode") && config["mode"] == "conv2d") {
-            if (conv.kernel_size <= 0 || conv.in_ch <= 0 || conv.out_ch <= 0 || conv.in_height <= 0 || conv.in_width <= 0 || conv.out_height <= 0 || conv.out_width <= 0) {
-                std::cerr << "[TB] Invalid conv2d config in config.txt" << std::endl;
-                sc_stop();
-                return;
+        if (config.count("mode")) {
+            if (config["mode"] == "conv2d") {
+                conv = parse_conv_params_from_config(config);
+                if (conv.kernel_size <= 0 || conv.in_ch <= 0 || conv.out_ch <= 0 || conv.in_height <= 0 || conv.in_width <= 0 || conv.out_height <= 0 || conv.out_width <= 0) {
+                    std::cerr << "[TB] Invalid conv2d config in config.txt" << std::endl;
+                    sc_stop();
+                    return;
+                }
+            }
+            else if (config["mode"] == "gemm") {
+                gemm = parse_gemm_params_from_config(config);
+                if (gemm.M <= 0 || gemm.K <= 0 || gemm.N <= 0) {
+                    std::cerr << "[TB] Invalid gemm config in config.txt" << std::endl;
+                    sc_stop();
+                    return;
+                }
+
+                if (!gemm.grid_m_per_wave.empty() && sum_tiles(gemm.grid_m_per_wave) != static_cast<size_t>(gemm.grid_m)) {
+                    std::cerr << "[TB] Invalid gemm config: grid_m_per_wave sum mismatch" << std::endl;
+                    sc_stop();
+                    return;
+                }
+                if (!gemm.grid_n_per_wave.empty() && sum_tiles(gemm.grid_n_per_wave) != static_cast<size_t>(gemm.grid_n)) {
+                    std::cerr << "[TB] Invalid gemm config: grid_n_per_wave sum mismatch" << std::endl;
+                    sc_stop();
+                    return;
+                }
+                if (!gemm.grid_k_per_wave.empty() && sum_tiles(gemm.grid_k_per_wave) != static_cast<size_t>(gemm.grid_k)) {
+                    std::cerr << "[TB] Invalid gemm config: grid_k_per_wave sum mismatch" << std::endl;
+                    sc_stop();
+                    return;
+                }
+
+                if (gemm.ultra_mode && gemm.grid_n > 0) {
+                    int max_n_tiles = max_tile_or_default(gemm.grid_n_per_wave, gemm.grid_n);
+                    int max_m_tiles = (max_n_tiles > 0) ? static_cast<int>(NUM_PES_PER_PORT / max_n_tiles) : 0;
+                    if (!gemm.grid_m_per_wave.empty()) {
+                        for (size_t i = 0; i < gemm.grid_m_per_wave.size(); ++i) {
+                            if (max_m_tiles > 0 && gemm.grid_m_per_wave[i] > max_m_tiles) {
+                                std::cerr << "[TB] Invalid gemm config: grid_m_per_wave exceeds per-port capacity" << std::endl;
+                                sc_stop();
+                                return;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1387,10 +1758,7 @@ public:
             int out_width = conv.out_width;
             total_macs = out_ch * out_height * out_width * kernel_size * kernel_size * in_ch;
         } else if (mode == "gemm") {
-            int M = config.count("M") ? std::stoi(config["M"]) : std::stoi(config["in_height"]);
-            int K = config.count("K") ? std::stoi(config["K"]) : std::stoi(config["in_ch"]);
-            int N = config.count("N") ? std::stoi(config["N"]) : std::stoi(config["out_ch"]);
-            total_macs = M * N * K;
+            total_macs = gemm.M * gemm.N * gemm.K;
         }
 
         std::cout << "[TB] Starting Parallel Data Distribution..." << std::endl;

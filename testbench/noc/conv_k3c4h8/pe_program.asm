@@ -5,6 +5,10 @@ conv2d_3x3:
     SDMA.LEN 48  # STORE 48 steps of kernel data
     SDMA.SD 4  # start DMA store operation
 
+    LDMA.ADDR 0
+    LDMA.LEN 48
+    LDMA.LD 4  # LOAD 48 steps of input data
+
     LOOPIN 4  # Global loop for 4x data volume
 
 load_kernel:
@@ -24,15 +28,8 @@ loop_window:
     LOOPIN 198  # Loop for 198 input elements
 
 load_input:
-    TSTORE t2
-    TSTORE t5
-    TSTORE t8
-    TSTORE t11
-
-    LDMA.ADDR 0
-    LDMA.LEN 48
-    LDMA.LD 4  # LOAD 48 steps of input data
-    SETRID.PT 0, 0
+    VTSTORE vt2 # t2,t5,t8,t11
+    RESET PC,TC,LDMA,PR
 
 loop_kernel:
     LOOPIN 16  # Loop for 16 kernels
@@ -46,7 +43,6 @@ calculate_psum:
     VPSUM vp1
     VPSUM vp2
     VPSUM vp3
-    CLEAR.P # Clear the partial sum register
 
     TSHIFT K3
     LOOPEND

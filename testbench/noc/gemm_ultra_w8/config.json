@@ -1,0 +1,11 @@
+{
+  "mode": "gemm",
+  "num_pes": 48,
+  "num_bus": 3,
+  "M": 96,
+  "N": 128,
+  "K": 96,
+  "seed":456,
+  "ultra_mode": true,
+  "out_dir": "./output/noc-sim/gemm_ultra_w8"
+}

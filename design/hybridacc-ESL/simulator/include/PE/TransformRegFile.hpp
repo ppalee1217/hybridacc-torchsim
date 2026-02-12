@@ -22,11 +22,12 @@ SC_MODULE(TransformRegFile) {
         sc_in<int> tid;
         sc_in<fp16_t> tid_in;
         sc_in<bool> tid_write_en;
+        sc_in<v_fp16_t> vtid_in;
+        sc_in<bool> vtid_write_en;
         sc_out<v_fp16_t> vtid_out;
 
         sc_in<bool> clear_regs;
         sc_in<bool> use_vcounter;
-        sc_in<bool> set_vcounter;
         sc_in<bool> clear_vcounter;
         sc_in<bool> incr_vcounter;
 
@@ -40,10 +41,11 @@ SC_MODULE(TransformRegFile) {
               tid("tid"),
               tid_in("tid_in"),
               tid_write_en("tid_write_en"),
+              vtid_in("vtid_in"),
+              vtid_write_en("vtid_write_en"),
               vtid_out("vtid_out"),
               clear_regs("clear_regs"),
               use_vcounter("use_vcounter"),
-              set_vcounter("set_vcounter"),
               clear_vcounter("clear_vcounter"),
               incr_vcounter("incr_vcounter"),
               vcounter(0)
@@ -52,7 +54,7 @@ SC_MODULE(TransformRegFile) {
             SC_CTHREAD(sequential_process, clk.pos());
             reset_signal_is(reset_n, false);
             SC_METHOD(combinational_process);
-            sensitive << tid << tid << tid_write_en << tid_in << shift_en << shift_mode << reset_n << vcounter;
+            sensitive << tid << tid_write_en << tid_in << shift_en << shift_mode << reset_n << vcounter << vtid_in << vtid_write_en;
         }
 
 
@@ -60,7 +62,16 @@ SC_MODULE(TransformRegFile) {
         sc_signal<int> vcounter;
         void clear() { reg.fill(0); }
         void reset() { clear(); vcounter.write(0); }  // 修正：使用 vcounter 而不是未定義的變數
-        void setT(int tid, fp16_t v) { reg[tid] = v; }
+        void setT(int tid, fp16_t v) {
+            DEBUG_MSG("[TransformRegFile] Setting T for TID " << tid << " with value " << v, DEBUG_LEVEL_PE_COMPONENTS);
+            reg[tid] = v;
+        }
+        void setVT(int tid, v_fp16_t v) {
+            DEBUG_MSG("[TransformRegFile] Setting VT for TID " << tid << " with value " << v, DEBUG_LEVEL_PE_COMPONENTS);
+            for (int i = 0; i < 4; ++i) {
+                reg[tid + i * 3] = v.lanes[i];
+            }
+        }
         v_fp16_t getVT(int tid) const {
             v_fp16_t vt;
             for (int i = 0; i < 4; ++i) {
@@ -90,18 +101,6 @@ SC_MODULE(TransformRegFile) {
                 }
             }
             reg[11] = 0; // 最後一個寄存器清零
-
-            // dump after shift
-            // std::cout << "[TransformRegFile] After shift (mode " << shift_mode << "): " << std::endl;
-            // for (int lane = 0; lane < 4; ++lane) {
-            //     std::cout << "Lane " << lane << ": ";
-            //     for (int i = 0; i < 3; ++i) {
-            //         int idx = lane * 3 + i;
-            //         std::cout << "T[" << idx << "]=0x" << std::hex << reg[idx] << " ";
-            //     }
-            //     std::cout << "|" << std::endl;
-            // }
-            // std::cout << std::dec << std::endl;
         }
         std::array<fp16_t, 12> reg{}; // 4x3 = 12 registers (3 for each vector lane)
 
@@ -113,18 +112,22 @@ SC_MODULE(TransformRegFile) {
 
             while (true) {
                 if (enable.read()) {
+                    // Register logic
                     if (shift_en.read()) {
                         shift(shift_mode.read());
                     } else if (tid_write_en.read()) {
                         setT(tid.read(), tid_in.read());
-                    } else if (incr_vcounter.read()) {
-                        vcounter.write(vcounter.read() + tid.read());
-                    } else if (set_vcounter.read()) {
-                        vcounter.write(tid.read());
-                    } else if (clear_vcounter.read()) {
-                        vcounter.write(0);
+                    } else if (vtid_write_en.read()) {
+                        setVT(tid.read(), vtid_in.read());
                     } else if (clear_regs.read()) {
                         clear();
+                    }
+
+                    // Counter logic
+                    if (incr_vcounter.read()) {
+                        vcounter.write(vcounter.read() + tid.read());
+                    } else if (clear_vcounter.read()) {
+                        vcounter.write(0);
                     }
                 }
                 wait();

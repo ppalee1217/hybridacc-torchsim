@@ -108,7 +108,7 @@ struct VerifyStats {
 
 inline VerifyStats verify_fp16_vectors(const std::vector<uint16_t>& expected_fp16,
                                       const std::vector<uint16_t>& received_fp16,
-                                      double tolerance = 1e-2) {
+                                      double tolerance = 1e-2, bool verbose = false) {
     VerifyStats stats;
     stats.total_elements = expected_fp16.size();
 
@@ -140,6 +140,12 @@ inline VerifyStats verify_fp16_vectors(const std::vector<uint16_t>& expected_fp1
         }
         if (diff > tolerance) {
             mismatches++;
+            if (verbose) {
+                std::cout << "[Mismatch] Index " << i
+                          << ": Expected " << exp_val << std::hex << "(" << expected_fp16[i] << ")" << std::dec
+                          << ", Received " << recv_val << std::hex << "(" << received_fp16[i] << ")" << std::dec
+                          << ", Diff " << diff << std::endl;
+            }
         }
     }
 

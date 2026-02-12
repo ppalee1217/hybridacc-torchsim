@@ -1,33 +1,33 @@
+# ISA v3
 gemv:
 
-load_kernel:
+setup:
     SDMA.ADDR 0
-    SDMA.LEN 64  # STORE 64 steps of kernel data (4out * 2vector * 32dim)
-    SDMA.SD 4 # start DMA store operation
-    SWAPDM
+    SDMA.LEN 48  # STORE 48 steps of kernel data (16 kernels * 3 vector each)
+    SDMA.LOOP 1  # loop for 1 kernel set
+    SDMA.SD 4  # start DMA store operation
 
     LDMA.ADDR 0
     LDMA.LEN 256 # LOAD 256 steps of input data (32dim * 8input)
     LDMA.LHB 1 # start DMA load operation (fp16, broadcasted to 4out)
 
+    SYS.CTRL (SDMA.ACT)
+
+compute:
+    LOOPIN 1 # processing pass
+    SYS.SYNC (SWAPDM)  # wait for previous SDMA operation to complete
+
+    SYS.CTRL (RST.PID, RST.TID, LDMA.ACT, CLEAR.P)
+
 loop_in_dim:
     LOOPIN 32  # Loop for 32 input dimensions
 
 load_input:
-    TSTORE t0
-    TSTORE t3
-    TSTORE t6
-    TSTORE t9
-    TSTORE t1
-    TSTORE t4
-    TSTORE t7
-    TSTORE t10
-    TSTORE t2
-    TSTORE t5
-    TSTORE t8
-    TSTORE t11
+    VTSTORE vt0
+    VTSTORE vt1
+    VTSTORE vt2
 
-    SETRID.PT 0, 0
+    SYS.CTRL (RST.PID, RST.TID)
 compute_gemv:
     LOOPIN 8 # Loop for 8 output dimensions
     VMULR 1, 1
@@ -35,7 +35,7 @@ compute_gemv:
     VMULRN 1, VTRST # reset vector register id
     LOOPEND # compute_gemv
 
-    SETRID.P 0
+    SYS.CTRL (RST.PID)
 
     LOOPEND # loop_in_dim
 
@@ -44,6 +44,6 @@ psum:
     LOOPIN 24 # Loop for 24 partial sums
     VPSUMR 1
     LOOPEND # psum
-    CLEAR.P # Clear the partial sum register
 
+    LOOPEND
     HALT  # End of program

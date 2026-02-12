@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Hybridacc PE ISA Table</title>
+	<style>
+		:root {
+			color-scheme: light;
+		}
+		body {
+			font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+			margin: 24px;
+			line-height: 1.4;
+			background: #fff;
+			color: #000;
+		}
+		h1, h2 {
+			margin: 0 0 8px 0;
+		}
+		h2 {
+			margin-top: 24px;
+		}
+		.note {
+			color: #000;
+			font-size: 0.95em;
+			margin-bottom: 12px;
+		}
+		table.isa {
+			border-collapse: collapse;
+			width: 100%;
+			table-layout: fixed;
+			margin: 8px 0 20px 0;
+			font-size: 12px;
+		}
+		table.isa th, table.isa td {
+			border: 1px solid #999;
+			text-align: center;
+			padding: 6px 4px;
+			word-break: break-word;
+		}
+		table.isa th.bit {
+			font-weight: 600;
+			background: #f3f3f3;
+			color: #000;
+		}
+		table.isa th.left, table.isa td.left {
+			text-align: left;
+			font-weight: 600;
+			width: 180px;
+		}
+		.legend {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+			gap: 8px 16px;
+			font-size: 12px;
+			margin-bottom: 16px;
+		}
+		.badge {
+			display: inline-block;
+			padding: 2px 6px;
+			border-radius: 4px;
+			background: #eee;
+			border: 1px solid #ccc;
+			color: #000;
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+		}
+	</style>
+</head>
+<body>
+	<h1>Hybridacc PE ISA Table (v3)</h1>
+	<div class="note">v3 mapping: payload[15:6] (may encode func3), func1[5], func2[4:3], opcode[2:1], LE[0].</div>
+
+	<h2>v3 Bit-frame Mapping</h2>
+	<table class="isa">
+		<tr>
+			<th class="left">Field</th>
+			<th class="bit">15</th><th class="bit">14</th><th class="bit">13</th><th class="bit">12</th><th class="bit">11</th>
+			<th class="bit">10</th><th class="bit">9</th><th class="bit">8</th><th class="bit">7</th><th class="bit">6</th><th class="bit">5</th><th class="bit">4</th><th class="bit">3</th><th class="bit">2</th><th class="bit">1</th>
+			<th class="bit">0</th>
+		</tr>
+		<tr>
+			<td class="left">v3 frame</td>
+			<td colspan="10">payload/func3[15:6]</td>
+			<td>func1[5]</td>
+			<td colspan="2">func2[4:3]</td>
+			<td colspan="2">opcode[2:1]</td>
+			<td>LE</td>
+		</tr>
+	</table>
+
+	<h2>Data Movement (v3)</h2>
+	<table class="isa">
+		<tr>
+			<th class="left">Instruction</th>
+			<th class="bit">15</th><th class="bit">14</th><th class="bit">13</th><th class="bit">12</th><th class="bit">11</th>
+			<th class="bit">10</th><th class="bit">9</th><th class="bit">8</th><th class="bit">7</th><th class="bit">6</th><th class="bit">5</th><th class="bit">4</th><th class="bit">3</th><th class="bit">2</th><th class="bit">1</th>
+			<th class="bit">0</th>
+		</tr>
+		<tr>
+			<td class="left">LDMA.ADDR</td>
+			<td colspan="10">start_addr[9:0]</td>
+			<td>0</td>
+			<td colspan="2">00</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">SDMA.ADDR</td>
+			<td colspan="10">start_addr[9:0]</td>
+			<td>1</td>
+			<td colspan="2">00</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">LDMA.LEN</td>
+			<td colspan="10">len[9:0]</td>
+			<td>0</td>
+			<td colspan="2">01</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">SDMA.LEN</td>
+			<td colspan="10">len[9:0]</td>
+			<td>1</td>
+			<td colspan="2">01</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">LDMA.LOOP</td>
+			<td colspan="10">loop_count[9:0]</td>
+			<td>0</td>
+			<td colspan="2">10</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">SDMA.LOOP</td>
+			<td colspan="10">loop_count[9:0]</td>
+			<td>1</td>
+			<td colspan="2">10</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">LDMA.LB</td>
+			<td colspan="4">0</td>
+			<td colspan="3">stride</td>
+			<td colspan="3">000</td>
+			<td>0</td>
+			<td colspan="2">11</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">LDMA.LH</td>
+			<td colspan="4">0</td>
+			<td colspan="3">stride</td>
+			<td colspan="3">001</td>
+			<td>0</td>
+			<td colspan="2">11</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">LDMA.LW</td>
+			<td colspan="4">0</td>
+			<td colspan="3">stride</td>
+			<td colspan="3">010</td>
+			<td>0</td>
+			<td colspan="2">11</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">LDMA.LD</td>
+			<td colspan="4">0</td>
+			<td colspan="3">stride</td>
+			<td colspan="3">011</td>
+			<td>0</td>
+			<td colspan="2">11</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">LDMA.LBB</td>
+			<td colspan="4">0</td>
+			<td colspan="3">stride</td>
+			<td colspan="3">100</td>
+			<td>0</td>
+			<td colspan="2">11</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">LDMA.LHB</td>
+			<td colspan="4">0</td>
+			<td colspan="3">stride</td>
+			<td colspan="3">101</td>
+			<td>0</td>
+			<td colspan="2">11</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">LDMA.LWB</td>
+			<td colspan="4">0</td>
+			<td colspan="3">stride</td>
+			<td colspan="3">110</td>
+			<td>0</td>
+			<td colspan="2">11</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">SDMA.SD</td>
+			<td colspan="4">0</td>
+			<td colspan="3">stride</td>
+			<td colspan="3">111</td>
+			<td>0</td>
+			<td colspan="2">11</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">TSTORE</td>
+			<td colspan="4">trd</td>
+			<td colspan="3">0</td>
+			<td colspan="3">000</td>
+			<td>1</td>
+			<td colspan="2">11</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VTSTORE</td>
+			<td colspan="4">0</td>
+			<td>0</td>
+			<td colspan="2">vtrd</td>
+			<td colspan="3">001</td>
+			<td>1</td>
+			<td colspan="2">11</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">TSHIFT</td>
+			<td colspan="4">0</td>
+			<td>0</td>
+			<td colspan="2">kernel_size</td>
+			<td colspan="3">010</td>
+			<td>1</td>
+			<td colspan="2">11</td>
+			<td colspan="2">00</td>
+			<td>0/1</td>
+		</tr>
+	</table>
+
+	<h2>Arithmetic (v3)</h2>
+	<table class="isa">
+		<tr>
+			<th class="left">Instruction</th>
+			<th class="bit">15</th><th class="bit">14</th><th class="bit">13</th><th class="bit">12</th><th class="bit">11</th>
+			<th class="bit">10</th><th class="bit">9</th><th class="bit">8</th><th class="bit">7</th><th class="bit">6</th><th class="bit">5</th><th class="bit">4</th><th class="bit">3</th><th class="bit">2</th><th class="bit">1</th>
+			<th class="bit">0</th>
+		</tr>
+		<tr>
+			<td class="left">VMAC</td>
+			<td colspan="5">prd[4:0]</td>
+			<td colspan="2">vtrs[1:0]</td>
+			<td colspan="3">000</td>
+			<td>0</td>
+			<td colspan="2">00</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VMACN</td>
+			<td colspan="5">prd[4:0]</td>
+			<td colspan="2">vtrs[1:0]</td>
+			<td colspan="3">000</td>
+			<td>1</td>
+			<td colspan="2">00</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VMACR</td>
+			<td colspan="5">pstride[4:0]</td>
+			<td colspan="2">vtstride[1:0]</td>
+			<td colspan="3">001</td>
+			<td>0</td>
+			<td colspan="2">00</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VMACRN</td>
+			<td colspan="5">pstride[4:0]</td>
+			<td colspan="2">vtstride[1:0]</td>
+			<td colspan="3">001</td>
+			<td>1</td>
+			<td colspan="2">00</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VMUL</td>
+			<td colspan="5">vprd[4:0]</td>
+			<td colspan="2">vtrs[1:0]</td>
+			<td colspan="3">000</td>
+			<td>0</td>
+			<td colspan="2">01</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VMULN</td>
+			<td colspan="5">vprd[4:0]</td>
+			<td colspan="2">vtrs[1:0]</td>
+			<td colspan="3">000</td>
+			<td>1</td>
+			<td colspan="2">01</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VMULR</td>
+			<td colspan="5">vpstride[4:0]</td>
+			<td colspan="2">vtstride[1:0]</td>
+			<td colspan="3">001</td>
+			<td>0</td>
+			<td colspan="2">01</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VMULRN</td>
+			<td colspan="5">vpstride[4:0]</td>
+			<td colspan="2">vtstride[1:0]</td>
+			<td colspan="3">001</td>
+			<td>1</td>
+			<td colspan="2">01</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VPSUM</td>
+			<td colspan="5">vprs[4:0]</td>
+			<td colspan="2">0</td>
+			<td colspan="3">000</td>
+			<td>0</td>
+			<td colspan="2">10</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VPSUMR</td>
+			<td colspan="5">vpstride[4:0]</td>
+			<td colspan="2">0</td>
+			<td colspan="3">001</td>
+			<td>0</td>
+			<td colspan="2">10</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VPSUM_VTSTORE</td>
+			<td colspan="5">vprs[4:0]</td>
+			<td colspan="2">vtrd[1:0]</td>
+			<td colspan="3">000</td>
+			<td>0</td>
+			<td colspan="2">11</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VPSUMR_VTSTORE</td>
+			<td colspan="5">vpstride[4:0]</td>
+			<td colspan="2">vtrd[1:0]</td>
+			<td colspan="3">001</td>
+			<td>0</td>
+			<td colspan="2">11</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VPSUM_TSHIFT</td>
+			<td colspan="5">vprs[4:0]</td>
+			<td colspan="2">kernel_size</td>
+			<td colspan="3">010</td>
+			<td>0</td>
+			<td colspan="2">11</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+		<tr>
+			<td class="left">VPSUMR_TSHIFT</td>
+			<td colspan="5">vpstride[4:0]</td>
+			<td colspan="2">kernel_size</td>
+			<td colspan="3">011</td>
+			<td>0</td>
+			<td colspan="2">11</td>
+			<td colspan="2">01</td>
+			<td>0/1</td>
+		</tr>
+	</table>
+
+	<h2>Control (v3)</h2>
+	<table class="isa">
+		<tr>
+			<th class="left">Instruction</th>
+			<th class="bit">15</th><th class="bit">14</th><th class="bit">13</th><th class="bit">12</th><th class="bit">11</th>
+			<th class="bit">10</th><th class="bit">9</th><th class="bit">8</th><th class="bit">7</th><th class="bit">6</th><th class="bit">5</th><th class="bit">4</th><th class="bit">3</th><th class="bit">2</th><th class="bit">1</th>
+			<th class="bit">0</th>
+		</tr>
+		<tr>
+			<td class="left">LOOPIN</td>
+			<td colspan="10">loop_count[9:0]</td>
+			<td>0</td>
+			<td colspan="2">00</td>
+			<td colspan="2">10</td>
+			<td>0</td>
+		</tr>
+		<tr>
+			<td class="left">LOOPEND (pseudo)</td>
+			<td colspan="15">(set LE=1 on previous word)</td>
+			<td>1</td>
+		</tr>
+	</table>
+
+	<h2>System (v3)</h2>
+	<div class="note">SYSCTRL uses payload bits as control flags.</div>
+	<table class="isa">
+		<tr>
+			<th class="left">Instruction</th>
+			<th class="bit">15</th><th class="bit">14</th><th class="bit">13</th><th class="bit">12</th><th class="bit">11</th>
+			<th class="bit">10</th><th class="bit">9</th><th class="bit">8</th><th class="bit">7</th><th class="bit">6</th><th class="bit">5</th><th class="bit">4</th><th class="bit">3</th><th class="bit">2</th><th class="bit">1</th>
+			<th class="bit">0</th>
+		</tr>
+		<tr>
+			<td class="left">SYS.CTRL</td>
+			<td colspan="2"> (reserved) 0</td>
+			<td colspan="1">SDMA.ACT</td>
+			<td colspan="1">SDMA.RST</td>
+			<td colspan="1">LDMA.ACT</td>
+			<td colspan="1">LDMA.RST</td>
+			<td colspan="1">RST.PID</td>
+			<td colspan="1">RST.TID</td>
+			<td colspan="1">CLEAR.T</td>
+			<td colspan="1">CLEAR.P</td>
+			<td>0</td>
+			<td colspan="2">01</td>
+			<td colspan="2">10</td>
+			<td>1/0</td>
+		</tr>
+		<tr>
+			<td class="left">SYS.SYNC</td>
+			<td colspan="9"> (reserved) 0</td>
+			<td colspan="1">SWAPDM</td>
+			<td>1</td>
+			<td colspan="2">01</td>
+			<td colspan="2">10</td>
+			<td>1/0</td>
+		</tr>
+		<tr>
+			<td class="left">NOP</td>
+			<td colspan="11">0</td>
+			<td colspan="2">10</td>
+			<td colspan="2">10</td>
+			<td>1/0</td>
+		</tr>
+		<tr>
+			<td class="left">HALT</td>
+			<td colspan="11">0</td>
+			<td colspan="2">11</td>
+			<td colspan="2">10</td>
+			<td>0</td>
+		</tr>
+	</table>
+</body>
+</html>

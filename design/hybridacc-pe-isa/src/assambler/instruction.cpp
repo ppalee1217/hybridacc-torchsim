@@ -21,87 +21,67 @@ Assembler::Assembler(){
     // Pseudo: LOOPEND -> set previous bit0
     add("LOOPEND", [=](const std::vector<std::string>&, EncoderCtx &ctx){
         if(ctx.words.empty()) throw AsmError("LOOPEND without previous instruction");
-        if(ctx.words.back() & 0x1) ctx.words.push_back(0x4|0x1); // NOP with LOOPEND
+        if(ctx.words.back() & 0x1) ctx.words.push_back(0x14|0x1); // NOP with LOOPEND
         else ctx.words.back() |= 0x1; // loop-end flag
     });
 
-    // LDMA.ADDR start_addr (opcode=00 f2=01 f1=0)
+    // LDMA.ADDR start_addr (opcode=00 func2=00 func1=0)
     add("LDMA.ADDR", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("LDMA.ADDR expects 1 operand");
         int addr = parseInt(ops[0]);
         if(addr < 0 || addr > 0x3FF) throw AsmError("start_addr out of range (0..1023)");
-        uint16_t w = makeBase(0, 1); // opcode=00 funct2=01
-        w |= ((addr >> 7) & 0x7) << 13;      // bits 15:13 = addr[9:7]
-        // bit12 func1=0 (LDMA ADDR)
-        w |= (addr & 0x1) << 11;             // bit11 = addr[0]
-        w |= ((addr >> 1) & 0x3F) << 5;      // bits 10:5 = addr[6:1]
+        uint16_t w = makeBase(0, 0, 0);
+        setPayload(w, addr);
         ctx.words.push_back(w);
     });
 
-    // LDMA.LEN len (opcode=00 f2=01 f1=1)
-    add("LDMA.LEN", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
-        if(ops.size()!=1) throw AsmError("LDMA.LEN expects 1 operand");
-        int len = parseInt(ops[0]) - 1; // 0-based encoding
-        if(len < 0 || len > 0x3FF) throw AsmError("len out of range (1..1024)");
-        uint16_t w = makeBase(0, 1); // opcode=00 funct2=01
-        w |= ((len >> 7) & 0x7) << 13;       // bits 15:13 = len[9:7]
-        w |= 1 << 12;                        // func1=1 (LDMA LEN)
-        w |= (len & 0x1) << 11;              // bit11 = len[0]
-        w |= ((len >> 1) & 0x3F) << 5;       // bits 10:5 = len[6:1]
-        ctx.words.push_back(w);
-    });
-
-    // SDMA.ADDR start_addr (opcode=00 f2=00 f1=0)
+    // SDMA.ADDR start_addr (opcode=00 func2=00 func1=1)
     add("SDMA.ADDR", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("SDMA.ADDR expects 1 operand");
         int addr = parseInt(ops[0]);
         if(addr < 0 || addr > 0x3FF) throw AsmError("start_addr out of range (0..1023)");
-        uint16_t w = makeBase(0, 0); // opcode=00 funct2=00
-        w |= ((addr >> 7) & 0x7) << 13;      // bits 15:13 = addr[9:7]
-        // bit12 func1=0 (SDMA ADDR)
-        w |= (addr & 0x1) << 11;             // bit11 = addr[0]
-        w |= ((addr >> 1) & 0x3F) << 5;      // bits 10:5 = addr[6:1]
+        uint16_t w = makeBase(0, 0, 1);
+        setPayload(w, addr);
         ctx.words.push_back(w);
     });
 
-    // SDMA.LEN len (opcode=00 f2=00 f1=1)
+    // LDMA.LEN len (opcode=00 func2=01 func1=0)
+    add("LDMA.LEN", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=1) throw AsmError("LDMA.LEN expects 1 operand");
+        int len = parseInt(ops[0]) - 1;
+        if(len < 0 || len > 0x3FF) throw AsmError("len out of range (1..1024)");
+        uint16_t w = makeBase(0, 1, 0);
+        setPayload(w, len);
+        ctx.words.push_back(w);
+    });
+
+    // SDMA.LEN len (opcode=00 func2=01 func1=1)
     add("SDMA.LEN", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("SDMA.LEN expects 1 operand");
-        int len = parseInt(ops[0]) - 1; // 0-based encoding
+        int len = parseInt(ops[0]) - 1;
         if(len < 0 || len > 0x3FF) throw AsmError("len out of range (1..1024)");
-        uint16_t w = makeBase(0, 0); // opcode=00 funct2=00
-        w |= ((len >> 7) & 0x7) << 13;       // bits 15:13 = len[9:7]
-        w |= 1 << 12;                        // func1=1 (SDMA LEN)
-        w |= (len & 0x1) << 11;              // bit11 = len[0]
-        w |= ((len >> 1) & 0x3F) << 5;       // bits 10:5 = len[6:1]
+        uint16_t w = makeBase(0, 1, 1);
+        setPayload(w, len);
         ctx.words.push_back(w);
     });
 
-    // LDMA.LOOP count (opcode=01 f2=01 f1=0)
+    // LDMA.LOOP count (opcode=00 func2=10 func1=0)
     add("LDMA.LOOP", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("LDMA.LOOP expects 1 operand");
-        int count = parseInt(ops[0]);
-        if(count < 1 || count > 1024) throw AsmError("count out of range (1..1024) for 0-based encoding");
-        int val = count - 1; // 0-based encoding
-        uint16_t w = makeBase(1, 1); // opcode=01 funct2=01
-        w |= ((val >> 7) & 0x7) << 13;     // bits 15:13
-        // bit12 func1=0
-        w |= (val & 0x1) << 11;            // bit11
-        w |= ((val >> 1) & 0x3F) << 5;     // bits 10:5
+        int count = parseInt(ops[0]) - 1;
+        if(count < 0 || count > 0x3FF) throw AsmError("count out of range (1..1024)");
+        uint16_t w = makeBase(0, 2, 0);
+        setPayload(w, count);
         ctx.words.push_back(w);
     });
 
-    // SDMA.LOOP count (opcode=01 f2=01 f1=1)
+    // SDMA.LOOP count (opcode=00 func2=10 func1=1)
     add("SDMA.LOOP", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("SDMA.LOOP expects 1 operand");
-        int count = parseInt(ops[0]);
-        if(count < 1 || count > 1024) throw AsmError("count out of range (1..1024) for 0-based encoding");
-        int val = count - 1; // 0-based encoding
-        uint16_t w = makeBase(1, 1); // opcode=01 funct2=01
-        w |= ((val >> 7) & 0x7) << 13;     // bits 15:13
-        w |= 1 << 12;                        // func1=1
-        w |= (val & 0x1) << 11;            // bit11
-        w |= ((val >> 1) & 0x3F) << 5;     // bits 10:5
+        int count = parseInt(ops[0]) - 1;
+        if(count < 0 || count > 0x3FF) throw AsmError("count out of range (1..1024)");
+        uint16_t w = makeBase(0, 2, 1);
+        setPayload(w, count);
         ctx.words.push_back(w);
     });
 
@@ -110,11 +90,9 @@ Assembler::Assembler(){
             if(ops.size()!=1) throw AsmError(mn+" expects 1 operand stride");
             int stride = parseInt(ops[0]);
             if(stride<0 || stride>7) throw AsmError("stride out of range(0..7)");
-            uint16_t w = makeBase(0, 2); // opcode=00 funct2=11
-            // func3 bits [15:13]
-            w |= (func3 & 0x7) << 13;
-            // stride bits [12:10]
-            w |= (stride & 0x7) << 10;
+            uint16_t w = makeBase(0, 3, 0); // opcode=00 func2=11 func1=0
+            int payload = ((stride & 0x7) << 3) | (func3 & 0x7);
+            setPayload(w, payload);
             ctx.words.push_back(w);
         });
     };
@@ -126,46 +104,63 @@ Assembler::Assembler(){
     addDMALoad("LDMA.LHB",5);
     addDMALoad("LDMA.LWB",6);
 
-    // SDMA.SD stride (store double-word) opcode=00 funct2=11 func3=011 stride bits [12:10]
+    // SDMA.SD stride (store double-word) opcode=00 func2=11 func1=0 func3=111
     add("SDMA.SD", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("SDMA.SD expects 1 operand");
         int stride = parseInt(ops[0]); if(stride<0||stride>7) throw AsmError("stride out of range");
-        uint16_t w = makeBase(0, 3); // opcode=00 funct2=11 func3=011
-        w |= (0x3) << 13; // func3=011
-        w |= (stride & 0x7) << 10; // bits 12:10
+        uint16_t w = makeBase(0, 3, 0);
+        int payload = ((stride & 0x7) << 3) | 0x7;
+        setPayload(w, payload);
         ctx.words.push_back(w);
     });
 
-    // TSTORE trd (Opcode 01 Function 00 func3=000)
+    // TSTORE trd (opcode=00 func2=11 func1=1, payload[15:12]=trd, payload[8:6]=000)
     add("TSTORE", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("TSTORE expects 1 operand (trd)");
         int trd = parseRegIndex(ops[0]);
-        uint16_t w = makeBase(1, 0); // opcode=01 funct2=00
-        // func3=000 already 0
-        w |= (trd & 0xf) << 5; // [8:5]
+        uint16_t w = makeBase(0, 3, 1);
+        int payload = (trd & 0xF) << 6;
+        setPayload(w, payload);
         ctx.words.push_back(w);
     });
-    // TSHIFT (Opcode 01 Function 00 func3=001)
+
+    // VTSTORE vtrd (opcode=00 func2=11 func1=1, payload[10:9]=vtrd, payload[8:6]=001)
+    add("VTSTORE", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=1) throw AsmError("VTSTORE expects 1 operand (vtrd)");
+        int vtrd = parseRegIndex(ops[0]);
+        if(vtrd<0 || vtrd>2) throw AsmError("vtrd out of range (0..2)");
+        uint16_t w = makeBase(0, 3, 1);
+        int payload = ((vtrd & 0x3) << 3) | 0x1;
+        setPayload(w, payload);
+        ctx.words.push_back(w);
+    });
+
+    // TSHIFT (opcode=00 func2=11 func1=1, payload[11:9]=kernel_size, payload[8:6]=010)
     add("TSHIFT", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("TSHIFT expects kernel_size (K3/K5/K7 or 3/5/7)");
         int k;
         if(!parseSpecialToken(ops[0], k)) {
             try { k = parseInt(ops[0]); } catch(...) { throw AsmError("Invalid kernel size token"); }
         }
-        int code=-1;
-        if(k==3) code=0; else if(k==5) code=1; else if(k==7) code=2; else throw AsmError("Unsupported kernel size (3/5/7)");
-        uint16_t w = makeBase(1, 0); // opcode=01 funct2=00
-        w |= (1)<<13; /*func3=001*/
-        w |= (code & 0x7) << 10;
+        int encoded_k;
+        switch(k){
+             case 3: encoded_k = 0; break;
+             case 5: encoded_k = 1; break;
+             case 7: encoded_k = 2; break;
+             default: throw AsmError("Unsupported kernel size (3/5/7)");
+        }
+        uint16_t w = makeBase(0, 3, 1);
+        int payload = ((encoded_k & 0x3) << 3) | 0x2;
+        setPayload(w, payload);
         ctx.words.push_back(w);
     });
 
-    auto addVMx = [&](const std::string &mn, int func3, bool hasN, bool regCtrl, bool mul){
+    auto addVMx = [&](const std::string &mn, int func2, int func3, bool hasN, bool regCtrl){
         add(mn, [=](const std::vector<std::string>&ops, EncoderCtx &ctx){
-            uint16_t w = makeBase(2, 1); // opcode=10 funct2=01
             int func1 = 0;
             if(hasN && mn.back()=='N') func1=1; // 尾碼 N
-            setFunc3Func1(w, func3, func1);
+            uint16_t w = makeBase(1, func2, func1); // opcode=01
+            int payload = 0;
             if(!regCtrl){
                 if(ops.size()!=2) throw AsmError(mn+" expects 2 operands");
                 int prd = parseRegIndex(ops[0]);
@@ -177,7 +172,7 @@ Assembler::Assembler(){
                 }
                 if(prd<0||prd>31) throw AsmError("prd out of range");
                 if(vtrs<0||vtrs>2) throw AsmError("vtrs out of range (0..2)");
-                w |= (prd & 0x1F) << 5; w |= (vtrs & 0x3) << 10;
+                payload = ((prd & 0x1F) << 5) | ((vtrs & 0x3) << 3) | (func3 & 0x7);
             } else {
                 if(ops.size()!=2) throw AsmError(mn+" expects 2 stride operands");
                 int ps; int vts;
@@ -193,144 +188,171 @@ Assembler::Assembler(){
                     if(parseSpecialToken(ops[1], tmp)) vts=tmp; else throw;
                 }
                 if(ps<0||ps>31) throw AsmError("pstride out of range");
-                if(vts<0||vts>3) throw AsmError("vtstride out of range (0..2)");
-                w |= (ps & 0x1F) << 5; w |= (vts & 0x3) << 10; // vtstride 2 bits
+                if(vts<0||vts>3) throw AsmError("vtstride out of range (0..3)");
+                payload = ((ps & 0x1F) << 5) | ((vts & 0x3) << 3) | (func3 & 0x7);
             }
+            setPayload(w, payload);
             ctx.words.push_back(w);
         });
     };
-    addVMx("VMAC", 0, true, false, false);
-    addVMx("VMACN",0, true, false, false);
-    addVMx("VMACR",1, true, true, false);
-    addVMx("VMACRN",1, true, true, false);
-    addVMx("VMUL",2, true, false, true);
-    addVMx("VMULN",2, true, false, true);
-    addVMx("VMULR",3, true, true, true);
-    addVMx("VMULRN",3, true, true, true);
+    addVMx("VMAC",  0, 0, true, false);
+    addVMx("VMACN", 0, 0, true, false);
+    addVMx("VMACR", 0, 1, true, true);
+    addVMx("VMACRN",0, 1, true, true);
+    addVMx("VMUL",  1, 0, true, false);
+    addVMx("VMULN", 1, 0, true, false);
+    addVMx("VMULR", 1, 1, true, true);
+    addVMx("VMULRN",1, 1, true, true);
 
     add("VPSUM", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("VPSUM expects vprs");
         int vprs = parseRegIndex(ops[0]);
         if(vprs<0||vprs>31) throw AsmError("vprs out of range");
-        uint16_t w = makeBase(2, 1); // opcode=10 funct2=01
-        w |= (vprs & 0x1F) << 5; // bits 9:5
-        w |= (0x4) << 13; // func3=100
+        uint16_t w = makeBase(1, 2, 0); // opcode=01 func2=10
+        int payload = ((vprs & 0x1F) << 5) | 0x0;
+        setPayload(w, payload);
         ctx.words.push_back(w);
     });
     add("VPSUMR", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("VPSUMR expects vpstride");
         int vpstride = parseInt(ops[0]);
         if(vpstride<0||vpstride>31) throw AsmError("vpstride out of range");
-        uint16_t w = makeBase(2, 1); // opcode=10 funct2=01
-        w |= (vpstride & 0x1F) << 5; // bits 9:5
-        w |= (0x5)<<13; // func3=101
+        uint16_t w = makeBase(1, 2, 0); // opcode=01 func2=10
+        int payload = ((vpstride & 0x1F) << 5) | 0x1;
+        setPayload(w, payload);
+        ctx.words.push_back(w);
+    });
+    // Mixed control
+    add("VPSUM_VTSTORE", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=2) throw AsmError("VPSUM_VTSTORE expects vprs and vtrd");
+        int vprs = parseRegIndex(ops[0]);
+        if(vprs<0||vprs>31) throw AsmError("vprs out of range");
+        int vtrd = parseRegIndex(ops[1]);
+        if(vtrd<0||vtrd>2) throw AsmError("vtrd out of range (0..2)");
+        uint16_t w = makeBase(1, 3, 0); // opcode=01 func2=11
+        int payload = ((vprs & 0x1F) << 5) | ((vtrd & 0x3) << 3) | 0x0;
+        setPayload(w, payload);
+        ctx.words.push_back(w);
+    });
+    add("VPSUMR_VTSTORE", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=2) throw AsmError("VPSUMR_VTSTORE expects vpstride and vtrd");
+        int vpstride = parseRegIndex(ops[0]);
+        if(vpstride<0||vpstride>31) throw AsmError("vpstride out of range");
+        int vtrd = parseRegIndex(ops[1]);
+        if(vtrd<0||vtrd>2) throw AsmError("vtrd out of range (0..2)");
+        uint16_t w = makeBase(1, 3, 0); // opcode=01 func2=11
+        int payload = ((vpstride & 0x1F) << 5) | ((vtrd & 0x3) << 3) | 0x1;
+        setPayload(w, payload);
+        ctx.words.push_back(w);
+    });
+    add("VPSUM_TSHIFT", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=2) throw AsmError("VPSUM_TSHIFT expects vprs and kernel_size");
+        int vprs = parseRegIndex(ops[0]);
+        if(vprs<0||vprs>31) throw AsmError("vprs out of range");
+        int kernel_size = parseRegIndex(ops[1]);
+        int encoded_k;
+        switch(kernel_size){
+             case 3: encoded_k = 0; break;
+             case 5: encoded_k = 1; break;
+             case 7: encoded_k = 2; break;
+             default: throw AsmError("Unsupported kernel size (3/5/7)");
+        }
+        uint16_t w = makeBase(1, 3, 0); // opcode=01 func2=11
+        int payload = ((vprs & 0x1F) << 5) | ((encoded_k & 0x3) << 3) | 0x2;
+        setPayload(w, payload);
+        ctx.words.push_back(w);
+    });
+    add("VPSUMR_TSHIFT", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=2) throw AsmError("VPSUMR_TSHIFT expects vpstride and kernel_size");
+        int vpstride = parseRegIndex(ops[0]);
+        if(vpstride<0||vpstride>31) throw AsmError("vpstride out of range");
+        int kernel_size = parseRegIndex(ops[1]);
+        int encoded_k;
+        switch(kernel_size){
+             case 3: encoded_k = 0; break;
+             case 5: encoded_k = 1; break;
+             case 7: encoded_k = 2; break;
+             default: throw AsmError("Unsupported kernel size (3/5/7)");
+        }
+        uint16_t w = makeBase(1, 3, 0); // opcode=01 func2=11
+        int payload = ((vpstride & 0x1F) << 5) | ((encoded_k & 0x3) << 3) | 0x3;
+        setPayload(w, payload);
         ctx.words.push_back(w);
     });
 
-    // J imm pattern same as LDMA.LEN
-    add("J", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
-        if(ops.size()!=1) throw AsmError("J expects 1 immediate/label");
-        int imm=-1;
-        bool isLabel=false;
-        try {
-            imm = parseInt(ops[0]);
-        } catch(...){
-            isLabel=true;
-        }
-        uint16_t w = makeBase(1, 2); // opcode=01 funct2=10
-        if(!isLabel){
-            if(imm<0||imm>0x7FF) throw AsmError("imm out of range (0..2047)");
-            if(imm & 0x1) throw AsmError("J immediate must be even (byte address, 2-byte aligned)");
-            int b_9_7 = (imm >> 7) & 0x7;
-            int b_10 = (imm >> 10) &1;
-            int b_0 = imm &1;
-            int b_6_1 = (imm>>1)&0x3F;
-            w |= b_9_7<<13; w |= b_10<<12; w |= b_0<<11; w |= b_6_1<<5;
-        } else {
-            patches.push_back({Patch::JUMP,(int)ctx.words.size(), ops[0]});
-        }
-        ctx.words.push_back(w);
-    });
 
-    // LOOPIN loop_count pattern bits 9:7 -> [15:13]; bits 6:1 + bit0 -> [11:5]; func1=0 at bit12, funct2=11 opcode=01 func1=0, func3= loop_count[9:7]
+    // LOOPIN / LOOPBREAK (opcode=10 func2=00)
     add("LOOPIN", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(ops.size()!=1) throw AsmError("LOOPIN expects loop_count");
-        int lc = parseInt(ops[0]); if(lc<1||lc>1024) throw AsmError("loop_count out of range (1..1024) for 0-based encoding");
-        int val = lc - 1; // 0-based encoding
-        uint16_t w = makeBase(1, 3); // opcode=01 funct2=11
-        int b_9_7=(val>>7)&0x7;
-        int b_0 = val &1;
-        int b_6_1=(val>>1)&0x3F;
-        w |= b_9_7<<13; // func3 region
-        // bit12 func1=0 already 0
-        w |= b_0 << 11;
-        w |= b_6_1 <<5;
+        int lc = parseInt(ops[0]) - 1;
+        if(lc < 0 || lc > 0x3FF) throw AsmError("loop_count out of range (1..1024)");
+        uint16_t w = makeBase(2, 0, 0);
+        setPayload(w, lc);
         ctx.words.push_back(w);
-    });
-    add("LOOPBREAK", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
-        if(!ops.empty()) throw AsmError("LOOPBREAK no operand");
-        uint16_t w = makeBase(1, 3); // opcode=01 funct2=11
-        // func1=1 at bit12; set it; func3 maybe 0
-        w |= 1<<12; ctx.words.push_back(w);
     });
 
-    // System level
+    // System level (opcode=10)
+    auto emitSysCtrl = [&](EncoderCtx &ctx, int payload){
+        uint16_t w = makeBase(2, 1, 0);
+        setPayload(w, payload);
+        ctx.words.push_back(w);
+    };
+    auto emitSysSync = [&](EncoderCtx &ctx, int payload){
+        uint16_t w = makeBase(2, 1, 1);
+        setPayload(w, payload);
+        ctx.words.push_back(w);
+    };
+
+    add("SYS.CTRL", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.size()!=1) throw AsmError("SYS.CTRL expects flag list");
+        std::string s = trim(ops[0]);
+        if(!s.empty() && s.front()=='(' && s.back()==')') s = trim(s.substr(1, s.size()-2));
+        auto flags = splitOperands(s);
+        bool hasSwap = false;
+        int payload = 0;
+        for(auto &f : flags){
+            std::string u = trim(f);
+            if(u.empty()) continue;
+            std::transform(u.begin(),u.end(),u.begin(),::toupper);
+            if(u=="SWAPDM") { hasSwap = true; continue; }
+            if(u=="SDMA.ACT") payload |= (1<<7);
+            else if(u=="SDMA.RST") payload |= (1<<6);
+            else if(u=="LDMA.ACT") payload |= (1<<5);
+            else if(u=="LDMA.RST") payload |= (1<<4);
+            else if(u=="RST.PID") payload |= (1<<3);
+            else if(u=="RST.TID") payload |= (1<<2);
+            else if(u=="CLEAR.T") payload |= (1<<1);
+            else if(u=="CLEAR.P") payload |= (1<<0);
+            else throw AsmError("Unknown SYS.CTRL flag: "+u);
+        }
+        if(hasSwap){
+            if(payload!=0) throw AsmError("SWAPDM cannot be combined with other SYS.CTRL flags");
+            emitSysSync(ctx, 1);
+        } else {
+            emitSysCtrl(ctx, payload);
+        }
+    });
+
+    add("SYS.SYNC", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
+        if(ops.empty()) { emitSysSync(ctx, 0); return; }
+        if(ops.size()!=1) throw AsmError("SYS.SYNC expects optional SWAPDM flag");
+        std::string s = trim(ops[0]);
+        if(!s.empty() && s.front()=='(' && s.back()==')') s = trim(s.substr(1, s.size()-2));
+        std::transform(s.begin(),s.end(),s.begin(),::toupper);
+        if(s.empty() || s=="SWAPDM") emitSysSync(ctx, 1); else throw AsmError("SYS.SYNC only supports SWAPDM");
+    });
+
     add("NOP", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(!ops.empty()) throw AsmError("NOP no operands");
-        uint16_t w = makeBase(2, 0);
+        uint16_t w = makeBase(2, 2, 0);
+        setPayload(w, 0);
         ctx.words.push_back(w);
     });
-    add("SWAPDM", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
-        if(!ops.empty()) throw AsmError("SWAPDM no operands");
-        uint16_t w = makeBase(3, 3); // opcode=11 funct2=11
-        w |= (4) << 13; // func3 = 100
-        ctx.words.push_back(w);
-    });
+
     add("HALT", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
         if(!ops.empty()) throw AsmError("HALT no operands");
-        uint16_t w = makeBase(3, 3); // opcode=11 funct2=11
-        // func3 = 000
-        ctx.words.push_back(w);
-    });
-    add("CLEAR.T", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
-        if(!ops.empty()) throw AsmError("CLEAR.T no operands");
-        uint16_t w = makeBase(2, 3);
-        // func3 = 0b000
-        ctx.words.push_back(w);
-    });
-    add("CLEAR.P", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
-        if(!ops.empty()) throw AsmError("CLEAR.P no operands");
-        uint16_t w = makeBase(2, 3);
-        w |= (1)<<13; // func3 = 0b001
-        ctx.words.push_back(w);
-    });
-    add("SETRID.P", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
-        if(ops.size()!=1) throw AsmError("SETRID.P pid");
-        int pid=parseInt(ops[0]);
-        if(pid<0||pid>31) throw AsmError("pid range");
-        uint16_t w = makeBase(2, 2); // opcode=10 funct2=10
-        setFunc3Func1(w, 1, 0); // func3=001 func1=0
-        w |= (pid & 0x1F)<<5;
-        ctx.words.push_back(w);
-    });
-    add("SETRID.T", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
-        if(ops.size()!=1) throw AsmError("SETRID.T vtid");
-        int vt=parseInt(ops[0]); if(vt<0||vt>3) throw AsmError("vtid range 0..3");
-        uint16_t w = makeBase(2, 2); // opcode=10 funct2=10
-        setFunc3Func1(w, 2, 0); // func3=010 func1=0
-        w |= (vt & 0x3)<<10;
-        ctx.words.push_back(w);
-    });
-    add("SETRID.PT", [&](const std::vector<std::string>&ops, EncoderCtx &ctx){
-        if(ops.size()!=2) throw AsmError("SETRID.PT pid, vtid");
-        int pid=parseInt(ops[0]);
-        int vt=parseInt(ops[1]);
-        if(pid<0||pid>31) throw AsmError("pid range");
-        if(vt<0||vt>3) throw AsmError("vtid range");
-        uint16_t w = makeBase(2, 2); // opcode=10 funct2=10
-        setFunc3Func1(w, 3, 0); // func3=011 func1=0
-        w |= (pid & 0x1F) << 5;
-        w |= (vt & 0x3) << 10;
+        uint16_t w = makeBase(2, 3, 0);
+        setPayload(w, 0);
         ctx.words.push_back(w);
     });
 }
@@ -405,6 +427,29 @@ TemplateResult Assembler::assembleTemplate(const std::string &source, bool verbo
     result.isTemplate = false;
 
     EncoderCtx ctx;
+    auto isDmaUseMnemonic = [&](const std::string &u){
+        return (u == "VMACN" || u == "VMACRN" || u == "VMULN" || u == "VMULRN");
+    };
+    auto hasLdmaActFlag = [&](const std::string &rest){
+        std::string s = trim(rest);
+        if (s.empty()) return false;
+        if (!s.empty() && s.front() == '(' && s.back() == ')') {
+            s = trim(s.substr(1, s.size() - 2));
+        }
+        auto flags = splitOperands(s);
+        for (auto &f : flags) {
+            std::string u = trim(f);
+            if (u.empty()) continue;
+            std::transform(u.begin(), u.end(), u.begin(), ::toupper);
+            if (u == "LDMA.ACT") return true;
+        }
+        return false;
+    };
+    auto emitNop = [&](EncoderCtx &ctxRef){
+        uint16_t w = makeBase(2, 2, 0);
+        setPayload(w, 0);
+        ctxRef.words.push_back(w);
+    };
     std::istringstream iss(source);
     std::string line;
     int lineno = 0;
@@ -416,6 +461,7 @@ TemplateResult Assembler::assembleTemplate(const std::string &source, bool verbo
     templatePatches.clear();
 
     bool inTemplate = false;
+    bool pendingLdmaAct = false;
 
     while (std::getline(iss, line)) {
         ++lineno;
@@ -476,6 +522,14 @@ TemplateResult Assembler::assembleTemplate(const std::string &source, bool verbo
         auto it = table.find(u);
         if (it == table.end()) throw AsmError("Unknown mnemonic '" + mn + "' at line " + std::to_string(lineno));
 
+        if (pendingLdmaAct) {
+            if (isDmaUseMnemonic(u)) {
+                emitNop(ctx);
+                if (verbose) std::cout << "Inserted NOP after LDMA.ACT before '" << u << "'\n";
+            }
+            pendingLdmaAct = false;
+        }
+
         auto operands = splitOperands(rest);
 
         // Check for template parameters in operands
@@ -505,12 +559,13 @@ TemplateResult Assembler::assembleTemplate(const std::string &source, bool verbo
             throw AsmError(std::string("Line ") + std::to_string(lineno) + ": " + e.what());
         }
 
+        if (u == "SYS.CTRL" && hasLdmaActFlag(rest)) {
+            pendingLdmaAct = true;
+        }
+
         instrIndex = ctx.words.size();
         if (verbose) std::cout << "Instruction [" << instrIndex - 1 << "] '" << mn << " " << rest << "'\n";
     }
-
-    // Apply label patches
-    applyPatches(ctx.words);
 
     result.instructions = ctx.words;
     result.patches = templatePatches;
@@ -524,33 +579,7 @@ TemplateResult Assembler::assembleTemplate(const std::string &source, bool verbo
     return result;
 }
 
-/*
-    將操作數字串分割為單獨的 token
-    支援逗號分隔和空格分隔
-    返回一個字符串向量
-*/
-void Assembler::applyPatches(std::vector<uint16_t> &words){
-    for(auto &p: patches){
-        if(p.type==Patch::JUMP){
-            auto it = labels.find(p.label);
-            if(it==labels.end()) throw AsmError("Undefined label: "+p.label);
-            int targetIdx = it->second; // 指令 index
-            int byteAddr = targetIdx * 2; // J 使用 byte address, 2-byte 對齊
-            if(byteAddr<0 || byteAddr>0x7FF) throw AsmError("Label target out of range: "+p.label);
-            uint16_t w = makeBase(1, 2); // opcode=01 funct2=10
-            int b_9_7 = (byteAddr >> 7) & 0x7;
-            int b_10 = (byteAddr >> 10) &1;
-            int b_0 = byteAddr &1;
-            int b_6_1 = (byteAddr>>1)&0x3F;
-            w |= b_9_7<<13;
-            w |= b_10<<12;
-            w |= b_0<<11;
-            w |= b_6_1<<5;
-            w |= (words[p.index] & 1); // 保留 loopEnd
-            words[p.index] = w;
-        }
-    }
-}
+
 /*
     組譯器主函式
     讀取源碼，處理標籤和指令，並返回組譯後的指令集 (vector<uint16_t>)
@@ -563,10 +592,34 @@ void Assembler::applyPatches(std::vector<uint16_t> &words){
 std::vector<uint16_t> Assembler::assemble(const std::string &source, bool verbose){
     if(verbose) std::cout << "Assembling source code...\n";
     EncoderCtx ctx;
+    auto isDmaUseMnemonic = [&](const std::string &u){
+        return (u == "VMACN" || u == "VMACRN" || u == "VMULN" || u == "VMULRN");
+    };
+    auto hasLdmaActFlag = [&](const std::string &rest){
+        std::string s = trim(rest);
+        if (s.empty()) return false;
+        if (!s.empty() && s.front() == '(' && s.back() == ')') {
+            s = trim(s.substr(1, s.size() - 2));
+        }
+        auto flags = splitOperands(s);
+        for (auto &f : flags) {
+            std::string u = trim(f);
+            if (u.empty()) continue;
+            std::transform(u.begin(), u.end(), u.begin(), ::toupper);
+            if (u == "LDMA.ACT") return true;
+        }
+        return false;
+    };
+    auto emitNop = [&](EncoderCtx &ctxRef){
+        uint16_t w = makeBase(2, 2, 0);
+        setPayload(w, 0);
+        ctxRef.words.push_back(w);
+    };
     std::istringstream iss(source);
     std::string line;
     int lineno=0;
     int instrIndex=0;
+    bool pendingLdmaAct = false;
     labels.clear();
     patches.clear();
     // first pass: 處理標籤和指令
@@ -595,17 +648,29 @@ std::vector<uint16_t> Assembler::assemble(const std::string &source, bool verbos
         std::transform(u.begin(),u.end(),u.begin(),::toupper); // 將指令名稱轉為大寫
         auto it = table.find(u); // 在對應表中查找
         if(it==table.end()) throw AsmError("Unknown mnemonic '"+mn+"' at line "+std::to_string(lineno)); // 未知指令
+
+        if (pendingLdmaAct) {
+            if (isDmaUseMnemonic(u)) {
+                emitNop(ctx);
+                if (verbose) std::cout << "Inserted NOP after LDMA.ACT before '" << u << "'\n";
+            }
+            pendingLdmaAct = false;
+        }
+
         auto operands = splitOperands(rest); // 分割操作數
         try {
             it->second.fn(operands, ctx);
         } catch(const AsmError &e){
             throw AsmError(std::string("Line ")+std::to_string(lineno)+": "+e.what());
         }
+
+        if (u == "SYS.CTRL" && hasLdmaActFlag(rest)) {
+            pendingLdmaAct = true;
+        }
         instrIndex = ctx.words.size();
         if(verbose) std::cout << "Instruction ["<< instrIndex-1<<"] '" << mn << " " << rest << "'\n";
     }
-    // second pass: 處理跳轉標籤
-    applyPatches(ctx.words);
+
     if(verbose) std::cout << "Assembling completed. Total instructions: " << ctx.words.size() << "\n";
     return ctx.words;
 }
@@ -620,83 +685,97 @@ std::string Disassembler::disasmWord(uint16_t w) const {
     std::ostringstream os;
     bool loopEnd = w & 1;
     int opcode = (w>>1)&0x3;
-    int funct2=(w>>3)&0x3;
-    int func3=(w>>13)&0x7;
-    int func1=(w>>12)&1;
-    int payload=(w>>5)&0x7F;
-    if(opcode==3 && funct2==3){
-        if(func3==4) os<<"SWAPDM";
-        else os<<"HALT";
+    int func2=(w>>3)&0x3;
+    int func1=(w>>5)&0x1;
+    int payload=(w>>6)&0x3FF;
+    int func3 = payload & 0x7;
+    int reg5 = (payload>>5) & 0x1F;
+    int vtbits = (payload>>3) & 0x3;
+    int stride = (payload>>3) & 0x7;
+
+    if(opcode==2 && func2==3 && func1==0){
+        os<<"HALT";
     }
-    else if(opcode==2 && funct2==0){ os<<"NOP"; }
-    else if(opcode==0 && funct2==0){
-        int bits6_1 = payload & 0x3F;
-        int bit0   = (payload >> 6) & 0x1;
-        int val = (func3 << 7) | (bits6_1 << 1) | bit0;
-        if(func1==0) os<<"SDMA.ADDR "<<val;
-        else os<<"SDMA.LEN "<<val+1;
+    else if(opcode==2 && func2==2 && func1==0){
+        os<<"NOP";
     }
-    else if(opcode==0 && funct2==1){
-        int bits6_1 = payload & 0x3F;           // payload bits5:0 -> [10:5] => value[6:1]
-        int bit0   = (payload >> 6) & 0x1;      // payload bit6   -> [11]   => value[0]
-        int val = (func3 << 7) | (bits6_1 << 1) | bit0; // 10-bit
-        if(func1==0) os<<"LDMA.ADDR "<<val;
-        else os<<"LDMA.LEN "<<val+1;
-    }
-    else if(opcode==0 && funct2==2){
-        static const char* names[7] = {"LDMA.LB","LDMA.LH","LDMA.LW","LDMA.LD","LDMA.LBB","LDMA.LHB","LDMA.LWB"};
-        if(func3<=6){ os<<names[func3]<<" "<< ((w>>10)&0x7); }
-        else os<<"DMA.?";
-    }
-    else if(opcode==0 && funct2==3 && func3==3){ os<<"SDMA.SD "<< ((w>>10)&0x7); }
-    else if(opcode==2 && funct2==1){
-        switch(func3){
-            case 0: os<<(func1?"VMACN":"VMAC")<<" P"<<((w>>5)&0x1F)<<", VT"<<((w>>10)&0x3); break;
-            case 1: os<<(func1?"VMACRN":"VMACR")<<" PSTR="<<((w>>5)&0x1F)<<", VTSTR="<<((w>>10)&0x3); break;
-            case 2: os<<(func1?"VMULN":"VMUL")<<" P"<<((w>>5)&0x1F)<<", VT"<<((w>>10)&0x3); break;
-            case 3: os<<(func1?"VMULRN":"VMULR")<<" VPSTR="<<((w>>5)&0x1F)<<", VTSTR="<<((w>>10)&0x3); break;
-            case 4: os<<"VPSUM VPRS=P"<<((w>>5)&0x1F); break;
-            case 5: os<<"VPSUMR VPSTR="<<((w>>5)&0x1F); break;
-            default: os<<"ARITH?"; break;
-        }
-    }
-    else if(opcode==2 && funct2==2){ // SETRID group
-        switch(func3){
-            case 1: os<<"SETRID.P "<<((w>>5)&0x1F); break;
-            case 2: os<<"SETRID.T "<<((w>>10)&0x3); break;
-            case 3: os<<"SETRID.PT "<<((w>>5)&0x1F)<<", "<<((w>>10)&0x3); break;
-            default: os<<"RID?"; break;
-        }
-    }
-    else if(opcode==2 && funct2==3){ // CLEAR group
-        switch(func3){
-            case 0: os<<"CLEAR.T"; break; case 1: os<<"CLEAR.P"; break; default: os<<"CLEAR?"; break;
-        }
-    }
-    else if(opcode==1 && funct2==1){
-        int bits6_1 = payload & 0x3F;
-        int bit0   = (payload >> 6) & 0x1;
-        int val = (func3 << 7) | (bits6_1 << 1) | bit0;
-        val += 1; // 0-based decoding
-        if(func1==0) os<<"LDMA.LOOP "<<val;
-        else os<<"SDMA.LOOP "<<val;
-    }
-    else if(opcode==1 && funct2==2){
-        int imm = ((func3 & 0x7)<<7) | (func1<<10) | (((w>>11)&1)) | ((payload & 0x3F)<<1);
-        os<<"J 0x"<<std::hex<<imm<<std::dec<<" (idx="<<(imm/2)<<")";
-    }
-    else if(opcode==1 && funct2==3){
-        if(func1==0){ int lc = ((func3 &0x7)<<7) | (((w>>11)&1)) | ((payload & 0x3F)<<1); lc+=1; os<<"LOOPIN "<<lc; }
-        else os<<"LOOPBREAK";
-    }
-    else if(opcode==1 && funct2==0){ // TSTORE / TSHIFT 新規格 funct2=00
-        if(func3==0){ // TSTORE
-            int trd = (w>>5)&0xf; os<<"TSTORE "<<trd; }
-        else if(func3==1){ // TSHIFT
-            int code = (w>>10)&0x7; int k = (code==0?3:(code==1?5:(code==2?7:-1)));
-            if(k==-1) os<<"TSHIFT ?"; else os<<"TSHIFT "<<k;
+    else if(opcode==2 && func2==1){
+        if(func1==1){
+            if(payload & 0x1) os<<"SYS.SYNC (SWAPDM)"; else os<<"SYS.SYNC";
         } else {
-            os<<"T?";
+            std::vector<std::string> flags;
+            if(payload & (1<<7)) flags.push_back("SDMA.ACT");
+            if(payload & (1<<6)) flags.push_back("SDMA.RST");
+            if(payload & (1<<5)) flags.push_back("LDMA.ACT");
+            if(payload & (1<<4)) flags.push_back("LDMA.RST");
+            if(payload & (1<<3)) flags.push_back("RST.PID");
+            if(payload & (1<<2)) flags.push_back("RST.TID");
+            if(payload & (1<<1)) flags.push_back("CLEAR.T");
+            if(payload & (1<<0)) flags.push_back("CLEAR.P");
+            os<<"SYSCTRL (";
+            for(size_t i=0;i<flags.size();++i){ if(i) os<<", "; os<<flags[i]; }
+            os<<")";
+        }
+    }
+    else if(opcode==2 && func2==0 && func1==0){
+        os<<"LOOPIN "<<payload+1;
+    }
+    else if(opcode==0 && func2==0){
+        if(func1==0) os<<"LDMA.ADDR "<<payload;
+        else os<<"SDMA.ADDR "<<payload;
+    }
+    else if(opcode==0 && func2==1){
+        if(func1==0) os<<"LDMA.LEN "<<payload+1;
+        else os<<"SDMA.LEN "<<payload+1;
+    }
+    else if(opcode==0 && func2==2){
+        if(func1==0) os<<"LDMA.LOOP "<<payload+1;
+        else os<<"SDMA.LOOP "<<payload+1;
+    }
+    else if(opcode==0 && func2==3){
+        if(func1==0){
+            static const char* names[7] = {"LDMA.LB","LDMA.LH","LDMA.LW","LDMA.LD","LDMA.LBB","LDMA.LHB","LDMA.LWB"};
+            if(func3==7) os<<"SDMA.SD "<<stride;
+            else if(func3<=6) os<<names[func3]<<" "<<stride;
+            else os<<"DMA.?";
+        } else {
+            if(func3==0){
+                int trd = (payload>>6)&0xF; os<<"TSTORE T"<<trd;
+            } else if(func3==1){
+                int vtrd = (payload>>3)&0x3; os<<"VTSTORE VT"<<vtrd;
+            } else if(func3==2){
+                int encoded_k = (payload>>3)&0x3;
+                switch (encoded_k) {
+                    case 0: os<<"TSHIFT K3"; break;
+                    case 1: os<<"TSHIFT K5"; break;
+                    case 2: os<<"TSHIFT K7"; break;
+                    default: os<<"TSHIFT K?";
+                }
+            } else {
+                os<<"T?";
+            }
+        }
+    }
+    else if(opcode==1){
+        if(func2==0){
+            if(func3==0){ os<<(func1?"VMACN":"VMAC")<<" P"<<reg5<<", VT"<<vtbits; }
+            else if(func3==1){ os<<(func1?"VMACRN":"VMACR")<<" "<<reg5<<", "<<(vtbits==3?"VTRST":("VT"+std::to_string(vtbits))); }
+            else os<<"ARITH?";
+        } else if(func2==1){
+            if(func3==0){ os<<(func1?"VMULN":"VMUL")<<" VP"<<reg5<<", VT"<<vtbits; }
+            else if(func3==1){ os<<(func1?"VMULRN":"VMULR")<<" "<<reg5<<", "<<(vtbits==3?"VTRST":("VT"+std::to_string(vtbits))); }
+            else os<<"ARITH?";
+        } else if(func2==2){
+            if(func3==0) os<<"VPSUM VP"<<reg5;
+            else if(func3==1) os<<"VPSUMR "<<reg5;
+            else os<<"ARITH?";
+        } else if(func2==3){
+            if(func3==0) os<<"VPSUM_VTSTORE VP"<<reg5<<", VT"<<vtbits;
+            else if(func3==1) os<<"VPSUMR_VTSTORE "<<reg5<<", VT"<<vtbits;
+            else if(func3==2) os<<"VPSUM_TSHIFT VP"<<reg5<<", K"<<((payload>>3)&0x3)*2+3;
+            else if(func3==3) os<<"VPSUMR_TSHIFT "<<reg5<<", K"<<((payload>>3)&0x3)*2+3;
+        } else {
+            os<<"ARITH?";
         }
     }
     else { os<<".word 0x"<<std::hex<<w; }

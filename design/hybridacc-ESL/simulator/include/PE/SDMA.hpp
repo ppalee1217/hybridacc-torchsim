@@ -49,12 +49,11 @@ public:
     sc_in<bool> set_addr;
     sc_in<bool> set_len;
     sc_in<bool> set_loop;
-    sc_in<uint16_t> mode;
-    sc_in<uint16_t> stride;
+    sc_in<bool> set_mode;
     sc_in<bool> swap_in;
 
     sc_in<bool> active;
-    sc_in<bool> next;
+    sc_in<bool> reset_active;
 
     sc_out<bool> busy;
     sc_out<bool> done;
@@ -80,11 +79,8 @@ public:
           set_addr("set_addr"),
           set_len("set_len"),
           set_loop("set_loop"),
-          mode("mode"),
-          stride("stride"),
           swap_in("swap_in"),
           active("active"),
-          next("next"),
           busy("busy"),
           done("done"),
           dl_stall_out("dl_stall_out"),
@@ -99,15 +95,15 @@ public:
 
         // 初始化暫存器
         state_reg.write(SDMAState::IDLE);
-        dma_base_reg.write(0);
-        dma_len_cfg_reg.write(0);
-        dma_stride_reg.write(0);
-        dma_loop_cfg_reg.write(0);
-        dma_offset_reg.write(0);
-        dma_len_rem_reg.write(0);
-        dma_loops_rem_reg.write(0);
-        bank_sel_reg.write(0); // Default Bank 0
-        bank_valid_reg.write(0);
+        dma_base_static_reg.write(0);
+        dma_len_static_reg.write(0);
+        dma_stride_static_reg.write(0);
+        dma_loop_static_reg.write(0);
+        dma_offset_active_reg.write(0);
+        dma_len_active_rem_reg.write(0);
+        dma_loops_active_rem_reg.write(0);
+        bank_sel_active_reg.write(0); // Default Bank 0
+        bank_valid_active_reg.write(0);
 
         SC_CTHREAD(sequential_process, clk.pos());
         reset_signal_is(reset_n, false);
@@ -119,20 +115,20 @@ public:
               << set_addr << set_len << set_loop
               << swap_in
               << ps_data.valid_in
-              << imm << stride
-              << dma_base_reg << dma_len_cfg_reg << dma_stride_reg << dma_loop_cfg_reg
-              << dma_offset_reg << dma_len_rem_reg << dma_loops_rem_reg
-              << bank_sel_reg << bank_valid_reg;
+              << imm
+              << dma_base_static_reg << dma_len_static_reg << dma_stride_static_reg << dma_loop_static_reg
+              << dma_offset_active_reg << dma_len_active_rem_reg << dma_loops_active_rem_reg
+              << bank_sel_active_reg << bank_valid_active_reg;
 
         SC_METHOD(output_logic);
         sensitive << state_reg
               << ps_data.valid_in << ps_data.data_in
-              << dma_base_reg << dma_offset_reg
-              << dma_len_rem_reg
-              << bank_sel_reg;
+              << dma_base_static_reg << dma_offset_active_reg
+              << dma_len_active_rem_reg
+              << bank_sel_active_reg;
 
         SC_METHOD(ready_logic);
-        sensitive << state_reg << dma_len_rem_reg;
+        sensitive << state_reg << dma_len_active_rem_reg;
 
         SC_METHOD(stall_logic);
         sensitive << state_reg;
@@ -142,32 +138,32 @@ public:
     sc_signal<SDMAState> state_reg;
 
     // Configuration registers (programmed only in IDLE)
-    sc_signal<uint16_t> dma_base_reg;
-    sc_signal<uint16_t> dma_len_cfg_reg;
-    sc_signal<uint16_t> dma_stride_reg;
-    sc_signal<uint16_t> dma_loop_cfg_reg;
+    sc_signal<uint16_t> dma_base_static_reg;
+    sc_signal<uint16_t> dma_len_static_reg;
+    sc_signal<uint16_t> dma_stride_static_reg;
+    sc_signal<uint16_t> dma_loop_static_reg;
 
     // Runtime registers
-    sc_signal<uint16_t> dma_offset_reg;
-    sc_signal<uint16_t> dma_len_rem_reg;
-    sc_signal<uint16_t> dma_loops_rem_reg;
+    sc_signal<uint16_t> dma_offset_active_reg;
+    sc_signal<uint16_t> dma_len_active_rem_reg;
+    sc_signal<uint16_t> dma_loops_active_rem_reg;
 
-    sc_signal<bool> bank_sel_reg;
-    sc_signal<uint8_t> bank_valid_reg; // Bit 0: Bank0, Bit 1: Bank1
+    sc_signal<bool> bank_sel_active_reg;
+    sc_signal<uint8_t> bank_valid_active_reg; // Bit 0: Bank0, Bit 1: Bank1
 
     // Next state (combinational) - 改為 signal
     sc_signal<SDMAState> state_next;
-    sc_signal<uint16_t> dma_base_next;
-    sc_signal<uint16_t> dma_len_cfg_next;
-    sc_signal<uint16_t> dma_stride_next;
-    sc_signal<uint16_t> dma_loop_cfg_next;
+    sc_signal<uint16_t> dma_base_static_next;
+    sc_signal<uint16_t> dma_len_static_next;
+    sc_signal<uint16_t> dma_stride_static_next;
+    sc_signal<uint16_t> dma_loop_static_next;
 
-    sc_signal<uint16_t> dma_offset_next;
-    sc_signal<uint16_t> dma_len_rem_next;
-    sc_signal<uint16_t> dma_loops_rem_next;
+    sc_signal<uint16_t> dma_offset_active_next;
+    sc_signal<uint16_t> dma_len_active_rem_next;
+    sc_signal<uint16_t> dma_loops_active_rem_next;
 
-    sc_signal<bool> bank_sel_next;
-    sc_signal<uint8_t> bank_valid_next;
+    sc_signal<bool> bank_sel_active_next;
+    sc_signal<uint8_t> bank_valid_active_next;
 
     static inline uint16_t normalize_loop_count(uint16_t v) {
         // Treat 0 as 1 phase to avoid "no-op task" surprises.
@@ -178,37 +174,38 @@ public:
     void sequential_process() {
         // Reset initialization
         state_reg.write(SDMAState::IDLE);
-        dma_base_reg.write(0);
-        dma_len_cfg_reg.write(0);
-        dma_stride_reg.write(0);
-        dma_loop_cfg_reg.write(0);
-        dma_offset_reg.write(0);
-        dma_len_rem_reg.write(0);
-        dma_loops_rem_reg.write(0);
-        bank_sel_reg.write(0);
-        bank_valid_reg.write(0);
+        dma_base_static_reg.write(0);
+        dma_len_static_reg.write(0);
+        dma_stride_static_reg.write(0);
+        dma_loop_static_reg.write(0);
+        dma_offset_active_reg.write(0);
+        dma_len_active_rem_reg.write(0);
+        dma_loops_active_rem_reg.write(0);
+        bank_sel_active_reg.write(0);
+        bank_valid_active_reg.write(0);
         wait();
 
         while (true) {
             // Update all registers with next values
             state_reg.write(state_next.read());
-            dma_base_reg.write(dma_base_next.read());
-            dma_len_cfg_reg.write(dma_len_cfg_next.read());
-            dma_offset_reg.write(dma_offset_next.read());
-            dma_stride_reg.write(dma_stride_next.read());
-            dma_loop_cfg_reg.write(dma_loop_cfg_next.read());
+            dma_base_static_reg.write(dma_base_static_next.read());
+            dma_len_static_reg.write(dma_len_static_next.read());
+            dma_offset_active_reg.write(dma_offset_active_next.read());
+            dma_stride_static_reg.write(dma_stride_static_next.read());
+            dma_loop_static_reg.write(dma_loop_static_next.read());
 
-            dma_len_rem_reg.write(dma_len_rem_next.read());
-            dma_loops_rem_reg.write(dma_loops_rem_next.read());
-            bank_sel_reg.write(bank_sel_next.read());
-            bank_valid_reg.write(bank_valid_next.read());
+            dma_len_active_rem_reg.write(dma_len_active_rem_next.read());
+            dma_loops_active_rem_reg.write(dma_loops_active_rem_next.read());
+            bank_sel_active_reg.write(bank_sel_active_next.read());
+            bank_valid_active_reg.write(bank_valid_active_next.read());
 
             DEBUG_MSG("[SDMA] State=" << state_reg.read()
                       << " ps_valid=" << ps_data.valid_in.read()
                       << " ready=" << ps_data.ready_out.read()
-                      << " len_rem=" << dma_len_rem_reg.read()
-                      << " loops_rem=" << dma_loops_rem_reg.read()
-                      << " next=" << next.read(), DEBUG_LEVEL_PE_COMPONENTS);
+                      << " len_rem=" << dma_len_active_rem_reg.read()
+                      << " loops_rem=" << dma_loops_active_rem_reg.read()
+                      << " stride=" << dma_stride_static_reg.read()
+                      << " offset=" << dma_offset_active_reg.read(), DEBUG_LEVEL_PE_COMPONENTS);
 
             wait();
         }
@@ -217,54 +214,64 @@ public:
     void next_state_logic() {
         // Default: hold current values
         state_next.write(state_reg.read());
-        dma_base_next.write(dma_base_reg.read());
-        dma_len_cfg_next.write(dma_len_cfg_reg.read());
-        dma_stride_next.write(dma_stride_reg.read());
-        dma_loop_cfg_next.write(dma_loop_cfg_reg.read());
-        dma_offset_next.write(dma_offset_reg.read());
-        dma_len_rem_next.write(dma_len_rem_reg.read());
-        dma_loops_rem_next.write(dma_loops_rem_reg.read());
-        bank_sel_next.write(bank_sel_reg.read());
-        bank_valid_next.write(bank_valid_reg.read());
+        dma_base_static_next.write(dma_base_static_reg.read());
+        dma_len_static_next.write(dma_len_static_reg.read());
+        dma_stride_static_next.write(dma_stride_static_reg.read());
+        dma_loop_static_next.write(dma_loop_static_reg.read());
+        dma_offset_active_next.write(dma_offset_active_reg.read());
+        dma_len_active_rem_next.write(dma_len_active_rem_reg.read());
+        dma_loops_active_rem_next.write(dma_loops_active_rem_reg.read());
+        bank_sel_active_next.write(bank_sel_active_reg.read());
+        bank_valid_active_next.write(bank_valid_active_reg.read());
 
-        const bool fire = (state_reg.read() == SDMAState::RUN) && ps_data.valid_in.read() && (dma_len_rem_reg.read() > 0);
+        const bool fire = (state_reg.read() == SDMAState::RUN) && ps_data.valid_in.read() && (dma_len_active_rem_reg.read() > 0);
+
+        if (reset_active.read()) {
+            // If reset active, go back to IDLE immediately.
+            state_next.write(SDMAState::IDLE);
+            dma_offset_active_next.write(0);
+            dma_len_active_rem_next.write(0);
+            dma_loops_active_rem_next.write(0);
+            bank_sel_active_next.write(0);
+            bank_valid_active_next.write(0);
+        }
 
         switch (state_reg.read()) {
             case SDMAState::IDLE: {
                 // Configuration (only in IDLE)
                 if (set_addr.read()) {
-                    dma_base_next.write(imm.read());
+                    dma_base_static_next.write(imm.read());
                 } else if (set_len.read()) {
-                    dma_len_cfg_next.write((uint16_t)(imm.read()+1)); // len is 0-based
+                    dma_len_static_next.write((uint16_t)(imm.read()+1)); // len is 0-based
                 } else if (set_loop.read()) {
-                    dma_loop_cfg_next.write((uint16_t)(imm.read()+1)); // loop count is 0-based
+                    dma_loop_static_next.write((uint16_t)(imm.read()+1)); // loop count is 0-based
+                } else if (set_mode.read()) {
+                    dma_stride_static_next.write(imm.read());
                 }
 
                 // Allow SWAPDM even when idle (pure bank role swap)
                 if (swap_in.read()) {
-                    bank_sel_next.write(!bank_sel_reg.read());
+                    bank_sel_active_next.write(!bank_sel_active_reg.read());
                 }
 
                 // Start a background store task (SDMA.SD)
                 if (active.read()) {
-                    dma_stride_next.write(stride.read());
-                    dma_offset_next.write(0);
-
-                    uint16_t loops = normalize_loop_count(dma_loop_cfg_reg.read());
-                    dma_loops_rem_next.write(loops);
-                    dma_len_rem_next.write(dma_len_cfg_reg.read());
+                    dma_offset_active_next.write(0);
+                    uint16_t loops = normalize_loop_count(dma_loop_static_reg.read());
+                    dma_loops_active_rem_next.write(loops);
+                    dma_len_active_rem_next.write(dma_len_static_reg.read());
 
                     // Starting a new phase will overwrite the current writer bank, mark it invalid.
-                    uint8_t mask = bank_sel_reg.read() ? 0x2 : 0x1;
-                    bank_valid_next.write(bank_valid_reg.read() & static_cast<uint8_t>(~mask));
+                    uint8_t mask = bank_sel_active_reg.read() ? 0x2 : 0x1;
+                    bank_valid_active_next.write(bank_valid_active_reg.read() & static_cast<uint8_t>(~mask));
 
                     // If len==0, treat as "phase complete" and directly wait for SWAPDM.
-                    if (dma_len_cfg_reg.read() == 0) {
+                    if (dma_len_static_reg.read() == 0) {
                         if (loops > 0) {
-                            dma_loops_rem_next.write(loops - 1);
+                            dma_loops_active_rem_next.write(loops - 1);
                         }
                         state_next.write(SDMAState::WAIT_SWAP);
-                        bank_valid_next.write((bank_valid_next.read()) | mask);
+                        bank_valid_active_next.write((bank_valid_active_next.read()) | mask);
                     } else {
                         state_next.write(SDMAState::RUN);
                     }
@@ -273,19 +280,19 @@ public:
 
             case SDMAState::RUN: {
                 if (fire) {
-                    dma_offset_next.write(dma_offset_reg.read() + dma_stride_reg.read() * sizeof(uint16_t));
-                    uint16_t next_len = dma_len_rem_reg.read() - 1;
-                    dma_len_rem_next.write(next_len);
+                    dma_offset_active_next.write(dma_offset_active_reg.read() + dma_stride_static_reg.read() * sizeof(uint16_t));
+                    uint16_t next_len = dma_len_active_rem_reg.read() - 1;
+                    dma_len_active_rem_next.write(next_len);
 
                     if (next_len == 0) {
-                        uint16_t loops_rem = dma_loops_rem_reg.read();
+                        uint16_t loops_rem = dma_loops_active_rem_reg.read();
                         if (loops_rem > 0) {
-                            dma_loops_rem_next.write(loops_rem - 1);
+                            dma_loops_active_rem_next.write(loops_rem - 1);
                         }
 
                         // Mark current writer bank valid.
-                        uint8_t mask = bank_sel_reg.read() ? 0x2 : 0x1;
-                        bank_valid_next.write(bank_valid_reg.read() | mask);
+                        uint8_t mask = bank_sel_active_reg.read() ? 0x2 : 0x1;
+                        bank_valid_active_next.write(bank_valid_active_reg.read() | mask);
 
                         // One loop-phase done, wait SWAPDM.
                         state_next.write(SDMAState::WAIT_SWAP);
@@ -295,21 +302,21 @@ public:
 
             case SDMAState::WAIT_SWAP: {
                 if (swap_in.read()) {
-                    bool new_bank_sel = !bank_sel_reg.read();
-                    bank_sel_next.write(new_bank_sel);
+                    bool new_bank_sel = !bank_sel_active_reg.read();
+                    bank_sel_active_next.write(new_bank_sel);
 
-                    if (dma_loops_rem_reg.read() > 0) {
+                    if (dma_loops_active_rem_reg.read() > 0) {
                         // Start next phase
-                        dma_offset_next.write(0);
-                        dma_len_rem_next.write(dma_len_cfg_reg.read());
+                        dma_offset_active_next.write(0);
+                        dma_len_active_rem_next.write(dma_len_static_reg.read());
 
                         uint8_t new_mask = new_bank_sel ? 0x2 : 0x1;
-                        bank_valid_next.write(bank_valid_reg.read() & static_cast<uint8_t>(~new_mask));
+                        bank_valid_active_next.write(bank_valid_active_reg.read() & static_cast<uint8_t>(~new_mask));
 
-                        if (dma_len_cfg_reg.read() == 0) {
+                        if (dma_len_static_reg.read() == 0) {
                             // Empty phase completes immediately
-                            dma_loops_rem_next.write(dma_loops_rem_reg.read() - 1);
-                            bank_valid_next.write((bank_valid_next.read()) | new_mask);
+                            dma_loops_active_rem_next.write(dma_loops_active_rem_reg.read() - 1);
+                            bank_valid_active_next.write((bank_valid_active_next.read()) | new_mask);
                             state_next.write(SDMAState::WAIT_SWAP);
                         } else {
                             state_next.write(SDMAState::RUN);
@@ -338,12 +345,12 @@ public:
         busy.write(false);
         done.write(false);
         dm_write_en.write(false);
-        dm_write_addr.write(dma_base_reg.read() + dma_offset_reg.read());
+        dm_write_addr.write(dma_base_static_reg.read() + dma_offset_active_reg.read());
         dm_write_data.write(0);
         dm_write_mask.write(0);
-        bank_sel.write(bank_sel_reg.read());
+        bank_sel.write(bank_sel_active_reg.read());
 
-        const bool fire = (state_reg.read() == SDMAState::RUN) && ps_data.valid_in.read() && (dma_len_rem_reg.read() > 0);
+        const bool fire = (state_reg.read() == SDMAState::RUN) && ps_data.valid_in.read() && (dma_len_active_rem_reg.read() > 0);
 
         switch (state_reg.read()) {
             case SDMAState::IDLE:
@@ -375,7 +382,7 @@ public:
 
     void ready_logic() {
         // SDMA pulls stream data only while RUN and len_rem>0.
-        ps_data.ready_out.write((state_reg.read() == SDMAState::RUN) && (dma_len_rem_reg.read() > 0));
+        ps_data.ready_out.write((state_reg.read() == SDMAState::RUN) && (dma_len_active_rem_reg.read() > 0));
     }
 
     void stall_logic() {

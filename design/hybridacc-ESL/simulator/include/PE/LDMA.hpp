@@ -72,12 +72,12 @@ public:
     sc_in<bool> set_addr;
     sc_in<bool> set_len;
     sc_in<bool> set_loop;
+    sc_in<bool> set_mode;
     sc_in<uint16_t> mode;
-    sc_in<uint16_t> stride;
-    sc_in<bool> write_en;
 
     sc_in<bool> active;
     sc_in<bool> next;
+    sc_in<bool> reset_active;
 
     sc_out<bool> busy;
     sc_out<bool> done;
@@ -90,9 +90,6 @@ public:
     // dmrv
     sc_out<v_fp16_t> dmrv_out;
 
-    // PS Data Port (Use Converted Type)
-    VRDIF<v_fp16_t> ps_data;
-
     // Constructor
     SC_CTOR(LDMA)
         : clk("clk"),
@@ -101,15 +98,14 @@ public:
           set_addr("set_addr"),
           set_len("set_len"),
           set_loop("set_loop"),
+          set_mode("set_mode"),
           mode("mode"),
-          stride("stride"),
-          write_en("write_en"),
           active("active"),
           next("next"),
+          reset_active("reset_active"),
           busy("busy"),
           done("done"),
           dl_stall_out("dl_stall_out"),
-          ps_data("ps_data"),
           dm_read_addr("dm_read_addr"),
           dm_read_data("dm_read_data"),
           dmrv_out("dmrv_out")
@@ -120,6 +116,12 @@ public:
         state_reg.write(LDMAState::IDLE);
         dmrv_reg.write(v_fp16_t());
         dmwv_reg.write(v_fp16_t());
+        dma_base_static_reg.write(0);
+        dma_len_static_reg.write(0);
+        dma_stride_static_reg.write(0);
+        dma_loop_static_reg.write(0);
+        dma_broadcast_static_reg.write(false);
+        request_type_static_reg.write(LDMARequestType::LOAD_DWORD);
         dma_base_reg.write(0);
         dma_offset_reg.write(0);
         dma_len_reg.write(0);
@@ -133,29 +135,36 @@ public:
 
         // 拆分成多個組合邏輯方法
         SC_METHOD(next_state_logic);
-        sensitive << state_reg << active << write_en << next << set_addr << set_len << set_loop
-                  << ps_data.valid_in << ps_data.data_in << dm_read_data
-                  << imm << mode << stride
-                  << dma_base_reg << dma_offset_reg << dma_len_reg << dma_stride_reg
-                  << dma_broadcast_reg << request_type_reg << dmwv_reg << dmrv_reg
-                  << dma_loop_reg;
+        sensitive << state_reg << active << next << set_addr << set_len << set_loop << set_mode << reset_active
+                << dm_read_data
+                << imm << mode
+              << dma_base_static_reg << dma_len_static_reg << dma_stride_static_reg << dma_loop_static_reg
+              << dma_broadcast_static_reg << request_type_static_reg
+              << dma_base_reg << dma_offset_reg << dma_len_reg << dma_stride_reg
+              << dma_broadcast_reg << request_type_reg << dmwv_reg << dmrv_reg
+              << dma_loop_reg;
 
         SC_METHOD(output_logic);
         sensitive << state_reg << dmrv_reg << dmwv_reg
-                  << dma_base_reg << dma_offset_reg
-                  << dma_offset_next << next;
-
-        SC_METHOD(ready_logic);
-        sensitive << state_reg;
-
-        SC_METHOD(stall_logic);
-        sensitive << state_reg << active << write_en;
+              << dma_base_reg << dma_offset_reg
+              << dma_offset_next << next
+              << active << dma_base_static_reg << dma_len_static_reg;
     }
 
     // Registers (current state)
     sc_signal<LDMAState> state_reg;
     sc_signal<v_fp16_t> dmrv_reg;
     sc_signal<v_fp16_t> dmwv_reg;
+
+    // Static configuration registers (programmed by LDMA.ADDR/LEN/LOOP and LDMA.L*)
+    sc_signal<uint16_t> dma_base_static_reg;
+    sc_signal<uint16_t> dma_len_static_reg;
+    sc_signal<uint16_t> dma_stride_static_reg;
+    sc_signal<uint16_t> dma_loop_static_reg;
+    sc_signal<bool> dma_broadcast_static_reg;
+    sc_signal<LDMARequestType> request_type_static_reg;
+
+    // Active runtime registers
     sc_signal<uint16_t> dma_base_reg;
     sc_signal<uint16_t> dma_offset_reg;
     sc_signal<uint16_t> dma_len_reg;
@@ -168,6 +177,13 @@ public:
     sc_signal<LDMAState> state_next;
     sc_signal<v_fp16_t> dmrv_next;
     sc_signal<v_fp16_t> dmwv_next;
+    sc_signal<uint16_t> dma_base_static_next;
+    sc_signal<uint16_t> dma_len_static_next;
+    sc_signal<uint16_t> dma_stride_static_next;
+    sc_signal<uint16_t> dma_loop_static_next;
+    sc_signal<bool> dma_broadcast_static_next;
+    sc_signal<LDMARequestType> request_type_static_next;
+
     sc_signal<uint16_t> dma_base_next;
     sc_signal<uint16_t> dma_offset_next;
     sc_signal<uint16_t> dma_len_next;
@@ -220,6 +236,12 @@ public:
         state_reg.write(LDMAState::IDLE);
         dmrv_reg.write(v_fp16_t());
         dmwv_reg.write(v_fp16_t());
+        dma_base_static_reg.write(0);
+        dma_len_static_reg.write(0);
+        dma_stride_static_reg.write(0);
+        dma_loop_static_reg.write(0);
+        dma_broadcast_static_reg.write(false);
+        request_type_static_reg.write(LDMARequestType::LOAD_DWORD);
         dma_base_reg.write(0);
         dma_offset_reg.write(0);
         dma_len_reg.write(0);
@@ -234,6 +256,12 @@ public:
             state_reg.write(state_next.read());
             dmrv_reg.write(dmrv_next.read());
             dmwv_reg.write(dmwv_next.read());
+            dma_base_static_reg.write(dma_base_static_next.read());
+            dma_len_static_reg.write(dma_len_static_next.read());
+            dma_stride_static_reg.write(dma_stride_static_next.read());
+            dma_loop_static_reg.write(dma_loop_static_next.read());
+            dma_broadcast_static_reg.write(dma_broadcast_static_next.read());
+            request_type_static_reg.write(request_type_static_next.read());
             dma_base_reg.write(dma_base_next.read());
             dma_offset_reg.write(dma_offset_next.read());
             dma_len_reg.write(dma_len_next.read());
@@ -243,8 +271,6 @@ public:
             dma_loop_reg.write(dma_loop_next.read());
 
             DEBUG_MSG("[LDMA] State=" << state_reg.read()
-                      << " ps_valid=" << ps_data.valid_in.read()
-                      << " ready=" << ps_data.ready_out.read()
                       << " len=" << dma_len_reg.read()
                       << " dmrv=" << dmrv_out.read()
                       << " addr=" << dm_read_addr.read()
@@ -260,6 +286,12 @@ public:
         state_next.write(state_reg.read());
         dmrv_next.write(dmrv_reg.read());
         dmwv_next.write(dmwv_reg.read());
+        dma_base_static_next.write(dma_base_static_reg.read());
+        dma_len_static_next.write(dma_len_static_reg.read());
+        dma_stride_static_next.write(dma_stride_static_reg.read());
+        dma_loop_static_next.write(dma_loop_static_reg.read());
+        dma_broadcast_static_next.write(dma_broadcast_static_reg.read());
+        request_type_static_next.write(request_type_static_reg.read());
         dma_base_next.write(dma_base_reg.read());
         dma_offset_next.write(dma_offset_reg.read());
         dma_len_next.write(dma_len_reg.read());
@@ -271,30 +303,61 @@ public:
         uint64_t v;
         v_fp16_t v_fp16 = v_fp16_t();
 
+        // Static configuration updates (do not affect active runtime)
+        if (set_addr.read()) {
+            dma_base_static_next.write(imm.read());
+        }
+        if (set_len.read()) {
+            dma_len_static_next.write(imm.read());
+        }
+        if (set_loop.read()) {
+            dma_loop_static_next.write(imm.read());
+        }
+        if (set_mode.read()) {
+            dma_stride_static_next.write(imm.read());
+            switch (mode.read() & 0x7) {
+                case 0: request_type_static_next.write(LDMARequestType::LOAD_BYTE); dma_broadcast_static_next.write(false); break;
+                case 1: request_type_static_next.write(LDMARequestType::LOAD_HALF); dma_broadcast_static_next.write(false); break;
+                case 2: request_type_static_next.write(LDMARequestType::LOAD_WORD); dma_broadcast_static_next.write(false); break;
+                case 3: request_type_static_next.write(LDMARequestType::LOAD_DWORD); dma_broadcast_static_next.write(false); break;
+                case 4: request_type_static_next.write(LDMARequestType::LOAD_BYTE); dma_broadcast_static_next.write(true); break;
+                case 5: request_type_static_next.write(LDMARequestType::LOAD_HALF); dma_broadcast_static_next.write(true); break;
+                case 6: request_type_static_next.write(LDMARequestType::LOAD_WORD); dma_broadcast_static_next.write(true); break;
+                default: request_type_static_next.write(LDMARequestType::LOAD_DWORD); dma_broadcast_static_next.write(false); break;
+            }
+        }
+
+        if (reset_active.read()) {
+            state_next.write(LDMAState::IDLE);
+            dma_base_next.write(0);
+            dma_stride_next.write(0);
+            dma_len_next.write(0);
+            dma_loop_next.write(0);
+            request_type_next.write(LDMARequestType::LOAD_DWORD);
+            dma_broadcast_next.write(0);
+            dma_offset_next.write(0);
+        }
+
         switch (state_reg.read()) {
             case LDMAState::IDLE:
                 if (active.read()) {
-                    // Initialize DMA parameters
+                    // Activate from static config
+                    dma_base_next.write(dma_base_static_reg.read());
+                    dma_stride_next.write(dma_stride_static_reg.read());
+                    dma_len_next.write(dma_len_static_reg.read());
+                    dma_loop_next.write(dma_loop_static_reg.read());
+                    request_type_next.write(request_type_static_reg.read());
+                    dma_broadcast_next.write(dma_broadcast_static_reg.read());
                     dma_offset_next.write(0);
-                    dma_stride_next.write(stride.read());
-                    state_next.write(LDMAState::LOAD_PRE);
 
-                    switch (mode.read() & 0x7) {
-                        case 0: request_type_next.write(LDMARequestType::LOAD_BYTE); dma_broadcast_next.write(false); break;
-                        case 1: request_type_next.write(LDMARequestType::LOAD_HALF); dma_broadcast_next.write(false); break;
-                        case 2: request_type_next.write(LDMARequestType::LOAD_WORD); dma_broadcast_next.write(false); break;
-                        case 3: request_type_next.write(LDMARequestType::LOAD_DWORD); dma_broadcast_next.write(false); break;
-                        case 4: request_type_next.write(LDMARequestType::LOAD_BYTE); dma_broadcast_next.write(true); break;
-                        case 5: request_type_next.write(LDMARequestType::LOAD_HALF); dma_broadcast_next.write(true); break;
-                        case 6: request_type_next.write(LDMARequestType::LOAD_WORD); dma_broadcast_next.write(true); break;
-                        default: request_type_next.write(LDMARequestType::LOAD_DWORD); dma_broadcast_next.write(false); break;
+                    if (dma_len_static_reg.read() == 0) {
+                        state_next.write(LDMAState::IDLE);
+                    } else {
+                        // Directly go to LOAD_WAIT to hide one cycle
+                        // Prepare next offset for the pipeline prefetch
+                        dma_offset_next.write(dma_stride_static_reg.read() * sizeof(uint16_t));
+                        state_next.write(LDMAState::LOAD_WAIT);
                     }
-                } else if (set_addr.read()) {
-                    dma_base_next.write(imm.read());
-                } else if (set_len.read()) {
-                    dma_len_next.write((uint16_t)(imm.read()+1)); // len is 0-based
-                } else if (set_loop.read()) {
-                    dma_loop_next.write((uint16_t)(imm.read()+1)); // loop count is 0-based
                 }
                 break;
 
@@ -319,9 +382,10 @@ public:
             case LDMAState::LOAD_PIPELINE:
                 if (next.read()) {
                     if (dma_len_reg.read() == 0) {
-                        if (dma_loop_reg.read() > 0) {
+                        if (dma_loop_reg.read() > 1) {
                             dma_loop_next.write(dma_loop_reg.read() - 1);
                             dma_offset_next.write(0);
+                            dma_len_next.write(dma_len_static_reg.read());
                             state_next.write(LDMAState::LOAD_PRE);
                         } else {
                             state_next.write(LDMAState::DONE);
@@ -360,7 +424,11 @@ public:
 
         switch (state_reg.read()) {
             case LDMAState::IDLE:
-                // All default values
+                // If activation arrives, issue first read address immediately
+                if (active.read() && dma_len_static_reg.read() != 0) {
+                    busy.write(true);
+                    dm_read_addr.write(dma_base_static_reg.read());
+                }
                 break;
 
             case LDMAState::LOAD_PRE:
@@ -385,27 +453,6 @@ public:
             default:
                 break;
         }
-    }
-
-    void ready_logic() {
-        // Ready to receive PS data when IDLE
-        if (state_reg.read() == LDMAState::IDLE) {
-            ps_data.ready_out.write(true);
-        } else {
-            ps_data.ready_out.write(false);
-        }
-    }
-
-    void stall_logic() {
-        // Combinational stall signal generation
-        bool stall = false;
-        LDMAState cur_state = state_reg.read();
-
-        if (cur_state == LDMAState::IDLE && active.read() && write_en.read()) {
-            stall = true;
-        }
-
-        dl_stall_out.write(stall);
     }
 }; // end of SC_MODULE(LDMA)
 

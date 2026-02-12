@@ -42,6 +42,11 @@ public:
     sc_out<OUT_T> data_out;
     sc_in<bool> pop;
 
+    // Read interface (set pop: pop sizeof(IN_T) at once)
+    sc_out<IN_T> data_out_set;
+    sc_in<bool> pop_set;
+    sc_out<bool> set_valid;
+
     // Status
     sc_out<bool> empty;
     sc_out<bool> full;
@@ -56,6 +61,9 @@ public:
           push("push"),
           data_out("data_out"),
           pop("pop"),
+          data_out_set("data_out_set"),
+          pop_set("pop_set"),
+          set_valid("set_valid"),
           empty("empty"),
           full("full"),
           fifo_depth(depth),
@@ -104,6 +112,29 @@ private:
         const int cnt = count_reg.read();
         const OUT_T head_value = (cnt > 0) ? storage[rd_ptr] : OUT_T();
         data_out.write(head_value);
+
+        const bool has_set = (cnt >= chunks_per_push);
+        set_valid.write(has_set);
+
+        IN_T set_value{};
+        if (has_set) {
+            if constexpr (std::is_trivially_copyable_v<IN_T> && std::is_trivially_copyable_v<OUT_T>) {
+                std::array<std::byte, sizeof(IN_T)> buf{};
+                for (int i = 0; i < chunks_per_push; i++) {
+                    const int idx = (rd_ptr + i) % (fifo_depth * chunks_per_push);
+                    std::memcpy(buf.data() + (static_cast<size_t>(i) * sizeof(OUT_T)),
+                                &storage[idx], sizeof(OUT_T));
+                }
+                std::memcpy(&set_value, buf.data(), sizeof(IN_T));
+            } else {
+                OUT_T* chunks = reinterpret_cast<OUT_T*>(&set_value);
+                for (int i = 0; i < chunks_per_push; i++) {
+                    const int idx = (rd_ptr + i) % (fifo_depth * chunks_per_push);
+                    chunks[i] = storage[idx];
+                }
+            }
+        }
+        data_out_set.write(set_value);
     }
 
     // Sequential logic
@@ -131,6 +162,7 @@ private:
 
             const bool want_push = push.read();
             const bool want_pop = pop.read();
+            const bool want_pop_set = pop_set.read();
 
             const size_t mask = mask_in.read();
             int mask_popcount = 0;
@@ -144,13 +176,16 @@ private:
             const bool is_empty = (cnt == 0);
 
             bool do_pop = false;
+            bool do_pop_set = false;
             bool do_push = false;
 
-            if (!is_empty && want_pop) {
+            if (want_pop_set && (cnt >= chunks_per_push)) {
+                do_pop_set = true;
+            } else if (!is_empty && want_pop) {
                 do_pop = true;
             }
 
-            const int remaining_after_pop = cnt - (do_pop ? 1 : 0);
+            const int remaining_after_pop = cnt - (do_pop ? 1 : 0) - (do_pop_set ? chunks_per_push : 0);
             if (want_push && (remaining_after_pop + mask_popcount <= max_elements)) {
                 do_push = true;
             }
@@ -184,7 +219,10 @@ private:
                 next_cnt += mask_popcount;
             }
 
-            if (do_pop) {
+            if (do_pop_set) {
+                next_rd_ptr = (rd_ptr + chunks_per_push) % max_elements;
+                next_cnt -= chunks_per_push;
+            } else if (do_pop) {
                 next_rd_ptr = (rd_ptr + 1) % max_elements;
                 next_cnt -= 1;
             }

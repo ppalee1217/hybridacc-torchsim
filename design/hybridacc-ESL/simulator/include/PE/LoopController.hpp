@@ -20,7 +20,6 @@ public:
     sc_in<uint16_t> pc_in;
     sc_in<uint16_t> count_in;
     sc_in<bool> loop_in_en;
-    sc_in<bool> loop_break_en;
     sc_in<bool> loop_end_en;
 
     sc_out<uint16_t> pc_out;
@@ -33,7 +32,6 @@ public:
           pc_in("pc_in"),
           count_in("count_in"),
           loop_in_en("loop_in_en"),
-          loop_break_en("loop_break_en"),
           loop_end_en("loop_end_en"),
           pc_out("pc_out"),
           jump("jump")
@@ -58,7 +56,6 @@ public:
         LoopFrame fr{start_pc, (uint16_t)(count+1)}; // N-1 encoding
         loopstack.push_back(fr);
     }
-    void loopBreak(){ if(!loopstack.empty()) loopstack.pop_back(); }
     bool empty() const { return loopstack.empty(); }
 
     // 組合邏輯: 決定是否跳轉
@@ -100,9 +97,6 @@ public:
             // 1. 更新 loop stack 控制 (Push/Break)
             if (loop_in_en.read()) {
                 loopIn(pc_in.read(), count_in.read());
-            }
-            if (loop_break_en.read()) {
-                loopBreak();
             }
 
             // 2. 處理 Loop End 的計數更新 (Sequential)

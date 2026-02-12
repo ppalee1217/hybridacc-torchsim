@@ -27,7 +27,6 @@ SC_MODULE(PsumRegFile) {
 
         sc_in<bool> clear_regs;
         sc_in<bool> use_pcounter;
-        sc_in<bool> set_pcounter;
         sc_in<bool> clear_pcounter;
         sc_in<bool> incr_pcounter;
 
@@ -45,7 +44,6 @@ SC_MODULE(PsumRegFile) {
               vp_out("vp_out"),
               clear_regs("clear_regs"),
               use_pcounter("use_pcounter"),
-              set_pcounter("set_pcounter"),
               clear_pcounter("clear_pcounter"),
               incr_pcounter("incr_pcounter")
         {
@@ -102,6 +100,7 @@ SC_MODULE(PsumRegFile) {
             wait();
 
             while (true) {
+                // register update logic
                 if (clear_regs.read()) {
                     clear();
                 } else {
@@ -116,15 +115,15 @@ SC_MODULE(PsumRegFile) {
                             setVP64(write_pid, vp_in.read());
                         }
                     }
+                }
 
-                    if (set_pcounter.read()) {
-                        pcounter.write(pid.read());
-                    } else if (clear_pcounter.read()) {
-                        pcounter.write(0);
-                    } else if (incr_pcounter.read()) {
-                        DEBUG_MSG("[PsumRegFile] INCR pcounter: " << pcounter.read() << " -> " << (pcounter.read() + pid.read()), DEBUG_LEVEL_PE_COMPONENTS);
-                        pcounter.write(pcounter.read() + pid.read());
-                    }
+                // pcounter update logic
+                if (clear_pcounter.read()) {
+                    DEBUG_MSG("[PsumRegFile] CLEAR pcounter: " << pcounter.read() << " -> 0", DEBUG_LEVEL_PE_COMPONENTS);
+                    pcounter.write(0);
+                } else if (incr_pcounter.read()) {
+                    DEBUG_MSG("[PsumRegFile] INCR pcounter: " << pcounter.read() << " -> " << (pcounter.read() + pid.read()), DEBUG_LEVEL_PE_COMPONENTS);
+                    pcounter.write(pcounter.read() + pid.read());
                 }
                 wait();
             }

@@ -112,7 +112,6 @@ public:
     sc_signal<uint16_t> loops_pc_in_sig;
     sc_signal<uint16_t> loops_count_in_sig;
     sc_signal<bool> loops_loop_in_en_sig;
-    sc_signal<bool> loops_loop_break_en_sig;
     sc_signal<bool> loops_loop_end_en_sig;
     sc_signal<bool> loops_empty_sig;
     sc_signal<uint16_t> loops_pc_out_sig;
@@ -140,7 +139,6 @@ public:
         loops.pc_in(loops_pc_in_sig);
         loops.count_in(loops_count_in_sig);
         loops.loop_in_en(loops_loop_in_en_sig);
-        loops.loop_break_en(loops_loop_break_en_sig);
         loops.loop_end_en(loops_loop_end_en_sig);
         loops.pc_out(loops_pc_out_sig);
         loops.jump(loops_jump_sig);
@@ -170,8 +168,6 @@ public:
             if (loops_jump_sig.read()) {
                 next_pc_candidate = loops_pc_out_sig.read();
             }
-        } else if (can_advance && decode_from_decoder.jump_en) {
-            next_pc_candidate = decode_from_decoder.imm;
         }
 
         // State Machine Update Logic
@@ -262,9 +258,6 @@ public:
         } else {
             loops_loop_in_en_sig.write(false);
         }
-
-        // Loop Break
-        loops_loop_break_en_sig.write(decode.loop_break && can_advance);
 
         // Loop End (Enable only if not stalled, as it might trigger a pop/jump)
         // If stalled, we re-execute the same loop_end instruction, checking condition again

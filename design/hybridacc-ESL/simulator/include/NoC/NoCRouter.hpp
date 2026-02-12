@@ -75,9 +75,10 @@ public:
     sc_vector<sc_out<ScanChainFormat>> scan_chain_out;
 
     size_t num_ports;
+    size_t noc_fifo_depth;
 
     SC_HAS_PROCESS(NoCRouter);
-    NoCRouter(sc_module_name name, size_t num_ports)
+    NoCRouter(sc_module_name name, size_t num_ports, size_t noc_fifo_depth = 4)
         : sc_module(name),
           clk("clk"),
           reset_n("reset_n"),
@@ -106,11 +107,13 @@ public:
           pending_read_ultra_reg("pending_read_ultra_reg"),
           pending_read_ultra_next("pending_read_ultra_next"),
           rx_stall_sig("rx_stall_sig"),
-          ps_fifo("ps_fifo", 4),
-          pd_fifo("pd_fifo", 4),
-          pli_fifo("pli_fifo", 4),
-          plo_fifo("plo_fifo", 4),
-          resp_fifo("resp_fifo", 4)
+          ps_fifo("ps_fifo", noc_fifo_depth),
+          pd_fifo("pd_fifo", noc_fifo_depth),
+          pli_fifo("pli_fifo", noc_fifo_depth),
+          plo_fifo("plo_fifo", noc_fifo_depth),
+          resp_fifo("resp_fifo", noc_fifo_depth),
+          noc_fifo_depth(noc_fifo_depth)
+
     {
         DEBUG_MSG("[Create] NoCRouter with " << num_ports << " ports", DEBUG_LEVEL_NOC_COMPONENTS);
 

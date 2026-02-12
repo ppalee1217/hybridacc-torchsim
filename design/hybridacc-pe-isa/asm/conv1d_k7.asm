@@ -1,51 +1,21 @@
-# Illegal Instruction
-# DMA.ADDR, start_addr
-# DMA.LEN, len
-# DMA.LB, stride
-# DMA.LH, stride
-# DMA.LW, stride
-# DMA.LD, stride
-# DMA.LBB, stride
-# DMA.LHB, stride
-# DMA.LWB, stride
-# DMA.SD, len
-# TSTORE, trd
-# TSHIFT, kernel_size
-# J, imm
-# LOOPIN, loop_count
-# LOOPBREAK
-# LOOPEND
-
-# NOP
-# VMAC, prd, vtrs
-# VMACN, prd, vtrs
-# VMACR, pstride, vtstride
-# VMACRN, pstride, vtstride
-# VMUL, vprd, vtrs
-# VMULN, vprd, vtrs
-# VMULR, vpstride, vtstride
-# VMULRN, vpstride, vtstride
-# VPSUM, vprs
-# VPSUMR, vprs
-# SETRID.PT, pid, vtid
-# SETRID.P, pid
-# SETRID.T, vtid
-# CLEAR.T
-# CLEAR.P
-# HALT
-
-
+# ISA v3
 conv1d_7x7:
 
-load_kernel:
+setup:
     SDMA.ADDR 0
     SDMA.LEN 48  # STORE 48 steps of kernel data (16 kernels * 3 vector each)
     SDMA.LOOP 1  # loop for 1 kernel set
     SDMA.SD 4  # start DMA store operation
 
+    LDMA.ADDR 0
+    LDMA.LEN 48
+    LDMA.LD 4  # LOAD 48 steps of input data (3 vector * 4 elements each)
+
+    SYS.CTRL (SDMA.ACT)
+
 compute:
     LOOPIN 1 # processing pass
-    SWAPDM  # wait for previous SDMA operation to complete
+    SYS.SYNC (SWAPDM)
 
 preload_input:
     TSTORE t0
@@ -53,18 +23,16 @@ preload_input:
     TSTORE t2
     TSTORE t3
     TSTORE t4
-    TSTORE t5
+
 
 loop_window:
     LOOPIN 397  # Loop for 800 input elements
 
 load_input:
+    TSTORE t5
     TSTORE t6
 
-    LDMA.ADDR 0
-    LDMA.LEN 48
-    LDMA.LD 4  # LOAD 48 steps of input data (3 vector * 4 elements each)
-    SETRID.PT 0, 0
+    SYS.CTRL (RST.PID, RST.TID, LDMA.ACT, CLEAR.P)
 
 loop_kernel:
     LOOPIN 16  # Loop for 16 kernels
@@ -78,10 +46,8 @@ calculate_psum:
     VPSUM vp1
     VPSUM vp2
     VPSUM vp3
-    CLEAR.P # Clear the partial sum register
 
     TSHIFT K7
-    TSTORE t6
     TSHIFT K7
     LOOPEND
 

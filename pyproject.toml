@@ -1,5 +1,5 @@
 [project]
-name = "hybridacc_verify"
+name = "hybridacc_tools"
 version = "0.1.0"
 description = "Verification tools for HybridAcc"
 requires-python = ">=3.8"
@@ -8,8 +8,14 @@ dependencies = [
     "torch",
     "pyyaml",
     "pandas>=2.0.3",
+    "matplotlib>=3.7.5",
+    "textual>=0.70.0",
 ]
 
+[project.scripts]
+log-parser = "log_parser.cli:main"
+trace-parser = "trace_parser.cli:main"
+
 [tool.setuptools.packages.find]
-where = ["python"]
-include = ["hybridacc_verify*", "trace_parser*"]
+where = ["./python"]
+include = ["hybridacc_verify*", "trace_parser*", "log_parser*"]

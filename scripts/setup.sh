@@ -79,9 +79,6 @@ if [ -d "$PROJECT_ROOT/python" ]; then
     if [ -f "$PROJECT_ROOT/pyproject.toml" ]; then
         echo "Installing python package from project root (pyproject.toml)..."
         uv pip install -e .
-    elif [ -f "$PROJECT_ROOT/python/setup.py" ]; then
-        echo "Installing python package using python/setup.py..."
-        uv pip install -e python/
     else
         echo "Warning: no pyproject.toml or python/setup.py found; skipping python install."
     fi

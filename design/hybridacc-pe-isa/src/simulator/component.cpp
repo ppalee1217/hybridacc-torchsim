@@ -359,6 +359,36 @@ void DMAController::activate() {
     handle();
 }
 
+void DMAController::activateFromStatic() {
+    // Copy static registers into active registers
+    dma_base = static_base;
+    dma_len = static_len;
+    dma_stride = static_stride;
+    dma_broadcast = static_broadcast;
+    request_type = static_request_type;
+
+    init_base = static_base;
+    init_len = static_len;
+    loop_count = static_loop;
+
+    dma_offset = 0;
+    bytes_transferred = 0;
+
+    if(dma_len == 0) {
+        dma_active = false;
+        return;
+    }
+    activate();
+}
+
+void DMAController::resetActive() {
+    dma_active = false;
+    dma_offset = 0;
+    dma_len = 0;
+    bytes_transferred = 0;
+    loop_count = 0;
+}
+
 void DMAController::next() {
     if (!dma_active) return;
     handle();

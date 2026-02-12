@@ -39,8 +39,10 @@ public:
     VRDOF<uint64_t> ln_plo;
 
     // Constructor
-    SC_CTOR(ProcessElement)
-        : clk("clk"),
+    SC_HAS_PROCESS(ProcessElement);
+    ProcessElement(sc_module_name name, size_t pe_fifo_depth = 4)
+        : sc_module(name),
+          clk("clk"),
           reset_n("reset_n"),
           router_enable("router_enable"),
           router_mode("router_mode"),
@@ -52,12 +54,13 @@ public:
           pe_busy("pe_busy"),
           ln_pli("ln_pli"),
           ln_plo("ln_plo"),
-          router("PE_Router"),
+          router("PE_Router", pe_fifo_depth),
           if_id_stage("IF_ID_Stage"),
           exe_m_stage("EXE_M_Stage"),
           exe_a_stage("EXE_A_Stage"),
           router_pe_ps_sig("router_pe_ps_sig"),
           router_pe_pd_sig("router_pe_pd_sig"),
+          router_pe_pd_set_sig("router_pe_pd_set_sig"),
           router_pe_pli_sig("router_pe_pli_sig"),
           router_pe_plo_sig("router_pe_plo_sig")
     {
@@ -154,6 +157,7 @@ public:
     // PE pipeline data signals - Router <-> EXE stages
     VRDSIG<uint64_t> router_pe_ps_sig;
     VRDSIG<uint16_t> router_pe_pd_sig;
+    VRDSIG<uint64_t> router_pe_pd_set_sig;
     VRDSIG<uint64_t> router_pe_pli_sig;
     VRDSIG<uint64_t> router_pe_plo_sig;
 
@@ -247,6 +251,10 @@ public:
         // PD port (Port Dynamic)
         connect_vr_signals(exe_m_stage.pd_data, router_pe_pd_sig);
         connect_vr_signals(router.pe_pd_out_if, router_pe_pd_sig);
+
+        // PD port (Port Dynamic, set pop)
+        connect_vr_signals(exe_m_stage.pd_data_set, router_pe_pd_set_sig);
+        connect_vr_signals(router.pe_pd_set_out_if, router_pe_pd_set_sig);
 
         // === EXE_A Stage Connections ===
         exe_a_stage.clk(clk);

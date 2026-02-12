@@ -3,9 +3,9 @@
   "num_pes": 48,
   "num_bus": 3,
   "M": 48,
-  "N": 128,
+  "N": 512,
   "K": 96,
-  "seed": 123,
+  "seed":456,
   "ultra_mode": true,
   "out_dir": "./output/noc-sim/gemm_ultra"
 }

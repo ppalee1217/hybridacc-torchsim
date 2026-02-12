@@ -83,6 +83,8 @@ public:
 
     // port dynamic - using VRDOF
     VRDOF<uint16_t> pe_pd_out_if;
+    // port dynamic (set pop) - using VRDOF
+    VRDOF<uint64_t> pe_pd_set_out_if;
 
     // port local input - using VRDOF
     VRDOF<uint64_t> pe_pli_out_if;
@@ -91,8 +93,10 @@ public:
     VRDIF<uint64_t> pe_plo_in_if;
 
     // methods
-    SC_CTOR(PErouter)
-        : clk("clk"),
+    SC_HAS_PROCESS(PErouter);
+    PErouter(sc_module_name name, size_t pe_fifo_depth = 4)
+        : sc_module(name),
+          clk("clk"),
           reset_n("reset_n"),
           enable("enable"),
           route_mode("route_mode"),
@@ -111,12 +115,14 @@ public:
           im_write_data("im_write_data"),
           pe_ps_out_if("pe_ps_out_if"),
           pe_pd_out_if("pe_pd_out_if"),
+          pe_pd_set_out_if("pe_pd_set_out_if"),
           pe_pli_out_if("pe_pli_out_if"),
           pe_plo_in_if("pe_plo_in_if"),
-          ps_fifo("ps_fifo", max_queue_size),
-          pd_fifo("pd_fifo", max_queue_size),
-          pli_fifo("pli_fifo", max_queue_size),
-          plo_fifo("plo_fifo", max_queue_size)
+          ps_fifo("ps_fifo", pe_fifo_depth),
+          pd_fifo("pd_fifo", pe_fifo_depth),
+          pli_fifo("pli_fifo", pe_fifo_depth),
+          plo_fifo("plo_fifo", pe_fifo_depth),
+          pe_fifo_depth(pe_fifo_depth)
     {
         DEBUG_MSG("[Create] PErouter", DEBUG_LEVEL_PE_TOP);
 
@@ -137,6 +143,9 @@ public:
         pd_fifo.push(pd_fifo_push_sig);
         pd_fifo.data_out(pd_fifo_data_out_sig);
         pd_fifo.pop(pd_fifo_pop_sig);
+        pd_fifo.data_out_set(pd_fifo_data_out_set_sig);
+        pd_fifo.pop_set(pd_fifo_pop_set_sig);
+        pd_fifo.set_valid(pd_fifo_set_valid_sig);
         pd_fifo.empty(pd_fifo_empty_sig);
         pd_fifo.full(pd_fifo_full_sig);
 
@@ -189,10 +198,10 @@ public:
 
         SC_METHOD(comb_pe_feed);
         sensitive << reset_n << enable
-                  << pe_ps_out_if.ready_in << pe_pd_out_if.ready_in << pe_pli_out_if.ready_in
-                  << ps_fifo_empty_sig << ps_fifo_data_out_sig
-                  << pd_fifo_empty_sig << pd_fifo_data_out_sig
-                  << pli_fifo_empty_sig << pli_fifo_data_out_sig << router_running_reg;
+              << pe_ps_out_if.ready_in << pe_pd_out_if.ready_in << pe_pd_set_out_if.ready_in << pe_pli_out_if.ready_in
+              << ps_fifo_empty_sig << ps_fifo_data_out_sig
+              << pd_fifo_empty_sig << pd_fifo_data_out_sig << pd_fifo_data_out_set_sig << pd_fifo_set_valid_sig
+              << pli_fifo_empty_sig << pli_fifo_data_out_sig << router_running_reg;
 
         SC_METHOD(comb_output_and_state);
         sensitive << reset_n << enable << route_mode
@@ -245,7 +254,7 @@ public:
     sc_signal<bool> router_running_reg; // signal to indicate PE router is running
 
     // Channel-specific data queues (these are not registers in HDL sense)
-    const int max_queue_size = 4;
+    size_t pe_fifo_depth = 4;
 
     FIFO<uint64_t> ps_fifo;   // PS channel: NoC -> PE (weights)
     asyncFIFO<uint64_t, uint16_t> pd_fifo;   // PD channel: NoC -> PE (activations)
@@ -266,6 +275,9 @@ public:
     sc_signal<bool> pd_fifo_push_sig;
     sc_signal<uint16_t> pd_fifo_data_out_sig;
     sc_signal<bool> pd_fifo_pop_sig;
+    sc_signal<uint64_t> pd_fifo_data_out_set_sig;
+    sc_signal<bool> pd_fifo_pop_set_sig;
+    sc_signal<bool> pd_fifo_set_valid_sig;
     sc_signal<bool> pd_fifo_empty_sig;
     sc_signal<bool> pd_fifo_full_sig;
 
@@ -473,12 +485,15 @@ public:
     void comb_pe_feed() {
         ps_fifo_pop_sig.write(false);
         pd_fifo_pop_sig.write(false);
+        pd_fifo_pop_set_sig.write(false);
         pli_fifo_pop_sig.write(false);
 
         pe_ps_out_if.valid_out.write(false);
         pe_ps_out_if.data_out.write(0);
         pe_pd_out_if.valid_out.write(false);
         pe_pd_out_if.data_out.write(0);
+        pe_pd_set_out_if.valid_out.write(false);
+        pe_pd_set_out_if.data_out.write(0);
         pe_pli_out_if.valid_out.write(false);
         pe_pli_out_if.data_out.write(0);
 
@@ -496,12 +511,26 @@ public:
         }
 
         // PD
-        if (!pd_fifo_empty_sig.read()) {
+        const bool pd_set_valid = pd_fifo_set_valid_sig.read();
+        const bool pd_scalar_valid = !pd_fifo_empty_sig.read();
+
+        if (pd_set_valid) {
+            pe_pd_set_out_if.valid_out.write(true);
+            pe_pd_set_out_if.data_out.write(pd_fifo_data_out_set_sig.read());
+        }
+
+        if (pd_scalar_valid) {
             pe_pd_out_if.valid_out.write(true);
             pe_pd_out_if.data_out.write(pd_fifo_data_out_sig.read());
-            if (pe_pd_out_if.ready_in.read()) {
-                pd_fifo_pop_sig.write(true);
-            }
+        }
+
+        const bool pd_pop_set = pd_set_valid && pe_pd_set_out_if.ready_in.read();
+        const bool pd_pop_scalar = pd_scalar_valid && pe_pd_out_if.ready_in.read() && !pd_pop_set;
+
+        if (pd_pop_set) {
+            pd_fifo_pop_set_sig.write(true);
+        } else if (pd_pop_scalar) {
+            pd_fifo_pop_sig.write(true);
         }
 
         // PLI
