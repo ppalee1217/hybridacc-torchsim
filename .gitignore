@@ -47,6 +47,7 @@ node_modules/
 
 design/**/data/
 libs/
+packages/
 **/__pycache__/
 **/*.egg-info/
 uv.lock

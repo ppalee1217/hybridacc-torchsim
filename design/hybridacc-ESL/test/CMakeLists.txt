@@ -15,13 +15,14 @@ set(DEBUG_LEVEL_MAX "6" CACHE STRING "Maximum debug level")
 
 # Find SystemC
 find_package(PkgConfig REQUIRED)
-set(SYSTEMC_ROOT ${CMAKE_SOURCE_DIR}/../../../libs/systemc)
+set(SYSTEMC_ROOT "$ENV{SYSTEMC_LIB}")
+message(STATUS "systemC Root: ${SYSTEMC_ROOT}")
 
 # SystemC include directories
 include_directories(${SYSTEMC_ROOT}/include)
 
 # SystemC library directories
-link_directories(${SYSTEMC_ROOT}/lib-linux64)
+link_directories(${SYSTEMC_ROOT}/lib64)
 
 # Include PE simulator headers
 include_directories(../simulator/include)

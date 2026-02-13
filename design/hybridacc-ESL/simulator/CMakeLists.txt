@@ -10,24 +10,26 @@ option(ENABLE_DEBUG_UTILS "Enable DEBUG_UTILS debug messages" OFF)
 option(ENABLE_DEBUG_PE "Enable DEBUG_PE debug messages for PE modules" OFF)
 option(ENABLE_DEBUG_NOC "Enable DEBUG_NOC debug messages for NoC modules" OFF)
 
-# SystemC library path
-set(SYSTEMC_HOME "/home/yoyo/work/MasterResearch/HybridAcc/libs/systemc")
+# Find SystemC
+find_package(PkgConfig REQUIRED)
+set(SYSTEMC_ROOT "$ENV{SYSTEMC_LIB}")
+message(STATUS "systemC Root: ${SYSTEMC_ROOT}")
 
 # SystemC include directories
-include_directories(${SYSTEMC_HOME}/include)
+include_directories(${SYSTEMC_ROOT}/include)
 
-# SystemC library directory
-link_directories(${SYSTEMC_HOME}/lib-linux64)
+# SystemC library directories
+link_directories(${SYSTEMC_ROOT}/lib64)
 
 # Find SystemC library
 find_library(SYSTEMC_LIBRARY
     NAMES systemc
-    PATHS ${SYSTEMC_HOME}/lib-linux64
+    PATHS ${SYSTEMC_ROOT}/lib64
     NO_DEFAULT_PATH
 )
 
 if(NOT SYSTEMC_LIBRARY)
-    message(FATAL_ERROR "SystemC library not found in ${SYSTEMC_HOME}/lib-linux64")
+    message(FATAL_ERROR "SystemC library not found in ${SYSTEMC_ROOT}/lib64")
 endif()
 
 # Include directories for the project
