@@ -17,9 +17,9 @@ namespace cluster {
 // Template parameters:
 //  - DATA_WIDTH_BITS: data bus width in bits (must be divisible by 8)
 //  - ADDR_WIDTH: width of address field (in bits)
-// Default target is 256-bit wide words (8 x 32-bit lanes), matching existing testbench.
+// Default target is 64-bit wide words (1 x 64-bit lane), matching existing testbench.
 
-template <unsigned DATA_WIDTH_BITS = 256, unsigned ADDR_WIDTH = 32>
+template <unsigned DATA_WIDTH_BITS = 64, unsigned ADDR_WIDTH = 32>
 SC_MODULE(SRAM) {
     static_assert(DATA_WIDTH_BITS % 8 == 0, "DATA_WIDTH_BITS must be a multiple of 8");
 

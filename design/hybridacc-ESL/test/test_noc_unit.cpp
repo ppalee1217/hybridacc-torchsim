@@ -3,7 +3,7 @@
 #include <cassert>
 #include <vector>
 #include "NetworkOnChip.hpp"
-#include "NoC/NoCRouter.hpp" // Include for router_req_t/resp_t
+#include "NoC/NoCRouter.hpp"
 #include "utils.hpp"
 
 using namespace hybridacc;
@@ -13,6 +13,11 @@ using namespace sc_dt;
 // Test helper class for NoC
 class NoCTestBench : public sc_module {
 public:
+    // Test parameters
+    static constexpr size_t NUM_PORTS = 3;
+    static constexpr size_t PORT_BANDWIDTH = 64; // bits per port (for ultra mode calculation)
+    static constexpr size_t NUM_PES_PER_PORT = 16;
+
     // Clock and reset
     sc_clock clk;
     sc_signal<bool> reset_n;
@@ -22,18 +27,14 @@ public:
     sc_signal<sc_uint<32>> command_data;
 
     // New Valid-Ready Signals (Split Channels)
-    VRDSIG<noc::router_req_t> ps_req_sig;
-    VRDSIG<noc::router_req_t> pd_req_sig;
-    VRDSIG<noc::router_req_t> pli_req_sig;
+    VRDSIG<request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t>> ps_req_sig;
+    VRDSIG<request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t>> pd_req_sig;
+    VRDSIG<request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t>> pli_req_sig;
     VRDSIG<noc_addr_req_t> plo_req_sig;
-    VRDSIG<noc::router_resp_t> plo_resp_sig;
+    VRDSIG<response_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>>> plo_resp_sig;
 
     // NoC instance
-    NetworkOnChip noc;
-
-    // Test parameters
-    static constexpr size_t NUM_PORTS = 4;
-    static constexpr size_t NUM_PES_PER_PORT = 16;
+    NetworkOnChip<NUM_PORTS, PORT_BANDWIDTH, NUM_PES_PER_PORT> noc;
 
     SC_HAS_PROCESS(NoCTestBench);
 
@@ -48,7 +49,7 @@ public:
                     pli_req_sig("pli_req_sig"),
                     plo_req_sig("plo_req_sig"),
                     plo_resp_sig("plo_resp_sig"),
-          noc("NoC_DUT", NUM_PORTS, NUM_PES_PER_PORT)
+          noc("NoC_DUT", NetWorkOnChipConfig(4, 32))
     {
 
         std::cout << "[TB] NUM_PORTS = " << NUM_PORTS << std::endl;
@@ -87,7 +88,7 @@ public:
         command_data.write(0);
 
         // Reset handshake signals
-        noc::router_req_t req;
+        request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t> req;
         req.data = 0;
         req.addr = 0;
         req.mask = 0;
@@ -124,7 +125,7 @@ public:
         }
     }
 
-    void send_router_req(VRDSIG<noc::router_req_t>& sig, const noc::router_req_t& req, const char* label) {
+    void send_router_req(VRDSIG<request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t>>& sig, const request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t>& req, const char* label) {
         std::cout << "[TB] Sending " << label << " request: addr=0x" << std::hex << req.addr
                   << ", mask=0x" << req.mask << std::dec << std::endl;
 
@@ -199,7 +200,7 @@ public:
         for (size_t i = 0; i < program.size(); ++i) {
             uint32_t param = 0;
             uint32_t pe_im_addr = static_cast<uint32_t>(i * sizeof(uint16_t)) & PE_ROUTER_IM_ADDR_MASK;
-            uint32_t pe_im_data = static_cast<uint32_t>(pe_program[i]) & PE_ROUTER_IM_DATA_MASK;
+            uint32_t pe_im_data = static_cast<uint32_t>(program[i]) & PE_ROUTER_IM_DATA_MASK;
             param |= (pe_im_addr << PE_ROUTER_IM_ADDR_OFFSET);  // Address
             param |= (pe_im_data << PE_ROUTER_IM_DATA_OFFSET); // Instruction data
             send_command(message_command_t::CMD_LOAD_PROGRAM , param);
@@ -308,10 +309,10 @@ public:
 
         std::cout << "[TB] Writing first data..." << std::endl;
 
-        sc_biguint<192> test_data_val = 0;
+        sc_biguint<NUM_PORTS*PORT_BANDWIDTH> test_data_val = 0;
         test_data_val.range(63, 0) = 0x123456789ABCDEF0ULL;
 
-        noc::router_req_t req1;
+        request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t> req1;
         req1.data = test_data_val;
         req1.addr = 0x000;
         req1.mask = 0x1;
@@ -326,7 +327,7 @@ public:
 
         test_data_val.range(63, 0) = 0xFEDCBA9876543210ULL;
 
-        noc::router_req_t req2;
+        request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t> req2;
         req2.data = test_data_val;
         req2.addr = 0x000;
         req2.mask = 0x1;

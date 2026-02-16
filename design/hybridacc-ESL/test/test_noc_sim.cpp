@@ -10,7 +10,7 @@
 #include <filesystem>
 #include <functional>
 #include "NetworkOnChip.hpp"
-#include "NoC/NoCRouter.hpp" // Include for router_req_t/resp_t
+#include "NoC/NoCRouter.hpp"
 #include "utils.hpp"
 #include "tb_utils.hpp"
 
@@ -216,6 +216,13 @@ int max_tile_or_default(const std::vector<int>& tiles, int default_val) {
 // TestBench
 class NoCSimTestBench : public sc_module {
 public:
+    // Parameters
+    static constexpr size_t NUM_PORTS = 3;
+    static constexpr size_t PORT_BANDWIDTH = 64;
+    static constexpr size_t NUM_PES_PER_PORT = 16;
+    static constexpr size_t TOTAL_PES = NUM_PORTS * NUM_PES_PER_PORT;
+    static constexpr uint64_t MAX_WAIT_CYCLES = 10000;
+
     // Ports
     sc_clock clk;
     sc_signal<bool> reset_n;
@@ -224,14 +231,14 @@ public:
     sc_signal<sc_uint<32>> command_data;
 
     // New Valid-Ready Signals (Triple Plane)
-    VRDSIG<noc::router_req_t> noc_ps_sig;  // NoC-PS
-    VRDSIG<noc::router_req_t> noc_pd_sig;  // NoC-PD
-    VRDSIG<noc::router_req_t> noc_pli_sig; // NoC-PLI (Local Network Plane - Write)
+    VRDSIG<request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t>> noc_ps_sig;  // NoC-PS
+    VRDSIG<request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t>> noc_pd_sig;  // NoC-PD
+    VRDSIG<request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t>> noc_pli_sig; // NoC-PLI (Local Network Plane - Write)
     VRDSIG<noc_addr_req_t>    noc_plo_sig; // NoC-PLO (Local Network Plane - Read)
-    VRDSIG<noc::router_resp_t> noc_plo_resp_sig; // NoC-PLO Response
+    VRDSIG<response_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>>> noc_plo_resp_sig; // NoC-PLO Response
 
     // DUT
-    NetworkOnChip noc;
+    NetworkOnChip<NUM_PORTS, PORT_BANDWIDTH, NUM_PES_PER_PORT> noc;
 
     // Test Data
     std::string test_data_dir;
@@ -285,11 +292,6 @@ public:
     sc_event pli_done_event;
     sc_event plo_done_event;
 
-    // Parameters
-    static constexpr size_t NUM_PORTS = 3;
-    static constexpr size_t NUM_PES_PER_PORT = 16;
-    static constexpr size_t TOTAL_PES = NUM_PORTS * NUM_PES_PER_PORT;
-    static constexpr uint64_t MAX_WAIT_CYCLES = 10000;
     int clock_period_ns;
 
     SC_HAS_PROCESS(NoCSimTestBench);
@@ -305,7 +307,7 @@ public:
           noc_pli_sig("noc_pli_sig"),
           noc_plo_sig("noc_plo_sig"),
           noc_plo_resp_sig("noc_plo_resp_sig"),
-          noc("NoC_DUT", NetWorkOnChipConfig(NUM_PORTS, NUM_PES_PER_PORT, 4, 32)),
+          noc("NoC_DUT", NetWorkOnChipConfig(4, 32)),
           test_data_dir(data_dir),
           rx_idx_fifo("rx_idx_fifo", 1024),
           verify_tolerance(verify_tolerance),
@@ -390,7 +392,7 @@ public:
     }
 
     void send_data_ps(uint16_t tag, const sc_biguint<256>& data_val, bool ultra_mode = false, size_t mask = 0xF) {
-        noc::router_req_t req;
+        request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t> req;
         req.data = data_val;
         req.addr = (static_cast<uint16_t>(tag) & 0x3F) | (ultra_mode ? 0x40 : 0x00);
         req.mask = mask;
@@ -411,7 +413,7 @@ public:
     }
 
     void send_data_pd(uint16_t tag, const sc_biguint<256>& data_val, bool ultra_mode = false, size_t mask = 0xF) {
-        noc::router_req_t req;
+        request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t> req;
         req.data = data_val;
         req.addr = (static_cast<uint16_t>(tag) & 0x3F) | (ultra_mode ? 0x40 : 0x00);
         req.mask = mask;
@@ -430,7 +432,7 @@ public:
     }
 
     void send_data_pli(uint16_t tag, const sc_biguint<256>& data_val, bool ultra_mode = false, size_t mask = 0xF) {
-        noc::router_req_t req;
+        request_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>, uint16_t> req;
         req.data = data_val;
         req.addr = (static_cast<uint16_t>(tag) & 0x3F) | (ultra_mode ? 0x40 : 0x00);
         req.mask = mask;
@@ -490,7 +492,7 @@ public:
             wait();
             if (noc_plo_resp_sig.valid_sig.read() && noc_plo_resp_sig.ready_sig.read()) {
                 // receive response
-                noc::router_resp_t resp = noc_plo_resp_sig.data_sig.read();
+                response_t<sc_biguint<NUM_PORTS*PORT_BANDWIDTH>> resp = noc_plo_resp_sig.data_sig.read();
                 RespMeta meta;
                 if(rx_idx_fifo.nb_read(meta)) {
                     // GEMM-specific handling: variable-length response mapping
@@ -706,8 +708,8 @@ public:
                                             : static_cast<size_t>(conv.out_height);
 
         // Determine max channels per packet based on mode
-        // Ultra Mode: 3 ports share 192 bits -> 64 bits/port -> 4 fp16 channels/port
-        // Normal Mode: 1 port uses 192 bits -> 12 fp16 channels
+        // Ultra Mode: 3 ports share NUM_PORTS*PORT_BANDWIDTH bits -> 64 bits/port -> 4 fp16 channels/port
+        // Normal Mode: 1 port uses NUM_PORTS*PORT_BANDWIDTH bits -> 12 fp16 channels
         size_t channels_per_packet = ultra_mode ? 4 : 12;
 
         for (int wave_h = 0; wave_h < wave_out_h; ++wave_h) {

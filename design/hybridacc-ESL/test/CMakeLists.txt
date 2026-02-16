@@ -114,31 +114,56 @@ target_link_libraries(test_noc_unit
 )
 
 # SRAM Unit Tests
-add_executable(test_sram
-    test_sram.cpp
+add_executable(test_sram_unit
+    test_sram_unit.cpp
 )
 
-# Conditional compile definitions for test_sram
+# Conditional compile definitions for test_sram_unit
 if(ENABLE_DEBUG_UTILS)
-    target_compile_definitions(test_sram PRIVATE DEBUG_UTILS)
-    target_compile_definitions(test_sram PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
-    target_compile_definitions(test_sram PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
+    target_compile_definitions(test_sram_unit PRIVATE DEBUG_UTILS)
+    target_compile_definitions(test_sram_unit PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
+    target_compile_definitions(test_sram_unit PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
 endif()
 
-target_link_libraries(test_sram
+target_link_libraries(test_sram_unit
     systemc
     pthread
 )
 
 # Test runner for SRAM
 add_custom_target(run_sram_test
-    COMMAND ./test_sram
-    DEPENDS test_sram
+    COMMAND ./test_sram_unit
+    DEPENDS test_sram_unit
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running SRAM unit test"
 )
 
-add_test(NAME SRAM_Unit_Tests COMMAND test_sram)
+add_test(NAME SRAM_Unit_Tests COMMAND test_sram_unit)
+
+# ScratchpadMemory Unit Tests
+add_executable(test_spm_unit
+    test_spm_unit.cpp
+)
+
+if(ENABLE_DEBUG_UTILS)
+    target_compile_definitions(test_spm_unit PRIVATE DEBUG_UTILS)
+    target_compile_definitions(test_spm_unit PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
+    target_compile_definitions(test_spm_unit PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
+endif()
+
+target_link_libraries(test_spm_unit
+    systemc
+    pthread
+)
+
+add_custom_target(run_spm_test
+    COMMAND ./test_spm_unit
+    DEPENDS test_spm_unit
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running ScratchpadMemory unit test"
+)
+
+add_test(NAME ScratchpadMemory_Unit_Tests COMMAND test_spm_unit)
 
 # Test runner script
 add_custom_target(run_tests
@@ -166,8 +191,8 @@ add_custom_target(run_noc_test
 
 # Run all tests
 add_custom_target(run_all_tests
-    COMMAND ./test_pe_unit && ./test_noc_unit && ./test_sram
-    DEPENDS test_pe_unit test_noc_unit test_sram
+    COMMAND ./test_pe_unit && ./test_noc_unit && ./test_sram_unit && ./test_spm_unit
+    DEPENDS test_pe_unit test_noc_unit test_sram_unit test_spm_unit
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running all unit tests"
 )
@@ -212,3 +237,53 @@ add_custom_target(run_noc_sim
 )
 
 add_test(NAME NoC_Simulation COMMAND test_noc_sim)
+
+# AGU Unit Tests
+add_executable(test_agu_unit
+    test_agu_unit.cpp
+)
+
+if(ENABLE_DEBUG_UTILS)
+    target_compile_definitions(test_agu_unit PRIVATE DEBUG_UTILS)
+    target_compile_definitions(test_agu_unit PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
+    target_compile_definitions(test_agu_unit PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
+endif()
+
+target_link_libraries(test_agu_unit
+    systemc
+    pthread
+)
+
+add_custom_target(run_agu_test
+    COMMAND ./test_agu_unit
+    DEPENDS test_agu_unit
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running AGU unit test"
+)
+
+add_test(NAME AGU_Unit_Tests COMMAND test_agu_unit)
+
+# HDDU Unit Tests
+add_executable(test_hddu_unit
+    test_hddu_unit.cpp
+)
+
+if(ENABLE_DEBUG_UTILS)
+    target_compile_definitions(test_hddu_unit PRIVATE DEBUG_UTILS)
+    target_compile_definitions(test_hddu_unit PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
+    target_compile_definitions(test_hddu_unit PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
+endif()
+
+target_link_libraries(test_hddu_unit
+    systemc
+    pthread
+)
+
+add_custom_target(run_hddu_test
+    COMMAND ./test_hddu_unit
+    DEPENDS test_hddu_unit
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running HDDU unit test"
+)
+
+add_test(NAME HDDU_Unit_Tests COMMAND test_hddu_unit)

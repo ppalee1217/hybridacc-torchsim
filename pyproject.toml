@@ -2,7 +2,7 @@
 name = "hybridacc_tools"
 version = "0.1.0"
 description = "Verification tools for HybridAcc"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 dependencies = [
     "numpy",
     "torch",

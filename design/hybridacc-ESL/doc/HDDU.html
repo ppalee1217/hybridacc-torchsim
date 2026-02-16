@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>HybridDataDeliverUnit (HDDU) 規格書 v2</title>
+	<style>
+		body { font-family: Arial, sans-serif; line-height: 1.6; margin: 24px; }
+		h1, h2, h3 { margin-top: 1.2em; }
+		table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+		th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+		code { background: #f4f4f4; padding: 2px 4px; border-radius: 4px; }
+	</style>
+</head>
+<body>
+	<h1>HybridDataDeliverUnit (HDDU) 規格書 v2</h1>
+
+	<h2>1. 概述</h2>
+	<p>HDDU 以 MMIO 控制 4 組 AGU、4 個 SPM 連接埠與 4 個 NoC 連接埠。本版本移除 DMA。</p>
+	<ul>
+		<li>SPM[0/1/2] read → NoC[0/1/2] send</li>
+		<li>NoC[3] recv → SPM[3] write</li>
+	</ul>
+
+	<h2>2. Template 參數</h2>
+	<pre><code>template &lt;int SPM_ADDR_BITS = 32, int NOC_TAG_BITS = 6, int DATA_BITS = 256&gt;
+class HybridDataDeliverUnit;</code></pre>
+	<ul>
+		<li><code>SPM_ADDR_BITS</code>: SPM 位址寬度</li>
+		<li><code>NOC_TAG_BITS</code>: NoC tag 寬度（NoC addr width = NOC_TAG_BITS + 1）</li>
+		<li><code>DATA_BITS</code>: 資料寬度</li>
+	</ul>
+
+	<h2>3. Port 定義</h2>
+	<h3>3.1 時序/控制</h3>
+	<table>
+		<tr><th>名稱</th><th>方向</th><th>寬度</th><th>說明</th></tr>
+		<tr><td>clk</td><td>in</td><td>1</td><td>系統時脈</td></tr>
+		<tr><td>reset_n</td><td>in</td><td>1</td><td>低有效重置</td></tr>
+		<tr><td>interrupt</td><td>out</td><td>1</td><td>done 或 err 中斷</td></tr>
+	</table>
+
+	<h3>3.2 MMIO</h3>
+	<table>
+		<tr><th>名稱</th><th>方向</th><th>寬度</th><th>說明</th></tr>
+		<tr><td>mmio_addr</td><td>in</td><td>32</td><td>MMIO 位址</td></tr>
+		<tr><td>mmio_write</td><td>in</td><td>1</td><td>寫使能</td></tr>
+		<tr><td>mmio_wdata</td><td>in</td><td>32</td><td>寫資料</td></tr>
+		<tr><td>mmio_rdata</td><td>out</td><td>32</td><td>讀資料</td></tr>
+	</table>
+
+	<h3>3.3 SPM（4 ports）</h3>
+	<p>訊號群：<code>spm_addr[i] / spm_req[i] / spm_we[i] / spm_wdata[i] / spm_rdata[i] / spm_ready[i]</code></p>
+	<table>
+		<tr><th>port</th><th>用途</th><th>行為</th></tr>
+		<tr><td>0</td><td>PS</td><td>read</td></tr>
+		<tr><td>1</td><td>PD</td><td>read</td></tr>
+		<tr><td>2</td><td>PLI</td><td>read</td></tr>
+		<tr><td>3</td><td>PLO</td><td>write</td></tr>
+	</table>
+
+	<h3>3.4 NoC（4 ports）</h3>
+	<p>送出（0/1/2）：<code>noc_out_data[i] / noc_out_addr[i] / noc_out_valid[i] / noc_out_ready[i]</code></p>
+	<p>接收（3）：<code>noc_in3_data / noc_in3_addr / noc_in3_valid / noc_in3_ready</code></p>
+
+	<h2>4. MMIO Register Map（0x800~0x8FF）</h2>
+	<table>
+		<tr><th>Offset</th><th>名稱</th><th>欄位</th><th>說明</th></tr>
+		<tr><td>0x800</td><td>HDDU_CTRL</td><td>bit0 en, bit1 soft_reset, bit2 start_all, bit3 stop_all</td><td>全域控制</td></tr>
+		<tr><td>0x804</td><td>HDDU_STATUS</td><td>bit0 busy, bit1 done, bit2 err, bit3 stall</td><td>全域狀態</td></tr>
+		<tr><td>0x808</td><td>PLANE_EN</td><td>bit0 PS, bit1 PD, bit2 PLI, bit3 PLO</td><td>平面使能</td></tr>
+		<tr><td>0x80C</td><td>PLANE_MODE</td><td>bit0 conv2d, bit1 gemm, bit2 ultra, bit3 k_split</td><td>模式</td></tr>
+		<tr><td>0x810</td><td>NUM_PORTS</td><td>[7:0]</td><td>固定 4</td></tr>
+		<tr><td>0x814</td><td>PORT_WIDTH</td><td>[15:0]</td><td>DATA_BITS / 4</td></tr>
+		<tr><td>0x818</td><td>MAX_OUTSTANDING</td><td>[7:0]</td><td>保留</td></tr>
+		<tr><td>0x81C</td><td>ARB_POLICY</td><td>[1:0]</td><td>仲裁策略</td></tr>
+		<tr><td>0x820</td><td>ERR_CODE</td><td>[31:0]</td><td>第一個錯誤</td></tr>
+		<tr><td>0x824</td><td>ERR_INFO0</td><td>[31:0]</td><td>錯誤資訊 0</td></tr>
+		<tr><td>0x828</td><td>ERR_INFO1</td><td>[31:0]</td><td>錯誤資訊 1</td></tr>
+		<tr><td>0x82C</td><td>COUNTER_TX_PKT</td><td>[31:0]</td><td>送出封包數</td></tr>
+		<tr><td>0x830</td><td>COUNTER_TX_BYTE</td><td>[31:0]</td><td>送出 bytes</td></tr>
+		<tr><td>0x834</td><td>COUNTER_RX_BYTE</td><td>[31:0]</td><td>接收 bytes</td></tr>
+		<tr><td>0x838</td><td>COUNTER_STALL</td><td>[31:0]</td><td>stall cycle</td></tr>
+	</table>
+
+	<h2>5. AGU Bank 對映</h2>
+	<ul>
+		<li>0x000~0x0FF: AGU_PS</li>
+		<li>0x100~0x1FF: AGU_PD</li>
+		<li>0x200~0x2FF: AGU_PLI</li>
+		<li>0x300~0x3FF: AGU_PLO</li>
+	</ul>
+
+	<h2>6. 核心行為</h2>
+	<ul>
+		<li>AGU0/1/2 產生地址，SPM read 後送到對應 NoC out port。</li>
+		<li>AGU3 與 NoC3 recv 握手後，資料寫入 SPM3。</li>
+		<li>NoC out 在 ready=0 時保持 valid/data/addr，不可遺失。</li>
+		<li>interrupt 在 done 或 err 時拉高。</li>
+	</ul>
+</body>
+</html>

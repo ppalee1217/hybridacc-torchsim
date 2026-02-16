@@ -13,11 +13,6 @@ namespace noc {
 
 static const int NUM_PORTS_DEFAULT = 3;
 
-// Define Router Request/Response types
-typedef request_t<sc_biguint<192>, uint16_t> router_req_t;
-typedef response_t<sc_biguint<192>> router_resp_t;
-
-
 // === FSM State & Registers ===
 enum class RouterState {
     IDLE,
@@ -40,7 +35,7 @@ inline void sc_trace(sc_core::sc_trace_file* tf, const RouterState& state, const
     sc_core::sc_trace(tf, static_cast<int>(state), name);
 }
 
-
+template <unsigned NUM_PORTS = NUM_PORTS_DEFAULT, unsigned PORT_WIDTH_BITS = 64>
 SC_MODULE(NoCRouter) {
 public:
     // Ports
@@ -54,11 +49,11 @@ public:
     sc_in<sc_uint<32>> command_data;
 
     // New Valid-Ready Interface
-    VRDIF<router_req_t> noc_ps_in; // PS (Weights)
-    VRDIF<router_req_t> noc_pd_in; // PD (Activations)
-    VRDIF<router_req_t> noc_pli_in; // Write PLI
+    VRDIF<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> noc_ps_in; // PS (Weights)
+    VRDIF<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> noc_pd_in; // PD (Activations)
+    VRDIF<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> noc_pli_in; // Write PLI
     VRDIF<noc_addr_req_t> noc_plo_in; // Read PLO (New)
-    VRDOF<router_resp_t> noc_plo_out; // Read Response (Was resp1)
+    VRDOF<response_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>>> noc_plo_out; // Read Response (Was resp1)
 
     // ===  NoC MBUS interface ports ===
     // NoC interface ports - using VRDIF/VRDOF
@@ -232,32 +227,32 @@ public:
 
 private:
     // === FIFOs ===
-    hybridacc::pe::FIFO<router_req_t> ps_fifo;
-    hybridacc::pe::FIFO<router_req_t> pd_fifo;
-    hybridacc::pe::FIFO<router_req_t> pli_fifo;
+    hybridacc::pe::FIFO<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> ps_fifo;
+    hybridacc::pe::FIFO<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> pd_fifo;
+    hybridacc::pe::FIFO<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> pli_fifo;
     hybridacc::pe::FIFO<noc_addr_req_t> plo_fifo;
-    hybridacc::pe::FIFO<router_resp_t> resp_fifo;
+    hybridacc::pe::FIFO<response_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>>> resp_fifo;
 
     // FIFO Signals - PS
-    sc_signal<router_req_t> ps_fifo_in_sig;
+    sc_signal<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> ps_fifo_in_sig;
     sc_signal<bool> ps_fifo_push_sig;
-    sc_signal<router_req_t> ps_fifo_out_sig;
+    sc_signal<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> ps_fifo_out_sig;
     sc_signal<bool> ps_fifo_pop_sig;
     sc_signal<bool> ps_fifo_empty_sig;
     sc_signal<bool> ps_fifo_full_sig;
 
     // FIFO Signals - PD
-    sc_signal<router_req_t> pd_fifo_in_sig;
+    sc_signal<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> pd_fifo_in_sig;
     sc_signal<bool> pd_fifo_push_sig;
-    sc_signal<router_req_t> pd_fifo_out_sig;
+    sc_signal<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> pd_fifo_out_sig;
     sc_signal<bool> pd_fifo_pop_sig;
     sc_signal<bool> pd_fifo_empty_sig;
     sc_signal<bool> pd_fifo_full_sig;
 
     // FIFO Signals - NoC1
-    sc_signal<router_req_t> pli_fifo_in_sig;
+    sc_signal<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> pli_fifo_in_sig;
     sc_signal<bool> pli_fifo_push_sig;
-    sc_signal<router_req_t> pli_fifo_out_sig;
+    sc_signal<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> pli_fifo_out_sig;
     sc_signal<bool> pli_fifo_pop_sig;
     sc_signal<bool> pli_fifo_empty_sig;
     sc_signal<bool> pli_fifo_full_sig;
@@ -270,9 +265,9 @@ private:
     sc_signal<bool> plo_fifo_empty_sig;
     sc_signal<bool> plo_fifo_full_sig;
 
-    sc_signal<router_resp_t> resp_fifo_in_sig;
+    sc_signal<response_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>>> resp_fifo_in_sig;
     sc_signal<bool> resp_fifo_push_sig;
-    sc_signal<router_resp_t> resp_fifo_out_sig;
+    sc_signal<response_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>>> resp_fifo_out_sig;
     sc_signal<bool> resp_fifo_pop_sig;
     sc_signal<bool> resp_fifo_empty_sig;
     sc_signal<bool> resp_fifo_full_sig;
@@ -406,7 +401,7 @@ private:
 
         // 2. FIFO Request (NoC PS)
         if (!ps_fifo_empty_sig.read()) {
-            router_req_t req = ps_fifo_out_sig.read();
+            request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t> req = ps_fifo_out_sig.read();
 
             // Decode
             bool is_ultra = (req.addr >> 6) & 0x1;
@@ -418,7 +413,7 @@ private:
             for (size_t i = 0; i < num_ports; ++i) {
                 noc_request_t r;
                 if (is_ultra) {
-                    assert(num_ports <= NUM_PORTS_DEFAULT); // Max 4 ports for ultra mode (since 192/64=3)
+                    assert(num_ports <= NUM_PORTS_DEFAULT); // Max 4 ports for ultra mode (since NUM_PORTS*PORT_WIDTH_BITS/64=3)
                     r.data = req.data.range(64*i + 63, 64*i).to_uint64();
                 } else { // Broadcast
                     r.data = req.data.range(63, 0).to_uint64();
@@ -459,7 +454,7 @@ private:
 
         // FIFO Request (NoC PD)
         if (!pd_fifo_empty_sig.read()) {
-            router_req_t req = pd_fifo_out_sig.read();
+            request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t> req = pd_fifo_out_sig.read();
 
             // Decode
             bool is_ultra = (req.addr >> 6) & 0x1;
@@ -511,7 +506,7 @@ private:
 
         // FIFO Request (NoC-PLI)
         if (!pli_fifo_empty_sig.read()) {
-            router_req_t req = pli_fifo_out_sig.read();
+            request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t> req = pli_fifo_out_sig.read();
 
             // Decode
             bool is_ultra = (req.addr >> 6) & 0x1;
@@ -624,7 +619,7 @@ private:
     void process_responses_plo() {
         // Default outputs
         resp_fifo_push_sig.write(false);
-        resp_fifo_in_sig.write(router_resp_t());
+        resp_fifo_in_sig.write(response_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>>());
         rx_stall_sig.write(false);
 
         for (size_t i = 0; i < num_ports; ++i) {
@@ -638,7 +633,7 @@ private:
 
         // Check if all expected responses are valid
         bool all_valid = true;
-        sc_biguint<192> collected_data = 0;
+        sc_biguint<NUM_PORTS*PORT_WIDTH_BITS> collected_data = 0;
         uint64_t valid_rx = 0;
         bool error_flag = false;
 
@@ -696,9 +691,9 @@ private:
                 }
 
                 // Push to FIFO
-                router_resp_t final_resp;
+                response_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>> final_resp;
                 final_resp.data = collected_data;
-                // Note: router_resp_t doesn't have status field in current definition,
+                // Note: response_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>> doesn't have status field in current definition,
                 // assuming data is enough or error handling is done elsewhere/ignored for now.
 
                 resp_fifo_push_sig.write(true);
