@@ -45,25 +45,33 @@ static void print_report(const std::vector<TestResult>& results, const std::stri
 
 class HDDUTestBench {
 public:
+	static constexpr int DATA_BITS = 192;
+	using data_t = sc_biguint<DATA_BITS>;
+	using noc_req_t = request_t<data_t, uint16_t>;
+	using noc_addr_req_t = ::noc_addr_req_t;
+	using noc_resp_t = response_t<data_t>;
+
 	sc_clock clk{"clk", 10, SC_NS};
 	sc_signal<bool> reset_n;
 
 	std::array<sc_signal<sc_uint<32>>, 4> spm_addr;
 	std::array<sc_signal<bool>, 4> spm_req;
 	std::array<sc_signal<bool>, 4> spm_we;
-	std::array<sc_signal<sc_biguint<256>>, 4> spm_wdata;
-	std::array<sc_signal<sc_biguint<256>>, 4> spm_rdata;
+	std::array<sc_signal<data_t>, 4> spm_wdata;
+	std::array<sc_signal<data_t>, 4> spm_rdata;
 	std::array<sc_signal<bool>, 4> spm_ready;
 
-	std::array<sc_signal<sc_biguint<256>>, 4> noc_out_data;
-	std::array<sc_signal<sc_uint<7>>, 4> noc_out_addr;
-	std::array<sc_signal<bool>, 4> noc_out_valid;
-	std::array<sc_signal<bool>, 4> noc_out_ready;
+	std::array<sc_signal<noc_req_t>, 3> noc_out_req_data;
+	std::array<sc_signal<bool>, 3> noc_out_req_valid;
+	std::array<sc_signal<bool>, 3> noc_out_req_ready;
 
-	sc_signal<sc_biguint<256>> noc_in3_data;
-	sc_signal<sc_uint<7>> noc_in3_addr;
-	sc_signal<bool> noc_in3_valid;
-	sc_signal<bool> noc_in3_ready;
+	sc_signal<noc_addr_req_t> noc_plo_req_data;
+	sc_signal<bool> noc_plo_req_valid;
+	sc_signal<bool> noc_plo_req_ready;
+
+	sc_signal<noc_resp_t> noc_plo_resp_data;
+	sc_signal<bool> noc_plo_resp_valid;
+	sc_signal<bool> noc_plo_resp_ready;
 
 	sc_signal<sc_uint<32>> mmio_addr;
 	sc_signal<bool> mmio_write;
@@ -71,7 +79,7 @@ public:
 	sc_signal<sc_uint<32>> mmio_rdata;
 	sc_signal<bool> interrupt;
 
-	HybridDataDeliverUnit<> dut{"HDDU_DUT"};
+	HybridDataDeliverUnit<32, 6, DATA_BITS> dut{"HDDU_DUT"};
 
 	HDDUTestBench() {
 		dut.clk(clk);
@@ -83,16 +91,24 @@ public:
 			dut.spm_wdata[i](spm_wdata[i]);
 			dut.spm_rdata[i](spm_rdata[i]);
 			dut.spm_ready[i](spm_ready[i]);
-
-			dut.noc_out_data[i](noc_out_data[i]);
-			dut.noc_out_addr[i](noc_out_addr[i]);
-			dut.noc_out_valid[i](noc_out_valid[i]);
-			dut.noc_out_ready[i](noc_out_ready[i]);
 		}
-		dut.noc_in3_data(noc_in3_data);
-		dut.noc_in3_addr(noc_in3_addr);
-		dut.noc_in3_valid(noc_in3_valid);
-		dut.noc_in3_ready(noc_in3_ready);
+
+		dut.noc_ps_out.data_out(noc_out_req_data[0]);
+		dut.noc_ps_out.valid_out(noc_out_req_valid[0]);
+		dut.noc_ps_out.ready_in(noc_out_req_ready[0]);
+		dut.noc_pd_out.data_out(noc_out_req_data[1]);
+		dut.noc_pd_out.valid_out(noc_out_req_valid[1]);
+		dut.noc_pd_out.ready_in(noc_out_req_ready[1]);
+		dut.noc_pli_out.data_out(noc_out_req_data[2]);
+		dut.noc_pli_out.valid_out(noc_out_req_valid[2]);
+		dut.noc_pli_out.ready_in(noc_out_req_ready[2]);
+
+		dut.noc_plo_out.data_out(noc_plo_req_data);
+		dut.noc_plo_out.valid_out(noc_plo_req_valid);
+		dut.noc_plo_out.ready_in(noc_plo_req_ready);
+		dut.noc_plo_in.data_in(noc_plo_resp_data);
+		dut.noc_plo_in.valid_in(noc_plo_resp_valid);
+		dut.noc_plo_in.ready_out(noc_plo_resp_ready);
 		dut.mmio_addr(mmio_addr);
 		dut.mmio_write(mmio_write);
 		dut.mmio_wdata(mmio_wdata);
@@ -107,16 +123,18 @@ public:
 			spm_wdata[i].write(0);
 			spm_rdata[i].write(0);
 			spm_ready[i].write(true);
-
-			noc_out_data[i].write(0);
-			noc_out_addr[i].write(0);
-			noc_out_valid[i].write(false);
-			noc_out_ready[i].write(true);
 		}
-		noc_in3_data.write(0);
-		noc_in3_addr.write(0);
-		noc_in3_valid.write(false);
-		noc_in3_ready.write(false);
+		for (int i = 0; i < 3; ++i) {
+			noc_out_req_data[i].write(noc_req_t{});
+			noc_out_req_valid[i].write(false);
+			noc_out_req_ready[i].write(true);
+		}
+		noc_plo_req_data.write(noc_addr_req_t{});
+		noc_plo_req_valid.write(false);
+		noc_plo_req_ready.write(true);
+		noc_plo_resp_data.write(noc_resp_t{});
+		noc_plo_resp_valid.write(false);
+		noc_plo_resp_ready.write(false);
 		mmio_addr.write(0);
 		mmio_write.write(false);
 		mmio_wdata.write(0);
@@ -127,12 +145,15 @@ public:
 
 	void reset() {
 		reset_n.write(false);
-		noc_in3_valid.write(false);
+		noc_plo_resp_valid.write(false);
 		mmio_write.write(false);
 		for (int i = 0; i < 4; ++i) {
 			spm_ready[i].write(true);
-			noc_out_ready[i].write(true);
+			if (i < 3) {
+				noc_out_req_ready[i].write(true);
+			}
 		}
+		noc_plo_req_ready.write(true);
 		tick(3);
 		reset_n.write(true);
 		tick(2);
@@ -182,17 +203,17 @@ public:
 	}
 
 	void load_spm_read_data(int port, uint32_t low32) {
-		sc_biguint<256> payload = 0;
+		data_t payload = 0;
 		payload.range(31, 0) = low32;
 		spm_rdata[port].write(payload);
 	}
 
 	uint32_t last_noc_addr(int port) const {
-		return noc_out_addr[port].read().to_uint();
+		return noc_out_req_data[port].read().addr;
 	}
 
 	bool any_noc_valid012() const {
-		return noc_out_valid[0].read() || noc_out_valid[1].read() || noc_out_valid[2].read();
+		return noc_out_req_valid[0].read() || noc_out_req_valid[1].read() || noc_out_req_valid[2].read();
 	}
 };
 
@@ -200,6 +221,8 @@ int sc_main(int argc, char* argv[]) {
 	(void)argc; (void)argv;
 
 	HDDUTestBench tb;
+	using data_t = HDDUTestBench::data_t;
+	using noc_resp_t = HDDUTestBench::noc_resp_t;
 	std::vector<TestResult> results;
 
 	auto run = [&](const std::string& name, const std::function<TestResult()>& fn) {
@@ -268,16 +291,16 @@ int sc_main(int argc, char* argv[]) {
 
 	run("SPM read data forms NoC packet", [&]() {
 		tb.reset();
-		sc_biguint<256> payload = 0;
+		data_t payload = 0;
 		payload.range(31, 0) = 0xDEADBEEF;
 		tb.spm_rdata[0].write(payload);
 		tb.setup_basic_agu_bank0(0x100, 0x0A, false);
 		tb.tick(2);
-		tb.noc_out_ready[0].write(false);
+		tb.noc_out_req_ready[0].write(false);
 		tb.tick(1);
-		bool v = tb.noc_out_valid[0].read();
-		bool ok_data = (tb.noc_out_data[0].read() == payload);
-		tb.noc_out_ready[0].write(true);
+		bool v = tb.noc_out_req_valid[0].read();
+		bool ok_data = (tb.noc_out_req_data[0].read().data == payload);
+		tb.noc_out_req_ready[0].write(true);
 		return TestResult{"", v && ok_data, std::string("valid=") + (v ? "1" : "0")};
 	});
 
@@ -302,27 +325,33 @@ int sc_main(int argc, char* argv[]) {
 
 	run("NoC valid holds when not ready", [&]() {
 		tb.reset();
-		tb.noc_out_ready[0].write(false);
+		tb.noc_out_req_ready[0].write(false);
 		tb.load_spm_read_data(0, 0x3333);
 		tb.setup_basic_agu_bank0(0x300, 0x05, false);
 		tb.tick(2);
 		tb.tick(2);
-		bool hold = tb.noc_out_valid[0].read();
-		tb.noc_out_ready[0].write(true);
+		bool hold = tb.noc_out_req_valid[0].read();
+		tb.noc_out_req_ready[0].write(true);
 		return TestResult{"", hold, std::string("hold=") + (hold ? "1" : "0")};
 	});
 
 	run("NoC valid clears after handshake", [&]() {
 		tb.reset();
-		tb.noc_out_ready[0].write(false);
+		tb.noc_out_req_ready[0].write(false);
 		tb.load_spm_read_data(0, 0x4444);
 		tb.setup_basic_agu_bank0(0x310, 0x06, false);
 		tb.tick(2);
 		tb.tick(1);
-		tb.noc_out_ready[0].write(true);
-		tb.tick(2);
-		bool cleared = !tb.noc_out_valid[0].read();
-		return TestResult{"", cleared, std::string("noc_valid=") + (tb.noc_out_valid[0].read() ? "1" : "0")};
+		tb.noc_out_req_ready[0].write(true);
+		bool cleared = false;
+		for (int i = 0; i < 10; ++i) {
+			tb.tick(1);
+			if (!tb.noc_out_req_valid[0].read()) {
+				cleared = true;
+				break;
+			}
+		}
+		return TestResult{"", cleared, std::string("noc_valid=") + (tb.noc_out_req_valid[0].read() ? "1" : "0")};
 	});
 
 	run("Arb state selects active bank", [&]() {
@@ -342,18 +371,21 @@ int sc_main(int argc, char* argv[]) {
 		tb.setup_basic_agu_bank(3, 0x400, 0x00, false);
 		tb.tick(1);
 		uint32_t rx_before = tb.mmio_rd(0x834);
-		sc_biguint<256> payload = 0;
+		data_t payload = 0;
 		payload.range(31, 0) = 0xCAFEBABE;
-		tb.noc_in3_data.write(payload);
+		noc_resp_t resp{};
+		resp.data = payload;
+		resp.status = NOC_RESPONSE_STATUS::NOC_OK;
+		tb.noc_plo_resp_data.write(resp);
 		int wr_seen = 0;
 		int ready_seen = 0;
 		for (int i = 0; i < 6; ++i) {
-			tb.noc_in3_valid.write(true);
+			tb.noc_plo_resp_valid.write(true);
 			tb.tick(1);
 			if (tb.spm_req[3].read() && tb.spm_we[3].read()) wr_seen++;
-			if (tb.noc_in3_ready.read()) ready_seen++;
+			if (tb.noc_plo_resp_ready.read()) ready_seen++;
 		}
-		tb.noc_in3_valid.write(false);
+		tb.noc_plo_resp_valid.write(false);
 		tb.tick(1);
 		uint32_t rx_after = tb.mmio_rd(0x834);
 		bool ok = (wr_seen > 0) && (ready_seen > 0) && (rx_after > rx_before);
@@ -383,12 +415,15 @@ int sc_main(int argc, char* argv[]) {
 			tb.spm_ready[2].write((c % 5) != 0);
 			tb.spm_ready[3].write((c % 2) == 0);
 
-			tb.noc_out_ready[0].write((c % 2) == 0);
-			tb.noc_out_ready[1].write((c % 3) != 1);
-			tb.noc_out_ready[2].write((c % 4) != 2);
+			tb.noc_out_req_ready[0].write((c % 2) == 0);
+			tb.noc_out_req_ready[1].write((c % 3) != 1);
+			tb.noc_out_req_ready[2].write((c % 4) != 2);
 
-			tb.noc_in3_data.write(static_cast<uint32_t>(0xABC00000u + static_cast<uint32_t>(c)));
-			tb.noc_in3_valid.write((c % 3) == 0);
+			noc_resp_t resp{};
+			resp.data = static_cast<uint32_t>(0xABC00000u + static_cast<uint32_t>(c));
+			resp.status = NOC_RESPONSE_STATUS::NOC_OK;
+			tb.noc_plo_resp_data.write(resp);
+			tb.noc_plo_resp_valid.write((c % 3) == 0);
 
 			tb.tick(1);
 			if ((tb.spm_req[0].read() && !tb.spm_we[0].read()) ||
@@ -400,7 +435,7 @@ int sc_main(int argc, char* argv[]) {
 				seen_wr3++;
 			}
 		}
-		tb.noc_in3_valid.write(false);
+		tb.noc_plo_resp_valid.write(false);
 
 		uint32_t stall = tb.mmio_rd(0x838);
 		uint32_t rx_b = tb.mmio_rd(0x834);

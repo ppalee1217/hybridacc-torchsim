@@ -2,8 +2,10 @@
 
 #include <systemc>
 #include <array>
+#include <deque>
 
 #include "Cluster/AddressGenerateUnit.hpp"
+#include "utils.hpp"
 
 using namespace sc_core;
 using namespace sc_dt;
@@ -11,7 +13,7 @@ using namespace sc_dt;
 namespace hybridacc {
 namespace cluster {
 
-template <int SPM_ADDR_BITS = 32, int NOC_TAG_BITS = 6, int DATA_BITS = 256>
+template <int SPM_ADDR_BITS = 32, int NOC_TAG_BITS = 6, int DATA_BITS = 192>
 class HybridDataDeliverUnit : public sc_module {
 public:
 	static constexpr int NUM_AGU = 4;
@@ -21,6 +23,9 @@ public:
 	static constexpr int RECV_PLANE = 3;
 	static constexpr int NOC_ADDR_BITS = NOC_TAG_BITS + 1;
 	static constexpr int DATA_BYTES = DATA_BITS / 8;
+	using noc_req_payload_t = request_t<sc_biguint<DATA_BITS>, uint16_t>;
+	using noc_addr_payload_t = noc_addr_req_t;
+	using noc_resp_payload_t = response_t<sc_biguint<DATA_BITS>>;
 
 	enum PlaneId : int {
 		PLANE_PS = 0,
@@ -41,16 +46,12 @@ public:
 	sc_vector<sc_in<sc_biguint<DATA_BITS>>> spm_rdata;
 	sc_vector<sc_in<bool>> spm_ready;
 
-	// --- NoC ports (0/1/2 send, 3 recv) ---
-	sc_vector<sc_out<sc_biguint<DATA_BITS>>> noc_out_data;
-	sc_vector<sc_out<sc_uint<NOC_ADDR_BITS>>> noc_out_addr;
-	sc_vector<sc_out<bool>> noc_out_valid;
-	sc_vector<sc_in<bool>> noc_out_ready;
-
-	sc_in<sc_biguint<DATA_BITS>> noc_in3_data;
-	sc_in<sc_uint<NOC_ADDR_BITS>> noc_in3_addr;
-	sc_in<bool> noc_in3_valid;
-	sc_out<bool> noc_in3_ready;
+	// --- NoC ports (typed valid/ready interfaces) ---
+	VRDOF<noc_req_payload_t> noc_ps_out;
+	VRDOF<noc_req_payload_t> noc_pd_out;
+	VRDOF<noc_req_payload_t> noc_pli_out;
+	VRDOF<noc_addr_payload_t> noc_plo_out;
+	VRDIF<noc_resp_payload_t> noc_plo_in;
 
 	// --- MMIO ---
 	sc_in<sc_uint<32>> mmio_addr;
@@ -78,14 +79,11 @@ public:
 		  spm_wdata("spm_wdata", NUM_SPM),
 		  spm_rdata("spm_rdata", NUM_SPM),
 		  spm_ready("spm_ready", NUM_SPM),
-		  noc_out_data("noc_out_data", NUM_NOC),
-		  noc_out_addr("noc_out_addr", NUM_NOC),
-		  noc_out_valid("noc_out_valid", NUM_NOC),
-		  noc_out_ready("noc_out_ready", NUM_NOC),
-		  noc_in3_data("noc_in3_data"),
-		  noc_in3_addr("noc_in3_addr"),
-		  noc_in3_valid("noc_in3_valid"),
-		  noc_in3_ready("noc_in3_ready"),
+		  noc_ps_out("noc_ps_out"),
+		  noc_pd_out("noc_pd_out"),
+		  noc_pli_out("noc_pli_out"),
+		  noc_plo_out("noc_plo_out"),
+		  noc_plo_in("noc_plo_in"),
 		  mmio_addr("mmio_addr"),
 		  mmio_write("mmio_write"),
 		  mmio_wdata("mmio_wdata"),
@@ -183,10 +181,40 @@ private:
 	sc_signal<sc_uint<32>> counter_rx_byte_reg;
 	sc_signal<sc_uint<32>> counter_stall_reg;
 
-	std::array<bool, NUM_SEND_PLANES> out_pending_reg{};
-	std::array<sc_biguint<DATA_BITS>, NUM_SEND_PLANES> out_data_reg{};
-	std::array<sc_uint<NOC_ADDR_BITS>, NUM_SEND_PLANES> out_addr_reg{};
-	int rr_ptr = 0;
+	std::array<std::deque<sc_uint<NOC_ADDR_BITS>>, NUM_SEND_PLANES> tx_tag_fifo_reg{};
+	std::array<std::deque<sc_biguint<DATA_BITS>>, NUM_SEND_PLANES> tx_data_fifo_reg{};
+	std::deque<sc_uint<SPM_ADDR_BITS>> plo_addr_fifo_reg{};
+
+	unsigned fifo_limit() const {
+		const uint32_t cfg = max_outstanding_reg.read().to_uint();
+		return (cfg == 0) ? 1U : cfg;
+	}
+
+	void clear_channel_fifos() {
+		for (int i = 0; i < NUM_SEND_PLANES; ++i) {
+			tx_tag_fifo_reg[i].clear();
+			tx_data_fifo_reg[i].clear();
+		}
+		plo_addr_fifo_reg.clear();
+	}
+
+	static noc_req_payload_t make_noc_req(sc_biguint<DATA_BITS> data, sc_uint<NOC_ADDR_BITS> addr) {
+		noc_req_payload_t req{};
+		req.data = data;
+		req.addr = static_cast<uint16_t>(addr.to_uint());
+		req.mask = static_cast<size_t>(~0ULL);
+		return req;
+	}
+
+	static noc_addr_payload_t make_noc_plo_req(sc_uint<16> tag, bool ultra) {
+		noc_addr_payload_t req{};
+		sc_uint<NOC_ADDR_BITS> addr = 0;
+		const sc_uint<NOC_TAG_BITS> tag_n = static_cast<sc_uint<NOC_TAG_BITS>>(tag);
+		addr.range(NOC_TAG_BITS - 1, 0) = tag_n;
+		addr[NOC_TAG_BITS] = ultra ? 1 : 0;
+		req.addr = static_cast<uint16_t>(addr.to_uint());
+		return req;
+	}
 
 	void reset_internal() {
 		global_ctrl_reg.write(0);
@@ -210,20 +238,18 @@ private:
 			spm_we[i].write(false);
 			spm_wdata[i].write(0);
 		}
-		for (int i = 0; i < NUM_NOC; ++i) {
-			noc_out_data[i].write(0);
-			noc_out_addr[i].write(0);
-			noc_out_valid[i].write(false);
-		}
-		noc_in3_ready.write(false);
+		noc_ps_out.data_out.write(noc_req_payload_t{});
+		noc_ps_out.valid_out.write(false);
+		noc_pd_out.data_out.write(noc_req_payload_t{});
+		noc_pd_out.valid_out.write(false);
+		noc_pli_out.data_out.write(noc_req_payload_t{});
+		noc_pli_out.valid_out.write(false);
+		noc_plo_out.data_out.write(noc_addr_payload_t{});
+		noc_plo_out.valid_out.write(false);
+		noc_plo_in.ready_out.write(false);
 		arb_state.write(0);
 
-		for (int i = 0; i < NUM_SEND_PLANES; ++i) {
-			out_pending_reg[i] = false;
-			out_data_reg[i] = 0;
-			out_addr_reg[i] = 0;
-		}
-		rr_ptr = 0;
+		clear_channel_fifos();
 
 		for (int i = 0; i < NUM_AGU; ++i) {
 			agu_cfg_write_sig[i].write(false);
@@ -273,9 +299,7 @@ private:
 					err_code_reg.write(0);
 					err_info0_reg.write(0);
 					err_info1_reg.write(0);
-					for (int i = 0; i < NUM_SEND_PLANES; ++i) {
-						out_pending_reg[i] = false;
-					}
+						clear_channel_fifos();
 				}
 				if (wdata[2]) {
 					for (int i = 0; i < NUM_AGU; ++i) {
@@ -312,7 +336,7 @@ private:
 				case 0x804: r = global_status_reg.read(); break;
 				case 0x808: r = plane_en_reg.read(); break;
 				case 0x80C: r = plane_mode_reg.read(); break;
-				case 0x810: r = NUM_NOC; break;
+				case 0x810: r = 4; break;
 				case 0x814: r = DATA_BITS / NUM_NOC; break;
 				case 0x818: r = max_outstanding_reg.read(); break;
 				case 0x81C: r = arb_policy_reg.read(); break;
@@ -343,22 +367,20 @@ private:
 		wait();
 
 		while (true) {
-			noc_in3_ready.write(false);
+			noc_ps_out.valid_out.write(false);
+			noc_ps_out.data_out.write(noc_req_payload_t{});
+			noc_pd_out.valid_out.write(false);
+			noc_pd_out.data_out.write(noc_req_payload_t{});
+			noc_pli_out.valid_out.write(false);
+			noc_pli_out.data_out.write(noc_req_payload_t{});
+			noc_plo_out.valid_out.write(false);
+			noc_plo_out.data_out.write(noc_addr_payload_t{});
+			noc_plo_in.ready_out.write(false);
+
 			for (int i = 0; i < NUM_SPM; ++i) {
 				spm_req[i].write(false);
 				spm_we[i].write(false);
 				spm_wdata[i].write(0);
-			}
-			for (int i = 0; i < NUM_NOC; ++i) {
-				noc_out_valid[i].write(false);
-				noc_out_data[i].write(0);
-				noc_out_addr[i].write(0);
-			}
-
-			for (int i = 0; i < NUM_SEND_PLANES; ++i) {
-				noc_out_valid[i].write(out_pending_reg[i]);
-				noc_out_data[i].write(out_data_reg[i]);
-				noc_out_addr[i].write(out_addr_reg[i]);
 			}
 
 			for (int i = 0; i < NUM_AGU; ++i) {
@@ -383,90 +405,123 @@ private:
 			status[1] = !any_busy;
 			status[2] = (err_code_reg.read() != 0);
 			status[3] = false;
-			global_status_reg.write(status);
 
-			int selected = -1;
 			const uint32_t plane_en = plane_en_reg.read().to_uint();
-			for (int turn = 0; turn < NUM_AGU; ++turn) {
-				const int cand = (rr_ptr + turn) % NUM_AGU;
-				if (((plane_en >> cand) & 0x1u) == 0) {
-					continue;
+			const bool plane_on_ps = ((plane_en >> PLANE_PS) & 0x1u) != 0;
+			const bool plane_on_pd = ((plane_en >> PLANE_PD) & 0x1u) != 0;
+			const bool plane_on_pli = ((plane_en >> PLANE_PLI) & 0x1u) != 0;
+			const bool plane_on_plo = ((plane_en >> PLANE_PLO) & 0x1u) != 0;
+
+			unsigned stall_inc = 0;
+			unsigned tx_pkt_inc = 0;
+			unsigned tx_byte_inc = 0;
+			unsigned rx_byte_inc = 0;
+
+			auto run_send_stage0 = [&](int lane, bool plane_enabled) {
+				if (!plane_enabled || !agu_gen_valid_sig[lane].read()) {
+					return;
 				}
-				if (agu_gen_valid_sig[cand].read()) {
-					selected = cand;
+				const unsigned limit = fifo_limit();
+				const bool room = tx_tag_fifo_reg[lane].size() < limit && tx_data_fifo_reg[lane].size() < limit;
+				if (room && spm_ready[lane].read()) {
+					const sc_uint<32> addr = agu_gen_addr_sig[lane].read();
+					const sc_uint<16> tag = agu_gen_tag_sig[lane].read();
+					const bool ultra = agu_gen_ultra_sig[lane].read();
+
+					spm_addr[lane].write(static_cast<sc_uint<SPM_ADDR_BITS>>(addr));
+					spm_req[lane].write(true);
+					spm_we[lane].write(false);
+					agu_gen_ready_sig[lane].write(true);
+
+					tx_tag_fifo_reg[lane].push_back(encode_noc_addr(tag, ultra));
+					tx_data_fifo_reg[lane].push_back(spm_rdata[lane].read());
+				} else {
+					stall_inc++;
+				}
+			};
+
+			run_send_stage0(PLANE_PS, plane_on_ps);
+			run_send_stage0(PLANE_PD, plane_on_pd);
+			run_send_stage0(PLANE_PLI, plane_on_pli);
+
+			auto run_send_stage1 = [&](int lane, VRDOF<noc_req_payload_t>& out_if) {
+				if (tx_tag_fifo_reg[lane].empty() || tx_data_fifo_reg[lane].empty()) {
+					return;
+				}
+				const noc_req_payload_t req = make_noc_req(tx_data_fifo_reg[lane].front(), tx_tag_fifo_reg[lane].front());
+				out_if.data_out.write(req);
+				out_if.valid_out.write(true);
+				if (out_if.ready_in.read()) {
+					tx_tag_fifo_reg[lane].pop_front();
+					tx_data_fifo_reg[lane].pop_front();
+					tx_pkt_inc++;
+					tx_byte_inc += DATA_BYTES;
+				}
+			};
+
+			run_send_stage1(PLANE_PS, noc_ps_out);
+			run_send_stage1(PLANE_PD, noc_pd_out);
+			run_send_stage1(PLANE_PLI, noc_pli_out);
+
+			if (plane_on_plo && agu_gen_valid_sig[RECV_PLANE].read()) {
+				const bool room = plo_addr_fifo_reg.size() < fifo_limit();
+				noc_addr_payload_t req = make_noc_plo_req(agu_gen_tag_sig[RECV_PLANE].read(), agu_gen_ultra_sig[RECV_PLANE].read());
+				noc_plo_out.data_out.write(req);
+				noc_plo_out.valid_out.write(true);
+
+				if (room && noc_plo_out.ready_in.read()) {
+					agu_gen_ready_sig[RECV_PLANE].write(true);
+					plo_addr_fifo_reg.push_back(static_cast<sc_uint<SPM_ADDR_BITS>>(agu_gen_addr_sig[RECV_PLANE].read()));
+				} else if (!room || !noc_plo_out.ready_in.read()) {
+					stall_inc++;
+				}
+			}
+
+			const bool plo_rsp_valid = plane_on_plo && noc_plo_in.valid_in.read();
+			const bool plo_addr_avail = !plo_addr_fifo_reg.empty();
+			const bool can_write_spm = plo_addr_avail && spm_ready[RECV_PLANE].read();
+			noc_plo_in.ready_out.write(plo_rsp_valid && can_write_spm);
+			if (plo_rsp_valid) {
+				if (can_write_spm) {
+					spm_addr[RECV_PLANE].write(plo_addr_fifo_reg.front());
+					spm_req[RECV_PLANE].write(true);
+					spm_we[RECV_PLANE].write(true);
+					spm_wdata[RECV_PLANE].write(noc_plo_in.data_in.read().data);
+					plo_addr_fifo_reg.pop_front();
+					rx_byte_inc += DATA_BYTES;
+				} else {
+					stall_inc++;
+				}
+			}
+
+			int dbg = 7;
+			for (int i = 0; i < NUM_AGU; ++i) {
+				if ((((plane_en >> i) & 0x1u) != 0) && agu_gen_valid_sig[i].read()) {
+					dbg = i;
 					break;
 				}
 			}
+			arb_state.write(static_cast<sc_uint<3>>(dbg));
 
-			if (selected >= 0) {
-				arb_state.write(static_cast<sc_uint<3>>(selected));
-				if (selected < NUM_SEND_PLANES) {
-					if (out_pending_reg[selected]) {
-						sc_uint<32> stall = counter_stall_reg.read();
-						counter_stall_reg.write(stall + 1);
-						status[3] = true;
-						global_status_reg.write(status);
-					} else if (spm_ready[selected].read()) {
-						const sc_uint<32> addr = agu_gen_addr_sig[selected].read();
-						const sc_uint<16> tag = agu_gen_tag_sig[selected].read();
-						const bool ultra = agu_gen_ultra_sig[selected].read();
-
-						spm_addr[selected].write(static_cast<sc_uint<SPM_ADDR_BITS>>(addr));
-						spm_req[selected].write(true);
-						spm_we[selected].write(false);
-						agu_gen_ready_sig[selected].write(true);
-
-						out_data_reg[selected] = spm_rdata[selected].read();
-						out_addr_reg[selected] = encode_noc_addr(tag, ultra);
-						out_pending_reg[selected] = true;
-
-						rr_ptr = (selected + 1) % NUM_AGU;
-					} else {
-						sc_uint<32> stall = counter_stall_reg.read();
-						counter_stall_reg.write(stall + 1);
-						status[3] = true;
-						global_status_reg.write(status);
-					}
-				} else {
-					const bool can_recv = spm_ready[RECV_PLANE].read() && noc_in3_valid.read();
-					if (can_recv) {
-						const sc_uint<32> addr = agu_gen_addr_sig[RECV_PLANE].read();
-						spm_addr[RECV_PLANE].write(static_cast<sc_uint<SPM_ADDR_BITS>>(addr));
-						spm_req[RECV_PLANE].write(true);
-						spm_we[RECV_PLANE].write(true);
-						spm_wdata[RECV_PLANE].write(noc_in3_data.read());
-						noc_in3_ready.write(true);
-						agu_gen_ready_sig[RECV_PLANE].write(true);
-
-						sc_uint<32> rx_b = counter_rx_byte_reg.read();
-						counter_rx_byte_reg.write(rx_b + DATA_BYTES);
-						rr_ptr = (selected + 1) % NUM_AGU;
-					} else {
-						sc_uint<32> stall = counter_stall_reg.read();
-						counter_stall_reg.write(stall + 1);
-						status[3] = true;
-						global_status_reg.write(status);
-					}
-				}
-			} else {
-				arb_state.write(7);
+			if (stall_inc > 0) {
+				sc_uint<32> stall = counter_stall_reg.read();
+				counter_stall_reg.write(stall + stall_inc);
+				status[3] = true;
+			}
+			if (tx_pkt_inc > 0) {
+				sc_uint<32> tx_pkt = counter_tx_pkt_reg.read();
+				counter_tx_pkt_reg.write(tx_pkt + tx_pkt_inc);
+			}
+			if (tx_byte_inc > 0) {
+				sc_uint<32> tx_b = counter_tx_byte_reg.read();
+				counter_tx_byte_reg.write(tx_b + tx_byte_inc);
+			}
+			if (rx_byte_inc > 0) {
+				sc_uint<32> rx_b = counter_rx_byte_reg.read();
+				counter_rx_byte_reg.write(rx_b + rx_byte_inc);
 			}
 
-			for (int i = 0; i < NUM_SEND_PLANES; ++i) {
-				if (!out_pending_reg[i]) {
-					continue;
-				}
-				noc_out_valid[i].write(true);
-				noc_out_data[i].write(out_data_reg[i]);
-				noc_out_addr[i].write(out_addr_reg[i]);
-				if (noc_out_ready[i].read()) {
-					out_pending_reg[i] = false;
-					sc_uint<32> tx_pkt = counter_tx_pkt_reg.read();
-					sc_uint<32> tx_b = counter_tx_byte_reg.read();
-					counter_tx_pkt_reg.write(tx_pkt + 1);
-					counter_tx_byte_reg.write(tx_b + DATA_BYTES);
-				}
-			}
+			global_status_reg.write(status);
 
 			interrupt.write(status[2] || status[1]);
 			wait();

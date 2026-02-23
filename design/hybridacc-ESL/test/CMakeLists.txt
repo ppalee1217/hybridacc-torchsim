@@ -287,3 +287,56 @@ add_custom_target(run_hddu_test
 )
 
 add_test(NAME HDDU_Unit_Tests COMMAND test_hddu_unit)
+
+# ComputeCluster Unit Tests
+add_executable(test_cluster_unit
+    test_cluster_unit.cpp
+)
+
+if(ENABLE_DEBUG_UTILS)
+    target_compile_definitions(test_cluster_unit PRIVATE DEBUG_UTILS)
+    target_compile_definitions(test_cluster_unit PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
+    target_compile_definitions(test_cluster_unit PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
+endif()
+
+target_link_libraries(test_cluster_unit
+    pe_simulator
+    systemc
+    pthread
+)
+
+add_custom_target(run_cluster_unit_test
+    COMMAND ./test_cluster_unit
+    DEPENDS test_cluster_unit
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running ComputeCluster unit test"
+)
+
+add_test(NAME ComputeCluster_Unit_Tests COMMAND test_cluster_unit)
+
+# ComputeCluster Simulation Helpers (scaffold)
+add_executable(test_cluster_sim
+    test_cluster_sim.cpp
+)
+
+if(ENABLE_DEBUG_UTILS)
+    target_compile_definitions(test_cluster_sim PRIVATE DEBUG_UTILS)
+    target_compile_definitions(test_cluster_sim PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
+    target_compile_definitions(test_cluster_sim PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
+endif()
+
+target_link_libraries(test_cluster_sim
+    pe_simulator
+    systemc
+    pthread
+    tb_utils
+)
+
+add_custom_target(run_cluster_sim
+    COMMAND ./test_cluster_sim
+    DEPENDS test_cluster_sim
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running ComputeCluster simulation helper scaffold"
+)
+
+add_test(NAME ComputeCluster_Sim_Helpers COMMAND test_cluster_sim)
