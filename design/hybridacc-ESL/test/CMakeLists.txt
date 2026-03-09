@@ -314,9 +314,10 @@ add_custom_target(run_cluster_unit_test
 
 add_test(NAME ComputeCluster_Unit_Tests COMMAND test_cluster_unit)
 
-# ComputeCluster Simulation Helpers (scaffold)
+# ComputeCluster Simulation
 add_executable(test_cluster_sim
     test_cluster_sim.cpp
+    mvp_compiler.hpp
 )
 
 if(ENABLE_DEBUG_UTILS)
@@ -330,13 +331,14 @@ target_link_libraries(test_cluster_sim
     systemc
     pthread
     tb_utils
+    stdc++fs
 )
 
 add_custom_target(run_cluster_sim
     COMMAND ./test_cluster_sim
     DEPENDS test_cluster_sim
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Running ComputeCluster simulation helper scaffold"
+    COMMENT "Running ComputeCluster simulation"
 )
 
-add_test(NAME ComputeCluster_Sim_Helpers COMMAND test_cluster_sim)
+add_test(NAME ComputeCluster_Simulation COMMAND test_cluster_sim)

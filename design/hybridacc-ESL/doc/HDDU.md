@@ -1,4 +1,4 @@
-# HybridDataDeliverUnit (HDDU) 規格書 v3
+# HybridDataDeliverUnit (HDDU) 規格書 v4
 
 > 適用檔案：`simulator/include/Cluster/HybridDataDeliverUnit.hpp`（目前實作）
 
@@ -34,6 +34,7 @@ class HybridDataDeliverUnit;
 - `RECV_PLANE = 3`（PLO）
 - `NOC_ADDR_BITS = NOC_TAG_BITS + 1`
 - `DATA_BYTES = DATA_BITS / 8`
+- `FIFO_DEPTH = 16`（所有內部 FIFO 固定深度）
 
 NoC 地址編碼（送出與 PLO request 共用）：
 
@@ -168,124 +169,169 @@ VRDIF<response_t<sc_biguint<DATA_BITS>>> noc_plo_in;
 
 | Offset | Name | RW | 說明 |
 |---:|---|---|---|
-| `0x800` | `HDDU_CTRL` | R/W | bit1: clear error/fifo；bit2: start_all；bit3: stop_all |
-| `0x804` | `HDDU_STATUS` | R | bit0: any_busy；bit1: !any_busy；bit2: err；bit3: 本 cycle stall |
-| `0x808` | `PLANE_EN` | R/W | bit0~3: PS/PD/PLI/PLO enable |
+| `0x800` | `HDDU_CTRL` | R/W | bit0: soft-reset（清 FIFO/錯誤）；bit1: start_all；bit2: stop_all |
+| `0x804` | `HDDU_STATUS` | R | bit1: any_busy；bit2: done（!any_busy）；bit3: 本 cycle stall；bit4: err |
+| `0x808` | `PLANE_EN` | R/W | bit0~3: PS/PD/PLI/PLO enable（預設全開 0xF） |
 | `0x80C` | `PLANE_MODE` | R/W | 軟體定義模式旗標（硬體不直接解碼） |
 | `0x810` | `NUM_PORTS` | R | 固定 4（相容欄位） |
 | `0x814` | `PORT_WIDTH` | R | `DATA_BITS / 4`（相容欄位） |
-| `0x818` | `MAX_OUTSTANDING` | R/W | 每通道 FIFO 限制（0 視為 1） |
-| `0x81C` | `ARB_POLICY` | R/W | 保留欄位 |
-| `0x820` | `ERR_CODE` | R/W | 錯誤碼（目前主要供軟體維護） |
-| `0x824` | `ERR_INFO0` | R/W | 錯誤資訊0 |
-| `0x828` | `ERR_INFO1` | R/W | 錯誤資訊1 |
-| `0x82C` | `COUNTER_TX_PKT` | R | PS/PD/PLI 成功握手送出封包數 |
-| `0x830` | `COUNTER_TX_BYTE` | R | 送出位元組累計（每包 +`DATA_BYTES`） |
-| `0x834` | `COUNTER_RX_BYTE` | R | PLO 寫回位元組累計（每筆 +`DATA_BYTES`） |
-| `0x838` | `COUNTER_STALL` | R | 各通道背壓/資源不足 stall 累計 |
+| `0x818` | `ARB_POLICY` | R/W | 仲裁策略保留欄位 |
+| `0x81C` | `ERR_CODE` | R/W | 錯誤碼（`HdduErrorCode`：0=NONE, 1=AGU, 2=NOC, 3=SPM） |
+| `0x820` | `ERR_INFO0` | R/W | 錯誤資訊0（受影響通道 bitmask） |
+| `0x824` | `ERR_INFO1` | R/W | 錯誤資訊1（錯誤位址） |
+| `0x828` | `COUNTER_TX_PKT` | R | PS/PD/PLI/PLO 出口握手封包累計數 |
+| `0x82C` | `COUNTER_TX_BYTE` | R | PS/PD/PLI 送出位元組累計（每包 +`DATA_BYTES`） |
+| `0x830` | `COUNTER_RX_BYTE` | R | PLO 寫回位元組累計（每筆 +`DATA_BYTES`） |
+| `0x834` | `COUNTER_STALL` | R | 各 AGU 有效但未 ready 之 stall cycle 累計 |
+
+> **注意**：`MAX_OUTSTANDING` 在程式碼中不存在，FIFO 深度固定為 `FIFO_DEPTH = 16`。
 
 ---
 
-## 6. 微架構與時序語意
+## 6. 微架構與詳細運作流程
 
-## 6.1 PS/PD/PLI：兩級獨立管線（平行）
+HDDU 採用四通道獨立平行運作的設計，每個平面 (Plane) 都有獨立的資料路徑與緩衝區。
 
-每個 send plane 各自維護兩個 FIFO：
+### 6.1 全域控制與 MMIO 路由
 
-- `tx_tag_fifo[lane]`
-- `tx_data_fifo[lane]`
+- **設定寫入**：MMIO 寫入位址會被解碼。若位址落在 `0x000~0x3FF`，則寫入特定 AGU 的設定暫存器；若落在 `0x800~0x8FF`，則更新 HDDU 全域控制暫存器 (如 `global_ctrl`, `plane_en`)。
+- **狀態更新**：每個時脈週期統計所有 AGU 的 `busy` 狀態，更新 `global_status`。
+- **平面啟用**：根據 `plane_en` register 決定是否驅動對應的 AGU 與資料路徑。
 
-### Stage 0（AGU -> SPM read -> FIFO push）
+### 6.2 發送平面 (PS, PD, PLI) 運作流程
 
-觸發條件（lane = 0/1/2）：
+PS、PD、PLI 三個平面負責將 SPM 中的資料讀出並發送至 NoC。每個平面維護以下兩個 FIFO：
+- `read_noc_addr_wait_fifo[i]`：存放已發出 SPM 讀取請求、等待回應的 **編碼 NoC 位址**（`encode_noc_addr(tag, ultra)` = `{ultra, tag[NOC_TAG_BITS-1:0]}`）。
+- `noc_req_fifo[i]`：存放已組裝好的完整 NoC 請求封包（`{data, addr}`），等待送出。
 
-1. `PLANE_EN[lane] = 1`
-2. `agu_gen_valid[lane] = 1`
-3. `spm_ready[lane] = 1`
-4. `tx_tag_fifo` 與 `tx_data_fifo` 未達 `MAX_OUTSTANDING`
+所有控制信號為純組合邏輯，無 Cooldown 機制。
 
-成功後行為：
+#### Stage 0: 請求生成與 SPM 讀取
+**觸發條件**（`comb_spm_read_req`）：
+1. 對應平面被啟用 (`PLANE_EN[i]=1`)。
+2. AGU 產生有效位址 (`agu_gen_valid=1`)。
+3. `read_noc_addr_wait_fifo[i]` 未滿。
 
-- 發出 `spm_req[lane]=1, spm_we[lane]=0`
-- `spm_addr[lane] = agu_gen_addr`
-- 對 AGU 回覆 `agu_gen_ready[lane]=1`
-- push `encode(tag, ultra)` 到 `tx_tag_fifo`
-- push `spm_rdata[lane]` 到 `tx_data_fifo`
+**動作**：
+- 對 SPM 發出讀取請求（`spm_req_valid=1`, `wen=0`, `addr=agu_gen_addr`）。
+- 若 SPM 接受（`spm_req_ready=1`）且以上條件成立（`comb_spm_read_req_push_wait_tag_fifo_agu_ready`）：
+  - 回應 AGU `gen_ready=1`。
+  - 將編碼後之 `encode_noc_addr(tag, ultra)` 推入 `read_noc_addr_wait_fifo[i]`。
+- AGU 有效但 `gen_ready=0` 時，`COUNTER_STALL` 累加。
 
-### Stage 1（FIFO pop -> NoC request）
+#### Stage 0.5: SPM 讀取回應處理
+**觸發條件**（`comb_spm_read_resp_ready`）：
+1. `read_noc_addr_wait_fifo[i]` 非空（表示有 in-flight 請求）。
+2. `noc_req_fifo[i]` 未滿。
 
-當兩個 FIFO 皆非空，輸出：
+**動作**：
+- 向 SPM assert `spm_resp_ready=1`。
+- 若收到 SPM 回應（`spm_resp_valid=1`）（`comb_spm_read_resp_pop_wait_tag_fifo_and_push_noc_req`）：
+  - 從 `read_noc_addr_wait_fifo[i]` pop 出對應的 NoC 位址。
+  - 將 `{spm_resp.rdata, noc_addr}` 組裝成 `noc_req_payload_t` 推入 `noc_req_fifo[i]`。
 
-- `noc_*_out.valid_out = 1`
-- `noc_*_out.data_out = {data=fifo_front_data, addr=fifo_front_tag, mask=all_ones}`
+#### Stage 1: NoC 封包發送
+**觸發條件**（`comb_noc_req_valid`）：
+1. `noc_req_fifo[i]` 非空。
 
-若 `ready_in=1`：
+**動作**：
+- 將 FIFO 頂端資料送往對應 NoC 介面（`noc_ps/pd/pli_out.data_out`），assert `valid_out=1`。
+- 若 NoC 接受（`ready_in=1`）（`comb_noc_req_pop`）：
+  - Pop `noc_req_fifo[i]`。
+  - 累加 `COUNTER_TX_PKT`（+1）與 `COUNTER_TX_BYTE`（+`DATA_BYTES`）。
 
-- pop 兩個 FIFO
-- `COUNTER_TX_PKT += 1`
-- `COUNTER_TX_BYTE += DATA_BYTES`
+### 6.3 接收平面 (PLO) 運作流程
 
-## 6.2 PLO：兩級獨立管線（平行）
+PLO 負責向 NoC 發送地址請求索取資料，並將回傳的資料寫入 SPM。
+PLO 維護以下兩個 FIFO（均深度 `FIFO_DEPTH=16`）：
+- `write_addr_fifo`：存放已發出 NoC 請求、等待 NoC 回傳資料的 **SPM 寫入位址**（`agu_gen_addr`）。
+- `spm_req_fifo`：暫存已組裝好的 SPM 寫入請求（`{addr, wdata, wen=true}`），在 NoC 回應到達並配對後推入。
 
-PLO 使用一個地址 FIFO：`plo_addr_fifo`。
+無獨立 mode FIFO（ultra bit 已在 NoC 位址封包中編碼）。
+無 pending 計數器，改以 `spm_req_fifo` 緩衝未完成的寫入。
 
-### Stage 0（AGU -> NoC PLO request -> addr fifo push）
+#### Stage 0: NoC 請求發送 (Request Address)
+**觸發條件**（`comb_noc_plo_req_valid`）：
+1. `PLANE_EN[PLO]=1`。
+2. AGU 產生有效位址 (`agu_gen_valid=1`)。
+3. `write_addr_fifo` 未滿。
 
-觸發條件：
+**動作**：
+- 組合 NoC 請求封包（僅含位址/Tag）：`req.addr = encode_noc_addr(tag, ultra)`。
+- 對 NoC 介面 (`noc_plo_out`) assert `valid_out=1`（繞過 FIFO，降低延遲）。
+- 若 NoC 接受（`ready_in=1`）（`comb_noc_plo_req_push_wait_addr_fifo_agu_ready`）：
+  - 回應 AGU `gen_ready=1`。
+  - 將 `agu_gen_addr` 推入 `write_addr_fifo`。
+- AGU 有效但 `gen_ready=0` 時，`COUNTER_STALL` 累加。
+- **注意**：PLO 的 NoC 請求握手也會遞增 `COUNTER_TX_PKT`（+1），但不累加 `COUNTER_TX_BYTE`。
 
-1. `PLANE_EN[PLO] = 1`
-2. `agu_gen_valid[PLO] = 1`
+#### Stage 1: NoC 資料接收與 SPM 寫入
+**觸發條件**（`comb_noc_plo_resp_ready`）：
+1. `write_addr_fifo` 非空（表示有對應的等待位址）。
+2. `spm_req_fifo` 未滿。
 
-輸出：
+**動作**：
+- 向 NoC assert `noc_plo_in.ready_out=1`。
+- 若收到 NoC 回應（`valid_in=1`）（`comb_noc_plo_resp_pop_wait_addr_fifo_and_push_spm_req`）：
+  - 從 `write_addr_fifo` pop 出 SPM 位址。
+  - 將 `{addr=pop_addr, wdata=noc_plo_in.data, wen=1}` 推入 `spm_req_fifo`。
+  - 累加 `COUNTER_RX_BYTE`（+`DATA_BYTES`）。
 
-- `noc_plo_out.valid_out = 1`
-- `noc_plo_out.data_out.addr = encode(tag, ultra)`
+#### Stage 2: SPM 寫入
+**觸發條件**（`comb_spm_write_req_valid`）：
+1. `spm_req_fifo` 非空。
 
-當 `noc_plo_out.ready_in=1` 且 `plo_addr_fifo` 未滿：
+**動作**（`comb_spm_write_req_pop`）：
+- 對 SPM port 3 assert 寫入請求 (`spm_req_valid=1`, `wen=1`)。
+- 若 SPM 接受（`spm_req_ready=1`）：
+  - Pop `spm_req_fifo`。
 
-- `agu_gen_ready[PLO] = 1`
-- push `agu_gen_addr` 到 `plo_addr_fifo`
+#### Stage 2.5: SPM 寫入確認
+在 `seq_process` 中監聽 `spm_resp_valid[PLO]`：
+- 若 SPM 回應碼非 `SPM_OK`：設定 `ERR_CODE=SPM_ERROR`，並記錄 `ERR_INFO0`（bitmask）與 `ERR_INFO1`（錯誤位址）。
 
-### Stage 1（NoC PLO response -> SPM write）
+### 6.4 Stall 與效能計數
 
-當 `noc_plo_in.valid_in=1` 時：
+`COUNTER_STALL` 在 `seq_process` 中統計，條件為 **每個 AGU 有 `gen_valid=1` 但 `gen_ready=0`**（涵蓋所有 4 個平面），每 cycle 將所有 stall 次數相加後寫入暫存器。
 
-- 若 `plo_addr_fifo` 非空且 `spm_ready[3]=1`，則
-  - `noc_plo_in.ready_out=1`
-  - pop `addr`
-  - 發出 `spm_req[3]=1, spm_we[3]=1`
-  - `spm_addr[3]=addr`
-  - `spm_wdata[3]=noc_plo_in.data_in.data`
-  - `COUNTER_RX_BYTE += DATA_BYTES`
-- 否則視為 stall（`COUNTER_STALL` 累加）
+各平面造成 stall 的原因：
+- **PS/PD/PLI**：`read_noc_addr_wait_fifo` 已滿，或 SPM port 未 ready（使 `gen_ready=0`）。
+- **PLO**：`write_addr_fifo` 已滿，或 NoC `noc_plo_out.ready_in=0`（使 `gen_ready=0`）。
 
-## 6.3 Stall 定義
+**`COUNTER_TX_PKT`** 計入：PS/PD/PLI 及 PLO 的 NoC 出口握手次數。
 
-以下任一情況會計入 stall：
+**`COUNTER_TX_BYTE`** 僅計入：PS/PD/PLI 成功送出封包的位元組數（每包 +`DATA_BYTES`）。
 
-- send stage0：SPM not ready 或 FIFO 已滿
-- PLO stage0：`noc_plo_out.ready_in=0` 或地址 FIFO 已滿
-- PLO stage1：有 response 但無地址可配對，或 SPM3 not ready
+**`COUNTER_RX_BYTE`** 計入：PLO pipeline 接收 NoC response 並送往 SPM 的位元組數（每筆 +`DATA_BYTES`）。
 
-`HDDU_STATUS.bit3` 反映「本 cycle 是否出現 stall」。
+### 6.5 中斷語意
 
-## 6.4 中斷語意
+`interrupt = HDDU_STATUS.bit4 || HDDU_STATUS.bit2`
 
-`interrupt = HDDU_STATUS.bit2 || HDDU_STATUS.bit1`
+- `bit4=1`：error 狀態（`err_code_reg != 0`）
+- `bit2=1`：所有 AGU 非 busy（`!any_busy`，視為 done 條件）
 
-- `bit2=1`：error 狀態
-- `bit1=1`：所有 AGU 非 busy（視為 done 條件）
+完整 `HDDU_STATUS` bit 定義：
+
+| Bit | 名稱 | 說明 |
+|---:|---|---|
+| 1 | BUSY | 至少一個 AGU busy |
+| 2 | DONE | 所有 AGU 非 busy（`!any_busy`） |
+| 3 | STALL | 本 cycle 發生 stall |
+| 4 | ERROR | `ERR_CODE != 0` |
 
 ---
 
 ## 7. 驅動流程（建議）
 
 1. 設定 AGU bank（PS/PD/PLI/PLO）
-2. 設定 `PLANE_EN`、`MAX_OUTSTANDING`
-3. 視情況設定 `PLANE_MODE`
-4. 以 `HDDU_CTRL.bit2=1` 啟動全部 AGU
-5. 輪詢 `HDDU_STATUS` 與 counters，或等 `interrupt`
-6. 完成後讀取統計與結果記憶體
+2. 設定 `PLANE_EN`（視情況設定 `PLANE_MODE`）
+3. 以 `HDDU_CTRL.bit1=1`（`CTRL_START`）啟動全部 AGU
+4. 輪詢 `HDDU_STATUS` 與 counters，或等 `interrupt`
+   - `bit2=1`：done；`bit4=1`：error
+5. 完成後讀取統計結果（`0x828~0x834`）
+
+> **注意**：程式碼中無 `MAX_OUTSTANDING` 軟體可設定欄位；FIFO 深度固定為 `FIFO_DEPTH=16`。
 
 ---
 
@@ -349,33 +395,32 @@ agu_wr(H, 3, 0x54, 0xF);
 agu_wr(H, 3, 0x20, 0x1);
 
 // global config
-hddu_wr(H, 0x808, 0xF);   // enable all planes
-hddu_wr(H, 0x80C, 0x1);   // mode flag (conv2d)
-hddu_wr(H, 0x818, 16);    // max outstanding
+hddu_wr(H, 0x808, 0xF);   // enable all planes (default is already 0xF)
+hddu_wr(H, 0x80C, 0x1);   // mode flag (conv2d, software-defined)
 
-// optional: start all AGU from global ctrl
-hddu_wr(H, 0x800, (1u << 2));
+// start all AGUs from global CTRL (bit1 = CTRL_START)
+hddu_wr(H, 0x800, (1u << 1));
 
 while (true) {
     uint32_t st = hddu_rd(H, 0x804);
-    if (st & (1u << 2)) { /* err */ break; }
-    if (st & (1u << 1)) { /* done */ break; }
+    if (st & (1u << 4)) { /* bit4 = err */ break; }
+    if (st & (1u << 2)) { /* bit2 = done */ break; }
 }
 
-uint32_t tx_pkt   = hddu_rd(H, 0x82C);
-uint32_t tx_bytes = hddu_rd(H, 0x830);
-uint32_t rx_bytes = hddu_rd(H, 0x834);
-uint32_t stall    = hddu_rd(H, 0x838);
+uint32_t tx_pkt   = hddu_rd(H, 0x828); // COUNTER_TX_PKT
+uint32_t tx_bytes = hddu_rd(H, 0x82C); // COUNTER_TX_BYTE
+uint32_t rx_bytes = hddu_rd(H, 0x830); // COUNTER_RX_BYTE
+uint32_t stall    = hddu_rd(H, 0x834); // COUNTER_STALL
 ```
 
 ## 8.3 Stop/clear 範例
 
 ```cpp
-// stop all AGUs
-hddu_wr(H, 0x800, (1u << 3));
+// stop all AGUs (bit2 = CTRL_STOP)
+hddu_wr(H, 0x800, (1u << 2));
 
-// clear fifo/error info
-hddu_wr(H, 0x800, (1u << 1));
+// soft-reset: clear FIFO & error info (bit0 = CTRL_RESET)
+hddu_wr(H, 0x800, (1u << 0));
 ```
 
 ---
@@ -383,9 +428,10 @@ hddu_wr(H, 0x800, (1u << 1));
 ## 9. 驗證重點清單
 
 1. bank MMIO passthrough 正確（0x000/0x100/0x200/0x300）
-2. `tag + ultra` 編碼符合預期
+2. `tag + ultra` 編碼符合預期（`encode_noc_addr`：`{ultra, tag[NOC_TAG_BITS-1:0]}`）
 3. send channel 在 `ready=0` 能 hold，不遺失封包
-4. PLO response 與地址 FIFO 對齊寫回 SPM3
-5. `MAX_OUTSTANDING` 對 FIFO 深度限制生效
-6. `COUNTER_TX_PKT / TX_BYTE / RX_BYTE / STALL` 與 traffic 相符
-7. 多通道同時運作時互不阻塞（除共享資源 backpressure 外）
+4. PLO response 與 `write_addr_fifo` 對齊寫回 SPM port 3，SPM 寫入錯誤能觸發 `ERR_CODE`
+5. FIFO 深度 `FIFO_DEPTH=16` 造成 backpressure 時 stall 計數正確累加
+6. `COUNTER_TX_PKT`（含 PLO NoC req）/ `TX_BYTE` / `RX_BYTE` / `STALL` 與 traffic 相符
+7. 多通道同時運作時互不阻塞（除共享 SPM/NoC backpressure 外）
+8. `HDDU_CTRL` bit0/1/2 分別觸發 reset/start/stop；`HDDU_STATUS` bit2/4 觸發中斷

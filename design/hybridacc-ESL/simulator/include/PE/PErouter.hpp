@@ -135,6 +135,7 @@ public:
         ps_fifo.pop(ps_fifo_pop_sig);
         ps_fifo.empty(ps_fifo_empty_sig);
         ps_fifo.full(ps_fifo_full_sig);
+        ps_fifo.clear(zero_signal);
 
         pd_fifo.clk(clk);
         pd_fifo.reset_n(reset_n);
@@ -148,6 +149,7 @@ public:
         pd_fifo.set_valid(pd_fifo_set_valid_sig);
         pd_fifo.empty(pd_fifo_empty_sig);
         pd_fifo.full(pd_fifo_full_sig);
+        pd_fifo.clear(zero_signal);
 
         pli_fifo.clk(clk);
         pli_fifo.reset_n(reset_n);
@@ -156,6 +158,7 @@ public:
         pli_fifo.data_out(pli_fifo_data_out_sig);
         pli_fifo.pop(pli_fifo_pop_sig);
         pli_fifo.empty(pli_fifo_empty_sig);
+        pli_fifo.clear(zero_signal);
         pli_fifo.full(pli_fifo_full_sig);
 
         plo_fifo.clk(clk);
@@ -164,6 +167,7 @@ public:
         plo_fifo.push(plo_fifo_push_sig);
         plo_fifo.data_out(plo_fifo_data_out_sig);
         plo_fifo.pop(plo_fifo_pop_sig);
+        plo_fifo.clear(zero_signal);
         plo_fifo.empty(plo_fifo_empty_sig);
         plo_fifo.full(plo_fifo_full_sig);
 
@@ -255,6 +259,8 @@ public:
 
     // Channel-specific data queues (these are not registers in HDL sense)
     size_t pe_fifo_depth = 4;
+
+    sc_signal<bool> zero_signal;
 
     FIFO<uint64_t> ps_fifo;   // PS channel: NoC -> PE (weights)
     asyncFIFO<uint64_t, uint16_t> pd_fifo;   // PD channel: NoC -> PE (activations)
@@ -638,6 +644,7 @@ public:
     // ========================= Sequential Logic =========================
     // All registers update here (single clocked process)
     void seq_process() {
+        zero_signal.write(false);
         // Reset values
         state_reg.write(PErouterState::IDLE);
         pending_noc_resp_reg.write(false);

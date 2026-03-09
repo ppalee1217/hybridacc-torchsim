@@ -167,6 +167,61 @@ class NocGemmConfig:
         if self.M <= 0 or self.N <= 0 or self.K <= 0:
             raise ValueError(f"M, N, K must be > 0, got {self.M}, {self.N}, {self.K}")
 
+
+@dataclass
+class ClusterConvConfig:
+    """Cluster Conv2d Configuration"""
+    name: str
+    pe_program: str
+    num_pes: int
+    num_bus: int
+    stride: int
+    input_h: int
+    input_w: int
+    input_c: int
+    out_ch: int
+    kernel_h: int
+    kernel_w: int
+    seed: int = 123
+    padding: int = 0
+    ultra_mode: bool = False
+    mode: str = "conv2d"
+    out_dir: str = "./output/cluster/conv2d"
+
+    def validate(self):
+        if self.num_pes <= 0:
+            raise ValueError(f"num_pes must be > 0, got {self.num_pes}")
+        if self.num_bus <= 0:
+            raise ValueError(f"num_bus must be > 0, got {self.num_bus}")
+        if self.stride <= 0:
+            raise ValueError(f"stride must be > 0, got {self.stride}")
+        if not Path(self.pe_program).exists():
+            raise ValueError(f"pe_program file does not exist: {self.pe_program}")
+
+@dataclass
+class ClusterGemmConfig:
+    """Cluster GEMM Configuration"""
+    name: str
+    pe_program: str
+    num_pes: int
+    num_bus: int
+    M: int
+    N: int
+    K: int
+    seed: int = 123
+    ultra_mode: bool = False
+    mode: str = "gemm"
+    out_dir: str = "./output/cluster/gemm"
+
+    def validate(self):
+        if self.num_pes <= 0:
+            raise ValueError(f"num_pes must be > 0, got {self.num_pes}")
+        if self.M <= 0 or self.N <= 0 or self.K <= 0:
+            raise ValueError(f"M, N, K must be > 0, got {self.M}, {self.N}, {self.K}")
+        if not Path(self.pe_program).exists():
+            raise ValueError(f"pe_program file does not exist: {self.pe_program}")
+
+
 import json
 from pathlib import Path
 from typing import Dict

@@ -2,7 +2,8 @@ import argparse
 import sys
 from .gen.noc_gen import generate_conv2d_test as gen_noc_conv, generate_gemm_test as gen_noc_gemm
 from .gen.pe_gen import ConvGenerator, GemmGenerator
-from .utils.config import ConvConfig, GemmConfig, ConfigLoader, NocConvConfig, NocGemmConfig, SUPPORTED_CONV_MODES
+from .gen.cluster_gen import generate_conv2d_test as gen_cluster_conv, generate_gemm_test as gen_cluster_gemm
+from .utils.config import ConvConfig, GemmConfig, ConfigLoader, NocConvConfig, NocGemmConfig, SUPPORTED_CONV_MODES, ClusterConvConfig, ClusterGemmConfig
 from .check.comparator import run_check_with_args
 
 def main():
@@ -43,6 +44,11 @@ def main():
     noc_parser = subparsers.add_parser("gen-noc", help="Generate NoC test data")
     noc_parser.add_argument("--config", type=str, help="Config file path")
 
+    # Gen Cluster workload
+    cluster_parser = subparsers.add_parser("gen-cluster", help="Generate Cluster workload (.hacc readable JSON-like)")
+    cluster_parser.add_argument("--config", type=str, required=True, help="Cluster workload config file path")
+    cluster_parser.add_argument("--assembler", type=str, help="Path to ha-asm assembler for assembling PE instructions", default="ha-asm")
+
     # Check
     check_parser = subparsers.add_parser("check", help="Compare simulation results")
     check_parser.add_argument('--sim', required=True, help='Simulation output (.bin)')
@@ -79,7 +85,10 @@ def main():
         output_path = Path("output")
 
         if args.config:
+            from pathlib import Path
             config_dict = ConfigLoader.load(Path(args.config))
+            # Get mode from config, default to 'conv2d' if missing (for legacy configs)
+            # But new configs should have 'mode'
             mode = config_dict.get('mode', 'conv2d')
 
             if mode == 'conv2d':
@@ -89,11 +98,16 @@ def main():
                     save_dir = Path(config.out_dir)
                     if len(conv_tests) > 1:
                         save_dir = save_dir / test.name
+                    if not save_dir.exists():
+                        save_dir.mkdir(parents=True, exist_ok=True) # Ensure dir exists
                     test.save(save_dir)
             elif mode == 'gemm':
                 config = NocGemmConfig(**config_dict)
                 gemm_test = gen_noc_gemm(config)
-                gemm_test.save(config.out_dir)
+                save_dir = Path(config.out_dir)
+                if not save_dir.exists():
+                    save_dir.mkdir(parents=True, exist_ok=True)
+                gemm_test.save(save_dir)
             else:
                 print(f"Unknown mode for NoC: {mode}")
         else:
@@ -118,6 +132,8 @@ def main():
                 save_dir = output_path / "conv2d_default"
                 if len(conv_tests) > 1:
                     save_dir = save_dir / test.name
+                if not save_dir.exists():
+                    save_dir.mkdir(parents=True, exist_ok=True)
                 test.save(save_dir)
 
             default_gemm_config = NocGemmConfig(
@@ -130,7 +146,53 @@ def main():
 
             # Generate GEMM
             gemm_test = gen_noc_gemm(default_gemm_config)
-            gemm_test.save(output_path / "gemm_default")
+            save_dir = output_path / "gemm_default"
+            if not save_dir.exists():
+                save_dir.mkdir(parents=True, exist_ok=True)
+            gemm_test.save(save_dir)
+
+    elif args.command == "gen-cluster":
+        from pathlib import Path
+        config_path = Path(args.config)
+
+        # Load config
+        config_dict = ConfigLoader.load(config_path)
+        mode = config_dict.get('mode', 'conv2d')
+
+        # Default output directory relative to the config file if not absolute
+        # (Though `config_dict` might have `out_dir`, let's check config schema or assume from dict)
+        # Assuming `out_dir` is in config_dict, if not default to `output/cluster_gen`
+        if 'out_dir' not in config_dict:
+             config_dict['out_dir'] = "output/cluster_gen"
+
+        if mode == 'conv2d':
+            config = ClusterConvConfig(**config_dict)
+            conv_tests = gen_cluster_conv(config, args.assembler)
+            print(f"[Main] Generated {len(conv_tests)} Cluster Conv2D test(s).")
+            for test in conv_tests:
+                # Save each split test case into its own folder
+                if len(conv_tests) > 1:
+                    save_dir = Path(config.out_dir) / test.name
+                else:
+                    save_dir = Path(config.out_dir)
+                if not save_dir.exists():
+                    save_dir.mkdir(parents=True, exist_ok=True)
+                test.save(save_dir)
+                print(f"[Main] Saved test '{test.name}' to {save_dir}")
+
+        elif mode == 'gemm':
+            config = ClusterGemmConfig(**config_dict)
+            gemm_test = gen_cluster_gemm(config)
+            print(f"[Main] Generated Cluster GEMM test: {gemm_test.name}")
+            save_dir = Path(config.out_dir) / gemm_test.name
+            if not save_dir.exists():
+                save_dir.mkdir(parents=True, exist_ok=True)
+            gemm_test.save(save_dir)
+            print(f"[Main] Saved test '{gemm_test.name}' to {save_dir}")
+
+        else:
+            print(f"[Error] Unknown mode for Cluster Gen: {mode}")
+
 
     elif args.command == "check":
         sys.exit(run_check_with_args(args))

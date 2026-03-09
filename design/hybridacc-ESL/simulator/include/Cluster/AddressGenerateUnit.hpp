@@ -3,12 +3,28 @@
 #include <systemc>
 #include <array>
 #include <cstdint>
+#include <string>
+
+#include "utils.hpp"
 
 using namespace sc_core;
 using namespace sc_dt;
 
 namespace hybridacc {
 namespace cluster {
+
+enum class AguCtrlBit : int {
+	CTRL_GEN_START = 0,
+	CTRL_GEN_STOP = 1,
+	CTRL_ULTRA = 3,
+};
+
+enum class AguStatusBit : int {
+	STATUS_BUSY = 0,
+	STATUS_DONE = 1,
+	STATUS_ERROR = 2,
+	STATUS_STALL = 3,
+};
 
 // -----------------------------------------------------------------------------
 // AddressGenerateUnit (AGU)
@@ -25,6 +41,30 @@ namespace cluster {
 // -----------------------------------------------------------------------------
 SC_MODULE(AddressGenerateUnit) {
 public:
+
+	enum AguRegOffset : uint32_t {
+		REG_BASE_ADDR   = 0x00, // 32-bit base address (group-local word64), actual = base + idx0*stride0 + idx1*stride1 + ...
+		REG_BASE_ADDR_H = 0x04, // 32-bit base address high，for future >32-bit address expansion，currently not enabled (must write 0).
+		REG_ITER01      = 0x08, // iter0=bit15:0 iter1=bit31:16
+		REG_ITER23      = 0x0C, // iter2=bit15:0 iter3=bit31:16
+		REG_STRIDE0     = 0x10, // 32-bit stride for idx0 (unit: word64)
+		REG_STRIDE1     = 0x14, // 32-bit stride for idx1 (unit: word64)
+		REG_STRIDE2     = 0x18, // 32-bit stride for idx2 (unit: word64)
+		REG_STRIDE3     = 0x1C, // 32-bit stride for idx3 (unit: word64)
+		REG_CTRL        = 0x20, // bit0=gen start, bit1=gen stop, bit3=ultra
+		REG_STATUS      = 0x24, // bit0=busy, bit1=done, bit2=error, bit3=stalled
+		REG_LANE_CFG    = 0x28, // bit0=idx0 to addr, bit1=idx1 to addr, ...
+								// bit8=idx0 to tag, bit9=idx1 to tag, ...
+		REG_TAG_BASE    = 0x40, // 32-bit tag base (only low 6 bit used)
+		REG_TAG_STRIDE0 = 0x44, // 32-bit tag stride for idx0
+		REG_TAG_STRIDE1 = 0x48, // 32-bit tag stride for idx1
+		REG_TAG_CTRL    = 0x4C, // bit0=tag gen enable, bit1=tag idx from idx1, bit2=tag idx from idx0, ...
+		REG_MASK_CFG    = 0x54, // bit0~15: mask for idx0~idx3 (1=enable)
+		REG_ERR_CODE    = 0x58, // 32-bit error code for last gen failure (0 if no error)
+		REG_DBG_TAG     = 0x5C, // 32-bit debug register to record last generated tag (for error reporting)
+		REG_DBG_ADDR    = 0x60, // 32-bit debug register to record last generated addr (for error reporting)
+	};
+
     // --- Clock / Reset ---
 	sc_in<bool> clk;
 	sc_in<bool> reset_n;
@@ -52,29 +92,6 @@ public:
 	sc_out<bool> busy;
 	sc_out<bool> done;
 	sc_out<sc_uint<2>> fsm_state;
-
-	enum RegOffset : uint32_t {
-		REG_BASE_ADDR   = 0x00, // 32-bit base address，actual address = base_addr + idx0*stride0 + idx1*stride1 + ...
-		REG_BASE_ADDR_H = 0x04, // 32-bit base address high，for future >32-bit address expansion，currently not enabled (must write 0).
-		REG_ITER01      = 0x08, // iter0=bit15:0 iter1=bit31:16
-		REG_ITER23      = 0x0C, // iter2=bit15:0 iter3=bit31:16
-		REG_STRIDE0     = 0x10, // 32-bit stride for idx0
-		REG_STRIDE1     = 0x14, // 32-bit stride for idx1
-		REG_STRIDE2     = 0x18, // 32-bit stride for idx2
-		REG_STRIDE3     = 0x1C, // 32-bit stride for idx3
-		REG_CTRL        = 0x20, // bit0=gen start, bit1=gen stop, bit3=ultra
-		REG_STATUS      = 0x24, // bit0=busy, bit1=done, bit2=error, bit3=stalled
-		REG_LANE_CFG    = 0x28, // bit0=idx0 to addr, bit1=idx1 to addr, ...
-                                // bit8=idx0 to tag, bit9=idx1 to tag, ...
-		REG_TAG_BASE    = 0x40, // 32-bit tag base (only low 6 bit used)
-		REG_TAG_STRIDE0 = 0x44, // 32-bit tag stride for idx0
-		REG_TAG_STRIDE1 = 0x48, // 32-bit tag stride for idx1
-		REG_TAG_CTRL    = 0x4C, // bit0=tag gen enable, bit1=tag idx from idx1, bit2=tag idx from idx0, ...
-		REG_MASK_CFG    = 0x54, // bit0~15: mask for idx0~idx3 (1=enable)
-		REG_ERR_CODE    = 0x58, // 32-bit error code for last gen failure (0 if no error)
-		REG_DBG_TAG     = 0x5C, // 32-bit debug register to record last generated tag (for error reporting)
-		REG_DBG_ADDR    = 0x60, // 32-bit debug register to record last generated addr (for error reporting)
-	};
 
 	// MMIO register offset（bank-local）
 	SC_CTOR(AddressGenerateUnit)
@@ -108,9 +125,69 @@ public:
 
 		SC_CTHREAD(seq_process, clk.pos());
 		reset_signal_is(reset_n, false);
+
+		SC_METHOD(trace_process);
+		sensitive << clk.pos();
 	}
 
+	void set_trace_context(uint32_t pid, int tid_base) {
+		trace_pid = pid;
+		trace_id = tid_base;
+		trace_init = false;
+		last_state = "IDLE";
+	}
+
+	int get_trace_num() const { return 1; }
+
 private:
+	static constexpr uint64_t DBG_REPORT_PERIOD = 256;
+
+	int trace_id = -1;
+	uint32_t trace_pid = 0;
+	bool trace_init = false;
+	std::string last_state = "IDLE";
+	uint32_t last_addr = 0;
+	uint32_t last_tag = 0;
+
+	void trace_process() {
+		if (trace_id < 0) return;
+
+		auto make_args = [&]() {
+			return std::string("{\"addr\": ")
+				+ std::to_string(gen_addr.read().to_uint())
+				+ ", \"tag\": "
+				+ std::to_string(gen_tag.read().to_uint())
+				+ "}";
+		};
+
+		if (!trace_init) {
+			TRACE_THREAD_NAME(trace_pid, static_cast<uint32_t>(trace_id), std::string(name()) + " AGU");
+			TRACE_EVENT(last_state, "AGU_State", TRACE_BEGIN, trace_pid, static_cast<uint32_t>(trace_id), make_args());
+			trace_init = true;
+		}
+
+		std::string current_state;
+		const bool stall = gen_valid.read() && !gen_ready.read();
+		if (state_reg == AguState::DONE || done_reg.read()) {
+			current_state = "DONE";
+		} else if (state_reg == AguState::RUN) {
+			current_state = stall ? "STALL" : "RUN";
+		} else if (busy_reg.read()) {
+			current_state = "BUSY";
+		} else {
+			current_state = "IDLE";
+		}
+
+		const bool update = (current_state != last_state) || (gen_addr.read().to_uint() != last_addr) || (gen_tag.read().to_uint() != last_tag);
+		if (update) {
+			TRACE_EVENT(last_state, "AGU_State", TRACE_END, trace_pid, static_cast<uint32_t>(trace_id), "{}");
+			TRACE_EVENT(current_state, "AGU_State", TRACE_BEGIN, trace_pid, static_cast<uint32_t>(trace_id), make_args());
+			last_state = current_state;
+			last_addr = gen_addr.read().to_uint();
+			last_tag = gen_tag.read().to_uint();
+		}
+	}
+
 	// -------------------------------
 	// Config / runtime registers
 	// -------------------------------
@@ -447,17 +524,23 @@ private:
 			if (!stop_req && start_req && state_reg == AguState::IDLE) {
 				clear_counters();
 				clear_pipeline();
+				help_print_info();
 				state_reg = AguState::RUN;
 				busy_reg.write(true);
-				if (ctrl_reg.read()[0]) {
-					sc_uint<32> ctrl_v = ctrl_reg.read();
-					ctrl_v[0] = 0;
-					ctrl_reg.write(ctrl_v);
-				}
+				sc_uint<32> ctrl_v = ctrl_reg.read();
+				ctrl_v[0] = 0;
+				ctrl_reg.write(ctrl_v);
+			}
+
+			if (state_reg == AguState::RUN && ctrl_reg.read()[0]) {
+				sc_uint<32> ctrl_v = ctrl_reg.read();
+				ctrl_v[0] = 0;
+				ctrl_reg.write(ctrl_v);
 			}
 
 			if (state_reg == AguState::RUN) {
 				const bool out_fire = s2_reg.valid && gen_ready.read();
+				const bool backpressure = s2_reg.valid && !gen_ready.read();
 				const bool s2_ready = (!s2_reg.valid) || gen_ready.read();
 				const bool n0_s1_ready = (!n0_s1_reg.valid) || s2_ready;
 				const bool n0_s0_ready = (!n0_s0_reg.valid) || n0_s1_ready;
@@ -476,6 +559,9 @@ private:
 
 				Stage0Reg issue_payload{};
 				bool issue_payload_valid = false;
+				std::array<sc_uint<16>, 4> issue_next_idx{};
+				bool issue_has_next_idx = false;
+				bool issue_all_done = false;
 
 				if (out_fire && s2_reg.last) {
 					state_reg = AguState::DONE;
@@ -483,7 +569,11 @@ private:
 					done_reg.write(true);
 				}
 
-				if (!gen_ready.read() && s2_reg.valid) {
+				if (out_fire) {
+					help_print_state();
+				}
+
+				if (backpressure) {
 					stalled_reg.write(true);
 				}
 
@@ -553,13 +643,9 @@ private:
 					issue_payload.ultra = ctrl_reg.read()[3];
 					issue_payload.last = all_done;
 					issue_payload_valid = true;
-
-					idx_next_reg = next_idx;
-					idx_update_pending = true;
-
-					if (all_done) {
-						run_last_issued = true;
-					}
+					issue_next_idx = next_idx;
+					issue_has_next_idx = true;
+					issue_all_done = all_done;
 				}
 
 				if (s1_ready) {
@@ -613,6 +699,15 @@ private:
 					} else {
 						s0_reg.valid = false;
 					}
+
+					const bool issue_committed = issue_payload_valid && (issue_consumed_by_s1 || s0_reg.valid);
+					if (issue_committed && issue_has_next_idx) {
+						idx_next_reg = issue_next_idx;
+						idx_update_pending = true;
+						if (issue_all_done) {
+							run_last_issued = true;
+						}
+					}
 				}
 
 				gen_valid.write(s2_reg.valid);
@@ -647,6 +742,15 @@ private:
 
 			wait();
 		}
+	}
+
+	// Helper to print current config / state for debugging.
+	void help_print_info() {
+		DEBUG_MSG("AGU Config: base=0x" << std::hex << base_addr_reg.read() << " iter=[" << std::dec << iter_reg[0].read() << "," << iter_reg[1].read() << "," << iter_reg[2].read() << "," << iter_reg[3].read() << "] stride=[" << stride_reg[0].read() << "," << stride_reg[1].read() << "," << stride_reg[2].read() << "," << stride_reg[3].read() << "] ctrl=0x" << std::hex << ctrl_reg.read() << " lane_cfg=0x" << lane_cfg_reg.read() << " tag_base=0x" << tag_base_reg.read() << " tag_stride0=0x" << tag_stride0_reg.read() << " tag_stride1=0x" << tag_stride1_reg.read() << " tag_ctrl=0x" << tag_ctrl_reg.read() << " mask_cfg=0x" << mask_cfg_reg.read(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
+	}
+
+	void help_print_state() {
+		DEBUG_MSG("AGU State: last_addr=0x" << std::hex << dbg_last_addr_reg.read() << " last_tag=0x" << dbg_last_tag_reg.read() << " busy=" << busy_reg.read() << " done=" << done_reg.read() << " error=" << error_reg.read() << " stalled=" << stalled_reg.read() << " iter=[" << std::dec << s0_reg.idx[0] << "," << s0_reg.idx[1] << "," << s0_reg.idx[2] << "," << s0_reg.idx[3] << "]", DEBUG_LEVEL_CLUSTER_COMPONENTS);
 	}
 };
 

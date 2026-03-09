@@ -3,7 +3,7 @@
 <head>
 	<meta charset="utf-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1" />
-	<title>HybridDataDeliverUnit (HDDU) 規格書 v3</title>
+	<title>HybridDataDeliverUnit (HDDU) 規格書 v4</title>
 	<style>
 		body { font-family: "Noto Sans TC", Arial, sans-serif; line-height: 1.65; margin: 24px auto; max-width: 1100px; padding: 0 16px; color: #1f2937; }
 		h1, h2, h3, h4 { color: #0f172a; margin-top: 1.2em; }
@@ -17,7 +17,7 @@
 	</style>
 </head>
 <body>
-	<h1>HybridDataDeliverUnit (HDDU) 規格書 v3</h1>
+	<h1>HybridDataDeliverUnit (HDDU) 規格書 v4</h1>
 	<p class="note">適用版本：<code>simulator/include/Cluster/HybridDataDeliverUnit.hpp</code>（四通道獨立平行管線 + VR NoC 介面）</p>
 
 	<h2>1. 模組定位</h2>
@@ -33,6 +33,7 @@ class HybridDataDeliverUnit;</code></pre>
 	<ul>
 		<li><code>NOC_ADDR_BITS = NOC_TAG_BITS + 1</code></li>
 		<li><code>DATA_BYTES = DATA_BITS / 8</code></li>
+		<li><code>FIFO_DEPTH = 16</code>（所有內部 FIFO 固定深度，無軟體可設定欄位）</li>
 		<li>NoC addr 編碼：<code>[NOC_TAG_BITS-1:0]=tag</code>，<code>[NOC_TAG_BITS]=ultra</code></li>
 	</ul>
 
@@ -125,44 +126,49 @@ VRDIF&lt;response_t&lt;sc_biguint&lt;DATA_BITS&gt;&gt;&gt; noc_plo_in;</code></p
 	<h3>4.5 Global register（0x800~0x8FF）</h3>
 	<table>
 		<tr><th>Offset</th><th>Name</th><th>RW</th><th>說明</th></tr>
-		<tr><td>0x800</td><td>HDDU_CTRL</td><td>R/W</td><td>bit1 清錯誤與 FIFO，bit2 start_all，bit3 stop_all</td></tr>
-		<tr><td>0x804</td><td>HDDU_STATUS</td><td>R</td><td>bit0 any_busy，bit1 done，bit2 err，bit3 本 cycle stall</td></tr>
-		<tr><td>0x808</td><td>PLANE_EN</td><td>R/W</td><td>bit0~3：PS/PD/PLI/PLO enable</td></tr>
+		<tr><td>0x800</td><td>HDDU_CTRL</td><td>R/W</td><td>bit0 soft-reset（清 FIFO/錯誤），bit1 start_all，bit2 stop_all</td></tr>
+		<tr><td>0x804</td><td>HDDU_STATUS</td><td>R</td><td>bit1 any_busy，bit2 done（!any_busy），bit3 stall，bit4 err</td></tr>
+		<tr><td>0x808</td><td>PLANE_EN</td><td>R/W</td><td>bit0~3：PS/PD/PLI/PLO enable（預設 0xF）</td></tr>
 		<tr><td>0x80C</td><td>PLANE_MODE</td><td>R/W</td><td>軟體模式旗標（硬體保留）</td></tr>
 		<tr><td>0x810</td><td>NUM_PORTS</td><td>R</td><td>固定 4（相容欄位）</td></tr>
 		<tr><td>0x814</td><td>PORT_WIDTH</td><td>R</td><td><code>DATA_BITS / 4</code>（相容欄位）</td></tr>
-		<tr><td>0x818</td><td>MAX_OUTSTANDING</td><td>R/W</td><td>每通道 FIFO 上限（0 視為 1）</td></tr>
-		<tr><td>0x81C</td><td>ARB_POLICY</td><td>R/W</td><td>保留</td></tr>
-		<tr><td>0x820</td><td>ERR_CODE</td><td>R/W</td><td>錯誤碼</td></tr>
-		<tr><td>0x824</td><td>ERR_INFO0</td><td>R/W</td><td>錯誤資訊0</td></tr>
-		<tr><td>0x828</td><td>ERR_INFO1</td><td>R/W</td><td>錯誤資訊1</td></tr>
-		<tr><td>0x82C</td><td>COUNTER_TX_PKT</td><td>R</td><td>PS/PD/PLI 送出封包數</td></tr>
-		<tr><td>0x830</td><td>COUNTER_TX_BYTE</td><td>R</td><td>送出位元組累計</td></tr>
-		<tr><td>0x834</td><td>COUNTER_RX_BYTE</td><td>R</td><td>PLO 寫回位元組累計</td></tr>
-		<tr><td>0x838</td><td>COUNTER_STALL</td><td>R</td><td>stall 累計</td></tr>
+		<tr><td>0x818</td><td>ARB_POLICY</td><td>R/W</td><td>仲裁策略保留欄位</td></tr>
+		<tr><td>0x81C</td><td>ERR_CODE</td><td>R/W</td><td>錯誤碼（0=NONE, 1=AGU, 2=NOC, 3=SPM）</td></tr>
+		<tr><td>0x820</td><td>ERR_INFO0</td><td>R/W</td><td>錯誤資訊0（受影響通道 bitmask）</td></tr>
+		<tr><td>0x824</td><td>ERR_INFO1</td><td>R/W</td><td>錯誤資訊1（錯誤位址）</td></tr>
+		<tr><td>0x828</td><td>COUNTER_TX_PKT</td><td>R</td><td>PS/PD/PLI/PLO 出口握手封包累計數</td></tr>
+		<tr><td>0x82C</td><td>COUNTER_TX_BYTE</td><td>R</td><td>PS/PD/PLI 送出位元組累計</td></tr>
+		<tr><td>0x830</td><td>COUNTER_RX_BYTE</td><td>R</td><td>PLO 寫回位元組累計</td></tr>
+		<tr><td>0x834</td><td>COUNTER_STALL</td><td>R</td><td>各 AGU gen_valid &amp;&amp; !gen_ready 累計次數</td></tr>
 	</table>
+	<p class="note">注意：<code>MAX_OUTSTANDING</code> 在程式碼中不存在，FIFO 深度固定為 <code>FIFO_DEPTH = 16</code>。</p>
 
 	<h2>5. 行為規格（重點）</h2>
-	<h3>5.1 PS/PD/PLI（各自獨立）</h3>
+	<h3>5.1 PS/PD/PLI（各自獨立，純組合邏輯）</h3>
 	<ul>
-		<li>Stage0：AGU 產生 addr/tag/ultra；SPM 讀取；tag+data push FIFO</li>
-		<li>Stage1：從 FIFO 取出並送到對應 NoC request</li>
-		<li>送出握手成功：<code>TX_PKT+=1</code>，<code>TX_BYTE+=DATA_BYTES</code></li>
+		<li><strong>Stage 0</strong>：AGU 產生 addr/tag/ultra；<code>read_noc_addr_wait_fifo</code> 未滿時對 SPM 發讀取請求。</li>
+		<li><strong>Stage 0.5</strong>：SPM Response 到達後，pop <code>read_noc_addr_wait_fifo</code>，將 <code>{data, noc_addr}</code> push <code>noc_req_fifo</code>。</li>
+		<li><strong>Stage 1</strong>：從 <code>noc_req_fifo</code> 送往對應 NoC 介面；握手成功：<code>TX_PKT+=1</code>，<code>TX_BYTE+=DATA_BYTES</code>。</li>
 	</ul>
+	<p>無 Cooldown 機制。FIFO 深度固定為 <code>FIFO_DEPTH=16</code>。</p>
 
 	<h3>5.2 PLO（獨立）</h3>
 	<ul>
-		<li>Stage0：AGU tag/ultra 送 <code>noc_plo_out</code>，AGU addr push <code>plo_addr_fifo</code></li>
-		<li>Stage1：<code>noc_plo_in</code> response 與 addr fifo pop 配對，寫回 SPM3</li>
-		<li>寫回成功：<code>RX_BYTE+=DATA_BYTES</code></li>
+		<li><strong>Stage 0</strong>：AGU tag/ultra 從 NoC bypass FIFO 送往 <code>noc_plo_out</code>；<code>write_addr_fifo</code> 未滿時，握手完成 push addr 並回應 AGU ready。NoC 請求握手也遞增 <code>TX_PKT</code>。</li>
+		<li><strong>Stage 1</strong>：<code>noc_plo_in</code> response 與 <code>write_addr_fifo</code> pop 配對， push <code>spm_req_fifo</code>；累加 <code>RX_BYTE+=DATA_BYTES</code>。</li>
+		<li><strong>Stage 2</strong>：從 <code>spm_req_fifo</code> 對 SPM port 3 發出寫入請求。</li>
+		<li><strong>Stage 2.5</strong>：<code>seq_process</code> 監聽 SPM 寫入回應，若非 SPM_OK 則設定 <code>ERR_CODE=SPM_ERROR</code>。</li>
 	</ul>
 
 	<h3>5.3 Stall 條件</h3>
 	<ul>
-		<li>SPM not ready</li>
-		<li>NoC ready=0</li>
-		<li>FIFO 滿 / PLO response 無可配對地址</li>
+		<li><strong>PS/PD/PLI</strong>：<code>read_noc_addr_wait_fifo</code> 已滿 或 SPM port 未 ready</li>
+		<li><strong>PLO</strong>：<code>write_addr_fifo</code> 已滿 或 NoC <code>noc_plo_out.ready_in=0</code></li>
+		<li>所有 AGU 中 <code>gen_valid=1 &amp;&amp; gen_ready=0</code> 的次數在每 cycle 累加至 <code>COUNTER_STALL</code></li>
 	</ul>
+
+	<h3>5.4 中斷語意</h3>
+	<p><code>interrupt = STATUS.bit4 (ERROR) || STATUS.bit2 (DONE)</code></p>
 
 	<h2>6. 驅動範例</h2>
 	<pre><code>// helper
@@ -178,21 +184,24 @@ agu_wr(H, 1, 0x00, pd_base);
 agu_wr(H, 2, 0x00, pli_base);
 agu_wr(H, 3, 0x00, plo_base);
 
-hddu_wr(H, 0x808, 0xF);  // enable planes
-hddu_wr(H, 0x818, 16);   // max outstanding
-hddu_wr(H, 0x800, 1u &lt;&lt; 2); // start all
+hddu_wr(H, 0x808, 0xF);      // enable planes (default is already 0xF)
+hddu_wr(H, 0x800, 1u &lt;&lt; 1); // CTRL_START (bit1): start all AGUs
 
 while (true) {
     uint32_t st = hddu_rd(H, 0x804);
-    if (st & (1u &lt;&lt; 2)) break; // err
-    if (st & (1u &lt;&lt; 1)) break; // done
+    if (st &amp; (1u &lt;&lt; 4)) break; // bit4 = err
+    if (st &amp; (1u &lt;&lt; 2)) break; // bit2 = done
 }
 
-uint32_t tx_pkt = hddu_rd(H, 0x82C);
-uint32_t tx_b   = hddu_rd(H, 0x830);
-uint32_t rx_b   = hddu_rd(H, 0x834);
-uint32_t stall  = hddu_rd(H, 0x838);</code></pre>
+uint32_t tx_pkt = hddu_rd(H, 0x828); // COUNTER_TX_PKT
+uint32_t tx_b   = hddu_rd(H, 0x82C); // COUNTER_TX_BYTE
+uint32_t rx_b   = hddu_rd(H, 0x830); // COUNTER_RX_BYTE
+uint32_t stall  = hddu_rd(H, 0x834); // COUNTER_STALL
 
-	<div class="note">建議搭配 <code>test/test_hddu_unit.cpp</code> 驗證 MMIO、tag 編碼、backpressure hold、PLO 寫回與多平面壓力測試。</div>
+// stop all AGUs: CTRL_STOP = bit2 → hddu_wr(H, 0x800, 1u &lt;&lt; 2);
+// soft-reset (clear FIFO/errors): CTRL_RESET = bit0 → hddu_wr(H, 0x800, 1u &lt;&lt; 0);</code></pre>
+
+	<div class="note">建議搭配 <code>test/test_hddu_unit.cpp</code> 驗證 MMIO、tag 編碼、backpressure hold、PLO 寫回與多平面壓力測試。<br>
+	注意：程式碼中無 <code>MAX_OUTSTANDING</code> 軟體可設定欄位，FIFO 深度固定為 <code>FIFO_DEPTH=16</code>。</div>
 </body>
 </html>

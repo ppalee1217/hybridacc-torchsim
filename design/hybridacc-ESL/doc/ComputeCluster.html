@@ -3,7 +3,7 @@
 <head>
 	<meta charset="UTF-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-	<title>ComputeCluster 規格與驅動手冊 v3</title>
+	<title>ComputeCluster 規格與驅動手冊 v4</title>
 	<style>
 		body {
 			font-family: "Noto Sans TC", "Segoe UI", Arial, sans-serif;
@@ -47,27 +47,62 @@
 		th {
 			background: #f3f4f6;
 		}
+		pre { font-size: 13px; }
+		td:first-child { white-space: nowrap; }
 		.note {
 			background: #ecfeff;
 			border: 1px solid #a5f3fc;
 			border-radius: 8px;
-			padding: 10px 12px;
+			padding: 10px 14px;
+			margin: 12px 0;
+		}
+		.warn {
+			background: #fffbeb;
+			border: 1px solid #fcd34d;
+			border-radius: 8px;
+			padding: 10px 14px;
 			margin: 12px 0;
 		}
 	</style>
 </head>
 <body>
-	<h1>ComputeCluster 規格與驅動手冊 v3</h1>
+	<h1>ComputeCluster 規格與驅動手冊 v4</h1>
+	<p>適用檔案：<code>simulator/include/ComputeCluster.hpp</code></p>
 
-	<h2>1. 概述</h2>
-	<p><code>ComputeCluster</code> 封裝 <code>SPM</code>、<code>HDDU</code>、<code>NoC</code>，對外提供統一 Data/Command slave 介面，並由 HDDU 管理資料平面傳輸。</p>
+	<h2>1. 模組定位</h2>
+	<p><code>ComputeCluster</code> 封裝 <code>ScratchpadMemory</code>（SPM）、<code>HybridDataDeliverUnit</code>（HDDU）、<code>NetworkOnChip</code>（NoC），對外提供：</p>
 	<ul>
-		<li>64-bit Data slave（對接 SPM DMA）</li>
-		<li>32-bit Command/MMIO slave（分流到 SPM/HDDU/NoC command）</li>
-		<li><code>clk</code> / <code>reset_n</code> / <code>power_enable_i</code> / <code>interrupt_o</code></li>
+		<li><strong>AXI4-Lite 64-bit Data Slave</strong>：對接 SPM DMA（preload / readback）</li>
+		<li><strong>AHB-Lite 32-bit Command/MMIO Slave</strong>：SPM config/PMU + HDDU MMIO + NoC command</li>
+		<li><code>interrupt_o</code>：來自 HDDU，受 <code>power_enable_i</code> gate</li>
 	</ul>
 
-	<h2>2. Micro Architecture</h2>
+	<h2>2. Template 參數與衍生常數</h2>
+	<pre>template &lt;
+    unsigned SPM_NUM_NOC_CHANNEL        = 4,
+    unsigned SPM_NUM_BANKS_PER_GROUP    = 3,
+    unsigned SPM_SRAM_BANK_WIDTH_BITS   = 64,
+    unsigned SPM_SRAM_BANK_DEPTH_WORDS  = 8192,
+    unsigned SPM_SRAM_BANK_LATENCY      = 1,
+    unsigned SPM_SRAM_BANK_PIPELINE_DEPTH = 1,
+    unsigned SPM_ADDR_WIDTH             = 32,
+    unsigned NOC_NUM_PORTS              = 3,
+    unsigned NOC_PORT_WIDTH_BITS        = 64,
+    unsigned NOC_NUM_PES_PER_PORT       = 16&gt;
+SC_MODULE(ComputeCluster)
+
+// 衍生常數
+static constexpr unsigned HDDU_DATA_BITS     = NOC_NUM_PORTS * NOC_PORT_WIDTH_BITS; // 192
+static constexpr unsigned HDDU_NOC_TAG_BITS  = 6;
+static constexpr unsigned HDDU_NOC_ADDR_BITS = HDDU_NOC_TAG_BITS + 1;              // 7</pre>
+	<p>硬體 <code>static_assert</code>：</p>
+	<ul>
+		<li><code>SPM_NUM_NOC_CHANNEL == 4</code></li>
+		<li><code>SPM_SRAM_BANK_WIDTH_BITS == 64</code></li>
+		<li><code>NOC_NUM_PORTS × NOC_PORT_WIDTH_BITS == SPM_NUM_BANKS_PER_GROUP × SPM_SRAM_BANK_WIDTH_BITS</code>（HDDU/NoC payload 寬度 = SPM group aggregate 寬度，預設均為 192-bit）</li>
+	</ul>
+
+	<h2>3. Micro Architecture</h2>
 	<div style="overflow-x:auto; border:1px solid #e2e8f0; border-radius:8px; background:#f8fafc; padding:10px;">
 		<svg viewBox="0 0 1200 500" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ComputeCluster Micro Architecture">
 			<defs>
@@ -76,90 +111,125 @@
 				</marker>
 			</defs>
 
+			<defs>
+				<marker id="arrowblue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+					<path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb" />
+				</marker>
+			</defs>
+
 			<!-- outer frame -->
-			<rect x="150" y="45" width="900" height="400" rx="10" ry="10" fill="#ffffff" stroke="#64748b" stroke-width="2"/>
-			<text x="600" y="75" text-anchor="middle" font-size="18" font-weight="700" fill="#0f172a">ComputeCluster</text>
+			<rect x="155" y="50" width="910" height="430" rx="10" ry="10" fill="#ffffff" stroke="#64748b" stroke-width="2"/>
+			<text x="610" y="80" text-anchor="middle" font-size="18" font-weight="700" fill="#0f172a">ComputeCluster</text>
 
-			<!-- external endpoints -->
-			<text x="20" y="285" font-size="14" fill="#0f172a">Host Data Slave (64b)</text>
-			<text x="20" y="305" font-size="12" fill="#334155">data_req/data_rsp</text>
+			<!-- External labels -->
+			<text x="10" y="155" font-size="13" fill="#0f172a" font-weight="600">AXI4-Lite</text>
+			<text x="10" y="172" font-size="12" fill="#334155">Data Slave</text>
+			<text x="10" y="187" font-size="11" fill="#334155">(64-bit DMA)</text>
 
-			<text x="20" y="110" font-size="14" fill="#0f172a">Host Cmd/MMIO (32b)</text>
-			<text x="20" y="130" font-size="12" fill="#334155">cmd_req/cmd_rsp</text>
+			<text x="10" y="310" font-size="13" fill="#0f172a" font-weight="600">AHB-Lite</text>
+			<text x="10" y="327" font-size="12" fill="#334155">Command Slave</text>
+			<text x="10" y="342" font-size="11" fill="#334155">(32-bit MMIO)</text>
 
-			<!-- modules -->
-			<rect x="260" y="120" width="260" height="90" rx="8" ry="8" fill="#eff6ff" stroke="#3b82f6"/>
-			<text x="390" y="154" text-anchor="middle" font-size="14" font-weight="700" fill="#1e3a8a">MMIO Decoder</text>
-			<text x="390" y="176" text-anchor="middle" font-size="12" fill="#1e3a8a">(SPM / HDDU / NoC)</text>
+			<!-- AXI4 gated arrow to SPM -->
+			<line x1="150" y1="170" x2="205" y2="300" stroke="#334155" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+			<text x="60" y="242" font-size="11" fill="#475569">power gate</text>
 
-			<rect x="560" y="120" width="190" height="90" rx="8" ry="8" fill="#fef3c7" stroke="#f59e0b"/>
-			<text x="655" y="154" text-anchor="middle" font-size="14" font-weight="700" fill="#92400e">NoC Command</text>
-			<text x="655" y="176" text-anchor="middle" font-size="12" fill="#92400e">(0x2000 only)</text>
+			<!-- AHB to seq_ahb_ctrl -->
+			<line x1="150" y1="325" x2="210" y2="325" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
 
-			<rect x="260" y="280" width="260" height="95" rx="8" ry="8" fill="#f1f5f9" stroke="#475569"/>
-			<text x="390" y="314" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">ScratchpadMemory</text>
-			<text x="390" y="336" text-anchor="middle" font-size="12" fill="#334155">SPM + DMA 64b port</text>
+			<!-- seq_ahb_ctrl box -->
+			<rect x="210" y="280" width="240" height="115" rx="8" ry="8" fill="#eff6ff" stroke="#3b82f6"/>
+			<text x="330" y="308" text-anchor="middle" font-size="13" font-weight="700" fill="#1e3a8a">seq_ahb_ctrl</text>
+			<text x="330" y="326" text-anchor="middle" font-size="11" fill="#1e3a8a">AHB Addr→Data pipeline</text>
+			<text x="330" y="342" text-anchor="middle" font-size="11" fill="#1e3a8a">SPM cfg/PMU (0x0000)</text>
+			<text x="330" y="358" text-anchor="middle" font-size="11" fill="#1e3a8a">HDDU MMIO passthru (0x1000)</text>
+			<text x="330" y="374" text-anchor="middle" font-size="11" fill="#1e3a8a">NoC cmd sideband (0x2000)</text>
 
-			<rect x="560" y="280" width="260" height="95" rx="8" ry="8" fill="#ecfeff" stroke="#0891b2"/>
-			<text x="690" y="314" text-anchor="middle" font-size="14" font-weight="700" fill="#0e7490">HybridDataDeliverUnit</text>
-			<text x="690" y="336" text-anchor="middle" font-size="12" fill="#155e75">HDDU (4 AGU + 4 planes)</text>
+			<!-- comb_power box -->
+			<rect x="210" y="148" width="240" height="100" rx="8" ry="8" fill="#f0fdf4" stroke="#16a34a"/>
+			<text x="330" y="175" text-anchor="middle" font-size="13" font-weight="700" fill="#15803d">comb_power_and_wiring</text>
+			<text x="330" y="193" text-anchor="middle" font-size="11" fill="#15803d">local_reset_n = reset_n &amp;&amp; power_en</text>
+			<text x="330" y="209" text-anchor="middle" font-size="11" fill="#15803d">AXI gating; hready_o = power_en</text>
+			<text x="330" y="225" text-anchor="middle" font-size="11" fill="#15803d">interrupt_o = power_en &amp;&amp; hddu_irq</text>
 
-			<rect x="860" y="205" width="170" height="120" rx="8" ry="8" fill="#f5f3ff" stroke="#7c3aed"/>
-			<text x="945" y="245" text-anchor="middle" font-size="14" font-weight="700" fill="#5b21b6">NetworkOnChip</text>
-			<text x="945" y="268" text-anchor="middle" font-size="12" fill="#6d28d9">PS/PD/PLI/PLO VR</text>
+			<!-- SPM box -->
+			<rect x="210" y="420" width="240" height="45" rx="8" ry="8" fill="#f1f5f9" stroke="#475569"/>
+			<text x="330" y="441" text-anchor="middle" font-size="13" font-weight="700" fill="#0f172a">ScratchpadMemory</text>
+			<text x="330" y="458" text-anchor="middle" font-size="11" fill="#334155">12 banks + AXI4-Lite DMA + PMU</text>
 
-			<!-- arrows external -->
-			<line x1="140" y1="320" x2="260" y2="320" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
-			<text x="148" y="312" font-size="12" fill="#334155">data slave bridge</text>
+			<!-- HDDU box -->
+			<rect x="510" y="260" width="230" height="110" rx="8" ry="8" fill="#ecfeff" stroke="#0891b2"/>
+			<text x="625" y="290" text-anchor="middle" font-size="13" font-weight="700" fill="#0e7490">HDDU</text>
+			<text x="625" y="308" text-anchor="middle" font-size="11" fill="#155e75">4 AGU (PS/PD/PLI/PLO)</text>
+			<text x="625" y="324" text-anchor="middle" font-size="11" fill="#155e75">4 FIFO planes / SPM ports 0~3</text>
+			<text x="625" y="340" text-anchor="middle" font-size="11" fill="#155e75">NoC VR interfaces</text>
+			<text x="625" y="356" text-anchor="middle" font-size="11" fill="#155e75">interrupt out</text>
 
-			<line x1="140" y1="145" x2="260" y2="145" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
-			<text x="148" y="137" font-size="12" fill="#334155">cmd_req/cmd_rsp</text>
+			<!-- NoC box -->
+			<rect x="840" y="200" width="195" height="200" rx="8" ry="8" fill="#f5f3ff" stroke="#7c3aed"/>
+			<text x="937" y="233" text-anchor="middle" font-size="13" font-weight="700" fill="#5b21b6">NetworkOnChip</text>
+			<text x="937" y="253" text-anchor="middle" font-size="11" fill="#6d28d9">NoCRouter</text>
+			<text x="937" y="270" text-anchor="middle" font-size="11" fill="#6d28d9">NUM_PORTS × MBUS</text>
+			<text x="937" y="287" text-anchor="middle" font-size="11" fill="#6d28d9">NUM_PORTS × NUM_PES PEs</text>
+			<text x="937" y="315" text-anchor="middle" font-size="12" fill="#7c3aed">← PS / PD / PLI req</text>
+			<text x="937" y="345" text-anchor="middle" font-size="12" fill="#7c3aed">⇄ PLO req / resp</text>
 
-			<!-- MMIO routing -->
-			<line x1="520" y1="165" x2="560" y2="165" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
-			<text x="528" y="155" font-size="12" fill="#334155">NoC command</text>
+			<!-- SPM ↔ HDDU noc-side ports -->
+			<line x1="450" y1="430" x2="510" y2="330" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<line x1="510" y1="350" x2="450" y2="445" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<text x="455" y="392" font-size="11" fill="#475569">SPM noc-side</text>
+			<text x="455" y="406" font-size="11" fill="#475569">ports 0~3</text>
 
-			<line x1="390" y1="210" x2="390" y2="280" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
-			<text x="402" y="252" font-size="12" fill="#334155">SPM cfg_*</text>
+			<!-- comb → SPM AXI DMA -->
+			<line x1="330" y1="248" x2="330" y2="420" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<text x="335" y="340" font-size="11" fill="#15803d">AXI4-Lite DMA</text>
+			<text x="335" y="354" font-size="11" fill="#15803d">(gated)</text>
 
-			<polyline points="470,210 650,250 650,280" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
-			<text x="540" y="238" font-size="12" fill="#334155">HDDU mmio_*</text>
+			<!-- seq → SPM cfg -->
+			<line x1="450" y1="360" x2="430" y2="440" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrowblue)"/>
+			<text x="453" y="415" font-size="11" fill="#2563eb">SPM cfg /</text>
+			<text x="453" y="428" font-size="11" fill="#2563eb">PMU read</text>
 
-			<!-- Data paths -->
-			<line x1="520" y1="320" x2="560" y2="320" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
-			<line x1="560" y1="340" x2="520" y2="340" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
-			<text x="530" y="364" font-size="12" fill="#334155">SPM noc-side ports (4x)</text>
+			<!-- seq → HDDU MMIO -->
+			<line x1="450" y1="325" x2="510" y2="295" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrowblue)"/>
+			<text x="453" y="318" font-size="11" fill="#2563eb">HDDU mmio</text>
 
-			<line x1="820" y1="310" x2="860" y2="260" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
-			<line x1="860" y1="290" x2="820" y2="340" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
-			<text x="790" y="252" font-size="12" fill="#334155">VR req/resp</text>
+			<!-- seq → NoC cmd sideband -->
+			<polyline points="450,305 840,255" fill="none" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<text x="595" y="252" font-size="11" fill="#b45309">command_mode / command_data</text>
 
-			<polyline points="750,165 845,165 845,220 860,220" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
-			<text x="770" y="188" font-size="12" fill="#334155">NoC command_*</text>
+			<!-- HDDU ↔ NoC VR -->
+			<line x1="740" y1="295" x2="840" y2="295" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<line x1="840" y1="355" x2="740" y2="355" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<text x="748" y="288" font-size="11" fill="#6d28d9">PS/PD/PLI/PLO req →</text>
+			<text x="748" y="370" font-size="11" fill="#6d28d9">← PLO response</text>
 
-			<!-- reset and interrupt notes -->
-			<text x="260" y="405" font-size="12" fill="#334155">local_reset_n = reset_n &amp; power_enable_i</text>
-			<text x="260" y="425" font-size="12" fill="#334155">interrupt_o = power_enable_i &amp; hddu_irq</text>
+			<!-- HDDU interrupt -->
+			<line x1="625" y1="260" x2="625" y2="230" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<text x="630" y="250" font-size="11" fill="#dc2626">interrupt</text>
 		</svg>
 	</div>
 
-	<h3>2.1 內部資料流</h3>
+	<h3>3.1 內部連線重點</h3>
 	<ol>
-		<li>Data slave 直接對接 SPM DMA（64-bit read/write）</li>
-		<li>HDDU 4 個 SPM ports 直連 SPM 4 個 NoC-side ports，且固定 parallel mode</li>
-		<li>HDDU 與 NoC 以 VR 型別介面相連：PS/PD/PLI request + PLO request/response</li>
-		<li>PLO request 由 HDDU 控制，不經 NoC MMIO 視窗</li>
+		<li><strong>SPM DMA path</strong>：外部 AXI4-Lite data slave 信號經 <code>comb_power_and_wiring</code> power gate 後直連 SPM DMA 介面；power off 時 <code>AWREADY=WREADY=ARREADY=0</code>，<code>BRESP=RRESP=DECERR</code></li>
+		<li><strong>HDDU ↔ SPM</strong>：HDDU 四個 SPM port 直連 SPM 四個 noc-side port（<code>SPM_NUM_NOC_CHANNEL=4</code>）；<code>SPM_ARB_POLICY</code> 為保留欄位</li>
+		<li><strong>HDDU ↔ NoC（VR 型別介面）</strong>：<code>hddu.noc_ps/pd/pli_out → noc.noc_ps/pd/pli_in</code>；<code>hddu.noc_plo_out ↔ noc.noc_plo_in/out</code>；PLO request 完全由 HDDU PLO channel 驅動</li>
+		<li><strong>SPM PMU</strong>：SPM 輸出 <code>pmu_cycle_cnt_o</code>、<code>pmu_arb_stall_cnt_o</code>、<code>pmu_credit_stall_cnt_o</code>（64-bit）及 <code>pmu_port_txn_cnt_o[0..3]</code>，由 <code>seq_ahb_ctrl</code> 讀出供 AHB 回傳</li>
 	</ol>
 
-	<h3>2.2 Power / Reset</h3>
+	<h3>3.2 Power / Reset 行為</h3>
+	<pre>local_reset_n = reset_n &amp;&amp; power_enable_i</pre>
 	<ul>
-		<li>內部 reset：<code>local_reset_n = reset_n &amp;&amp; power_enable_i</code></li>
-		<li><code>power_enable_i=0</code>：內部模組重置、slave ready 拉低、<code>interrupt_o=0</code></li>
+		<li><code>power_enable_i=0</code>：SPM/HDDU/NoC 全部等效 reset</li>
+		<li>AXI4-Lite：<code>AWREADY=WREADY=ARREADY=0</code>；<code>BRESP=RRESP=2'b11</code>（DECERR）；<code>RDATA=0</code></li>
+		<li>AHB-Lite：<code>hready_o=0</code>，<code>hrdata_o=0</code></li>
+		<li><code>interrupt_o=0</code></li>
 	</ul>
 
-	<h2>3. Top-level 介面</h2>
+	<h2>4. Top-level 介面</h2>
 
-	<h3>3.1 時序/控制</h3>
+	<h3>4.1 控制與中斷</h3>
 	<table>
 		<thead>
 			<tr><th>Port</th><th>Dir</th><th>Width</th><th>說明</th></tr>
@@ -172,72 +242,105 @@
 		</tbody>
 	</table>
 
-	<h3>3.2 Data slave（64-bit）</h3>
+	<h3>4.2 AXI4-Lite Data Slave（64-bit，對接 SPM DMA）</h3>
 	<table>
-		<thead>
-			<tr><th>Port</th><th>Dir</th><th>Width</th><th>說明</th></tr>
-		</thead>
+		<thead><tr><th>Port</th><th>Dir</th><th>Width</th><th>說明</th></tr></thead>
 		<tbody>
-			<tr><td>data_req_vld_i</td><td>in</td><td>1</td><td>請求 valid</td></tr>
-			<tr><td>data_req_rdy_o</td><td>out</td><td>1</td><td>SPM DMA ready</td></tr>
-			<tr><td>data_addr_i</td><td>in</td><td>32</td><td>global address</td></tr>
-			<tr><td>data_write_i</td><td>in</td><td>1</td><td>1=write,0=read</td></tr>
-			<tr><td>data_wdata_i</td><td>in</td><td>64</td><td>write payload</td></tr>
-			<tr><td>data_rdata_o</td><td>out</td><td>64</td><td>read payload</td></tr>
-			<tr><td>data_done_o</td><td>out</td><td>1</td><td>完成脈衝</td></tr>
+			<tr><td><code>s_axi_awvalid_i</code></td><td>in</td><td>1</td><td>AW channel 有效</td></tr>
+			<tr><td><code>s_axi_awready_o</code></td><td>out</td><td>1</td><td><code>= power_on &amp;&amp; spm.awready</code></td></tr>
+			<tr><td><code>s_axi_awaddr_i</code></td><td>in</td><td>SPM_ADDR_WIDTH</td><td>寫入位元組位址</td></tr>
+			<tr><td><code>s_axi_wvalid_i</code></td><td>in</td><td>1</td><td>W channel 有效</td></tr>
+			<tr><td><code>s_axi_wready_o</code></td><td>out</td><td>1</td><td><code>= power_on &amp;&amp; spm.wready</code></td></tr>
+			<tr><td><code>s_axi_wdata_i</code></td><td>in</td><td>64</td><td>寫入資料</td></tr>
+			<tr><td><code>s_axi_wstrb_i</code></td><td>in</td><td>8</td><td>Byte strobe</td></tr>
+			<tr><td><code>s_axi_bvalid_o</code></td><td>out</td><td>1</td><td>B channel 有效</td></tr>
+			<tr><td><code>s_axi_bready_i</code></td><td>in</td><td>1</td><td>上游 B ready</td></tr>
+			<tr><td><code>s_axi_bresp_o</code></td><td>out</td><td>2</td><td>寫回應（power off → DECERR）</td></tr>
+			<tr><td><code>s_axi_arvalid_i</code></td><td>in</td><td>1</td><td>AR channel 有效</td></tr>
+			<tr><td><code>s_axi_arready_o</code></td><td>out</td><td>1</td><td><code>= power_on &amp;&amp; spm.arready</code></td></tr>
+			<tr><td><code>s_axi_araddr_i</code></td><td>in</td><td>SPM_ADDR_WIDTH</td><td>讀取位元組位址</td></tr>
+			<tr><td><code>s_axi_rvalid_o</code></td><td>out</td><td>1</td><td>R channel 有效</td></tr>
+			<tr><td><code>s_axi_rready_i</code></td><td>in</td><td>1</td><td>上游 R ready</td></tr>
+			<tr><td><code>s_axi_rdata_o</code></td><td>out</td><td>64</td><td>讀回資料（power off → 0）</td></tr>
+			<tr><td><code>s_axi_rresp_o</code></td><td>out</td><td>2</td><td>讀回應（power off → DECERR）</td></tr>
 		</tbody>
 	</table>
 
-	<h3>3.3 Command/MMIO slave（32-bit）</h3>
+	<h3>4.3 AHB-Lite Command/MMIO Slave（32-bit）</h3>
 	<table>
-		<thead>
-			<tr><th>Port</th><th>Dir</th><th>Width</th><th>說明</th></tr>
-		</thead>
+		<thead><tr><th>Port</th><th>Dir</th><th>Width</th><th>說明</th></tr></thead>
 		<tbody>
-			<tr><td>cmd_req_vld_i</td><td>in</td><td>1</td><td>請求 valid</td></tr>
-			<tr><td>cmd_req_rdy_o</td><td>out</td><td>1</td><td>MMIO ready</td></tr>
-			<tr><td>cmd_addr_i</td><td>in</td><td>32</td><td>MMIO address</td></tr>
-			<tr><td>cmd_write_i</td><td>in</td><td>1</td><td>1=write,0=read</td></tr>
-			<tr><td>cmd_wdata_i</td><td>in</td><td>32</td><td>write data</td></tr>
-			<tr><td>cmd_rdata_o</td><td>out</td><td>32</td><td>read data</td></tr>
-			<tr><td>cmd_done_o</td><td>out</td><td>1</td><td>transaction accepted</td></tr>
+			<tr><td><code>hsel_i</code></td><td>in</td><td>1</td><td>Slave select</td></tr>
+			<tr><td><code>haddr_i</code></td><td>in</td><td>32</td><td>位址（Address phase）</td></tr>
+			<tr><td><code>hwrite_i</code></td><td>in</td><td>1</td><td>1=write</td></tr>
+			<tr><td><code>htrans_i</code></td><td>in</td><td>2</td><td>IDLE=0, BUSY=1, NONSEQ=2, SEQ=3</td></tr>
+			<tr><td><code>hsize_i</code></td><td>in</td><td>3</td><td>傳輸寬度（保留）</td></tr>
+			<tr><td><code>hburst_i</code></td><td>in</td><td>3</td><td>Burst 型態（保留）</td></tr>
+			<tr><td><code>hprot_i</code></td><td>in</td><td>4</td><td>保護控制（保留）</td></tr>
+			<tr><td><code>hready_i</code></td><td>in</td><td>1</td><td>前一個 slave ready（pipeline）</td></tr>
+			<tr><td><code>hwdata_i</code></td><td>in</td><td>32</td><td>寫入資料（Data phase，比 address late 1 cycle）</td></tr>
+			<tr><td><code>hready_o</code></td><td>out</td><td>1</td><td><code>= power_enable_i</code>（無 wait states）</td></tr>
+			<tr><td><code>hresp_o</code></td><td>out</td><td>1</td><td><code>= 0</code>（OKAY）</td></tr>
+			<tr><td><code>hrdata_o</code></td><td>out</td><td>32</td><td>讀回資料（power off → 0）</td></tr>
+		</tbody>
+	</table>
+	<div class="note">
+		<strong>AHB-Lite 2-Cycle Pipeline</strong>：<br/>
+		Cycle N（Address Phase）：<code>hsel &amp;&amp; htrans[1]=1 &amp;&amp; hready_i</code> → 鎖存 haddr / hwrite / hsize<br/>
+		Cycle N+1（Data Phase）：根據鎖存位址執行讀寫；<code>hwdata</code> 在此週期有效；讀回值更新 <code>ahb_rdata_reg</code>，次週期輸出
+	</div>
+
+	<h2>5. MMIO Map（AHB 位址）</h2>
+
+	<h3>5.1 SPM config/PMU window（0x0000 ~ 0x00FF）</h3>
+	<table>
+		<thead><tr><th>Addr</th><th>Name</th><th>RW</th><th>說明</th></tr></thead>
+		<tbody>
+			<tr><td>0x0000</td><td>SPM_CONFIG_MAP</td><td>R/W</td><td>[7:0]：4 ports × 2-bit group mapping（<code>config_map_i</code>）</td></tr>
+			<tr><td>0x0004</td><td>SPM_CONFIG_UPDATE</td><td>W</td><td>bit0=1 觸發 <code>config_update_i</code> 一拍 pulse（read 回傳 0）</td></tr>
+			<tr><td>0x0008</td><td>SPM_ARB_POLICY</td><td>R/W</td><td>bit0：保留，寫入不影響 SPM 仲裁行為</td></tr>
+			<tr><td>0x000C</td><td>SPM_PMU_CTRL</td><td>W</td><td>bit0=1 觸發 PMU counter reset 一拍 pulse（read 回傳 0）</td></tr>
+			<tr><td>0x0010</td><td>SPM_PMU_CYCLE_CNT_LO</td><td>R</td><td><code>pmu_cycle_cnt_o[31:0]</code></td></tr>
+			<tr><td>0x0014</td><td>SPM_PMU_CYCLE_CNT_HI</td><td>R</td><td><code>pmu_cycle_cnt_o[63:32]</code></td></tr>
+			<tr><td>0x0018</td><td>SPM_PMU_ARB_STALL_LO</td><td>R</td><td><code>pmu_arb_stall_cnt_o[31:0]</code></td></tr>
+			<tr><td>0x001C</td><td>SPM_PMU_ARB_STALL_HI</td><td>R</td><td><code>pmu_arb_stall_cnt_o[63:32]</code></td></tr>
+			<tr><td>0x0020</td><td>SPM_PMU_CREDIT_STALL_LO</td><td>R</td><td><code>pmu_credit_stall_cnt_o[31:0]</code></td></tr>
+			<tr><td>0x0024</td><td>SPM_PMU_CREDIT_STALL_HI</td><td>R</td><td><code>pmu_credit_stall_cnt_o[63:32]</code></td></tr>
+			<tr><td>0x0040 + N×8</td><td>SPM_PMU_PORTn_TXN_LO</td><td>R</td><td><code>pmu_port_txn_cnt_o[N][31:0]</code>（N=0..3）</td></tr>
+			<tr><td>0x0044 + N×8</td><td>SPM_PMU_PORTn_TXN_HI</td><td>R</td><td><code>pmu_port_txn_cnt_o[N][63:32]</code>（N=0..3）</td></tr>
 		</tbody>
 	</table>
 
-	<h2>4. MMIO Map</h2>
+	<h3>5.2 HDDU window（0x1000 ~ 0x1FFF）</h3>
+	<p>直接 passthrough 到 HDDU MMIO：<code>hddu_mmio_addr = haddr - 0x1000</code>。範例：cluster <code>0x1800</code> → HDDU <code>0x800</code>（HDDU_CTRL）。詳細欄位請參考 HDDU.md 第 5 節。</p>
 
-	<h3>4.1 SPM Crossbar（0x0000~0x00FF）</h3>
+	<h3>5.3 NoC command window（0x2000 ~ 0x20FF）</h3>
 	<table>
-		<thead>
-			<tr><th>Addr</th><th>Name</th><th>RW</th><th>說明</th></tr>
-		</thead>
+		<thead><tr><th>Addr</th><th>Name</th><th>RW</th><th>說明</th></tr></thead>
 		<tbody>
-			<tr><td>0x0000</td><td>SPM_CONFIG_MAP</td><td>R/W</td><td>[7:0]，4 ports x 2-bit group map</td></tr>
-			<tr><td>0x0004</td><td>SPM_CONFIG_UPDATE</td><td>W</td><td>bit0=1 觸發更新 pulse</td></tr>
-			<tr><td>0x0008</td><td>SPM_ARB_POLICY</td><td>R/W</td><td>bit0（保留）</td></tr>
+			<tr><td>0x2000</td><td>NOC_CMD_DATA</td><td>R/W</td><td>Write：發送一拍 <code>command_mode=1</code> + <code>command_data=hwdata</code>，更新 <code>noc_last_cmd_reg</code>；Read：回傳 <code>noc_last_cmd_reg</code></td></tr>
+		</tbody>
+	</table>
+	<div class="note">PLO request/response 路徑由 HDDU PLO channel 直接驅動，不經 NoC MMIO window。</div>
+
+	<h3>5.4 命令分流規則</h3>
+	<p><code>haddr</code> 依區間分流（<code>seq_ahb_ctrl</code> Data Phase 執行）：</p>
+	<table>
+		<thead><tr><th>地址範圍</th><th>目標</th></tr></thead>
+		<tbody>
+			<tr><td>0x0000 ~ 0x00FF</td><td>SPM config / PMU 暫存器</td></tr>
+			<tr><td>0x1000 ~ 0x1FFF</td><td>HDDU MMIO passthrough</td></tr>
+			<tr><td>0x2000 ~ 0x20FF</td><td>NoC command sideband</td></tr>
+			<tr><td>其他</td><td>讀回 0，寫入忽略</td></tr>
 		</tbody>
 	</table>
 
-	<h3>4.2 HDDU Window（0x1000~0x1FFF）</h3>
-	<p>直接 passthrough 至 HDDU MMIO。例：HDDU <code>0x800</code> 對應 cluster <code>0x1800</code>。</p>
-
-	<h3>4.3 NoC Window（0x2000~0x20FF）</h3>
-	<table>
-		<thead>
-			<tr><th>Addr</th><th>Name</th><th>RW</th><th>說明</th></tr>
-		</thead>
-		<tbody>
-			<tr><td>0x2000</td><td>NOC_CMD_DATA</td><td>R/W</td><td>Write: command_mode 脈衝 + command_data；Read: last cmd</td></tr>
-		</tbody>
-	</table>
-	<p class="note">本版本 NoC MMIO 僅保留 <code>0x2000</code> command。PLO request/response 路徑由 HDDU PLO channel 直接驅動。</p>
-
-	<h2>5. 驅動共用工具（AGU / Scan-chain / PE program）</h2>
-	<pre>// Host helper（平台相關）
-void mmio_write(uint32_t addr, uint32_t data);
-uint32_t mmio_read(uint32_t addr);
-void data_write64(uint32_t addr, uint64_t data);
-uint64_t data_read64(uint32_t addr);
+	<h2>6. 驅動共用工具（AGU / NoC command / PE program）</h2>
+	<pre>// Platform-side helpers（請依實際介面實作）
+void ahb_write(uint32_t addr, uint32_t data);   // AHB-Lite 32-bit write（2-cycle pipeline）
+uint32_t ahb_read(uint32_t addr);               // AHB-Lite 32-bit read
+void axi_write64(uint32_t addr, uint64_t data); // AXI4-Lite 64-bit DMA write
+uint64_t axi_read64(uint32_t addr);             // AXI4-Lite 64-bit DMA read
 
 // ---- Cluster / HDDU base ----
 static constexpr uint32_t CLUSTER_HDDU_BASE = 0x1000;
@@ -266,12 +369,12 @@ static constexpr uint32_t REG_TAG_STRIDE1 = 0x48;
 static constexpr uint32_t REG_TAG_CTRL    = 0x4C;
 static constexpr uint32_t REG_MASK_CFG    = 0x54;
 
-// ---- HDDU global offset ----
-static constexpr uint32_t HDDU_CTRL            = 0x800; // bit1 clear, bit2 start_all, bit3 stop_all
-static constexpr uint32_t HDDU_STATUS          = 0x804; // bit1 done, bit2 err
-static constexpr uint32_t HDDU_PLANE_EN        = 0x808; // bit0~3 = PS/PD/PLI/PLO
-static constexpr uint32_t HDDU_PLANE_MODE      = 0x80C; // software mode flag
-static constexpr uint32_t HDDU_MAX_OUTSTANDING = 0x818;
+// ---- HDDU global offset（相對於 0x1000）----
+static constexpr uint32_t HDDU_CTRL       = 0x800; // bit0=soft-reset, bit1=start_all, bit2=stop_all
+static constexpr uint32_t HDDU_STATUS     = 0x804; // bit1=any_busy, bit2=done(!any_busy), bit4=err
+static constexpr uint32_t HDDU_PLANE_EN   = 0x808; // bit0~3 = PS/PD/PLI/PLO enable
+static constexpr uint32_t HDDU_PLANE_MODE = 0x80C; // software mode flag（硬體不解碼）
+static constexpr uint32_t HDDU_ARB_POLICY = 0x818; // 保留欄位
 
 // ---- NoC command ----
 enum message_command_t : uint32_t {
@@ -312,7 +415,7 @@ uint32_t pack_load_program(uint16_t im_addr_bytes, uint16_t inst16) {
 }
 
 void noc_cmd_write(uint32_t packed_cmd) {
-	mmio_write(CLUSTER_NOC_CMD, packed_cmd); // 寫 0x2000，ComputeCluster 會打一拍 command_mode
+	ahb_write(CLUSTER_NOC_CMD, packed_cmd); // 寫 0x2000，ComputeCluster 打一拍 command_mode=1
 }
 
 struct AguCfg {
@@ -327,37 +430,37 @@ struct AguCfg {
 
 void cfg_agu(uint32_t bank, const AguCfg&amp; c) {
 	const uint32_t B = CLUSTER_HDDU_BASE + bank * AGU_BANK_STRIDE;
-	mmio_write(B + REG_BASE_ADDR,   c.base_addr);
-	mmio_write(B + REG_BASE_ADDR_H, 0);
-	mmio_write(B + REG_ITER01,      (static_cast<uint32_t>(c.iter1) &lt;&lt; 16) | c.iter0);
-	mmio_write(B + REG_ITER23,      (static_cast<uint32_t>(c.iter3) &lt;&lt; 16) | c.iter2);
-	mmio_write(B + REG_STRIDE0,     static_cast<uint32_t>(c.stride0));
-	mmio_write(B + REG_STRIDE1,     static_cast<uint32_t>(c.stride1));
-	mmio_write(B + REG_STRIDE2,     static_cast<uint32_t>(c.stride2));
-	mmio_write(B + REG_STRIDE3,     static_cast<uint32_t>(c.stride3));
-	mmio_write(B + REG_LANE_CFG,    c.lane_cfg);
-	mmio_write(B + REG_TAG_BASE,    c.tag_base);
-	mmio_write(B + REG_TAG_STRIDE0, c.tag_stride0);
-	mmio_write(B + REG_TAG_STRIDE1, c.tag_stride1);
-	mmio_write(B + REG_TAG_CTRL,    c.tag_ctrl);
-	mmio_write(B + REG_MASK_CFG,    c.mask_cfg);
-	mmio_write(B + REG_CTRL,        c.ultra ? (1u &lt;&lt; 3) : 0u); // 先配置 ultra，不在此時 start
+	ahb_write(B + REG_BASE_ADDR,   c.base_addr);
+	ahb_write(B + REG_BASE_ADDR_H, 0);
+	ahb_write(B + REG_ITER01,      (static_cast&lt;uint32_t&gt;(c.iter1) &lt;&lt; 16) | c.iter0);
+	ahb_write(B + REG_ITER23,      (static_cast&lt;uint32_t&gt;(c.iter3) &lt;&lt; 16) | c.iter2);
+	ahb_write(B + REG_STRIDE0,     static_cast&lt;uint32_t&gt;(c.stride0));
+	ahb_write(B + REG_STRIDE1,     static_cast&lt;uint32_t&gt;(c.stride1));
+	ahb_write(B + REG_STRIDE2,     static_cast&lt;uint32_t&gt;(c.stride2));
+	ahb_write(B + REG_STRIDE3,     static_cast&lt;uint32_t&gt;(c.stride3));
+	ahb_write(B + REG_LANE_CFG,    c.lane_cfg);
+	ahb_write(B + REG_TAG_BASE,    c.tag_base);
+	ahb_write(B + REG_TAG_STRIDE0, c.tag_stride0);
+	ahb_write(B + REG_TAG_STRIDE1, c.tag_stride1);
+	ahb_write(B + REG_TAG_CTRL,    c.tag_ctrl);
+	ahb_write(B + REG_MASK_CFG,    c.mask_cfg);
+	ahb_write(B + REG_CTRL,        c.ultra ? (1u &lt;&lt; 3) : 0u); // ultra flag 先配，不在此 start
 }</pre>
 
-	<h2>6. 完整驅動範例：Conv2D（四 AGU + scan-chain + PE program）</h2>
-	<pre>// 1) power/reset
+	<h2>7. 完整驅動範例：Conv2D（四 AGU + scan-chain + PE program）</h2>
+	<pre>// 1) power / reset
 power_enable_i = 1;
 reset_n = 0; wait_cycles(4);
 reset_n = 1; wait_cycles(4);
 
-// 2) SPM mapping
-mmio_write(0x0000, 0xE4);
-mmio_write(0x0004, 0x1);
+// 2) SPM mapping（AHB-Lite）
+ahb_write(0x0000, 0xE4);  // 4-port group mapping
+ahb_write(0x0004, 0x1);   // trigger config_update pulse
 
-// 3) preload ifmap/weight/partial-sum init
-for (uint32_t i = 0; i &lt; weight_words; ++i) data_write64(weight_base + i, weight_buf[i]);
-for (uint32_t i = 0; i &lt; ifmap_words;  ++i) data_write64(ifmap_base  + i, ifmap_buf[i]);
-for (uint32_t i = 0; i &lt; pli_words;    ++i) data_write64(pli_base    + i, pli_init[i]);
+// 3) preload data（AXI4-Lite DMA，位址單位 byte）
+for (uint32_t i = 0; i &lt; weight_words; ++i) axi_write64(weight_base + i*8, weight_buf[i]);
+for (uint32_t i = 0; i &lt; ifmap_words;  ++i) axi_write64(ifmap_base  + i*8, ifmap_buf[i]);
+for (uint32_t i = 0; i &lt; pli_words;    ++i) axi_write64(pli_base    + i*8, pli_init[i]);
 
 // 4) AGU 全設定（PS / PD / PLI / PLO）
 AguCfg ps_cfg  = {ps_base,  ps_i0,  ps_i1,  ps_i2,  ps_i3,  ps_s0,  ps_s1,  ps_s2,  ps_s3,  0, ps_tag_base,  ps_t0,  ps_t1,  ps_tctrl,  0xF, false};
@@ -370,11 +473,10 @@ cfg_agu(AGU_PD,  pd_cfg);
 cfg_agu(AGU_PLI, pli_cfg);
 cfg_agu(AGU_PLO, plo_cfg);
 
-// 5) HDDU global
-mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL,            (1u &lt;&lt; 1)); // clear fifo/error
-mmio_write(CLUSTER_HDDU_BASE + HDDU_PLANE_EN,        0xF);       // PS/PD/PLI/PLO 全開
-mmio_write(CLUSTER_HDDU_BASE + HDDU_PLANE_MODE,      0x1);       // conv2d mode flag（軟體定義）
-mmio_write(CLUSTER_HDDU_BASE + HDDU_MAX_OUTSTANDING, 16);
+// 5) HDDU global 設定
+ahb_write(CLUSTER_HDDU_BASE + HDDU_CTRL,       (1u &lt;&lt; 0)); // soft-reset / clear FIFO
+ahb_write(CLUSTER_HDDU_BASE + HDDU_PLANE_EN,   0xF);       // PS/PD/PLI/PLO 全開
+ahb_write(CLUSTER_HDDU_BASE + HDDU_PLANE_MODE, 0x1);       // conv2d mode flag
 
 // 6) NoC 初始化 + scan-chain（注意：依實作需 reverse 順序 shift）
 noc_cmd_write(pack_noc_cmd(CMD_RESET, 0));
@@ -394,25 +496,28 @@ for (uint32_t pc = 0; pc &lt; pe_program_words; ++pc) {
 
 // 8) 啟動 PE 與 HDDU
 noc_cmd_write(pack_noc_cmd(CMD_START_PE, 0));
-mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u &lt;&lt; 2)); // start_all
+ahb_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u &lt;&lt; 1)); // start_all
 
-// 9) 等待完成
+// 9) 等待完成（輪詢 HDDU_STATUS）
+// bit1=any_busy, bit4=err；!any_busy → done
 while (true) {
-	uint32_t st = mmio_read(CLUSTER_HDDU_BASE + HDDU_STATUS);
-	if (st &amp; (1u &lt;&lt; 2)) { /* err */ break; }
-	if (st &amp; (1u &lt;&lt; 1)) { /* done */ break; }
+	uint32_t st = ahb_read(CLUSTER_HDDU_BASE + HDDU_STATUS);
+	if (st &amp; (1u &lt;&lt; 4)) { /* error */ break; }
+	if (!(st &amp; (1u &lt;&lt; 1))) { /* !any_busy → done */ break; }
 }
 
-// 10) 讀回 ofmap
-for (uint32_t i = 0; i &lt; ofmap_words; ++i) ofmap_buf[i] = data_read64(ofmap_base + i);</pre>
-	<p>建議同步讀取 HDDU counters（<code>0x82C/0x830/0x834/0x838</code>）做吞吐與背壓分析。</p>
+// 10) 讀回 ofmap（AXI4-Lite DMA）
+for (uint32_t i = 0; i &lt; ofmap_words; ++i)
+	ofmap_buf[i] = axi_read64(ofmap_base + i * 8);</pre>
+	<p>建議同步讀取 HDDU counters（<code>0x1828 TX_PKT</code> / <code>0x182C TX_BYTE</code> / <code>0x1830 RX_BYTE</code> / <code>0x1834 STALL</code>）做吞吐與背壓分析。</p>
 
-	<h2>7. 完整驅動範例：GEMM（四 AGU + scan-chain + PE program）</h2>
-	<pre>// reset/power/SPM mapping 同 Conv2D
+	<h2>8. 完整驅動範例：GEMM（四 AGU + scan-chain + PE program）</h2>
+	<pre>// reset / power / SPM mapping 同 Conv2D
 
-for (uint32_t i = 0; i &lt; A_words; ++i) data_write64(A_base + i, A[i]);
-for (uint32_t i = 0; i &lt; B_words; ++i) data_write64(B_base + i, B[i]);
-for (uint32_t i = 0; i &lt; C_words; ++i) data_write64(C_base + i, 0);
+// 載入矩陣（AXI4-Lite DMA）
+for (uint32_t i = 0; i &lt; A_words; ++i) axi_write64(A_base + i*8, A[i]);
+for (uint32_t i = 0; i &lt; B_words; ++i) axi_write64(B_base + i*8, B[i]);
+for (uint32_t i = 0; i &lt; C_words; ++i) axi_write64(C_base + i*8, 0ULL);
 
 AguCfg ps_cfg  = {A_base, a_i0, a_i1, a_i2, a_i3, a_s0, a_s1, a_s2, a_s3, 0, a_tag_base, a_t0, a_t1, a_tctrl, 0xF, false};
 AguCfg pd_cfg  = {B_base, b_i0, b_i1, b_i2, b_i3, b_s0, b_s1, b_s2, b_s3, 0, b_tag_base, b_t0, b_t1, b_tctrl, 0xF, false};
@@ -424,28 +529,41 @@ cfg_agu(AGU_PD,  pd_cfg);
 cfg_agu(AGU_PLI, pli_cfg);
 cfg_agu(AGU_PLO, plo_cfg);
 
-mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL,            (1u &lt;&lt; 1));
-mmio_write(CLUSTER_HDDU_BASE + HDDU_PLANE_EN,        0xB); // PS/PD/PLO
-mmio_write(CLUSTER_HDDU_BASE + HDDU_PLANE_MODE,      0x2); // gemm mode flag
-mmio_write(CLUSTER_HDDU_BASE + HDDU_MAX_OUTSTANDING, 16);
+ahb_write(CLUSTER_HDDU_BASE + HDDU_CTRL,       (1u &lt;&lt; 0));
+ahb_write(CLUSTER_HDDU_BASE + HDDU_PLANE_EN,   0xB); // PS/PD/PLO（PLI 停用）
+ahb_write(CLUSTER_HDDU_BASE + HDDU_PLANE_MODE, 0x2); // gemm mode flag
 
 noc_cmd_write(pack_noc_cmd(CMD_RESET, 0));
 noc_cmd_write(pack_noc_cmd(CMD_INIT,  0x56780000));
-for (int i = static_cast<int>(scan_chain_words.size()) - 1; i &gt;= 0; --i) {
+for (int i = static_cast&lt;int&gt;(scan_chain_words.size()) - 1; i &gt;= 0; --i)
 	noc_cmd_write(pack_noc_cmd(CMD_NOC_SCAN_CHAIN, scan_chain_words[i]));
-}
-for (uint32_t pc = 0; pc &lt; pe_program_words; ++pc) {
-	noc_cmd_write(pack_load_program(static_cast<uint16_t>(pc * 2), pe_program[pc]));
-}
+for (uint32_t pc = 0; pc &lt; pe_program_words; ++pc)
+	noc_cmd_write(pack_load_program(static_cast&lt;uint16_t&gt;(pc * 2), pe_program[pc]));
 
 noc_cmd_write(pack_noc_cmd(CMD_START_PE, 0));
-mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u &lt;&lt; 2));
+ahb_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u &lt;&lt; 1)); // start_all
 
-while ((mmio_read(CLUSTER_HDDU_BASE + HDDU_STATUS) &amp; (1u &lt;&lt; 1)) == 0) {}
-for (uint32_t i = 0; i &lt; C_words; ++i) C[i] = data_read64(C_base + i);</pre>
+while ((ahb_read(CLUSTER_HDDU_BASE + HDDU_STATUS) &amp; (1u &lt;&lt; 1)) != 0) {} // wait !any_busy
+for (uint32_t i = 0; i &lt; C_words; ++i) C[i] = axi_read64(C_base + i * 8);</pre>
 
-	<div class="note">
-		建議除錯順序：先驗證 Data slave + SPM，再驗證 HDDU MMIO/AGU，再驗證 NoC command，最後整合 conv2d/gemm end-to-end。
+	<h2>9. 除錯與驗證建議</h2>
+	<p>建議分層驗證順序：</p>
+	<ol>
+		<li>AXI4-Lite data slave ↔ SPM 基本讀寫</li>
+		<li>AHB-Lite SPM mapping/更新脈衝行為（<code>0x0000 / 0x0004</code>）</li>
+		<li>AHB-Lite HDDU MMIO + AGU 設定讀回（<code>0x1xxx</code>）</li>
+		<li>AHB-Lite NoC command（<code>0x2000</code>）</li>
+		<li>全鏈路 Conv2D / GEMM end-to-end</li>
+	</ol>
+	<p>建議監控：</p>
+	<ul>
+		<li>HDDU counters: <code>0x1828 COUNTER_TX_PKT</code> / <code>0x182C TX_BYTE</code> / <code>0x1830 RX_BYTE</code> / <code>0x1834 STALL</code></li>
+		<li>HDDU status: <code>0x1804</code>（<code>bit1=any_busy</code>, <code>bit4=err</code>, <code>bit3=stall</code>）</li>
+		<li>SPM PMU: <code>0x0010~0x0024</code> cycle/arb_stall/credit_stall；<code>0x0040~0x005C</code> port txn counters</li>
+		<li><code>interrupt_o</code> 脈衝（來自 HDDU status.err 或 status.done）</li>
+	</ul>
+	<div class="warn">
+		<strong>注意</strong>：舊文件中的 <code>cmd_req_vld_i / data_req_vld_i</code>、<code>HDDU_MAX_OUTSTANDING</code>、<code>cmd_done_o / data_done_o</code> 等已不存在於 v4 實作，請以本文件為準。
 	</div>
 </body>
 </html>

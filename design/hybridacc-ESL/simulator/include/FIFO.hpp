@@ -1,7 +1,6 @@
 #pragma once
 
 #include <systemc>
-#include <cassert>
 #include <vector>
 #include <string>
 #include "utils.hpp"
@@ -9,7 +8,6 @@
 using namespace sc_core;  // Add this to use SystemC types without prefix
 
 namespace hybridacc {
-namespace pe {
 
 // ============================================================================
 // FIFO Module with Template Support (Pure Port-Based Interface)
@@ -42,6 +40,9 @@ public:
     sc_out<bool> empty;
     sc_out<bool> full;
 
+    // Clear
+    sc_in<bool> clear;
+
     // Constructor with custom depth
     FIFO(sc_module_name name, int depth)
         : sc_module(name),
@@ -53,10 +54,10 @@ public:
           pop("pop"),
           empty("empty"),
           full("full"),
+          clear("clear"),
           fifo_depth(depth),
           fifo_name(name)  // Store the name
     {
-        assert(fifo_depth > 0 && "FIFO depth must be > 0");
 
         // Initialize storage
         storage.resize(fifo_depth);
@@ -126,6 +127,16 @@ private:
         wait();
 
         while (true) {
+            if (clear.read()) {
+                write_ptr_reg.write(0);
+                read_ptr_reg.write(0);
+                count_reg.write(0);
+                empty.write(true);
+                full.write(false);
+                wait();
+                continue;
+            }
+
             const int wr_ptr = write_ptr_reg.read();
             const int rd_ptr = read_ptr_reg.read();
             const int cnt = count_reg.read();
@@ -153,12 +164,12 @@ private:
 
             // pop first, then push, warning detection
             if (want_pop && is_empty) {
-                SC_REPORT_WARNING(fifo_name.c_str(), "Attempting to pop from an empty FIFO. Operation ignored.");
+                SC_REPORT_ERROR(fifo_name.c_str(), "Attempting to pop from an empty FIFO. Operation ignored.");
             }
             if (want_push && is_full && !want_pop) {
                 std::stringstream warning_msg;
                 warning_msg << "Attempting to push into a full FIFO. Operation ignored. Data: 0x" << std::hex << data_in.read() << std::dec;
-                SC_REPORT_WARNING(fifo_name.c_str(), warning_msg.str().c_str());
+                SC_REPORT_ERROR(fifo_name.c_str(), warning_msg.str().c_str());
             }
 
 
@@ -204,5 +215,4 @@ private:
     }
 };
 
-} // namespace pe
 } // namespace hybridacc

@@ -484,18 +484,25 @@ public:
 
     // Trace support
     int trace_id = -1;
+    uint32_t trace_pid = static_cast<uint32_t>(TRACE_PID::PE);
     std::string last_state = "IDLE";
     bool trace_init = false;
 
     void set_trace_id(int id) { trace_id = id;}
+    void set_trace_context(uint32_t pid, int tid_base) {
+        trace_pid = pid;
+        trace_id = tid_base;
+        trace_init = false;
+        last_state = "IDLE";
+    }
     int get_trace_num() const { return 1;}
 
     void trace_process() {
         if (trace_id == -1) return;
 
         if (!trace_init) {
-            TRACE_THREAD_NAME(TRACE_PID::PE, trace_id, "PE " + std::to_string(trace_id));
-            TRACE_EVENT(last_state, "PE_State", TRACE_BEGIN, TRACE_PID::PE, trace_id, "{}");
+            TRACE_THREAD_NAME(trace_pid, trace_id, "PE " + std::to_string(trace_id));
+            TRACE_EVENT(last_state, "PE_State", TRACE_BEGIN, trace_pid, trace_id, "{}");
             trace_init = true;
         }
 
@@ -528,9 +535,9 @@ public:
 
         if (current_state != last_state) {
             // End previous state
-            TRACE_EVENT(last_state, "PE_State", TRACE_END, TRACE_PID::PE, trace_id, "{}");
+            TRACE_EVENT(last_state, "PE_State", TRACE_END, trace_pid, trace_id, "{}");
             // Begin new state
-            TRACE_EVENT(current_state, "PE_State", TRACE_BEGIN, TRACE_PID::PE, trace_id, "{}");
+            TRACE_EVENT(current_state, "PE_State", TRACE_BEGIN, trace_pid, trace_id, "{}");
             last_state = current_state;
         }
     }

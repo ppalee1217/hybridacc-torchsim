@@ -619,6 +619,116 @@ int sc_main(int argc, char* argv[]) {
 		return TestResult{"", seq_ok && out.hold_ok && out.seen_done, detail.str()};
 	});
 
+	run("PS config intermittent stall (base0 iter[1,3,3,16])", [&]() {
+		tb.reset();
+		tb.mmio_wr(AddressGenerateUnit::REG_BASE_ADDR, 0);
+		tb.mmio_wr(AddressGenerateUnit::REG_BASE_ADDR_H, 0);
+		tb.mmio_wr(AddressGenerateUnit::REG_ITER01, (3u << 16) | 1u);   // iter0=1, iter1=3
+		tb.mmio_wr(AddressGenerateUnit::REG_ITER23, (16u << 16) | 3u);  // iter2=3, iter3=16
+		tb.mmio_wr(AddressGenerateUnit::REG_STRIDE0, 1);
+		tb.mmio_wr(AddressGenerateUnit::REG_STRIDE1, 1);
+		tb.mmio_wr(AddressGenerateUnit::REG_STRIDE2, 3);
+		tb.mmio_wr(AddressGenerateUnit::REG_STRIDE3, 9);
+		tb.mmio_wr(AddressGenerateUnit::REG_TAG_BASE, 0);
+		tb.mmio_wr(AddressGenerateUnit::REG_TAG_STRIDE0, 1);
+		tb.mmio_wr(AddressGenerateUnit::REG_TAG_STRIDE1, 1);
+		tb.mmio_wr(AddressGenerateUnit::REG_TAG_CTRL, 0x2); // use idx2
+		tb.mmio_wr(AddressGenerateUnit::REG_MASK_CFG, 0xF);
+		tb.mmio_wr(AddressGenerateUnit::REG_CTRL, 0x0); // ultra=0
+
+		tb.gen_ready.write(false);
+		tb.pulse_start();
+
+		std::vector<uint32_t> fired_addr;
+		std::vector<uint32_t> fired_tag;
+		bool hold_ok = true;
+		bool seen_done = false;
+
+		bool prev_stall = false;
+		uint32_t hold_addr = 0;
+		uint32_t hold_tag = 0;
+
+		uint32_t lcg = 0x31415926u;
+		int stall_left = -1;
+		for (int cycle = 0; cycle < 3000; ++cycle) {
+			if (stall_left < 0) {
+				lcg = 1664525u * lcg + 1013904223u;
+				stall_left = static_cast<int>((lcg >> 30) & 0x3u); // 0~3 cycles stall burst
+			}
+			const bool ready = (stall_left == 0);
+			if (stall_left == 0) {
+				stall_left = -1; // keep at least one ready cycle between stall bursts
+			} else {
+				stall_left--;
+			}
+			tb.gen_ready.write(ready);
+
+			const bool valid = tb.gen_valid.read();
+			const bool fire = valid && ready;
+			const uint32_t addr = tb.gen_addr.read().to_uint();
+			const uint32_t tag = tb.gen_tag.read().to_uint();
+
+			if (valid && !ready) {
+				if (!prev_stall) {
+					hold_addr = addr;
+					hold_tag = tag;
+					prev_stall = true;
+				} else if (addr != hold_addr || tag != hold_tag) {
+					hold_ok = false;
+				}
+			} else {
+				prev_stall = false;
+			}
+
+			if (fire) {
+				fired_addr.push_back(addr);
+				fired_tag.push_back(tag);
+			}
+
+			if (tb.done.read()) {
+				seen_done = true;
+				break;
+			}
+
+			tb.tick(1);
+		}
+
+		std::vector<uint32_t> exp_addr;
+		std::vector<uint32_t> exp_tag;
+		exp_addr.reserve(144);
+		exp_tag.reserve(144);
+		for (uint32_t i3 = 0; i3 < 16; ++i3) {
+			for (uint32_t i2 = 0; i2 < 3; ++i2) {
+				for (uint32_t i1 = 0; i1 < 3; ++i1) {
+					for (uint32_t i0 = 0; i0 < 1; ++i0) {
+						exp_addr.push_back(i0 * 1 + i1 * 1 + i2 * 3 + i3 * 9);
+						exp_tag.push_back(i2 & 0x3F);
+					}
+				}
+			}
+		}
+
+		bool seq_ok = (fired_addr.size() == exp_addr.size()) && (fired_tag.size() == exp_tag.size());
+		if (seq_ok) {
+			for (size_t i = 0; i < exp_addr.size(); ++i) {
+				if (fired_addr[i] != exp_addr[i] || fired_tag[i] != exp_tag[i]) {
+					seq_ok = false;
+					break;
+				}
+			}
+		}
+
+		std::ostringstream detail;
+		detail << "fires=" << fired_addr.size()
+			   << ", expected=" << exp_addr.size()
+			   << ", hold_ok=" << (hold_ok ? 1 : 0)
+			   << ", done=" << (seen_done ? 1 : 0)
+			   << ", first=" << (fired_addr.empty() ? 0 : fired_addr.front())
+			   << ", last=" << (fired_addr.empty() ? 0 : fired_addr.back());
+
+		return TestResult{"", seq_ok && hold_ok && seen_done, detail.str()};
+	});
+
 	run("Done pulse appears", [&]() {
 		tb.reset();
 		tb.mmio_wr(AddressGenerateUnit::REG_ITER01, 0x00010001);

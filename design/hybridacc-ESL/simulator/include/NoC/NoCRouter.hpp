@@ -121,6 +121,7 @@ public:
         ps_fifo.pop(ps_fifo_pop_sig);
         ps_fifo.empty(ps_fifo_empty_sig);
         ps_fifo.full(ps_fifo_full_sig);
+        ps_fifo.clear(zero_signal);
 
         pd_fifo.clk(clk);
         pd_fifo.reset_n(reset_n);
@@ -130,6 +131,7 @@ public:
         pd_fifo.pop(pd_fifo_pop_sig);
         pd_fifo.empty(pd_fifo_empty_sig);
         pd_fifo.full(pd_fifo_full_sig);
+        pd_fifo.clear(zero_signal);
 
         pli_fifo.clk(clk);
         pli_fifo.reset_n(reset_n);
@@ -139,6 +141,7 @@ public:
         pli_fifo.pop(pli_fifo_pop_sig);
         pli_fifo.empty(pli_fifo_empty_sig);
         pli_fifo.full(pli_fifo_full_sig);
+        pli_fifo.clear(zero_signal);
 
         plo_fifo.clk(clk);
         plo_fifo.reset_n(reset_n);
@@ -148,6 +151,7 @@ public:
         plo_fifo.pop(plo_fifo_pop_sig);
         plo_fifo.empty(plo_fifo_empty_sig);
         plo_fifo.full(plo_fifo_full_sig);
+        plo_fifo.clear(zero_signal);
 
         resp_fifo.clk(clk);
         resp_fifo.reset_n(reset_n);
@@ -157,6 +161,7 @@ public:
         resp_fifo.pop(resp_fifo_pop_sig);
         resp_fifo.empty(resp_fifo_empty_sig);
         resp_fifo.full(resp_fifo_full_sig);
+        resp_fifo.clear(zero_signal);
 
         // Register sequential process
         SC_CTHREAD(seq_process, clk.pos());
@@ -227,11 +232,11 @@ public:
 
 private:
     // === FIFOs ===
-    hybridacc::pe::FIFO<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> ps_fifo;
-    hybridacc::pe::FIFO<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> pd_fifo;
-    hybridacc::pe::FIFO<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> pli_fifo;
-    hybridacc::pe::FIFO<noc_addr_req_t> plo_fifo;
-    hybridacc::pe::FIFO<response_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>>> resp_fifo;
+    hybridacc::FIFO<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> ps_fifo;
+    hybridacc::FIFO<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> pd_fifo;
+    hybridacc::FIFO<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> pli_fifo;
+    hybridacc::FIFO<noc_addr_req_t> plo_fifo;
+    hybridacc::FIFO<response_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>>> resp_fifo;
 
     // FIFO Signals - PS
     sc_signal<request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t>> ps_fifo_in_sig;
@@ -286,9 +291,12 @@ private:
     // Internal signal for Rx stall
     sc_signal<bool> rx_stall_sig;
 
+    sc_signal<bool> zero_signal;
+
     // === Sequential Process ===
     void seq_process() {
         // Reset initialization
+        zero_signal.write(false);
         ScanChainFormat init_config;
         init_config.ps_id = 0;
         init_config.pd_id = 0;
@@ -544,6 +552,7 @@ private:
                     noc_pli_to_bus_req[i].valid_out.write(true);
                 }
                 pli_fifo_pop_sig.write(true);
+                DEBUG_MSG("[NoCRouter] NoC-PLI request accepted for transfer - " << r << (is_ultra ? " (ULTRA)" : " (BROADCAST)"), DEBUG_LEVEL_NOC_COMPONENTS);
             }
             else{
                 DEBUG_MSG(" [NoCRouter] NoC-PLI Request not all ready, stalling - " << r << std::dec, DEBUG_LEVEL_NOC_COMPONENTS);
@@ -776,6 +785,7 @@ private:
 
     // Trace support
     int trace_id = 0;
+    uint32_t trace_pid = static_cast<uint32_t>(TRACE_PID::NOC_ROUTER);
     std::string last_state_noc_ps = "IDLE";
     std::string last_state_noc_pd = "IDLE";
     std::string last_state_noc_pli = "IDLE";
@@ -795,10 +805,46 @@ private:
     std::string last_state_noc_plo_tx = "IDLE";
     std::string last_state_noc_plo_rx = "IDLE";
     std::string last_state_noc_plo_out = "IDLE";
+    std::string last_args_noc_ps_tx = "{}";
+    std::string last_args_noc_pd_tx = "{}";
+    std::string last_args_noc_pli_tx = "{}";
+    std::string last_args_noc_plo_tx = "{}";
+    std::string last_args_noc_plo_rx = "{}";
+    std::string last_args_noc_plo_out = "{}";
     bool trace_init = false;
 
 public:
     void set_trace_id(int id) { trace_id = id; }
+    void set_trace_context(uint32_t pid, int tid_base) {
+        trace_pid = pid;
+        trace_id = tid_base;
+        trace_init = false;
+        last_state_noc_ps = "IDLE";
+        last_state_noc_pd = "IDLE";
+        last_state_noc_pli = "IDLE";
+        last_state_noc_plo = "IDLE";
+        last_state_noc_ps_fifo = "IDLE";
+        last_state_noc_pd_fifo = "IDLE";
+        last_state_noc_pli_fifo = "IDLE";
+        last_state_noc_plo_fifo = "IDLE";
+        last_state_noc_resp_fifo = "IDLE";
+        last_state_noc_ps_in = "IDLE";
+        last_state_noc_pd_in = "IDLE";
+        last_state_noc_pli_in = "IDLE";
+        last_state_noc_plo_in = "IDLE";
+        last_state_noc_ps_tx = "IDLE";
+        last_state_noc_pd_tx = "IDLE";
+        last_state_noc_pli_tx = "IDLE";
+        last_state_noc_plo_tx = "IDLE";
+        last_state_noc_plo_rx = "IDLE";
+        last_state_noc_plo_out = "IDLE";
+        last_args_noc_ps_tx = "{}";
+        last_args_noc_pd_tx = "{}";
+        last_args_noc_pli_tx = "{}";
+        last_args_noc_plo_tx = "{}";
+        last_args_noc_plo_rx = "{}";
+        last_args_noc_plo_out = "{}";
+    }
     int get_trace_num() { return 40; }
 
 private:
@@ -824,13 +870,27 @@ private:
         uint32_t tid_noc_plo_out = trace_id + 36;
 
         auto bool_to_json = [](bool v) { return v ? "true" : "false"; };
+        auto u64_hex_json = [](uint64_t v) {
+            return std::string("\"") + sc_uint<64>(v).to_string(SC_HEX) + "\"";
+        };
         auto trace_state = [&](std::string& last, const std::string& current,
                                const std::string& cat, uint32_t tid,
                                const std::string& args) {
             if (current != last) {
-                TRACE_EVENT(last, cat, TRACE_END, TRACE_PID::NOC_ROUTER, tid, "{}");
-                TRACE_EVENT(current, cat, TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid, args);
+                TRACE_EVENT(last, cat, TRACE_END, trace_pid, tid, "{}");
+                TRACE_EVENT(current, cat, TRACE_BEGIN, trace_pid, tid, args);
                 last = current;
+            }
+        };
+        auto trace_state_with_args = [&](std::string& last_state, std::string& last_args,
+                                         const std::string& current,
+                                         const std::string& cat, uint32_t tid,
+                                         const std::string& args) {
+            if (current != last_state || args != last_args) {
+                TRACE_EVENT(last_state, cat, TRACE_END, trace_pid, tid, "{}");
+                TRACE_EVENT(current, cat, TRACE_BEGIN, trace_pid, tid, args);
+                last_state = current;
+                last_args = args;
             }
         };
         auto fifo_state = [&](bool empty, bool full, bool push, bool pop) {
@@ -849,69 +909,69 @@ private:
         };
 
         if (!trace_init) {
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_ps, "NoC-PS (Tx Write)");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_pd, "NoC-PD (Tx Write)");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_pli, "NoC-PLI (Tx Write)");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_plo, "NoC-PLO (Rx/Tx Read)");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_ps_fifo, "NoC-PS FIFO");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_pd_fifo, "NoC-PD FIFO");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_pli_fifo, "NoC-PLI FIFO");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_plo_fifo, "NoC-PLO FIFO");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_resp_fifo, "NoC-RESP FIFO");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_ps_in, "NoC-PS In");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_pd_in, "NoC-PD In");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_pli_in, "NoC-PLI In");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_plo_in, "NoC-PLO In");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_ps_tx, "NoC-PS Tx");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_pd_tx, "NoC-PD Tx");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_pli_tx, "NoC-PLI Tx");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_plo_tx, "NoC-PLO Tx");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_plo_rx, "NoC-PLO Rx");
-            TRACE_THREAD_NAME(TRACE_PID::NOC_ROUTER, tid_noc_plo_out, "NoC-PLO Out");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_ps, "NoC-PS (Tx Write)");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_pd, "NoC-PD (Tx Write)");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_pli, "NoC-PLI (Tx Write)");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_plo, "NoC-PLO (Rx/Tx Read)");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_ps_fifo, "NoC-PS FIFO");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_pd_fifo, "NoC-PD FIFO");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_pli_fifo, "NoC-PLI FIFO");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_plo_fifo, "NoC-PLO FIFO");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_resp_fifo, "NoC-RESP FIFO");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_ps_in, "NoC-PS In");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_pd_in, "NoC-PD In");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_pli_in, "NoC-PLI In");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_plo_in, "NoC-PLO In");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_ps_tx, "NoC-PS Tx");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_pd_tx, "NoC-PD Tx");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_pli_tx, "NoC-PLI Tx");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_plo_tx, "NoC-PLO Tx");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_plo_rx, "NoC-PLO Rx");
+            TRACE_THREAD_NAME(trace_pid, tid_noc_plo_out, "NoC-PLO Out");
 
-            TRACE_EVENT(last_state_noc_ps, "NoC_PS_State", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_ps, "{}");
-            TRACE_EVENT(last_state_noc_pd, "NoC_PD_State", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_pd, "{}");
-            TRACE_EVENT(last_state_noc_pli, "NoC_PLI_State", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_pli, "{}");
-            TRACE_EVENT(last_state_noc_plo, "NoC_PLO_State", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_plo, "{}");
-            TRACE_EVENT(last_state_noc_ps_fifo, "NoC_PS_FIFO", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_ps_fifo, "{}");
-            TRACE_EVENT(last_state_noc_pd_fifo, "NoC_PD_FIFO", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_pd_fifo, "{}");
-            TRACE_EVENT(last_state_noc_pli_fifo, "NoC_PLI_FIFO", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_pli_fifo, "{}");
-            TRACE_EVENT(last_state_noc_plo_fifo, "NoC_PLO_FIFO", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_plo_fifo, "{}");
-            TRACE_EVENT(last_state_noc_resp_fifo, "NoC_RESP_FIFO", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_resp_fifo, "{}");
-            TRACE_EVENT(last_state_noc_ps_in, "NoC_PS_IN", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_ps_in, "{}");
-            TRACE_EVENT(last_state_noc_pd_in, "NoC_PD_IN", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_pd_in, "{}");
-            TRACE_EVENT(last_state_noc_pli_in, "NoC_PLI_IN", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_pli_in, "{}");
-            TRACE_EVENT(last_state_noc_plo_in, "NoC_PLO_IN", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_plo_in, "{}");
-            TRACE_EVENT(last_state_noc_ps_tx, "NoC_PS_TX", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_ps_tx, "{}");
-            TRACE_EVENT(last_state_noc_pd_tx, "NoC_PD_TX", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_pd_tx, "{}");
-            TRACE_EVENT(last_state_noc_pli_tx, "NoC_PLI_TX", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_pli_tx, "{}");
-            TRACE_EVENT(last_state_noc_plo_tx, "NoC_PLO_TX", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_plo_tx, "{}");
-            TRACE_EVENT(last_state_noc_plo_rx, "NoC_PLO_RX", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_plo_rx, "{}");
-            TRACE_EVENT(last_state_noc_plo_out, "NoC_PLO_OUT", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_plo_out, "{}");
+            TRACE_EVENT(last_state_noc_ps, "NoC_PS_State", TRACE_BEGIN, trace_pid, tid_noc_ps, "{}");
+            TRACE_EVENT(last_state_noc_pd, "NoC_PD_State", TRACE_BEGIN, trace_pid, tid_noc_pd, "{}");
+            TRACE_EVENT(last_state_noc_pli, "NoC_PLI_State", TRACE_BEGIN, trace_pid, tid_noc_pli, "{}");
+            TRACE_EVENT(last_state_noc_plo, "NoC_PLO_State", TRACE_BEGIN, trace_pid, tid_noc_plo, "{}");
+            TRACE_EVENT(last_state_noc_ps_fifo, "NoC_PS_FIFO", TRACE_BEGIN, trace_pid, tid_noc_ps_fifo, "{}");
+            TRACE_EVENT(last_state_noc_pd_fifo, "NoC_PD_FIFO", TRACE_BEGIN, trace_pid, tid_noc_pd_fifo, "{}");
+            TRACE_EVENT(last_state_noc_pli_fifo, "NoC_PLI_FIFO", TRACE_BEGIN, trace_pid, tid_noc_pli_fifo, "{}");
+            TRACE_EVENT(last_state_noc_plo_fifo, "NoC_PLO_FIFO", TRACE_BEGIN, trace_pid, tid_noc_plo_fifo, "{}");
+            TRACE_EVENT(last_state_noc_resp_fifo, "NoC_RESP_FIFO", TRACE_BEGIN, trace_pid, tid_noc_resp_fifo, "{}");
+            TRACE_EVENT(last_state_noc_ps_in, "NoC_PS_IN", TRACE_BEGIN, trace_pid, tid_noc_ps_in, "{}");
+            TRACE_EVENT(last_state_noc_pd_in, "NoC_PD_IN", TRACE_BEGIN, trace_pid, tid_noc_pd_in, "{}");
+            TRACE_EVENT(last_state_noc_pli_in, "NoC_PLI_IN", TRACE_BEGIN, trace_pid, tid_noc_pli_in, "{}");
+            TRACE_EVENT(last_state_noc_plo_in, "NoC_PLO_IN", TRACE_BEGIN, trace_pid, tid_noc_plo_in, "{}");
+            TRACE_EVENT(last_state_noc_ps_tx, "NoC_PS_TX", TRACE_BEGIN, trace_pid, tid_noc_ps_tx, "{}");
+            TRACE_EVENT(last_state_noc_pd_tx, "NoC_PD_TX", TRACE_BEGIN, trace_pid, tid_noc_pd_tx, "{}");
+            TRACE_EVENT(last_state_noc_pli_tx, "NoC_PLI_TX", TRACE_BEGIN, trace_pid, tid_noc_pli_tx, "{}");
+            TRACE_EVENT(last_state_noc_plo_tx, "NoC_PLO_TX", TRACE_BEGIN, trace_pid, tid_noc_plo_tx, "{}");
+            TRACE_EVENT(last_state_noc_plo_rx, "NoC_PLO_RX", TRACE_BEGIN, trace_pid, tid_noc_plo_rx, "{}");
+            TRACE_EVENT(last_state_noc_plo_out, "NoC_PLO_OUT", TRACE_BEGIN, trace_pid, tid_noc_plo_out, "{}");
             trace_init = true;
         }
 
         // NoC-PS State
         std::string current_state_noc_ps = ps_fifo_empty_sig.read() ? "IDLE" : "PROCESSING";
         if (current_state_noc_ps != last_state_noc_ps) {
-            TRACE_EVENT(last_state_noc_ps, "NoC_PS_State", TRACE_END, TRACE_PID::NOC_ROUTER, tid_noc_ps, "{}");
-            TRACE_EVENT(current_state_noc_ps, "NoC_PS_State", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_ps, "{}");
+            TRACE_EVENT(last_state_noc_ps, "NoC_PS_State", TRACE_END, trace_pid, tid_noc_ps, "{}");
+            TRACE_EVENT(current_state_noc_ps, "NoC_PS_State", TRACE_BEGIN, trace_pid, tid_noc_ps, "{}");
             last_state_noc_ps = current_state_noc_ps;
         }
 
         // NoC-PD State
         std::string current_state_noc_pd = pd_fifo_empty_sig.read() ? "IDLE" : "PROCESSING";
         if (current_state_noc_pd != last_state_noc_pd) {
-            TRACE_EVENT(last_state_noc_pd, "NoC_PD_State", TRACE_END, TRACE_PID::NOC_ROUTER, tid_noc_pd, "{}");
-            TRACE_EVENT(current_state_noc_pd, "NoC_PD_State", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_pd, "{}");
+            TRACE_EVENT(last_state_noc_pd, "NoC_PD_State", TRACE_END, trace_pid, tid_noc_pd, "{}");
+            TRACE_EVENT(current_state_noc_pd, "NoC_PD_State", TRACE_BEGIN, trace_pid, tid_noc_pd, "{}");
             last_state_noc_pd = current_state_noc_pd;
         }
 
         // NoC-PLI State
         std::string current_state_noc_pli = pli_fifo_empty_sig.read() ? "IDLE" : "PROCESSING";
         if (current_state_noc_pli != last_state_noc_pli) {
-            TRACE_EVENT(last_state_noc_pli, "NoC_PLI_State", TRACE_END, TRACE_PID::NOC_ROUTER, tid_noc_pli, "{}");
-            TRACE_EVENT(current_state_noc_pli, "NoC_PLI_State", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_pli, "{}");
+            TRACE_EVENT(last_state_noc_pli, "NoC_PLI_State", TRACE_END, trace_pid, tid_noc_pli, "{}");
+            TRACE_EVENT(current_state_noc_pli, "NoC_PLI_State", TRACE_BEGIN, trace_pid, tid_noc_pli, "{}");
             last_state_noc_pli = current_state_noc_pli;
         }
 
@@ -932,8 +992,8 @@ private:
         }
 
         if (current_state_noc_plo != last_state_noc_plo) {
-            TRACE_EVENT(last_state_noc_plo, "NoC_PLO_State", TRACE_END, TRACE_PID::NOC_ROUTER, tid_noc_plo, "{}");
-            TRACE_EVENT(current_state_noc_plo, "NoC_PLO_State", TRACE_BEGIN, TRACE_PID::NOC_ROUTER, tid_noc_plo, "{}");
+            TRACE_EVENT(last_state_noc_plo, "NoC_PLO_State", TRACE_END, trace_pid, tid_noc_plo, "{}");
+            TRACE_EVENT(current_state_noc_plo, "NoC_PLO_State", TRACE_BEGIN, trace_pid, tid_noc_plo, "{}");
             last_state_noc_plo = current_state_noc_plo;
         }
 
@@ -960,6 +1020,49 @@ private:
         bool pli_full = pli_fifo_full_sig.read();
         bool pli_push = pli_fifo_push_sig.read();
         bool pli_pop = pli_fifo_pop_sig.read();
+
+        if (pli_push) {
+            request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t> req_in = pli_fifo_in_sig.read();
+            bool is_ultra_in = (req_in.addr >> 6) & 0x1;
+            sc_uint<8> base_addr_in = (req_in.addr & 0x80 ? 0x40 : 0x00) | (req_in.addr & 0x3F);
+
+            noc_request_t enq;
+            if (is_ultra_in) {
+                const size_t lane = (num_ports > 0) ? (num_ports - 1) : 0;
+                enq.data = req_in.data.range(64*lane + 63, 64*lane).to_uint64();
+            } else {
+                enq.data = req_in.data.range(63, 0).to_uint64();
+            }
+            enq.addr = base_addr_in;
+            enq.mask = req_in.mask;
+
+            DEBUG_MSG("[NoCRouter] Enqueued NoC-PLI req" << enq
+                      << (is_ultra_in ? " (ULTRA/IN)" : " (BROADCAST/IN)"),
+                      DEBUG_LEVEL_NOC_COMPONENTS);
+        }
+
+        if (pli_pop && !pli_empty) {
+            request_t<sc_biguint<NUM_PORTS*PORT_WIDTH_BITS>, uint16_t> req = pli_fifo_out_sig.read();
+
+            bool is_ultra = (req.addr >> 6) & 0x1;
+            sc_uint<8> base_addr = (req.addr & 0x80 ? 0x40 : 0x00) | (req.addr & 0x3F);
+            size_t mask = req.mask;
+
+            noc_request_t fired;
+            if (is_ultra) {
+                const size_t lane = (num_ports > 0) ? (num_ports - 1) : 0;
+                fired.data = req.data.range(64*lane + 63, 64*lane).to_uint64();
+            } else {
+                fired.data = req.data.range(63, 0).to_uint64();
+            }
+            fired.addr = base_addr;
+            fired.mask = mask;
+
+            DEBUG_MSG("[NoCRouter] Sent NoC-PLI write req" << fired
+                      << (is_ultra ? " (ULTRA/FIRE)" : " (BROADCAST/FIRE)"),
+                      DEBUG_LEVEL_NOC_COMPONENTS);
+        }
+
         trace_state(last_state_noc_pli_fifo,
                     fifo_state(pli_empty, pli_full, pli_push, pli_pop),
                     "NoC_PLI_FIFO", tid_noc_pli_fifo,
@@ -1015,47 +1118,80 @@ private:
         // Output transfer (FIFO to MBUS)
         bool ps_tx_any_valid = false;
         bool ps_tx_all_ready = true;
+        uint64_t ps_tx_addr = 0;
+        uint64_t ps_tx_data = 0;
         for (size_t i = 0; i < num_ports; ++i) {
-            if (noc_ps_to_bus_req[i].valid_out.read()) ps_tx_any_valid = true;
+            if (noc_ps_to_bus_req[i].valid_out.read()) {
+                ps_tx_any_valid = true;
+                ps_tx_addr = noc_ps_to_bus_req[i].data_out.read().addr;
+                ps_tx_data = noc_ps_to_bus_req[i].data_out.read().data;
+            }
             if (!noc_ps_to_bus_req[i].ready_in.read()) ps_tx_all_ready = false;
         }
         std::string ps_tx_state = ps_tx_any_valid ? (ps_tx_all_ready ? "TX_XFER" : "TX_WAIT_READY") : "TX_IDLE";
-        trace_state(last_state_noc_ps_tx, ps_tx_state, "NoC_PS_TX", tid_noc_ps_tx,
-                    std::string("{\"any_valid\": ") + bool_to_json(ps_tx_any_valid)
-                    + ", \"all_ready\": " + bool_to_json(ps_tx_all_ready) + "}");
+        std::string ps_tx_args = std::string("{\"any_valid\": ") + bool_to_json(ps_tx_any_valid)
+                       + ", \"all_ready\": " + bool_to_json(ps_tx_all_ready)
+                       + ", \"addr\": " + u64_hex_json(ps_tx_addr)
+                       + ", \"data\": " + u64_hex_json(ps_tx_data) + "}";
+        trace_state_with_args(last_state_noc_ps_tx, last_args_noc_ps_tx, ps_tx_state,
+                      "NoC_PS_TX", tid_noc_ps_tx, ps_tx_args);
 
         bool pd_tx_any_valid = false;
         bool pd_tx_all_ready = true;
+        uint64_t pd_tx_addr = 0;
+        uint64_t pd_tx_data = 0;
         for (size_t i = 0; i < num_ports; ++i) {
-            if (noc_pd_to_bus_req[i].valid_out.read()) pd_tx_any_valid = true;
+            if (noc_pd_to_bus_req[i].valid_out.read()) {
+                pd_tx_any_valid = true;
+                pd_tx_addr = noc_pd_to_bus_req[i].data_out.read().addr;
+                pd_tx_data = noc_pd_to_bus_req[i].data_out.read().data;
+            }
             if (!noc_pd_to_bus_req[i].ready_in.read()) pd_tx_all_ready = false;
         }
         std::string pd_tx_state = pd_tx_any_valid ? (pd_tx_all_ready ? "TX_XFER" : "TX_WAIT_READY") : "TX_IDLE";
-        trace_state(last_state_noc_pd_tx, pd_tx_state, "NoC_PD_TX", tid_noc_pd_tx,
-                    std::string("{\"any_valid\": ") + bool_to_json(pd_tx_any_valid)
-                    + ", \"all_ready\": " + bool_to_json(pd_tx_all_ready) + "}");
+        std::string pd_tx_args = std::string("{\"any_valid\": ") + bool_to_json(pd_tx_any_valid)
+                       + ", \"all_ready\": " + bool_to_json(pd_tx_all_ready)
+                       + ", \"addr\": " + u64_hex_json(pd_tx_addr)
+                       + ", \"data\": " + u64_hex_json(pd_tx_data) + "}";
+        trace_state_with_args(last_state_noc_pd_tx, last_args_noc_pd_tx, pd_tx_state,
+                      "NoC_PD_TX", tid_noc_pd_tx, pd_tx_args);
 
         bool pli_tx_any_valid = false;
         bool pli_tx_all_ready = true;
+        uint64_t pli_tx_addr = 0;
+        uint64_t pli_tx_data = 0;
         for (size_t i = 0; i < num_ports; ++i) {
-            if (noc_pli_to_bus_req[i].valid_out.read()) pli_tx_any_valid = true;
+            if (noc_pli_to_bus_req[i].valid_out.read()) {
+                pli_tx_any_valid = true;
+                pli_tx_addr = noc_pli_to_bus_req[i].data_out.read().addr;
+                pli_tx_data = noc_pli_to_bus_req[i].data_out.read().data;
+            }
             if (!noc_pli_to_bus_req[i].ready_in.read()) pli_tx_all_ready = false;
         }
         std::string pli_tx_state = pli_tx_any_valid ? (pli_tx_all_ready ? "TX_XFER" : "TX_WAIT_READY") : "TX_IDLE";
-        trace_state(last_state_noc_pli_tx, pli_tx_state, "NoC_PLI_TX", tid_noc_pli_tx,
-                    std::string("{\"any_valid\": ") + bool_to_json(pli_tx_any_valid)
-                    + ", \"all_ready\": " + bool_to_json(pli_tx_all_ready) + "}");
+        std::string pli_tx_args = std::string("{\"any_valid\": ") + bool_to_json(pli_tx_any_valid)
+                    + ", \"all_ready\": " + bool_to_json(pli_tx_all_ready)
+                    + ", \"addr\": " + u64_hex_json(pli_tx_addr)
+                    + ", \"data\": " + u64_hex_json(pli_tx_data) + "}";
+        trace_state_with_args(last_state_noc_pli_tx, last_args_noc_pli_tx, pli_tx_state,
+                      "NoC_PLI_TX", tid_noc_pli_tx, pli_tx_args);
 
         bool plo_tx_any_valid = false;
         bool plo_tx_all_ready = true;
+        uint64_t plo_tx_addr = 0;
         for (size_t i = 0; i < num_ports; ++i) {
-            if (noc_plo_to_bus_req[i].valid_out.read()) plo_tx_any_valid = true;
+            if (noc_plo_to_bus_req[i].valid_out.read()) {
+                plo_tx_any_valid = true;
+                plo_tx_addr = noc_plo_to_bus_req[i].data_out.read().addr;
+            }
             if (!noc_plo_to_bus_req[i].ready_in.read()) plo_tx_all_ready = false;
         }
         std::string plo_tx_state = plo_tx_any_valid ? (plo_tx_all_ready ? "TX_XFER" : "TX_WAIT_READY") : "TX_IDLE";
-        trace_state(last_state_noc_plo_tx, plo_tx_state, "NoC_PLO_TX", tid_noc_plo_tx,
-                    std::string("{\"any_valid\": ") + bool_to_json(plo_tx_any_valid)
-                    + ", \"all_ready\": " + bool_to_json(plo_tx_all_ready) + "}");
+        std::string plo_tx_args = std::string("{\"any_valid\": ") + bool_to_json(plo_tx_any_valid)
+                    + ", \"all_ready\": " + bool_to_json(plo_tx_all_ready)
+                    + ", \"addr\": " + u64_hex_json(plo_tx_addr) + "}";
+        trace_state_with_args(last_state_noc_plo_tx, last_args_noc_plo_tx, plo_tx_state,
+                      "NoC_PLO_TX", tid_noc_plo_tx, plo_tx_args);
 
         // Response transfer (MBUS to FIFO)
         bool plo_rx_any_valid = false;
@@ -1067,6 +1203,31 @@ private:
             }
         }
         bool plo_pending = pending_read_reg.read();
+        bool plo_ultra = pending_read_ultra_reg.read();
+
+        std::string plo_rx_data_json = "null";
+        if (plo_pending && plo_rx_any_valid) {
+            if (plo_ultra) {
+                std::string lane_data = "[";
+                bool first = true;
+                for (size_t i = 0; i < num_ports; ++i) {
+                    if (bus_to_noc_plo_resp[i].valid_in.read()) {
+                        if (!first) lane_data += ", ";
+                        lane_data += u64_hex_json(bus_to_noc_plo_resp[i].data_in.read().data);
+                        first = false;
+                    }
+                }
+                lane_data += "]";
+                plo_rx_data_json = lane_data;
+            } else {
+                for (size_t i = 0; i < num_ports; ++i) {
+                    if (bus_to_noc_plo_resp[i].valid_in.read()) {
+                        plo_rx_data_json = u64_hex_json(bus_to_noc_plo_resp[i].data_in.read().data);
+                        break;
+                    }
+                }
+            }
+        }
         std::string plo_rx_state;
         if (!plo_pending) {
             plo_rx_state = "RX_IDLE";
@@ -1077,20 +1238,23 @@ private:
         } else {
             plo_rx_state = "RX_WAIT";
         }
-        trace_state(last_state_noc_plo_rx, plo_rx_state, "NoC_PLO_RX", tid_noc_plo_rx,
-                    std::string("{\"pending\": ") + bool_to_json(plo_pending)
+        std::string plo_rx_args = std::string("{\"pending\": ") + bool_to_json(plo_pending)
                     + ", \"any_valid\": " + bool_to_json(plo_rx_any_valid)
                     + ", \"valid_mask\": " + std::to_string(plo_rx_valid_mask)
-                    + ", \"resp_fifo_full\": " + bool_to_json(resp_fifo_full_sig.read()) + "}");
+                    + ", \"resp_fifo_full\": " + bool_to_json(resp_fifo_full_sig.read())
+                    + ", \"data\": " + plo_rx_data_json + "}";
+        trace_state_with_args(last_state_noc_plo_rx, last_args_noc_plo_rx, plo_rx_state,
+                      "NoC_PLO_RX", tid_noc_plo_rx, plo_rx_args);
 
         // Response output (FIFO to PLO Out)
         bool plo_out_valid = noc_plo_out.valid_out.read();
         bool plo_out_ready = noc_plo_out.ready_in.read();
         std::string plo_out_state = plo_out_valid ? (plo_out_ready ? "OUT_XFER" : "OUT_WAIT_READY") : "OUT_IDLE";
-        trace_state(last_state_noc_plo_out, plo_out_state, "NoC_PLO_OUT", tid_noc_plo_out,
-                    std::string("{\"valid\": ") + bool_to_json(plo_out_valid)
-                    + ", \"ready\": " + bool_to_json(plo_out_ready)
-                    + ", \"resp_fifo_empty\": " + bool_to_json(resp_empty) + "}");
+        std::string plo_out_args = std::string("{\"valid\": ") + bool_to_json(plo_out_valid)
+                                 + ", \"ready\": " + bool_to_json(plo_out_ready)
+                                 + ", \"resp_fifo_empty\": " + bool_to_json(resp_empty) + "}";
+        trace_state_with_args(last_state_noc_plo_out, last_args_noc_plo_out, plo_out_state,
+                              "NoC_PLO_OUT", tid_noc_plo_out, plo_out_args);
     }
 };
 

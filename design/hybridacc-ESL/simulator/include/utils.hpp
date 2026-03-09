@@ -17,6 +17,8 @@ enum DebugLevel {
     DEBUG_LEVEL_PE_TOP,
     DEBUG_LEVEL_NOC_COMPONENTS,
     DEBUG_LEVEL_NOC_TOP,
+    DEBUG_LEVEL_CLUSTER_COMPONENTS,
+    DEBUG_LEVEL_CLUSTER_TOP,
     DEBUG_LEVEL_ALL,
 };
 
@@ -38,9 +40,21 @@ enum DebugLevel {
                           << msg << std::endl;                        \
             }                                                         \
         } while (0)
+
+    #define DEBUG_PRINTF(level, fmt, ...) \
+        do { \
+            if ((level) <= DEBUG_LEVEL_MAX && (level) >= DEBUG_LEVEL_MIN) { \
+                std::printf("[Debug] Time: %s [%s] " fmt, sc_time_stamp().to_string().c_str(), this->name(), ##__VA_ARGS__);\
+            } \
+        } while (0)
 #else
     #define DEBUG_MSG(msg, level) do {} while (0)
+    #define DEBUG_PRINTF(level, fmt, ...) do {} while (0)
 #endif
+
+// SC_ASSERT is not part of the SystemC standard; map it to SC_REPORT_ERROR.
+#define SC_ASSERT(name, cond, msg) \
+    do { if (!(cond)) SC_REPORT_ERROR(name, msg); } while (0)
 
 // PE Router Command and ID field definitions
 #define PE_CMD_ADDRESS 0x40
@@ -223,6 +237,69 @@ struct response_t {
 };
 
 typedef response_t<uint64_t> noc_response_t;
+
+// -----------------------------------------------------------------------------
+enum class SPM_RESPONSE_CODE {
+    SPM_OK = 0,
+    SPM_ERROR = 1,
+};
+
+inline std::ostream& operator<<(std::ostream& os, SPM_RESPONSE_CODE code) {
+    switch (code) {
+        case SPM_RESPONSE_CODE::SPM_OK: return os << "SPM_OK";
+        case SPM_RESPONSE_CODE::SPM_ERROR: return os << "SPM_ERROR";
+        default: return os << "SPM_UNKNOWN";
+    }
+}
+
+inline void sc_trace(sc_core::sc_trace_file* tf, const SPM_RESPONSE_CODE& code, const std::string& name) {
+    sc_core::sc_trace(tf, static_cast<int>(code), name);
+}
+
+template<int ADDR_BITS, int DATA_BITS>
+struct spm_request_t {
+    sc_dt::sc_uint<ADDR_BITS> addr;
+    sc_dt::sc_biguint<DATA_BITS> wdata;
+    bool wen;
+
+    bool operator==(const spm_request_t& other) const {
+        return addr == other.addr && wdata == other.wdata && wen == other.wen;
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, const spm_request_t& req) {
+        os << "spm_request_t{addr=0x" << std::hex << req.addr
+           << ", wdata=0x" << req.wdata
+           << ", wen=" << std::dec << req.wen << "}";
+        return os;
+    }
+
+    friend void sc_trace(sc_core::sc_trace_file* tf, const spm_request_t& req, const std::string& name) {
+        sc_core::sc_trace(tf, req.addr, name + ".addr");
+        sc_core::sc_trace(tf, req.wdata, name + ".wdata");
+        sc_core::sc_trace(tf, req.wen, name + ".wen");
+    }
+};
+
+template<int DATA_BITS>
+struct spm_response_t {
+    sc_dt::sc_biguint<DATA_BITS> rdata;
+    SPM_RESPONSE_CODE code;
+
+    bool operator==(const spm_response_t& other) const {
+        return rdata == other.rdata && code == other.code;
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, const spm_response_t& resp) {
+        os << "spm_response_t{rdata=0x" << std::hex << resp.rdata
+           << ", code=" << std::dec << static_cast<int>(resp.code) << "}";
+        return os;
+    }
+
+    friend void sc_trace(sc_core::sc_trace_file* tf, const spm_response_t& resp, const std::string& name) {
+        sc_core::sc_trace(tf, resp.rdata, name + ".rdata");
+        sc_core::sc_trace(tf, static_cast<int>(resp.code), name + ".code");
+    }
+};
 
 // -----------------------------------------------------------------------------
 struct pe_decode_signals_t {

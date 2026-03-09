@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <utility>
 #include <systemc>
 #include "utils.hpp"
 #include "NoC/MBUS.hpp"
@@ -280,19 +281,34 @@ private:
     }
 
 public:
-    void enable_perffeto_trace(){
-        // Set Trace IDs
-        int trace_counter = 0;
-        router.set_trace_id(trace_counter);
-        trace_counter += router.get_trace_num();
+    std::pair<uint32_t, uint32_t> enable_perffeto_trace(uint32_t start_pid, uint32_t start_tid) {
+        uint32_t next_pid = start_pid;
+        uint32_t next_tid = start_tid;
+
+        router.set_trace_context(next_pid, static_cast<int>(next_tid));
+        next_pid += 1;
+        next_tid += static_cast<uint32_t>(router.get_trace_num() + 1);
+
         for (size_t i = 0; i < NUM_PORTS; ++i) {
-            mbus[i].set_trace_id(trace_counter);
-            trace_counter += mbus[i].get_trace_num();
+            mbus[i].set_trace_context(next_pid, static_cast<int>(next_tid));
+            next_tid += static_cast<uint32_t>(mbus[i].get_trace_num() + 1);
+        }
+        next_pid += 1;
+
+
+        for (size_t i = 0; i < NUM_PORTS; ++i) {
             for (size_t j = 0; j < NUM_PES_PER_PORT; ++j) {
-                pes[i][j].set_trace_id(trace_counter);
-                trace_counter += pes[i][j].get_trace_num();
+                pes[i][j].set_trace_context(next_pid, static_cast<int>(next_tid));
+                next_tid += static_cast<uint32_t>(pes[i][j].get_trace_num() + 1);
             }
         }
+        next_pid += 1;
+
+        return {next_pid, next_tid};
+    }
+
+    void enable_perffeto_trace(){
+        (void)enable_perffeto_trace(100, 1000);
     }
 };
 

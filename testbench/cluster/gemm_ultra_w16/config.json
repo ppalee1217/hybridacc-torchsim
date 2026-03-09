@@ -1,0 +1,13 @@
+{
+  "name": "gemm_ultra_w16",
+  "mode": "gemm",
+  "pe_program": "testbench/cluster/gemm_ultra_w16/pe_program.asm",
+  "num_pes": 48,
+  "num_bus": 3,
+  "M": 192,
+  "N": 128,
+  "K": 96,
+  "seed":456,
+  "ultra_mode": true,
+  "out_dir": "./output/cluster-sim/gemm_ultra_w16"
+}

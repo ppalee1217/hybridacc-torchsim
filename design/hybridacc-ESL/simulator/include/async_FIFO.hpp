@@ -12,7 +12,6 @@
 using namespace sc_core;  // Add this to use SystemC types without prefix
 
 namespace hybridacc {
-namespace pe {
 
 // ============================================================================
 // asyncFIFO Module with Template Support for Different Input and Output Types
@@ -51,13 +50,16 @@ public:
     sc_out<bool> empty;
     sc_out<bool> full;
 
+    // Clear
+    sc_in<bool> clear;
+
     // Constructor with custom depth
     asyncFIFO(sc_module_name name, int depth)
         : sc_module(name),
           clk("clk"),
           reset_n("reset_n"),
           data_in("data_in"),
-                    mask_in("mask_in"),
+          mask_in("mask_in"),
           push("push"),
           data_out("data_out"),
           pop("pop"),
@@ -66,6 +68,7 @@ public:
           set_valid("set_valid"),
           empty("empty"),
           full("full"),
+          clear("clear"),
           fifo_depth(depth),
           fifo_name(name),
           chunks_per_push(sizeof(IN_T) / sizeof(OUT_T))  // Calculate N/M
@@ -156,6 +159,18 @@ private:
         wait();
 
         while (true) {
+            if (clear.read()) {
+                write_ptr_reg.write(0);
+                read_ptr_reg.write(0);
+                count_reg.write(0);
+                empty_reg.write(true);
+                full_reg.write(false);
+                empty.write(true);
+                full.write(false);
+                wait();
+                continue;
+            }
+
             const int wr_ptr = write_ptr_reg.read();
             const int rd_ptr = read_ptr_reg.read();
             const int cnt = count_reg.read();
@@ -243,5 +258,4 @@ private:
     }
 };
 
-} // namespace pe
 } // namespace hybridacc

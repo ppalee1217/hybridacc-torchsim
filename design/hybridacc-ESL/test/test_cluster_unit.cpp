@@ -52,33 +52,74 @@ public:
 	static constexpr uint32_t kCmdSpmCfgMap = 0x0000;
 	static constexpr uint32_t kCmdSpmCfgUpdate = 0x0004;
 	static constexpr uint32_t kCmdSpmArbPolicy = 0x0008;
+	static constexpr uint32_t kCmdSpmPmuCtrl = 0x000C;
+	static constexpr uint32_t kCmdSpmPmuCycleCntLo = 0x0010;
+	static constexpr uint32_t kCmdSpmPmuCycleCntHi = 0x0014;
+	static constexpr uint32_t kCmdSpmPmuArbStallLo = 0x0018;
+	static constexpr uint32_t kCmdSpmPmuArbStallHi = 0x001C;
+	static constexpr uint32_t kCmdSpmPmuCreditStallLo = 0x0020;
+	static constexpr uint32_t kCmdSpmPmuCreditStallHi = 0x0024;
+	static constexpr uint32_t kCmdSpmPmuPort0TxnLo = 0x0040;
+	static constexpr uint32_t kCmdSpmPmuPort0TxnHi = 0x0044;
+	static constexpr uint32_t kCmdSpmPmuPort1TxnLo = 0x0048;
+	static constexpr uint32_t kCmdSpmPmuPort1TxnHi = 0x004C;
+	static constexpr uint32_t kCmdSpmPmuPort2TxnLo = 0x0050;
+	static constexpr uint32_t kCmdSpmPmuPort2TxnHi = 0x0054;
+	static constexpr uint32_t kCmdSpmPmuPort3TxnLo = 0x0058;
+	static constexpr uint32_t kCmdSpmPmuPort3TxnHi = 0x005C;
 	static constexpr uint32_t kCmdHdduBase = 0x1000;
 	static constexpr uint32_t kCmdNocData = 0x2000;
 
 	static constexpr uint32_t kHdduPlaneEn = 0x808;
 	static constexpr uint32_t kHdduPlaneMode = 0x80C;
+	static constexpr uint32_t kHdduCtrl = 0x800;
 	static constexpr uint32_t kHdduMaxOutstanding = 0x818;
+
+	static constexpr uint32_t kHdduAguBankStride = 0x100;
+	static constexpr uint32_t kHdduRegBaseAddr = 0x00;
+	static constexpr uint32_t kHdduRegIter01 = 0x08;
+	static constexpr uint32_t kHdduRegIter23 = 0x0C;
+	static constexpr uint32_t kHdduRegCtrl = 0x20;
+	static constexpr uint32_t kHdduRegTagBase = 0x40;
+	static constexpr uint32_t kHdduRegStride0 = 0x10;
+	static constexpr uint32_t kHdduRegTagStride0 = 0x44;
+	static constexpr uint32_t kHdduRegMaskCfg = 0x54;
 
 	sc_clock clk{"clk", 10, SC_NS};
 	sc_signal<bool> reset_n;
 	sc_signal<bool> power_enable_i;
 	sc_signal<bool> interrupt_o;
 
-	sc_signal<bool> data_req_vld_i;
-	sc_signal<bool> data_req_rdy_o;
-	sc_signal<sc_uint<32>> data_addr_i;
-	sc_signal<bool> data_write_i;
-	sc_signal<sc_biguint<64>> data_wdata_i;
-	sc_signal<sc_biguint<64>> data_rdata_o;
-	sc_signal<bool> data_done_o;
+	sc_signal<bool> s_axi_awvalid_i;
+	sc_signal<bool> s_axi_awready_o;
+	sc_signal<sc_uint<32>> s_axi_awaddr_i;
+	sc_signal<bool> s_axi_wvalid_i;
+	sc_signal<bool> s_axi_wready_o;
+	sc_signal<sc_biguint<64>> s_axi_wdata_i;
+	sc_signal<sc_uint<8>> s_axi_wstrb_i;
+	sc_signal<bool> s_axi_bvalid_o;
+	sc_signal<bool> s_axi_bready_i;
+	sc_signal<sc_uint<2>> s_axi_bresp_o;
+	sc_signal<bool> s_axi_arvalid_i;
+	sc_signal<bool> s_axi_arready_o;
+	sc_signal<sc_uint<32>> s_axi_araddr_i;
+	sc_signal<bool> s_axi_rvalid_o;
+	sc_signal<bool> s_axi_rready_i;
+	sc_signal<sc_biguint<64>> s_axi_rdata_o;
+	sc_signal<sc_uint<2>> s_axi_rresp_o;
 
-	sc_signal<bool> cmd_req_vld_i;
-	sc_signal<bool> cmd_req_rdy_o;
-	sc_signal<sc_uint<32>> cmd_addr_i;
-	sc_signal<bool> cmd_write_i;
-	sc_signal<sc_uint<32>> cmd_wdata_i;
-	sc_signal<sc_uint<32>> cmd_rdata_o;
-	sc_signal<bool> cmd_done_o;
+	sc_signal<bool> hsel_i;
+	sc_signal<sc_uint<32>> haddr_i;
+	sc_signal<bool> hwrite_i;
+	sc_signal<sc_uint<2>> htrans_i;
+	sc_signal<sc_uint<3>> hsize_i;
+	sc_signal<sc_uint<3>> hburst_i;
+	sc_signal<sc_uint<4>> hprot_i;
+	sc_signal<bool> hready_i;
+	sc_signal<sc_uint<32>> hwdata_i;
+	sc_signal<bool> hready_o;
+	sc_signal<bool> hresp_o;
+	sc_signal<sc_uint<32>> hrdata_o;
 
 	ComputeCluster<> dut;
 
@@ -89,32 +130,57 @@ public:
 		dut.power_enable_i(power_enable_i);
 		dut.interrupt_o(interrupt_o);
 
-		dut.data_req_vld_i(data_req_vld_i);
-		dut.data_req_rdy_o(data_req_rdy_o);
-		dut.data_addr_i(data_addr_i);
-		dut.data_write_i(data_write_i);
-		dut.data_wdata_i(data_wdata_i);
-		dut.data_rdata_o(data_rdata_o);
-		dut.data_done_o(data_done_o);
+		dut.s_axi_awvalid_i(s_axi_awvalid_i);
+		dut.s_axi_awready_o(s_axi_awready_o);
+		dut.s_axi_awaddr_i(s_axi_awaddr_i);
+		dut.s_axi_wvalid_i(s_axi_wvalid_i);
+		dut.s_axi_wready_o(s_axi_wready_o);
+		dut.s_axi_wdata_i(s_axi_wdata_i);
+		dut.s_axi_wstrb_i(s_axi_wstrb_i);
+		dut.s_axi_bvalid_o(s_axi_bvalid_o);
+		dut.s_axi_bready_i(s_axi_bready_i);
+		dut.s_axi_bresp_o(s_axi_bresp_o);
+		dut.s_axi_arvalid_i(s_axi_arvalid_i);
+		dut.s_axi_arready_o(s_axi_arready_o);
+		dut.s_axi_araddr_i(s_axi_araddr_i);
+		dut.s_axi_rvalid_o(s_axi_rvalid_o);
+		dut.s_axi_rready_i(s_axi_rready_i);
+		dut.s_axi_rdata_o(s_axi_rdata_o);
+		dut.s_axi_rresp_o(s_axi_rresp_o);
 
-		dut.cmd_req_vld_i(cmd_req_vld_i);
-		dut.cmd_req_rdy_o(cmd_req_rdy_o);
-		dut.cmd_addr_i(cmd_addr_i);
-		dut.cmd_write_i(cmd_write_i);
-		dut.cmd_wdata_i(cmd_wdata_i);
-		dut.cmd_rdata_o(cmd_rdata_o);
-		dut.cmd_done_o(cmd_done_o);
+		dut.hsel_i(hsel_i);
+		dut.haddr_i(haddr_i);
+		dut.hwrite_i(hwrite_i);
+		dut.htrans_i(htrans_i);
+		dut.hsize_i(hsize_i);
+		dut.hburst_i(hburst_i);
+		dut.hprot_i(hprot_i);
+		dut.hready_i(hready_i);
+		dut.hwdata_i(hwdata_i);
+		dut.hready_o(hready_o);
+		dut.hresp_o(hresp_o);
+		dut.hrdata_o(hrdata_o);
 
 		reset_n.write(false);
 		power_enable_i.write(false);
-		data_req_vld_i.write(false);
-		data_addr_i.write(0);
-		data_write_i.write(false);
-		data_wdata_i.write(0);
-		cmd_req_vld_i.write(false);
-		cmd_addr_i.write(0);
-		cmd_write_i.write(false);
-		cmd_wdata_i.write(0);
+		s_axi_awvalid_i.write(false);
+		s_axi_awaddr_i.write(0);
+		s_axi_wvalid_i.write(false);
+		s_axi_wdata_i.write(0);
+		s_axi_wstrb_i.write(0xFF);
+		s_axi_bready_i.write(false);
+		s_axi_arvalid_i.write(false);
+		s_axi_araddr_i.write(0);
+		s_axi_rready_i.write(false);
+		hsel_i.write(false);
+		haddr_i.write(0);
+		hwrite_i.write(false);
+		htrans_i.write(0);
+		hsize_i.write(2);
+		hburst_i.write(0);
+		hprot_i.write(0);
+		hready_i.write(true);
+		hwdata_i.write(0);
 	}
 
 	void tick(int n = 1) {
@@ -126,102 +192,134 @@ public:
 	void reset_with_power_on() {
 		power_enable_i.write(true);
 		reset_n.write(false);
-		cmd_req_vld_i.write(false);
-		data_req_vld_i.write(false);
+		hsel_i.write(false);
+		htrans_i.write(0);
+		hwrite_i.write(false);
+		hwdata_i.write(0);
+		s_axi_awvalid_i.write(false);
+		s_axi_wvalid_i.write(false);
+		s_axi_bready_i.write(false);
+		s_axi_arvalid_i.write(false);
+		s_axi_rready_i.write(false);
 		tick(3);
 		reset_n.write(true);
 		tick(2);
 	}
 
-	bool cmd_write(uint32_t addr, uint32_t data, int timeout_cycles = 20) {
-		cmd_addr_i.write(addr);
-		cmd_write_i.write(true);
-		cmd_wdata_i.write(data);
-		cmd_req_vld_i.write(true);
+	bool ahb_write(uint32_t addr, uint32_t data, int timeout_cycles = 20) {
+		if (!hready_o.read()) return false;
 
-		bool done = false;
+		hsel_i.write(true);
+		haddr_i.write(addr);
+		hwrite_i.write(true);
+		htrans_i.write(2); // NONSEQ
+		hsize_i.write(2);  // 32-bit
+		hburst_i.write(0); // SINGLE
+		hprot_i.write(0);
+		hready_i.write(true);
+		tick(1);
+
+		hsel_i.write(false);
+		htrans_i.write(0); // IDLE
+		hwdata_i.write(data);
+
 		for (int i = 0; i < timeout_cycles; ++i) {
 			tick(1);
-			if (cmd_done_o.read()) {
-				done = true;
-				break;
+			if (hready_o.read()) {
+				hwdata_i.write(0);
+				return true;
 			}
 		}
 
-		cmd_req_vld_i.write(false);
-		cmd_write_i.write(false);
-		tick(1);
-		return done;
+		hwdata_i.write(0);
+		return false;
 	}
 
-	bool cmd_read(uint32_t addr, uint32_t& out, int timeout_cycles = 20) {
-		cmd_addr_i.write(addr);
-		cmd_write_i.write(false);
-		cmd_wdata_i.write(0);
-		cmd_req_vld_i.write(true);
+	bool ahb_read(uint32_t addr, uint32_t& out, int timeout_cycles = 20) {
+		if (!hready_o.read()) return false;
 
-		bool done = false;
+		hsel_i.write(true);
+		haddr_i.write(addr);
+		hwrite_i.write(false);
+		htrans_i.write(2); // NONSEQ
+		hsize_i.write(2);  // 32-bit
+		hburst_i.write(0); // SINGLE
+		hprot_i.write(0);
+		hready_i.write(true);
+		tick(1);
+
+		hsel_i.write(false);
+		htrans_i.write(0); // IDLE
+
 		for (int i = 0; i < timeout_cycles; ++i) {
 			tick(1);
-			if (cmd_done_o.read()) {
-				done = true;
-				out = cmd_rdata_o.read().to_uint();
-				break;
+			if (hready_o.read()) {
+				out = hrdata_o.read().to_uint();
+				return true;
 			}
 		}
 
-		cmd_req_vld_i.write(false);
-		tick(1);
-		return done;
-	}
-
-	bool cmd_read_hddu(uint32_t addr, uint32_t& out) {
-		uint32_t throwaway = 0;
-		if (!cmd_read(addr, throwaway)) {
-			return false;
-		}
-		return cmd_read(addr, out);
+		return false;
 	}
 
 	bool data_write64(uint32_t addr, uint64_t data, int timeout_cycles = 80) {
-		data_addr_i.write(addr);
-		data_write_i.write(true);
-		data_wdata_i.write(data);
-		data_req_vld_i.write(true);
+		s_axi_awaddr_i.write(addr);
+		s_axi_awvalid_i.write(true);
+		s_axi_wdata_i.write(data);
+		s_axi_wstrb_i.write(0xFF);
+		s_axi_wvalid_i.write(true);
+		s_axi_bready_i.write(true);
 
-		bool done = false;
+		bool aw_done = false;
+		bool w_done = false;
 		for (int i = 0; i < timeout_cycles; ++i) {
 			tick(1);
-			if (data_done_o.read()) {
-				done = true;
-				break;
+			if (!aw_done && s_axi_awready_o.read()) {
+				aw_done = true;
+				s_axi_awvalid_i.write(false);
+			}
+			if (!w_done && s_axi_wready_o.read()) {
+				w_done = true;
+				s_axi_wvalid_i.write(false);
+			}
+			if (aw_done && w_done && s_axi_bvalid_o.read()) {
+				s_axi_bready_i.write(false);
+				tick(1);
+				return true;
 			}
 		}
 
-		data_req_vld_i.write(false);
-		data_write_i.write(false);
+		s_axi_awvalid_i.write(false);
+		s_axi_wvalid_i.write(false);
+		s_axi_bready_i.write(false);
 		tick(1);
-		return done;
+		return false;
 	}
 
 	bool data_read64(uint32_t addr, uint64_t& out, int timeout_cycles = 80) {
-		data_addr_i.write(addr);
-		data_write_i.write(false);
-		data_req_vld_i.write(true);
+		s_axi_araddr_i.write(addr);
+		s_axi_arvalid_i.write(true);
+		s_axi_rready_i.write(true);
 
-		bool done = false;
+		bool ar_done = false;
 		for (int i = 0; i < timeout_cycles; ++i) {
 			tick(1);
-			if (data_done_o.read()) {
-				done = true;
-				out = data_rdata_o.read().to_uint64();
-				break;
+			if (!ar_done && s_axi_arready_o.read()) {
+				ar_done = true;
+				s_axi_arvalid_i.write(false);
+			}
+			if (ar_done && s_axi_rvalid_o.read()) {
+				out = s_axi_rdata_o.read().to_uint64();
+				s_axi_rready_i.write(false);
+				tick(1);
+				return true;
 			}
 		}
 
-		data_req_vld_i.write(false);
+		s_axi_arvalid_i.write(false);
+		s_axi_rready_i.write(false);
 		tick(1);
-		return done;
+		return false;
 	}
 };
 
@@ -243,103 +341,321 @@ int sc_main(int argc, char* argv[]) {
 		}
 	};
 
-	run("Power-on reset sets cmd ready", [&]() {
+	run("Power-on reset sets AHB ready", [&]() {
 		tb.reset_with_power_on();
-		const bool ok = tb.cmd_req_rdy_o.read();
-		return TestResult{"", ok, std::string("cmd_req_rdy=") + (ok ? "1" : "0")};
+		const bool ok = tb.hready_o.read();
+		return TestResult{"", ok, std::string("hready=") + (ok ? "1" : "0")};
 	});
 
-	run("Power-off drives cmd ready low", [&]() {
+	run("Power-off drives AHB ready low", [&]() {
 		tb.reset_with_power_on();
 		tb.power_enable_i.write(false);
 		tb.tick(1);
-		const bool ok = !tb.cmd_req_rdy_o.read();
-		return TestResult{"", ok, std::string("cmd_req_rdy=") + (tb.cmd_req_rdy_o.read() ? "1" : "0")};
+		const bool ok = !tb.hready_o.read();
+		return TestResult{"", ok, std::string("hready=") + (tb.hready_o.read() ? "1" : "0")};
 	});
 
 	run("Power-off drives data ready low", [&]() {
 		tb.reset_with_power_on();
 		tb.power_enable_i.write(false);
 		tb.tick(1);
-		const bool ok = !tb.data_req_rdy_o.read();
-		return TestResult{"", ok, std::string("data_req_rdy=") + (tb.data_req_rdy_o.read() ? "1" : "0")};
+		const bool ok = !tb.s_axi_awready_o.read() && !tb.s_axi_wready_o.read() && !tb.s_axi_arready_o.read();
+		return TestResult{"", ok, std::string("awready=") + (tb.s_axi_awready_o.read() ? "1" : "0")};
 	});
 
 	run("SPM CFG_MAP MMIO write/read", [&]() {
 		tb.reset_with_power_on();
-		bool w_ok = tb.cmd_write(ClusterUnitTestBench::kCmdSpmCfgMap, 0x93);
+		bool w_ok = tb.ahb_write(ClusterUnitTestBench::kCmdSpmCfgMap, 0x93);
 		uint32_t v = 0;
-		bool r_ok = tb.cmd_read(ClusterUnitTestBench::kCmdSpmCfgMap, v);
+		bool r_ok = tb.ahb_read(ClusterUnitTestBench::kCmdSpmCfgMap, v);
 		return TestResult{"", w_ok && r_ok && v == 0x93, "CFG_MAP=0x" + std::to_string(v)};
 	});
 
 	run("SPM ARB_POLICY MMIO write/read", [&]() {
 		tb.reset_with_power_on();
-		bool w_ok = tb.cmd_write(ClusterUnitTestBench::kCmdSpmArbPolicy, 1);
+		bool w_ok = tb.ahb_write(ClusterUnitTestBench::kCmdSpmArbPolicy, 1);
 		uint32_t v = 0;
-		bool r_ok = tb.cmd_read(ClusterUnitTestBench::kCmdSpmArbPolicy, v);
+		bool r_ok = tb.ahb_read(ClusterUnitTestBench::kCmdSpmArbPolicy, v);
 		return TestResult{"", w_ok && r_ok && v == 1, "ARB_POLICY=" + std::to_string(v)};
 	});
 
 	run("SPM CFG_UPDATE write accepted", [&]() {
 		tb.reset_with_power_on();
-		bool w_ok = tb.cmd_write(ClusterUnitTestBench::kCmdSpmCfgUpdate, 1);
-		return TestResult{"", w_ok, std::string("cmd_done=") + (w_ok ? "1" : "0")};
+		bool w_ok = tb.ahb_write(ClusterUnitTestBench::kCmdSpmCfgUpdate, 1);
+		return TestResult{"", w_ok, std::string("ahb_write=") + (w_ok ? "1" : "0")};
+	});
+
+	run("SPM PMU cycle counter MMIO increments", [&]() {
+		tb.reset_with_power_on();
+		uint32_t c0 = 0;
+		uint32_t c1 = 0;
+		bool r0_ok = tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuCycleCntLo, c0);
+		tb.tick(5);
+		bool r1_ok = tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuCycleCntLo, c1);
+		const bool ok = r0_ok && r1_ok && (c1 > c0);
+		return TestResult{"", ok, "cycle_lo_before=" + std::to_string(c0) + ", after=" + std::to_string(c1)};
+	});
+
+	run("SPM PMU counter windows MMIO readable", [&]() {
+		tb.reset_with_power_on();
+		uint32_t cycle_hi = 0;
+		uint32_t arb_lo = 0;
+		uint32_t arb_hi = 0;
+		uint32_t credit_lo = 0;
+		uint32_t credit_hi = 0;
+		uint32_t port0_lo = 0;
+		uint32_t port0_hi = 0;
+
+		bool ok = true;
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuCycleCntHi, cycle_hi);
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuArbStallLo, arb_lo);
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuArbStallHi, arb_hi);
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuCreditStallLo, credit_lo);
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuCreditStallHi, credit_hi);
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuPort0TxnLo, port0_lo);
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuPort0TxnHi, port0_hi);
+
+		const bool values_ok = (arb_lo == 0) && (arb_hi == 0) && (credit_lo == 0) && (credit_hi == 0)
+			&& (port0_lo == 0) && (port0_hi == 0);
+		return TestResult{"", ok && values_ok,
+			"cycle_hi=" + std::to_string(cycle_hi)
+			+ ", arb_lo=" + std::to_string(arb_lo)
+			+ ", credit_lo=" + std::to_string(credit_lo)
+			+ ", port0_lo=" + std::to_string(port0_lo)};
+	});
+
+	run("SPM PMU control reset via MMIO", [&]() {
+		tb.reset_with_power_on();
+		tb.tick(8);
+		uint32_t before = 0;
+		bool rb_ok = tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuCycleCntLo, before);
+		bool w_ok = tb.ahb_write(ClusterUnitTestBench::kCmdSpmPmuCtrl, 1);
+		tb.tick(1);
+		uint32_t after = 0;
+		bool ra_ok = tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuCycleCntLo, after);
+		const bool reset_effect = (before > 4U) ? (after < before) : (after <= before);
+		return TestResult{"", rb_ok && w_ok && ra_ok && reset_effect,
+			"cycle_before=" + std::to_string(before) + ", after_reset=" + std::to_string(after)};
+	});
+
+	run("SPM PMU port0 txn counter increments after HDDU AGU start", [&]() {
+		tb.reset_with_power_on();
+
+		uint32_t pmu_before = 0;
+		bool rb_ok = tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuPort0TxnLo, pmu_before);
+
+		const uint32_t b0 = ClusterUnitTestBench::kCmdHdduBase + 0u * ClusterUnitTestBench::kHdduAguBankStride;
+		bool ok = rb_ok;
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduCtrl, (1u << 1));
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneEn, 0x1u);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneMode, 0x0u);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduMaxOutstanding, 4u);
+
+		ok = ok && tb.ahb_write(b0 + ClusterUnitTestBench::kHdduRegBaseAddr, 0x40u);
+		ok = ok && tb.ahb_write(b0 + ClusterUnitTestBench::kHdduRegIter01, (1u << 16) | 1u);
+		ok = ok && tb.ahb_write(b0 + ClusterUnitTestBench::kHdduRegIter23, (1u << 16) | 1u);
+		ok = ok && tb.ahb_write(b0 + ClusterUnitTestBench::kHdduRegTagBase, 0x03u);
+		ok = ok && tb.ahb_write(b0 + ClusterUnitTestBench::kHdduRegStride0, 1u);
+		ok = ok && tb.ahb_write(b0 + ClusterUnitTestBench::kHdduRegTagStride0, 1u);
+		ok = ok && tb.ahb_write(b0 + ClusterUnitTestBench::kHdduRegMaskCfg, 0xFu);
+		ok = ok && tb.ahb_write(b0 + ClusterUnitTestBench::kHdduRegCtrl, 0x1u);
+
+		uint32_t pmu_after = pmu_before;
+		bool increased = false;
+		for (int i = 0; i < 80; ++i) {
+			tb.tick(1);
+			uint32_t v = 0;
+			if (!tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuPort0TxnLo, v)) {
+				ok = false;
+				break;
+			}
+			pmu_after = v;
+			if (pmu_after > pmu_before) {
+				increased = true;
+				break;
+			}
+		}
+
+		return TestResult{"", ok && increased,
+			"port0_txn_before=" + std::to_string(pmu_before) + ", after=" + std::to_string(pmu_after)};
+	});
+
+	run("SPM PMU port2 txn counter increments after HDDU AGU start", [&]() {
+		tb.reset_with_power_on();
+
+		uint32_t pmu_before = 0;
+		bool rb_ok = tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuPort2TxnLo, pmu_before);
+
+		const uint32_t b2 = ClusterUnitTestBench::kCmdHdduBase + 2u * ClusterUnitTestBench::kHdduAguBankStride;
+		bool ok = rb_ok;
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduCtrl, (1u << 1));
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneEn, 0x4u);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneMode, 0x0u);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduMaxOutstanding, 4u);
+
+		ok = ok && tb.ahb_write(b2 + ClusterUnitTestBench::kHdduRegBaseAddr, 0x80u);
+		ok = ok && tb.ahb_write(b2 + ClusterUnitTestBench::kHdduRegIter01, (1u << 16) | 1u);
+		ok = ok && tb.ahb_write(b2 + ClusterUnitTestBench::kHdduRegIter23, (1u << 16) | 1u);
+		ok = ok && tb.ahb_write(b2 + ClusterUnitTestBench::kHdduRegTagBase, 0x07u);
+		ok = ok && tb.ahb_write(b2 + ClusterUnitTestBench::kHdduRegStride0, 1u);
+		ok = ok && tb.ahb_write(b2 + ClusterUnitTestBench::kHdduRegTagStride0, 1u);
+		ok = ok && tb.ahb_write(b2 + ClusterUnitTestBench::kHdduRegMaskCfg, 0xFu);
+		ok = ok && tb.ahb_write(b2 + ClusterUnitTestBench::kHdduRegCtrl, 0x1u);
+
+		uint32_t pmu_after = pmu_before;
+		bool increased = false;
+		for (int i = 0; i < 80; ++i) {
+			tb.tick(1);
+			uint32_t v = 0;
+			if (!tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuPort2TxnLo, v)) {
+				ok = false;
+				break;
+			}
+			pmu_after = v;
+			if (pmu_after > pmu_before) {
+				increased = true;
+				break;
+			}
+		}
+
+		return TestResult{"", ok && increased,
+			"port2_txn_before=" + std::to_string(pmu_before) + ", after=" + std::to_string(pmu_after)};
+	});
+
+	run("SPM PMU all 4 port counters under concurrent enable", [&]() {
+		tb.reset_with_power_on();
+
+		const std::array<uint32_t, 4> port_txn_lo_addr = {
+			ClusterUnitTestBench::kCmdSpmPmuPort0TxnLo,
+			ClusterUnitTestBench::kCmdSpmPmuPort1TxnLo,
+			ClusterUnitTestBench::kCmdSpmPmuPort2TxnLo,
+			ClusterUnitTestBench::kCmdSpmPmuPort3TxnLo,
+		};
+
+		std::array<uint32_t, 4> before = {0, 0, 0, 0};
+		std::array<uint32_t, 4> after = {0, 0, 0, 0};
+		std::array<bool, 4> increased = {false, false, false, false};
+
+		bool ok = true;
+		for (size_t p = 0; p < 4; ++p) {
+			ok = ok && tb.ahb_read(port_txn_lo_addr[p], before[p]);
+			after[p] = before[p];
+		}
+
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduCtrl, (1u << 1));
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneEn, 0xFu);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneMode, 0x0u);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduMaxOutstanding, 8u);
+
+		for (uint32_t bank = 0; bank < 4; ++bank) {
+			const uint32_t b = ClusterUnitTestBench::kCmdHdduBase + bank * ClusterUnitTestBench::kHdduAguBankStride;
+			ok = ok && tb.ahb_write(b + ClusterUnitTestBench::kHdduRegBaseAddr, 0x100u + bank * 0x40u);
+			ok = ok && tb.ahb_write(b + ClusterUnitTestBench::kHdduRegIter01, (1u << 16) | 1u);
+			ok = ok && tb.ahb_write(b + ClusterUnitTestBench::kHdduRegIter23, (1u << 16) | 1u);
+			ok = ok && tb.ahb_write(b + ClusterUnitTestBench::kHdduRegTagBase, 0x10u + bank);
+			ok = ok && tb.ahb_write(b + ClusterUnitTestBench::kHdduRegStride0, 1u);
+			ok = ok && tb.ahb_write(b + ClusterUnitTestBench::kHdduRegTagStride0, 1u);
+			ok = ok && tb.ahb_write(b + ClusterUnitTestBench::kHdduRegMaskCfg, 0xFu);
+			ok = ok && tb.ahb_write(b + ClusterUnitTestBench::kHdduRegCtrl, 0x1u);
+		}
+
+		for (int cycle = 0; cycle < 160; ++cycle) {
+			tb.tick(1);
+			for (size_t p = 0; p < 4; ++p) {
+				uint32_t v = 0;
+				if (!tb.ahb_read(port_txn_lo_addr[p], v)) {
+					ok = false;
+					continue;
+				}
+				after[p] = v;
+				if (after[p] > before[p]) {
+					increased[p] = true;
+				}
+			}
+			if (increased[0] && increased[1] && increased[2] && increased[3]) {
+				break;
+			}
+		}
+
+		const bool expected_behavior = increased[0] && increased[1] && increased[2] && (after[3] == before[3]);
+		return TestResult{"", ok && expected_behavior,
+			"delta=["
+			+ std::to_string(after[0] - before[0]) + ","
+			+ std::to_string(after[1] - before[1]) + ","
+			+ std::to_string(after[2] - before[2]) + ","
+			+ std::to_string(after[3] - before[3]) + "]"};
+	});
+
+	run("SPM PMU port3 requires PLO response path", [&]() {
+		tb.reset_with_power_on();
+
+		uint32_t p3_before = 0;
+		bool ok = tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuPort3TxnLo, p3_before);
+
+		const uint32_t b3 = ClusterUnitTestBench::kCmdHdduBase + 3u * ClusterUnitTestBench::kHdduAguBankStride;
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduCtrl, (1u << 1));
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneEn, 0x8u);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduRegBaseAddr + 3u * ClusterUnitTestBench::kHdduAguBankStride, 0x200u);
+		ok = ok && tb.ahb_write(b3 + ClusterUnitTestBench::kHdduRegIter01, (1u << 16) | 1u);
+		ok = ok && tb.ahb_write(b3 + ClusterUnitTestBench::kHdduRegIter23, (1u << 16) | 1u);
+		ok = ok && tb.ahb_write(b3 + ClusterUnitTestBench::kHdduRegTagBase, 0x21u);
+		ok = ok && tb.ahb_write(b3 + ClusterUnitTestBench::kHdduRegStride0, 1u);
+		ok = ok && tb.ahb_write(b3 + ClusterUnitTestBench::kHdduRegTagStride0, 1u);
+		ok = ok && tb.ahb_write(b3 + ClusterUnitTestBench::kHdduRegMaskCfg, 0xFu);
+		ok = ok && tb.ahb_write(b3 + ClusterUnitTestBench::kHdduRegCtrl, 0x1u);
+
+		tb.tick(120);
+		uint32_t p3_after = p3_before;
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuPort3TxnLo, p3_after);
+
+		return TestResult{"", ok && (p3_after == p3_before),
+			"port3_txn_before=" + std::to_string(p3_before) + ", after=" + std::to_string(p3_after)};
 	});
 
 	run("SPM unknown offset reads zero", [&]() {
 		tb.reset_with_power_on();
 		uint32_t v = 123;
-		bool r_ok = tb.cmd_read(0x000C, v);
-		return TestResult{"", r_ok && v == 0, "SPM[0x000C]=" + std::to_string(v)};
+		bool r_ok = tb.ahb_read(0x0028, v);
+		return TestResult{"", r_ok && v == 0, "SPM[0x0028]=" + std::to_string(v)};
 	});
 
 	run("HDDU PLANE_EN passthrough read/write", [&]() {
 		tb.reset_with_power_on();
 		const uint32_t addr = ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneEn;
-		bool w_ok = tb.cmd_write(addr, 0x5);
+		bool w_ok = tb.ahb_write(addr, 0x5);
 		uint32_t v = 0;
-		bool r_ok = tb.cmd_read_hddu(addr, v);
+		bool r_ok = tb.ahb_read(addr, v);
 		return TestResult{"", w_ok && r_ok && ((v & 0xFFFFu) == 0x5u), "PLANE_EN=0x" + std::to_string(v)};
 	});
 
 	run("HDDU PLANE_MODE passthrough read/write", [&]() {
 		tb.reset_with_power_on();
 		const uint32_t addr = ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneMode;
-		bool w_ok = tb.cmd_write(addr, 0x2);
+		bool w_ok = tb.ahb_write(addr, 0x2);
 		uint32_t v = 0;
-		bool r_ok = tb.cmd_read_hddu(addr, v);
+		bool r_ok = tb.ahb_read(addr, v);
 		return TestResult{"", w_ok && r_ok && ((v & 0xFFFFu) == 0x2u), "PLANE_MODE=0x" + std::to_string(v)};
-	});
-
-	run("HDDU MAX_OUTSTANDING passthrough", [&]() {
-		tb.reset_with_power_on();
-		const uint32_t addr = ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduMaxOutstanding;
-		bool w_ok = tb.cmd_write(addr, 12);
-		uint32_t v = 0;
-		bool r_ok = tb.cmd_read_hddu(addr, v);
-		return TestResult{"", w_ok && r_ok && v == 12, "MAX_OUT=" + std::to_string(v)};
 	});
 
 	run("NoC command write and readback", [&]() {
 		tb.reset_with_power_on();
-		bool w_ok = tb.cmd_write(ClusterUnitTestBench::kCmdNocData, 0x12345674);
+		bool w_ok = tb.ahb_write(ClusterUnitTestBench::kCmdNocData, 0x12345674);
 		uint32_t v = 0;
-		bool r_ok = tb.cmd_read(ClusterUnitTestBench::kCmdNocData, v);
+		bool r_ok = tb.ahb_read(ClusterUnitTestBench::kCmdNocData, v);
 		return TestResult{"", w_ok && r_ok && v == 0x12345674, "NOC_CMD=0x" + std::to_string(v)};
 	});
 
 	run("NoC unknown offset reads zero", [&]() {
 		tb.reset_with_power_on();
 		uint32_t v = 1;
-		bool r_ok = tb.cmd_read(0x2004, v);
+		bool r_ok = tb.ahb_read(0x2004, v);
 		return TestResult{"", r_ok && v == 0, "NOC[0x2004]=" + std::to_string(v)};
 	});
 
 	run("Out-of-range MMIO reads zero", [&]() {
 		tb.reset_with_power_on();
 		uint32_t v = 1;
-		bool r_ok = tb.cmd_read(0x3000, v);
+		bool r_ok = tb.ahb_read(0x3000, v);
 		return TestResult{"", r_ok && v == 0, "MMIO[0x3000]=" + std::to_string(v)};
 	});
 
@@ -353,47 +669,42 @@ int sc_main(int argc, char* argv[]) {
 		return TestResult{"", w_ok && r_ok && rv == pattern, "RDATA=0x" + std::to_string(rv)};
 	});
 
-	run("Power-off blocks command completion", [&]() {
+	run("Power-off blocks AHB writes", [&]() {
 		tb.reset_with_power_on();
 		tb.power_enable_i.write(false);
 		tb.tick(1);
-		tb.cmd_addr_i.write(ClusterUnitTestBench::kCmdSpmCfgMap);
-		tb.cmd_write_i.write(true);
-		tb.cmd_wdata_i.write(0x77);
-		tb.cmd_req_vld_i.write(true);
-		tb.tick(3);
-		bool ok = !tb.cmd_done_o.read();
-		tb.cmd_req_vld_i.write(false);
-		tb.cmd_write_i.write(false);
-		tb.tick(1);
-		return TestResult{"", ok, std::string("cmd_done=") + (tb.cmd_done_o.read() ? "1" : "0")};
+		bool w_ok = tb.ahb_write(ClusterUnitTestBench::kCmdSpmCfgMap, 0x77, 2);
+		return TestResult{"", !w_ok, std::string("ahb_write=") + (w_ok ? "1" : "0")};
 	});
 
 	run("Power-off blocks data completion", [&]() {
 		tb.reset_with_power_on();
 		tb.power_enable_i.write(false);
 		tb.tick(1);
-		tb.data_addr_i.write(0x24);
-		tb.data_write_i.write(true);
-		tb.data_wdata_i.write(0xAA55AA55AA55AA55ULL);
-		tb.data_req_vld_i.write(true);
+		tb.s_axi_awaddr_i.write(0x24);
+		tb.s_axi_awvalid_i.write(true);
+		tb.s_axi_wdata_i.write(0xAA55AA55AA55AA55ULL);
+		tb.s_axi_wstrb_i.write(0xFF);
+		tb.s_axi_wvalid_i.write(true);
+		tb.s_axi_bready_i.write(true);
 		tb.tick(5);
-		bool ok = !tb.data_done_o.read();
-		tb.data_req_vld_i.write(false);
-		tb.data_write_i.write(false);
+		bool ok = !tb.s_axi_bvalid_o.read();
+		tb.s_axi_awvalid_i.write(false);
+		tb.s_axi_wvalid_i.write(false);
+		tb.s_axi_bready_i.write(false);
 		tb.tick(1);
-		return TestResult{"", ok, std::string("data_done=") + (tb.data_done_o.read() ? "1" : "0")};
+		return TestResult{"", ok, std::string("bvalid=") + (tb.s_axi_bvalid_o.read() ? "1" : "0")};
 	});
 
 	run("Power-cycle resets SPM CFG_MAP", [&]() {
 		tb.reset_with_power_on();
-		bool w_ok = tb.cmd_write(ClusterUnitTestBench::kCmdSpmCfgMap, 0xA5);
+		bool w_ok = tb.ahb_write(ClusterUnitTestBench::kCmdSpmCfgMap, 0xA5);
 		tb.power_enable_i.write(false);
 		tb.tick(3);
 		tb.power_enable_i.write(true);
 		tb.tick(3);
 		uint32_t v = 0;
-		bool r_ok = tb.cmd_read(ClusterUnitTestBench::kCmdSpmCfgMap, v);
+		bool r_ok = tb.ahb_read(ClusterUnitTestBench::kCmdSpmCfgMap, v);
 		return TestResult{"", w_ok && r_ok && v == 0, "CFG_MAP_after_power_cycle=0x" + std::to_string(v)};
 	});
 

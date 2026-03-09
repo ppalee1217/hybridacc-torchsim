@@ -347,7 +347,19 @@ private:
     bool trace_init = false;
 public:
     int trace_id = -1;
+    uint32_t trace_pid = static_cast<uint32_t>(TRACE_PID::MBUS);
     void set_trace_id(int id) { trace_id = id; }
+    void set_trace_context(uint32_t pid, int tid_base) {
+        trace_pid = pid;
+        trace_id = tid_base;
+        trace_init = false;
+        last_state_scan = "SCAN_OFF";
+        last_state_ps = "TX_IDLE";
+        last_state_pd = "TX_IDLE";
+        last_state_pli = "TX_IDLE";
+        last_state_plo_req = "TX_IDLE";
+        last_state_plo_resp = "RX_IDLE";
+    }
     int get_trace_num() const { return 7; }
     void trace_process() {
         if (trace_id < 0) return;
@@ -364,26 +376,26 @@ public:
                                const std::string& cat, uint32_t tid,
                                const std::string& args) {
             if (current != last) {
-                TRACE_EVENT(last, cat, TRACE_END, TRACE_PID::MBUS, tid, "{}");
-                TRACE_EVENT(current, cat, TRACE_BEGIN, TRACE_PID::MBUS, tid, args);
+                TRACE_EVENT(last, cat, TRACE_END, trace_pid, tid, "{}");
+                TRACE_EVENT(current, cat, TRACE_BEGIN, trace_pid, tid, args);
                 last = current;
             }
         };
 
         if (!trace_init) {
-            TRACE_THREAD_NAME(TRACE_PID::MBUS, tid_scan, "MBUS ScanChain");
-            TRACE_THREAD_NAME(TRACE_PID::MBUS, tid_ps, "MBUS PS Routing");
-            TRACE_THREAD_NAME(TRACE_PID::MBUS, tid_pd, "MBUS PD Routing");
-            TRACE_THREAD_NAME(TRACE_PID::MBUS, tid_pli, "MBUS PLI Routing");
-            TRACE_THREAD_NAME(TRACE_PID::MBUS, tid_plo_req, "MBUS PLO Req Routing");
-            TRACE_THREAD_NAME(TRACE_PID::MBUS, tid_plo_resp, "MBUS PLO Resp");
+            TRACE_THREAD_NAME(trace_pid, tid_scan, "MBUS ScanChain");
+            TRACE_THREAD_NAME(trace_pid, tid_ps, "MBUS PS Routing");
+            TRACE_THREAD_NAME(trace_pid, tid_pd, "MBUS PD Routing");
+            TRACE_THREAD_NAME(trace_pid, tid_pli, "MBUS PLI Routing");
+            TRACE_THREAD_NAME(trace_pid, tid_plo_req, "MBUS PLO Req Routing");
+            TRACE_THREAD_NAME(trace_pid, tid_plo_resp, "MBUS PLO Resp");
 
-            TRACE_EVENT(last_state_scan, "MBUS_Scan", TRACE_BEGIN, TRACE_PID::MBUS, tid_scan, "{}");
-            TRACE_EVENT(last_state_ps, "MBUS_PS", TRACE_BEGIN, TRACE_PID::MBUS, tid_ps, "{}");
-            TRACE_EVENT(last_state_pd, "MBUS_PD", TRACE_BEGIN, TRACE_PID::MBUS, tid_pd, "{}");
-            TRACE_EVENT(last_state_pli, "MBUS_PLI", TRACE_BEGIN, TRACE_PID::MBUS, tid_pli, "{}");
-            TRACE_EVENT(last_state_plo_req, "MBUS_PLO_REQ", TRACE_BEGIN, TRACE_PID::MBUS, tid_plo_req, "{}");
-            TRACE_EVENT(last_state_plo_resp, "MBUS_PLO_RESP", TRACE_BEGIN, TRACE_PID::MBUS, tid_plo_resp, "{}");
+            TRACE_EVENT(last_state_scan, "MBUS_Scan", TRACE_BEGIN, trace_pid, tid_scan, "{}");
+            TRACE_EVENT(last_state_ps, "MBUS_PS", TRACE_BEGIN, trace_pid, tid_ps, "{}");
+            TRACE_EVENT(last_state_pd, "MBUS_PD", TRACE_BEGIN, trace_pid, tid_pd, "{}");
+            TRACE_EVENT(last_state_pli, "MBUS_PLI", TRACE_BEGIN, trace_pid, tid_pli, "{}");
+            TRACE_EVENT(last_state_plo_req, "MBUS_PLO_REQ", TRACE_BEGIN, trace_pid, tid_plo_req, "{}");
+            TRACE_EVENT(last_state_plo_resp, "MBUS_PLO_RESP", TRACE_BEGIN, trace_pid, tid_plo_resp, "{}");
             trace_init = true;
         }
 

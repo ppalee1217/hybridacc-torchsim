@@ -3,8 +3,11 @@
 #include <systemc>
 #include <array>
 #include <cstdint>
+#include <string>
+#include <utility>
 
 #include "utils.hpp"
+#include "AXI4_lite/axi4-lite.hpp"
 #include "Cluster/ScratchpadMemory.hpp"
 #include "Cluster/HybridDataDeliverUnit.hpp"
 #include "NetworkOnChip.hpp"
@@ -15,23 +18,29 @@ using namespace sc_dt;
 namespace hybridacc {
 
 template <
-	unsigned SPM_NUM_NOC_PORT = 4,
-	unsigned SPM_BANKS_PER_GROUP = 3,
-	unsigned SPM_BANK_WIDTH_BITS = 64,
+	unsigned SPM_NUM_NOC_CHANNEL = 4,
+	unsigned SPM_NUM_BANKS_PER_GROUP = 3,
+	unsigned SPM_SRAM_BANK_WIDTH_BITS = 64,
+	unsigned SPM_SRAM_BANK_DEPTH_WORDS = 8192,
+	unsigned SPM_SRAM_BANK_LATENCY = 1,
+	unsigned SPM_SRAM_BANK_PIPELINE_DEPTH = 1,
 	unsigned SPM_ADDR_WIDTH = 32,
 	unsigned NOC_NUM_PORTS = 3,
 	unsigned NOC_PORT_WIDTH_BITS = 64,
 	unsigned NOC_NUM_PES_PER_PORT = 16>
 SC_MODULE(ComputeCluster) {
-	static_assert(SPM_NUM_NOC_PORT == 4, "ComputeCluster expects 4 SPM NoC-side ports.");
-	static_assert(SPM_BANK_WIDTH_BITS == 64, "ComputeCluster DMA slave width is fixed at 64 bits.");
+	static_assert(SPM_NUM_NOC_CHANNEL == 4, "ComputeCluster expects 4 SPM NoC-side channels.");
+	static_assert(SPM_SRAM_BANK_WIDTH_BITS == 64, "ComputeCluster DMA slave width is fixed at 64 bits.");
 	static_assert(
-		NOC_NUM_PORTS * NOC_PORT_WIDTH_BITS == SPM_BANKS_PER_GROUP * SPM_BANK_WIDTH_BITS,
+		NOC_NUM_PORTS * NOC_PORT_WIDTH_BITS == SPM_NUM_BANKS_PER_GROUP * SPM_SRAM_BANK_WIDTH_BITS,
 		"HDDU/NoC payload width must match SPM group aggregate width.");
 
 	static constexpr unsigned HDDU_DATA_BITS = NOC_NUM_PORTS * NOC_PORT_WIDTH_BITS;
 	static constexpr unsigned HDDU_NOC_TAG_BITS = 6;
 	static constexpr unsigned HDDU_NOC_ADDR_BITS = HDDU_NOC_TAG_BITS + 1;
+
+	using spm_req_payload_t = spm_request_t<SPM_ADDR_WIDTH, HDDU_DATA_BITS>;
+	using spm_resp_payload_t = spm_response_t<HDDU_DATA_BITS>;
 
 	static constexpr uint32_t kCmdSpmBase = 0x0000;
 	static constexpr uint32_t kCmdSpmSize = 0x0100;
@@ -43,6 +52,15 @@ SC_MODULE(ComputeCluster) {
 	static constexpr uint32_t kSpmCfgMapOffset = 0x00;
 	static constexpr uint32_t kSpmCfgUpdateOffset = 0x04;
 	static constexpr uint32_t kSpmArbPolicyOffset = 0x08;
+	static constexpr uint32_t kSpmPmuCtrlOffset = 0x0C;
+	static constexpr uint32_t kSpmPmuCycleCntLoOffset = 0x10;
+	static constexpr uint32_t kSpmPmuCycleCntHiOffset = 0x14;
+	static constexpr uint32_t kSpmPmuArbStallLoOffset = 0x18;
+	static constexpr uint32_t kSpmPmuArbStallHiOffset = 0x1C;
+	static constexpr uint32_t kSpmPmuCreditStallLoOffset = 0x20;
+	static constexpr uint32_t kSpmPmuCreditStallHiOffset = 0x24;
+	static constexpr uint32_t kSpmPmuPortTxnBaseOffset = 0x40;
+	static constexpr uint32_t kSpmPmuPortTxnStride = 0x08;
 
 	static constexpr uint32_t kNocCmdDataOffset = 0x00;
 
@@ -53,30 +71,65 @@ public:
 
 	sc_out<bool> interrupt_o;
 
-	// 64-bit data slave port -> SPM DMA port
-	sc_in<bool> data_req_vld_i;
-	sc_out<bool> data_req_rdy_o;
-	sc_in<sc_uint<SPM_ADDR_WIDTH>> data_addr_i;
-	sc_in<bool> data_write_i;
-	sc_in<sc_biguint<SPM_BANK_WIDTH_BITS>> data_wdata_i;
-	sc_out<sc_biguint<SPM_BANK_WIDTH_BITS>> data_rdata_o;
-	sc_out<bool> data_done_o;
+	// AXI4-Lite slave DATA port -> SPM DMA port
+	sc_in<bool> s_axi_awvalid_i;
+	sc_out<bool> s_axi_awready_o;
+	sc_in<sc_uint<SPM_ADDR_WIDTH>> s_axi_awaddr_i;
 
-	// 32-bit MMIO/command slave port
-	sc_in<bool> cmd_req_vld_i;
-	sc_out<bool> cmd_req_rdy_o;
-	sc_in<sc_uint<32>> cmd_addr_i;
-	sc_in<bool> cmd_write_i;
-	sc_in<sc_uint<32>> cmd_wdata_i;
-	sc_out<sc_uint<32>> cmd_rdata_o;
-	sc_out<bool> cmd_done_o;
+	sc_in<bool> s_axi_wvalid_i;
+	sc_out<bool> s_axi_wready_o;
+	sc_in<sc_biguint<SPM_SRAM_BANK_WIDTH_BITS>> s_axi_wdata_i;
+	sc_in<sc_uint<SPM_SRAM_BANK_WIDTH_BITS / 8>> s_axi_wstrb_i;
+
+	sc_out<bool> s_axi_bvalid_o;
+	sc_in<bool> s_axi_bready_i;
+	sc_out<sc_uint<2>> s_axi_bresp_o;
+
+	sc_in<bool> s_axi_arvalid_i;
+	sc_out<bool> s_axi_arready_o;
+	sc_in<sc_uint<SPM_ADDR_WIDTH>> s_axi_araddr_i;
+
+	sc_out<bool> s_axi_rvalid_o;
+	sc_in<bool> s_axi_rready_i;
+	sc_out<sc_biguint<SPM_SRAM_BANK_WIDTH_BITS>> s_axi_rdata_o;
+	sc_out<sc_uint<2>> s_axi_rresp_o;
+
+	// AHB-Lite Slave Port
+	sc_in<bool> hsel_i;
+	sc_in<sc_uint<32>> haddr_i;
+	sc_in<bool> hwrite_i;
+	sc_in<sc_uint<2>> htrans_i;
+	sc_in<sc_uint<3>> hsize_i;
+	sc_in<sc_uint<3>> hburst_i;
+	sc_in<sc_uint<4>> hprot_i;
+	sc_in<bool> hready_i;
+	sc_in<sc_uint<32>> hwdata_i;
+
+	sc_out<bool> hready_o;
+	sc_out<bool> hresp_o;
+	sc_out<sc_uint<32>> hrdata_o;
 
 	using noc_req_payload_t = request_t<sc_biguint<HDDU_DATA_BITS>, uint16_t>;
 	using noc_resp_payload_t = response_t<sc_biguint<HDDU_DATA_BITS>>;
 
-	cluster::ScratchpadMemory<SPM_NUM_NOC_PORT, SPM_BANKS_PER_GROUP, SPM_BANK_WIDTH_BITS, SPM_ADDR_WIDTH> spm;
-	cluster::HybridDataDeliverUnit<SPM_ADDR_WIDTH, HDDU_NOC_TAG_BITS, HDDU_DATA_BITS> hddu;
-	NetworkOnChip<NOC_NUM_PORTS, NOC_PORT_WIDTH_BITS, NOC_NUM_PES_PER_PORT> noc;
+	cluster::ScratchpadMemory<
+		SPM_NUM_NOC_CHANNEL,
+		SPM_NUM_BANKS_PER_GROUP,
+		SPM_SRAM_BANK_WIDTH_BITS,
+		SPM_SRAM_BANK_DEPTH_WORDS,
+		SPM_SRAM_BANK_LATENCY,
+		SPM_SRAM_BANK_PIPELINE_DEPTH,
+		SPM_ADDR_WIDTH> spm;
+
+	cluster::HybridDataDeliverUnit<
+		SPM_ADDR_WIDTH,
+		HDDU_NOC_TAG_BITS,
+		HDDU_DATA_BITS> hddu;
+
+	NetworkOnChip<
+		NOC_NUM_PORTS,
+		NOC_PORT_WIDTH_BITS,
+		NOC_NUM_PES_PER_PORT> noc;
 
 	SC_HAS_PROCESS(ComputeCluster);
 
@@ -86,20 +139,35 @@ public:
 		  reset_n("reset_n"),
 		  power_enable_i("power_enable_i"),
 		  interrupt_o("interrupt_o"),
-		  data_req_vld_i("data_req_vld_i"),
-		  data_req_rdy_o("data_req_rdy_o"),
-		  data_addr_i("data_addr_i"),
-		  data_write_i("data_write_i"),
-		  data_wdata_i("data_wdata_i"),
-		  data_rdata_o("data_rdata_o"),
-		  data_done_o("data_done_o"),
-		  cmd_req_vld_i("cmd_req_vld_i"),
-		  cmd_req_rdy_o("cmd_req_rdy_o"),
-		  cmd_addr_i("cmd_addr_i"),
-		  cmd_write_i("cmd_write_i"),
-		  cmd_wdata_i("cmd_wdata_i"),
-		  cmd_rdata_o("cmd_rdata_o"),
-		  cmd_done_o("cmd_done_o"),
+		  s_axi_awvalid_i("s_axi_awvalid_i"),
+		  s_axi_awready_o("s_axi_awready_o"),
+		  s_axi_awaddr_i("s_axi_awaddr_i"),
+		  s_axi_wvalid_i("s_axi_wvalid_i"),
+		  s_axi_wready_o("s_axi_wready_o"),
+		  s_axi_wdata_i("s_axi_wdata_i"),
+		  s_axi_wstrb_i("s_axi_wstrb_i"),
+		  s_axi_bvalid_o("s_axi_bvalid_o"),
+		  s_axi_bready_i("s_axi_bready_i"),
+		  s_axi_bresp_o("s_axi_bresp_o"),
+		  s_axi_arvalid_i("s_axi_arvalid_i"),
+		  s_axi_arready_o("s_axi_arready_o"),
+		  s_axi_araddr_i("s_axi_araddr_i"),
+		  s_axi_rvalid_o("s_axi_rvalid_o"),
+		  s_axi_rready_i("s_axi_rready_i"),
+		  s_axi_rdata_o("s_axi_rdata_o"),
+		  s_axi_rresp_o("s_axi_rresp_o"),
+		  hsel_i("hsel_i"),
+		  haddr_i("haddr_i"),
+		  hwrite_i("hwrite_i"),
+		  htrans_i("htrans_i"),
+		  hsize_i("hsize_i"),
+		  hburst_i("hburst_i"),
+		  hprot_i("hprot_i"),
+		  hready_i("hready_i"),
+		  hwdata_i("hwdata_i"),
+		  hready_o("hready_o"),
+		  hresp_o("hresp_o"),
+		  hrdata_o("hrdata_o"),
 		  spm("spm"),
 		  hddu("hddu"),
 		  noc("noc", noc_cfg),
@@ -107,13 +175,12 @@ public:
 		  spm_cfg_map_sig("spm_cfg_map_sig"),
 		  spm_cfg_update_sig("spm_cfg_update_sig"),
 		  spm_arb_policy_sig("spm_arb_policy_sig"),
-		  spm_noc_mode_sig("spm_noc_mode_sig", SPM_NUM_NOC_PORT),
-		  hddu_spm_addr_sig("hddu_spm_addr_sig", SPM_NUM_NOC_PORT),
-		  hddu_spm_req_sig("hddu_spm_req_sig", SPM_NUM_NOC_PORT),
-		  hddu_spm_we_sig("hddu_spm_we_sig", SPM_NUM_NOC_PORT),
-		  hddu_spm_wdata_sig("hddu_spm_wdata_sig", SPM_NUM_NOC_PORT),
-		  hddu_spm_rdata_sig("hddu_spm_rdata_sig", SPM_NUM_NOC_PORT),
-		  hddu_spm_ready_sig("hddu_spm_ready_sig", SPM_NUM_NOC_PORT),
+		  hddu_spm_req_valid_sig("hddu_spm_req_valid_sig", SPM_NUM_NOC_CHANNEL),
+		  hddu_spm_req_ready_sig("hddu_spm_req_ready_sig", SPM_NUM_NOC_CHANNEL),
+		  hddu_spm_req_payload_sig("hddu_spm_req_payload_sig", SPM_NUM_NOC_CHANNEL),
+		  hddu_spm_resp_valid_sig("hddu_spm_resp_valid_sig", SPM_NUM_NOC_CHANNEL),
+		  hddu_spm_resp_ready_sig("hddu_spm_resp_ready_sig", SPM_NUM_NOC_CHANNEL),
+		  hddu_spm_resp_payload_sig("hddu_spm_resp_payload_sig", SPM_NUM_NOC_CHANNEL),
 		  hddu_mmio_addr_sig("hddu_mmio_addr_sig"),
 		  hddu_mmio_write_sig("hddu_mmio_write_sig"),
 		  hddu_mmio_wdata_sig("hddu_mmio_wdata_sig"),
@@ -126,11 +193,28 @@ public:
 		  pli_req_sig("pli_req_sig"),
 		  plo_req_sig("plo_req_sig"),
 		  plo_resp_sig("plo_resp_sig"),
-		  spm_dma_req_vld_sig("spm_dma_req_vld_sig"),
-		  spm_dma_req_rdy_sig("spm_dma_req_rdy_sig"),
-		  spm_dma_rdata_sig("spm_dma_rdata_sig"),
-		    spm_dma_done_sig("spm_dma_done_sig"),
-		    cmd_rdata_reg_sig("cmd_rdata_reg_sig")
+		  spm_axi_awvalid_sig("spm_axi_awvalid_sig"),
+		  spm_axi_awready_sig("spm_axi_awready_sig"),
+		  spm_axi_awaddr_sig("spm_axi_awaddr_sig"),
+		  spm_axi_wvalid_sig("spm_axi_wvalid_sig"),
+		  spm_axi_wready_sig("spm_axi_wready_sig"),
+		  spm_axi_wdata_sig("spm_axi_wdata_sig"),
+		  spm_axi_wstrb_sig("spm_axi_wstrb_sig"),
+		  spm_axi_bvalid_sig("spm_axi_bvalid_sig"),
+		  spm_axi_bready_sig("spm_axi_bready_sig"),
+		  spm_axi_bresp_sig("spm_axi_bresp_sig"),
+		  spm_axi_arvalid_sig("spm_axi_arvalid_sig"),
+		  spm_axi_arready_sig("spm_axi_arready_sig"),
+		  spm_axi_araddr_sig("spm_axi_araddr_sig"),
+		  spm_axi_rvalid_sig("spm_axi_rvalid_sig"),
+		  spm_axi_rready_sig("spm_axi_rready_sig"),
+		  spm_axi_rdata_sig("spm_axi_rdata_sig"),
+		  spm_axi_rresp_sig("spm_axi_rresp_sig"),
+		  ahb_active_reg("ahb_active_reg"),
+		  ahb_write_reg("ahb_write_reg"),
+		  ahb_addr_reg("ahb_addr_reg"),
+		  ahb_hsize_reg("ahb_hsize_reg"),
+		  ahb_rdata_reg("ahb_rdata_reg")
 	{
 		// Common clock/reset with power-gated local reset
 		spm.clk(clk);
@@ -144,33 +228,49 @@ public:
 		spm.config_map_i(spm_cfg_map_sig);
 		spm.config_update_i(spm_cfg_update_sig);
 		spm.arb_policy_i(spm_arb_policy_sig);
+		spm.pmu_rst_i(spm_pmu_rst_sig);
+		spm.pmu_cycle_cnt_o(spm_pmu_cycle_cnt_sig);
+		spm.pmu_arb_stall_cnt_o(spm_pmu_arb_stall_cnt_sig);
+		spm.pmu_credit_stall_cnt_o(spm_pmu_credit_stall_cnt_sig);
+		for (size_t i = 0; i < SPM_NUM_NOC_CHANNEL; ++i) {
+			spm.pmu_port_txn_cnt_o[i](spm_pmu_port_txn_cnt_sig[i]);
+		}
 
 		// SPM<->HDDU data path
-		for (size_t i = 0; i < SPM_NUM_NOC_PORT; ++i) {
-			hddu.spm_addr[i](hddu_spm_addr_sig[i]);
-			hddu.spm_req[i](hddu_spm_req_sig[i]);
-			hddu.spm_we[i](hddu_spm_we_sig[i]);
-			hddu.spm_wdata[i](hddu_spm_wdata_sig[i]);
-			hddu.spm_rdata[i](hddu_spm_rdata_sig[i]);
-			hddu.spm_ready[i](hddu_spm_ready_sig[i]);
+		for (size_t i = 0; i < SPM_NUM_NOC_CHANNEL; ++i) {
+			hddu.spm_req_valid[i](hddu_spm_req_valid_sig[i]);
+			hddu.spm_req_ready[i](hddu_spm_req_ready_sig[i]);
+			hddu.spm_req_payload[i](hddu_spm_req_payload_sig[i]);
+			hddu.spm_resp_valid[i](hddu_spm_resp_valid_sig[i]);
+			hddu.spm_resp_ready[i](hddu_spm_resp_ready_sig[i]);
+			hddu.spm_resp_payload[i](hddu_spm_resp_payload_sig[i]);
 
-			spm.noc_req_vld_i[i](hddu_spm_req_sig[i]);
-			spm.noc_req_rdy_o[i](hddu_spm_ready_sig[i]);
-			spm.noc_addr_i[i](hddu_spm_addr_sig[i]);
-			spm.noc_mode_i[i](spm_noc_mode_sig[i]);
-			spm.noc_rdata_o[i](hddu_spm_rdata_sig[i]);
-			spm.noc_wdata_i[i](hddu_spm_wdata_sig[i]);
-			spm.noc_resp_vld_o[i](open_noc_resp_vld_sig[i]);
+			spm.spm_req_valid_i[i](hddu_spm_req_valid_sig[i]);
+			spm.spm_req_ready_o[i](hddu_spm_req_ready_sig[i]);
+			spm.spm_req_i[i](hddu_spm_req_payload_sig[i]);
+			spm.spm_resp_valid_o[i](hddu_spm_resp_valid_sig[i]);
+			spm.spm_resp_ready_i[i](hddu_spm_resp_ready_sig[i]);
+			spm.spm_resp_o[i](hddu_spm_resp_payload_sig[i]);
 		}
 
 		// External 64-bit data slave <-> SPM DMA
-		spm.dma_req_vld_i(spm_dma_req_vld_sig);
-		spm.dma_req_rdy_o(spm_dma_req_rdy_sig);
-		spm.dma_addr_i(data_addr_i);
-		spm.dma_rw_i(data_write_i);
-		spm.dma_wdata_i(data_wdata_i);
-		spm.dma_rdata_o(spm_dma_rdata_sig);
-		spm.dma_done_o(spm_dma_done_sig);
+		spm.s_axi_awvalid_i(spm_axi_awvalid_sig);
+		spm.s_axi_awready_o(spm_axi_awready_sig);
+		spm.s_axi_awaddr_i(spm_axi_awaddr_sig);
+		spm.s_axi_wvalid_i(spm_axi_wvalid_sig);
+		spm.s_axi_wready_o(spm_axi_wready_sig);
+		spm.s_axi_wdata_i(spm_axi_wdata_sig);
+		spm.s_axi_wstrb_i(spm_axi_wstrb_sig);
+		spm.s_axi_bvalid_o(spm_axi_bvalid_sig);
+		spm.s_axi_bready_i(spm_axi_bready_sig);
+		spm.s_axi_bresp_o(spm_axi_bresp_sig);
+		spm.s_axi_arvalid_i(spm_axi_arvalid_sig);
+		spm.s_axi_arready_o(spm_axi_arready_sig);
+		spm.s_axi_araddr_i(spm_axi_araddr_sig);
+		spm.s_axi_rvalid_o(spm_axi_rvalid_sig);
+		spm.s_axi_rready_i(spm_axi_rready_sig);
+		spm.s_axi_rdata_o(spm_axi_rdata_sig);
+		spm.s_axi_rresp_o(spm_axi_rresp_sig);
 
 		// HDDU MMIO
 		hddu.mmio_addr(hddu_mmio_addr_sig);
@@ -198,36 +298,138 @@ public:
 
 		SC_METHOD(comb_power_and_wiring);
 		sensitive << reset_n << power_enable_i;
-		sensitive << data_req_vld_i << spm_dma_req_rdy_sig << spm_dma_rdata_sig << spm_dma_done_sig;
+		sensitive << s_axi_awvalid_i << s_axi_awaddr_i;
+		sensitive << s_axi_wvalid_i << s_axi_wdata_i << s_axi_wstrb_i;
+		sensitive << s_axi_bready_i << s_axi_arvalid_i << s_axi_araddr_i << s_axi_rready_i;
+		sensitive << spm_axi_awready_sig << spm_axi_wready_sig << spm_axi_bvalid_sig << spm_axi_bresp_sig;
+		sensitive << spm_axi_arready_sig << spm_axi_rvalid_sig << spm_axi_rdata_sig << spm_axi_rresp_sig;
 		sensitive << hddu_interrupt_sig;
-		sensitive << cmd_req_vld_i << cmd_addr_i << cmd_wdata_i;
-		sensitive << cmd_rdata_reg_sig;
+		sensitive << ahb_active_reg << ahb_addr_reg << ahb_write_reg << hwdata_i;
 		sensitive << ps_req_sig.ready_sig << pd_req_sig.ready_sig << pli_req_sig.ready_sig;
 		sensitive << plo_resp_sig.valid_sig << plo_resp_sig.data_sig;
+		sensitive << spm_cfg_map_sig << spm_arb_policy_sig << hddu_mmio_rdata_sig;
 
-		SC_CTHREAD(ctrl_process, clk.pos());
+		SC_CTHREAD(seq_ahb_ctrl, clk.pos());
 		reset_signal_is(local_reset_n_sig, false);
+
+		SC_METHOD(trace_process);
+		sensitive << clk.pos();
+	}
+
+	void set_trace_context(uint32_t pid, int tid_base) {
+		trace_pid = pid;
+		trace_id = tid_base;
+		trace_init = false;
+		last_state_cluster = "IDLE";
+		last_state_cmd = "IDLE";
+		last_state_dma = "IDLE";
+	}
+
+	int get_trace_num() const { return 4; }
+
+	std::pair<uint32_t, uint32_t> enable_perffeto_trace(uint32_t start_pid = 100, uint32_t start_tid = 1000) {
+		set_trace_context(start_pid, static_cast<int>(start_tid));
+
+		uint32_t next_pid = start_pid + 1;
+		uint32_t next_tid = start_tid + static_cast<uint32_t>(get_trace_num() + 1);
+
+		auto spm_next = spm.enable_perffeto_trace(next_pid, next_tid);
+		next_pid = spm_next.first;
+		next_tid = spm_next.second;
+
+		auto hddu_next = hddu.enable_perffeto_trace(next_pid, next_tid);
+		next_pid = hddu_next.first;
+		next_tid = hddu_next.second;
+
+		auto noc_next = noc.enable_perffeto_trace(next_pid, next_tid);
+		next_pid = noc_next.first;
+		next_tid = noc_next.second;
+
+		return {next_pid, next_tid};
 	}
 
 private:
+	int trace_id = -1;
+	uint32_t trace_pid = 0;
+	bool trace_init = false;
+	std::string last_state_cluster = "IDLE";
+	std::string last_state_cmd = "IDLE";
+	std::string last_state_dma = "IDLE";
+
+	void trace_process() {
+		if (trace_id < 0) return;
+
+		const uint32_t tid_cluster = static_cast<uint32_t>(trace_id + 1);
+		const uint32_t tid_cmd = static_cast<uint32_t>(trace_id + 2);
+		const uint32_t tid_dma = static_cast<uint32_t>(trace_id + 3);
+
+		auto bool_to_json = [](bool v) { return v ? "true" : "false"; };
+		auto trace_state = [&](std::string& last, const std::string& current,
+							   const std::string& cat, uint32_t tid,
+							   const std::string& args) {
+			if (current != last) {
+				TRACE_EVENT(last, cat, TRACE_END, trace_pid, tid, "{}");
+				TRACE_EVENT(current, cat, TRACE_BEGIN, trace_pid, tid, args);
+				last = current;
+			}
+		};
+
+		if (!trace_init) {
+			TRACE_THREAD_NAME(trace_pid, tid_cluster, std::string(name()) + " Cluster");
+			TRACE_THREAD_NAME(trace_pid, tid_cmd, std::string(name()) + " Cmd");
+			TRACE_THREAD_NAME(trace_pid, tid_dma, std::string(name()) + " DMA");
+
+			TRACE_EVENT(last_state_cluster, "Cluster_State", TRACE_BEGIN, trace_pid, tid_cluster, "{}");
+			TRACE_EVENT(last_state_cmd, "Cluster_AHB", TRACE_BEGIN, trace_pid, tid_cmd, "{}");
+			TRACE_EVENT(last_state_dma, "Cluster_DMA", TRACE_BEGIN, trace_pid, tid_dma, "{}");
+			trace_init = true;
+		}
+
+		const bool power_on = power_enable_i.read();
+		const bool rst_n = reset_n.read();
+		const std::string cluster_state = !power_on ? "POWER_OFF" : (rst_n ? "RUN" : "RESET");
+		trace_state(last_state_cluster, cluster_state, "Cluster_State", tid_cluster,
+					std::string("{\"power\": ") + bool_to_json(power_on)
+					+ ", \"reset_n\": " + bool_to_json(rst_n)
+					+ ", \"interrupt\": " + bool_to_json(interrupt_o.read()) + "}");
+
+		const bool ahb_active = ahb_active_reg.read();
+		const bool ahb_write = ahb_write_reg.read();
+		const std::string ahb_state = ahb_active ? (ahb_write ? "WRITE" : "READ") : "IDLE";
+		trace_state(last_state_cmd, ahb_state, "Cluster_AHB", tid_cmd,
+					std::string("{\"addr\": ") + std::to_string(ahb_addr_reg.read().to_uint())
+					+ ", \"write\": " + bool_to_json(ahb_write) + "}");
+
+		const bool dma_req = (s_axi_awvalid_i.read() && s_axi_awready_o.read())
+			|| (s_axi_wvalid_i.read() && s_axi_wready_o.read())
+			|| (s_axi_arvalid_i.read() && s_axi_arready_o.read());
+		const bool dma_done = (s_axi_bvalid_o.read() && s_axi_bready_i.read())
+			|| (s_axi_rvalid_o.read() && s_axi_rready_i.read());
+		const std::string dma_state = dma_req ? (dma_done ? "XFER" : "REQ") : (dma_done ? "RESP" : "IDLE");
+		trace_state(last_state_dma, dma_state, "Cluster_DMA", tid_dma,
+					std::string("{\"req\": ") + bool_to_json(dma_req)
+					+ ", \"done\": " + bool_to_json(dma_done) + "}");
+	}
+
 	sc_signal<bool> local_reset_n_sig;
 
 	// SPM config/control
 	sc_signal<sc_uint<8>> spm_cfg_map_sig;
 	sc_signal<bool> spm_cfg_update_sig;
 	sc_signal<bool> spm_arb_policy_sig;
-
-	// Fixed SPM mode (all HDDU accesses use parallel layout)
-	sc_vector<sc_signal<bool>> spm_noc_mode_sig;
+	sc_signal<bool> spm_pmu_rst_sig;
+	sc_signal<sc_uint<64>> spm_pmu_cycle_cnt_sig;
+	sc_vector<sc_signal<sc_uint<64>>> spm_pmu_port_txn_cnt_sig{"spm_pmu_port_txn_cnt_sig", SPM_NUM_NOC_CHANNEL};
+	sc_signal<sc_uint<64>> spm_pmu_arb_stall_cnt_sig;
+	sc_signal<sc_uint<64>> spm_pmu_credit_stall_cnt_sig;
 
 	// HDDU <-> SPM
-	sc_vector<sc_signal<sc_uint<SPM_ADDR_WIDTH>>> hddu_spm_addr_sig;
-	sc_vector<sc_signal<bool>> hddu_spm_req_sig;
-	sc_vector<sc_signal<bool>> hddu_spm_we_sig;
-	sc_vector<sc_signal<sc_biguint<HDDU_DATA_BITS>>> hddu_spm_wdata_sig;
-	sc_vector<sc_signal<sc_biguint<HDDU_DATA_BITS>>> hddu_spm_rdata_sig;
-	sc_vector<sc_signal<bool>> hddu_spm_ready_sig;
-	std::array<sc_signal<bool>, SPM_NUM_NOC_PORT> open_noc_resp_vld_sig;
+	sc_vector<sc_signal<bool>> hddu_spm_req_valid_sig;
+	sc_vector<sc_signal<bool>> hddu_spm_req_ready_sig;
+	sc_vector<sc_signal<spm_req_payload_t>> hddu_spm_req_payload_sig;
+	sc_vector<sc_signal<bool>> hddu_spm_resp_valid_sig;
+	sc_vector<sc_signal<bool>> hddu_spm_resp_ready_sig;
+	sc_vector<sc_signal<spm_resp_payload_t>> hddu_spm_resp_payload_sig;
 
 	// HDDU MMIO
 	sc_signal<sc_uint<32>> hddu_mmio_addr_sig;
@@ -247,13 +449,31 @@ private:
 	VRDSIG<noc_addr_req_t> plo_req_sig;
 	VRDSIG<noc_resp_payload_t> plo_resp_sig;
 
-	// SPM DMA bridge
-	sc_signal<bool> spm_dma_req_vld_sig;
-	sc_signal<bool> spm_dma_req_rdy_sig;
-	sc_signal<sc_biguint<SPM_BANK_WIDTH_BITS>> spm_dma_rdata_sig;
-	sc_signal<bool> spm_dma_done_sig;
+	// SPM AXI-Lite bridge
+	sc_signal<bool> spm_axi_awvalid_sig;
+	sc_signal<bool> spm_axi_awready_sig;
+	sc_signal<sc_uint<SPM_ADDR_WIDTH>> spm_axi_awaddr_sig;
+	sc_signal<bool> spm_axi_wvalid_sig;
+	sc_signal<bool> spm_axi_wready_sig;
+	sc_signal<sc_biguint<SPM_SRAM_BANK_WIDTH_BITS>> spm_axi_wdata_sig;
+	sc_signal<sc_uint<SPM_SRAM_BANK_WIDTH_BITS / 8>> spm_axi_wstrb_sig;
+	sc_signal<bool> spm_axi_bvalid_sig;
+	sc_signal<bool> spm_axi_bready_sig;
+	sc_signal<sc_uint<2>> spm_axi_bresp_sig;
+	sc_signal<bool> spm_axi_arvalid_sig;
+	sc_signal<bool> spm_axi_arready_sig;
+	sc_signal<sc_uint<SPM_ADDR_WIDTH>> spm_axi_araddr_sig;
+	sc_signal<bool> spm_axi_rvalid_sig;
+	sc_signal<bool> spm_axi_rready_sig;
+	sc_signal<sc_biguint<SPM_SRAM_BANK_WIDTH_BITS>> spm_axi_rdata_sig;
+	sc_signal<sc_uint<2>> spm_axi_rresp_sig;
 
-	sc_signal<sc_uint<32>> cmd_rdata_reg_sig;
+	sc_signal<bool> ahb_active_reg;
+	sc_signal<bool> ahb_write_reg;
+	sc_signal<sc_uint<32>> ahb_addr_reg;
+	sc_signal<sc_uint<3>> ahb_hsize_reg;
+	sc_signal<sc_uint<32>> ahb_rdata_reg;
+
 	sc_uint<32> noc_last_cmd_reg{};
 
 	static bool in_range(uint32_t addr, uint32_t base, uint32_t size) {
@@ -264,72 +484,100 @@ private:
 		const bool power_on = power_enable_i.read();
 		local_reset_n_sig.write(reset_n.read() && power_on);
 
-		// External data slave gating
-		spm_dma_req_vld_sig.write(power_on && data_req_vld_i.read());
-		data_req_rdy_o.write(power_on && spm_dma_req_rdy_sig.read());
-		data_rdata_o.write(power_on ? spm_dma_rdata_sig.read() : sc_biguint<SPM_BANK_WIDTH_BITS>(0));
-		data_done_o.write(power_on && spm_dma_done_sig.read());
+		// External AXI4 data slave gating
+		spm_axi_awvalid_sig.write(power_on && s_axi_awvalid_i.read());
+		spm_axi_awaddr_sig.write(s_axi_awaddr_i.read());
+		s_axi_awready_o.write(power_on && spm_axi_awready_sig.read());
 
-		// External command slave default view
-		cmd_req_rdy_o.write(power_on);
-		cmd_rdata_o.write(cmd_rdata_reg_sig.read());
+		spm_axi_wvalid_sig.write(power_on && s_axi_wvalid_i.read());
+		spm_axi_wdata_sig.write(s_axi_wdata_i.read());
+		spm_axi_wstrb_sig.write(s_axi_wstrb_i.read());
+		s_axi_wready_o.write(power_on && spm_axi_wready_sig.read());
+
+		spm_axi_bready_sig.write(power_on && s_axi_bready_i.read());
+		s_axi_bvalid_o.write(power_on && spm_axi_bvalid_sig.read());
+		s_axi_bresp_o.write(power_on ? spm_axi_bresp_sig.read() : sc_uint<2>(axi4lite::AXI_RESP_DECERR));
+
+		spm_axi_arvalid_sig.write(power_on && s_axi_arvalid_i.read());
+		spm_axi_araddr_sig.write(s_axi_araddr_i.read());
+		s_axi_arready_o.write(power_on && spm_axi_arready_sig.read());
+
+		spm_axi_rready_sig.write(power_on && s_axi_rready_i.read());
+		s_axi_rvalid_o.write(power_on && spm_axi_rvalid_sig.read());
+		s_axi_rdata_o.write(power_on ? spm_axi_rdata_sig.read() : sc_biguint<SPM_SRAM_BANK_WIDTH_BITS>(0));
+		s_axi_rresp_o.write(power_on ? spm_axi_rresp_sig.read() : sc_uint<2>(axi4lite::AXI_RESP_DECERR));
+
+		// AHB Output Logic
+		hready_o.write(power_on);
+		hresp_o.write(false); // OKAY
 
 		// Top-level interrupt
 		interrupt_o.write(power_on && hddu_interrupt_sig.read());
 
-		// HDDU MMIO pre-routing (read path and write payload)
-		if (power_on && cmd_req_vld_i.read() && in_range(cmd_addr_i.read().to_uint(), kCmdHdduBase, kCmdHdduSize)) {
-			hddu_mmio_addr_sig.write(cmd_addr_i.read() - kCmdHdduBase);
-			hddu_mmio_wdata_sig.write(cmd_wdata_i.read());
-		} else {
-			hddu_mmio_addr_sig.write(0);
-			hddu_mmio_wdata_sig.write(0);
-		}
-
-		// SPM NoC mode fixed to parallel for HDDU-side accesses
-		for (size_t i = 0; i < SPM_NUM_NOC_PORT; ++i) {
-			spm_noc_mode_sig[i].write(true);
-		}
+		// AHB read data is sequence-driven to avoid delta-cycle races.
+		hrdata_o.write(power_on ? ahb_rdata_reg.read() : sc_uint<32>(0));
 
 	}
 
-	void ctrl_process() {
+	void seq_ahb_ctrl() {
 		spm_cfg_map_sig.write(0);
 		spm_cfg_update_sig.write(false);
 		spm_arb_policy_sig.write(false);
-
-		hddu_mmio_write_sig.write(false);
+		spm_pmu_rst_sig.write(false);
 
 		noc_command_mode_sig.write(false);
 		noc_command_data_sig.write(0);
-
-		cmd_done_o.write(false);
-		cmd_rdata_reg_sig.write(0);
 		noc_last_cmd_reg = 0;
+
+		ahb_active_reg.write(false);
+		ahb_write_reg.write(false);
+		ahb_addr_reg.write(0);
+		ahb_rdata_reg.write(0);
+
+		hddu_mmio_addr_sig.write(0);
+		hddu_mmio_wdata_sig.write(0);
+		hddu_mmio_write_sig.write(false);
 
 		wait();
 
 		while (true) {
 			spm_cfg_update_sig.write(false);
-			hddu_mmio_write_sig.write(false);
 			noc_command_mode_sig.write(false);
-			cmd_done_o.write(false);
+			hddu_mmio_write_sig.write(false);
+			spm_pmu_rst_sig.write(false);
 
 			if (!power_enable_i.read()) {
-				cmd_rdata_reg_sig.write(0);
+				ahb_active_reg.write(false);
 				wait();
 				continue;
 			}
 
-			if (cmd_req_vld_i.read() && cmd_req_rdy_o.read()) {
-				const uint32_t addr = cmd_addr_i.read().to_uint();
-				const bool is_write = cmd_write_i.read();
-				const uint32_t wdata = cmd_wdata_i.read().to_uint();
+			// Pipeline Control: Capture Address Phase for Next Cycle Data Phase
+			const bool sel = hsel_i.read();
+			const bool ready = hready_i.read();
+			const sc_uint<2> trans = htrans_i.read();
+			// HTRANS: 2=NONSEQ, 3=SEQ implies valid transfer
+			const bool is_trans = sel && ready && (trans[1] != 0);
+
+			if (is_trans) {
+				ahb_addr_reg.write(haddr_i.read());
+				ahb_write_reg.write(hwrite_i.read());
+				ahb_hsize_reg.write(hsize_i.read());
+				ahb_active_reg.write(true);
+			} else {
+				ahb_active_reg.write(false);
+			}
+
+			// Data Phase Execution (using registers latched in previous cycle)
+			if (ahb_active_reg.read()) {
+				const uint32_t addr = ahb_addr_reg.read().to_uint();
+				const bool is_write = ahb_write_reg.read();
+				const uint32_t wdata = hwdata_i.read().to_uint(); // HWDATA valid now
 				sc_uint<32> read_value = 0;
 
-				if (in_range(addr, kCmdSpmBase, kCmdSpmSize)) {
-					const uint32_t off = addr - kCmdSpmBase;
-					if (is_write) {
+				if (is_write) {
+					if (in_range(addr, kCmdSpmBase, kCmdSpmSize)) {
+						const uint32_t off = addr - kCmdSpmBase;
 						if (off == kSpmCfgMapOffset) {
 							spm_cfg_map_sig.write(static_cast<sc_uint<8>>(wdata & 0xFF));
 						} else if (off == kSpmCfgUpdateOffset) {
@@ -338,39 +586,66 @@ private:
 							}
 						} else if (off == kSpmArbPolicyOffset) {
 							spm_arb_policy_sig.write((wdata & 0x1U) != 0U);
+						} else if (off == kSpmPmuCtrlOffset) {
+							if ((wdata & 0x1U) != 0U) {
+								spm_pmu_rst_sig.write(true);
+							}
 						}
-					} else {
+					} else if (in_range(addr, kCmdNocBase, kCmdNocSize)) {
+						const uint32_t off = addr - kCmdNocBase;
+						if (off == kNocCmdDataOffset) {
+							noc_last_cmd_reg = wdata;
+							noc_command_data_sig.write(static_cast<sc_uint<32>>(wdata));
+							noc_command_mode_sig.write(true);
+						}
+					} else if (in_range(addr, kCmdHdduBase, kCmdHdduSize)) {
+						hddu_mmio_addr_sig.write(static_cast<sc_uint<32>>(addr - kCmdHdduBase));
+						hddu_mmio_wdata_sig.write(static_cast<sc_uint<32>>(wdata));
+						hddu_mmio_write_sig.write(true);
+					}
+				} else {
+					if (in_range(addr, kCmdSpmBase, kCmdSpmSize)) {
+						const uint32_t off = addr - kCmdSpmBase;
 						if (off == kSpmCfgMapOffset) {
 							read_value = spm_cfg_map_sig.read();
 						} else if (off == kSpmCfgUpdateOffset) {
 							read_value = 0;
 						} else if (off == kSpmArbPolicyOffset) {
 							read_value = spm_arb_policy_sig.read() ? 1U : 0U;
+						} else if (off == kSpmPmuCtrlOffset) {
+							read_value = 0;
+						} else if (off == kSpmPmuCycleCntLoOffset) {
+							read_value = static_cast<uint32_t>(spm_pmu_cycle_cnt_sig.read().to_uint64() & 0xFFFFFFFFULL);
+						} else if (off == kSpmPmuCycleCntHiOffset) {
+							read_value = static_cast<uint32_t>((spm_pmu_cycle_cnt_sig.read().to_uint64() >> 32) & 0xFFFFFFFFULL);
+						} else if (off == kSpmPmuArbStallLoOffset) {
+							read_value = static_cast<uint32_t>(spm_pmu_arb_stall_cnt_sig.read().to_uint64() & 0xFFFFFFFFULL);
+						} else if (off == kSpmPmuArbStallHiOffset) {
+							read_value = static_cast<uint32_t>((spm_pmu_arb_stall_cnt_sig.read().to_uint64() >> 32) & 0xFFFFFFFFULL);
+						} else if (off == kSpmPmuCreditStallLoOffset) {
+							read_value = static_cast<uint32_t>(spm_pmu_credit_stall_cnt_sig.read().to_uint64() & 0xFFFFFFFFULL);
+						} else if (off == kSpmPmuCreditStallHiOffset) {
+							read_value = static_cast<uint32_t>((spm_pmu_credit_stall_cnt_sig.read().to_uint64() >> 32) & 0xFFFFFFFFULL);
+						} else if (off >= kSpmPmuPortTxnBaseOffset) {
+							const uint32_t rel = off - kSpmPmuPortTxnBaseOffset;
+							const uint32_t idx = rel / kSpmPmuPortTxnStride;
+							const bool high = (rel % kSpmPmuPortTxnStride) == 0x4;
+							if (idx < SPM_NUM_NOC_CHANNEL && ((rel % kSpmPmuPortTxnStride) == 0x0 || high)) {
+								const uint64_t v = spm_pmu_port_txn_cnt_sig[idx].read().to_uint64();
+								read_value = static_cast<uint32_t>(high ? (v >> 32) : (v & 0xFFFFFFFFULL));
+							}
 						}
-					}
-				} else if (in_range(addr, kCmdHdduBase, kCmdHdduSize)) {
-					if (is_write) {
-						hddu_mmio_write_sig.write(true);
-					} else {
+					} else if (in_range(addr, kCmdHdduBase, kCmdHdduSize)) {
+						hddu_mmio_addr_sig.write(static_cast<sc_uint<32>>(addr - kCmdHdduBase));
 						read_value = hddu_mmio_rdata_sig.read();
-					}
-				} else if (in_range(addr, kCmdNocBase, kCmdNocSize)) {
-					const uint32_t off = addr - kCmdNocBase;
-					if (is_write) {
-						if (off == kNocCmdDataOffset) {
-							noc_last_cmd_reg = wdata;
-							noc_command_data_sig.write(static_cast<sc_uint<32>>(wdata));
-							noc_command_mode_sig.write(true);
-						}
-					} else {
+					} else if (in_range(addr, kCmdNocBase, kCmdNocSize)) {
+						const uint32_t off = addr - kCmdNocBase;
 						if (off == kNocCmdDataOffset) {
 							read_value = noc_last_cmd_reg;
 						}
 					}
+					ahb_rdata_reg.write(read_value);
 				}
-
-				cmd_rdata_reg_sig.write(read_value);
-				cmd_done_o.write(true);
 			}
 
 			wait();
