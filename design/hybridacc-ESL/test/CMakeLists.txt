@@ -320,13 +320,28 @@ add_executable(test_cluster_sim
     mvp_compiler.hpp
 )
 
+add_executable(test_cluster_sim_advanced
+    test_cluster_sim_advanced.cpp
+)
+
 if(ENABLE_DEBUG_UTILS)
     target_compile_definitions(test_cluster_sim PRIVATE DEBUG_UTILS)
     target_compile_definitions(test_cluster_sim PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
     target_compile_definitions(test_cluster_sim PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
+    target_compile_definitions(test_cluster_sim_advanced PRIVATE DEBUG_UTILS)
+    target_compile_definitions(test_cluster_sim_advanced PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
+    target_compile_definitions(test_cluster_sim_advanced PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
 endif()
 
 target_link_libraries(test_cluster_sim
+    pe_simulator
+    systemc
+    pthread
+    tb_utils
+    stdc++fs
+)
+
+target_link_libraries(test_cluster_sim_advanced
     pe_simulator
     systemc
     pthread
@@ -341,4 +356,12 @@ add_custom_target(run_cluster_sim
     COMMENT "Running ComputeCluster simulation"
 )
 
+add_custom_target(run_cluster_sim_advanced
+    COMMAND ./test_cluster_sim_advanced
+    DEPENDS test_cluster_sim_advanced
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running advanced ComputeCluster simulation"
+)
+
 add_test(NAME ComputeCluster_Simulation COMMAND test_cluster_sim)
+add_test(NAME ComputeCluster_Simulation_Advanced COMMAND test_cluster_sim_advanced)

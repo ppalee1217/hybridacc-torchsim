@@ -214,6 +214,7 @@ public:
 		  ahb_write_reg("ahb_write_reg"),
 		  ahb_addr_reg("ahb_addr_reg"),
 		  ahb_hsize_reg("ahb_hsize_reg"),
+		  ahb_read_wait_reg("ahb_read_wait_reg"),
 		  ahb_rdata_reg("ahb_rdata_reg")
 	{
 		// Common clock/reset with power-gated local reset
@@ -304,7 +305,7 @@ public:
 		sensitive << spm_axi_awready_sig << spm_axi_wready_sig << spm_axi_bvalid_sig << spm_axi_bresp_sig;
 		sensitive << spm_axi_arready_sig << spm_axi_rvalid_sig << spm_axi_rdata_sig << spm_axi_rresp_sig;
 		sensitive << hddu_interrupt_sig;
-		sensitive << ahb_active_reg << ahb_addr_reg << ahb_write_reg << hwdata_i;
+		sensitive << ahb_active_reg << ahb_addr_reg << ahb_write_reg << ahb_read_wait_reg << hwdata_i;
 		sensitive << ps_req_sig.ready_sig << pd_req_sig.ready_sig << pli_req_sig.ready_sig;
 		sensitive << plo_resp_sig.valid_sig << plo_resp_sig.data_sig;
 		sensitive << spm_cfg_map_sig << spm_arb_policy_sig << hddu_mmio_rdata_sig;
@@ -387,7 +388,7 @@ private:
 
 		const bool power_on = power_enable_i.read();
 		const bool rst_n = reset_n.read();
-		const std::string cluster_state = !power_on ? "POWER_OFF" : (rst_n ? "RUN" : "RESET");
+		const std::string cluster_state = !power_on ? "POWER_OFF" : (rst_n ? ((interrupt_o.read()) ? "INTERRUPT" : "RUN") : "RESET");
 		trace_state(last_state_cluster, cluster_state, "Cluster_State", tid_cluster,
 					std::string("{\"power\": ") + bool_to_json(power_on)
 					+ ", \"reset_n\": " + bool_to_json(rst_n)
@@ -472,6 +473,7 @@ private:
 	sc_signal<bool> ahb_write_reg;
 	sc_signal<sc_uint<32>> ahb_addr_reg;
 	sc_signal<sc_uint<3>> ahb_hsize_reg;
+	sc_signal<bool> ahb_read_wait_reg;
 	sc_signal<sc_uint<32>> ahb_rdata_reg;
 
 	sc_uint<32> noc_last_cmd_reg{};
@@ -508,7 +510,7 @@ private:
 		s_axi_rresp_o.write(power_on ? spm_axi_rresp_sig.read() : sc_uint<2>(axi4lite::AXI_RESP_DECERR));
 
 		// AHB Output Logic
-		hready_o.write(power_on);
+		hready_o.write(power_on && !ahb_read_wait_reg.read());
 		hresp_o.write(false); // OKAY
 
 		// Top-level interrupt
@@ -532,6 +534,7 @@ private:
 		ahb_active_reg.write(false);
 		ahb_write_reg.write(false);
 		ahb_addr_reg.write(0);
+		ahb_read_wait_reg.write(false);
 		ahb_rdata_reg.write(0);
 
 		hddu_mmio_addr_sig.write(0);
@@ -546,8 +549,13 @@ private:
 			hddu_mmio_write_sig.write(false);
 			spm_pmu_rst_sig.write(false);
 
+			// Keep current read path and insert one wait-state during read data phase.
+			const bool read_data_phase = ahb_active_reg.read() && !ahb_write_reg.read();
+			ahb_read_wait_reg.write(read_data_phase);
+
 			if (!power_enable_i.read()) {
 				ahb_active_reg.write(false);
+				ahb_read_wait_reg.write(false);
 				wait();
 				continue;
 			}
@@ -557,7 +565,7 @@ private:
 			const bool ready = hready_i.read();
 			const sc_uint<2> trans = htrans_i.read();
 			// HTRANS: 2=NONSEQ, 3=SEQ implies valid transfer
-			const bool is_trans = sel && ready && (trans[1] != 0);
+			const bool is_trans = sel && ready && !ahb_read_wait_reg.read() && (trans[1] != 0);
 
 			if (is_trans) {
 				ahb_addr_reg.write(haddr_i.read());

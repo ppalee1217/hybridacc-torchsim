@@ -1,18 +1,18 @@
 {
-  "name": "conv_k3c4",
+  "name": "conv_k3c4ich4och64",
   "mode": "conv2d",
-  "pe_program": "testbench/cluster/conv_k3c4/pe_program.asm",
+  "pe_program": "testbench/cluster/conv_k3c4ich4och64/pe_program.asm",
   "num_pes": 48,
   "num_bus": 3,
   "stride": 1,
   "input_h": 16,
   "input_w": 200,
-  "input_c": 16,
-  "out_ch": 16,
+  "input_c": 4,
+  "out_ch": 64,
   "kernel_h": 3,
   "kernel_w": 3,
   "seed": 123,
   "padding": 0,
   "ultra_mode": false,
-  "out_dir": "./output/cluster-sim/conv_k3c4"
+  "out_dir": "./output/cluster-sim/conv_k3c4ich4och64"
 }

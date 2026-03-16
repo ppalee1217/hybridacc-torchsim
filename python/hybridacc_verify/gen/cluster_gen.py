@@ -243,8 +243,6 @@ def _compile_cluster_plans_conv2d(
     waves_oc = max(1, int(wave_schedule.get("temporal_wave_out_ch", 1)))
     waves_ic = max(1, int(wave_schedule.get("temporal_wave_in_ch", 1)))
 
-    in_ch_pack = max(1, _ceil_div_int(in_ch, 4))
-
     loop_in_height = in_h
     loop_out_height = out_h
     if ultra_mode:
@@ -277,7 +275,6 @@ def _compile_cluster_plans_conv2d(
                 count_oc = oc_r[1] - oc_r[0]
                 count_oc_pack = max(1, _ceil_div_int(count_oc, 4))
                 count_ic_pack = max(1, _ceil_div_int(ic_r[1] - ic_r[0], 4))
-                ic_pack_start = int(ic_r[0]) // 4
 
                 plan = {
                     "name": f"CONV_H{wh}_OC{woc}_IC{wic}",
@@ -285,8 +282,10 @@ def _compile_cluster_plans_conv2d(
                     "ultra_mode": ultra_mode,
                     "agu_ps": _new_agu_cfg(True, ultra_mode),
                     "agu_pd": _new_agu_cfg(True, ultra_mode),
-                    "agu_pli": _new_agu_cfg(wic == 0, ultra_mode),
-                    "agu_plo": _new_agu_cfg(wic == waves_ic - 1, ultra_mode),
+                    # Keep partial-sum read/write AGUs active on every wave.
+                    # DMA writeback policy is independent from in-cluster accumulation traffic.
+                    "agu_pli": _new_agu_cfg(True, ultra_mode),
+                    "agu_plo": _new_agu_cfg(True, ultra_mode),
                 }
 
                 agu_ps = plan["agu_ps"]
@@ -295,10 +294,10 @@ def _compile_cluster_plans_conv2d(
                 agu_ps["iter2"] = int(kernel_size)
                 agu_ps["iter3"] = int(count_oc)
                 agu_ps["stride0"] = 1
-                agu_ps["stride1"] = int(in_ch_pack)
-                agu_ps["stride2"] = int(kernel_size * in_ch_pack)
-                agu_ps["stride3"] = int(kernel_size * kernel_size * in_ch_pack)
-                agu_ps["base_addr"] = int(ps_local_base + ic_pack_start)
+                agu_ps["stride1"] = int(count_ic_pack)
+                agu_ps["stride2"] = int(kernel_size * count_ic_pack)
+                agu_ps["stride3"] = int(kernel_size * kernel_size * count_ic_pack)
+                agu_ps["base_addr"] = int(ps_local_base)
                 agu_ps["tag_base"] = 0
                 agu_ps["tag_stride0"] = 1
                 agu_ps["tag_stride1"] = 1
@@ -310,11 +309,10 @@ def _compile_cluster_plans_conv2d(
                 agu_pd["iter2"] = int(in_w)
                 agu_pd["iter3"] = 1
                 agu_pd["stride0"] = 1
-                agu_pd["stride1"] = int(in_w * in_ch_pack)
-                agu_pd["stride2"] = int(in_ch_pack)
+                agu_pd["stride1"] = int(in_w * count_ic_pack)
+                agu_pd["stride2"] = int(count_ic_pack)
                 agu_pd["stride3"] = 0
-                pd_offset = int(ih_start) * int(in_w) * int(in_ch_pack) + int(ic_pack_start)
-                agu_pd["base_addr"] = int(pd_local_base + pd_offset)
+                agu_pd["base_addr"] = int(pd_local_base)
                 agu_pd["tag_base"] = 0
                 agu_pd["tag_stride0"] = 1
                 agu_pd["tag_stride1"] = 1
@@ -412,6 +410,7 @@ def _build_spm_dma_plan(
         2: "PLI",
         3: "PLO",
     }
+    channel_name_by_group = {v: k for k, v in channel_names.items()}
 
     def align_up(words: int) -> int:
         return max(align_words, ((max(words, 1) + align_words - 1) // align_words) * align_words)
@@ -468,31 +467,59 @@ def _build_spm_dma_plan(
             "unit": "byte",
         }
 
-    def build_nhwc_channel_chunk_addr_gen(base_addr: int,
-                                          shape: List[int],
-                                          channel_word_offset: int,
-                                          channel_word_count: int) -> Optional[Dict[str, Any]]:
-        if len(shape) != 4:
-            return None
-        n, h, w, c = [int(v) for v in shape]
-        if n <= 0 or h <= 0 or w <= 0 or c <= 0:
+    def wave_dim_range(total: int, waves: int, wave_idx: int) -> Tuple[int, int]:
+        chunks = split_evenly(max(0, int(total)), max(1, int(waves)))
+        start = int(sum(chunks[:max(0, int(wave_idx))]))
+        if wave_idx < 0 or wave_idx >= len(chunks):
+            return start, 0
+        return start, int(chunks[wave_idx])
+
+    def build_packed_4d_slice_addr_gen(base_addr: int,
+                                       shape: List[int],
+                                       starts: List[int],
+                                       counts: List[int]) -> Optional[Dict[str, Any]]:
+        if len(shape) != 4 or len(starts) != 4 or len(counts) != 4:
             return None
 
-        c_words_total = (c + 3) // 4
-        if channel_word_count <= 0 or channel_word_offset < 0:
+        d0, d1, d2, d3_elems = [int(v) for v in shape]
+        s0, s1, s2, s3 = [int(v) for v in starts]
+        c0, c1, c2, c3_words = [int(v) for v in counts]
+        d3_words = _ceil_div_int(d3_elems, 4)
+
+        if d0 <= 0 or d1 <= 0 or d2 <= 0 or d3_words <= 0:
             return None
-        if channel_word_offset + channel_word_count > c_words_total:
+        if c0 <= 0 or c1 <= 0 or c2 <= 0 or c3_words <= 0:
+            return None
+        if s0 < 0 or s1 < 0 or s2 < 0 or s3 < 0:
+            return None
+        if s0 + c0 > d0 or s1 + c1 > d1 or s2 + c2 > d2 or s3 + c3_words > d3_words:
             return None
 
         stride3 = 8
-        stride2 = c_words_total * stride3
-        stride1 = w * stride2
-        stride0 = h * stride1
+        stride2 = d3_words * stride3
+        stride1 = d2 * stride2
+        stride0 = d1 * stride1
+        base = int(base_addr) + s0 * stride0 + s1 * stride1 + s2 * stride2 + s3 * stride3
+
         return build_addr_gen4d(
-            base_addr + channel_word_offset * 8,
-            [n, h, w, channel_word_count],
+            base,
+            [c0, c1, c2, c3_words],
             [stride0, stride1, stride2, stride3],
         )
+
+    def build_compact_linear_addr_gen(base_addr: int, word_count: int) -> Optional[Dict[str, Any]]:
+        words = int(word_count)
+        if words <= 0:
+            return None
+        return build_packed_4d_slice_addr_gen(int(base_addr), [1, 1, words, 4], [0, 0, 0, 0], [1, 1, words, 1])
+
+    def pack_spm_map(port_to_group: Dict[str, int]) -> int:
+        ports = ["PS", "PD", "PLI", "PLO"]
+        map_val = 0
+        for p_idx, p_name in enumerate(ports):
+            g = int(port_to_group.get(p_name, p_idx)) & 0x3
+            map_val |= (g << (p_idx * 2))
+        return int(map_val)
 
     groups = []
     section_lookup: Dict[str, Dict[str, Any]] = {}
@@ -538,6 +565,7 @@ def _build_spm_dma_plan(
     waves_h = max(1, int((wave_schedule or {}).get("temporal_wave_out_h", 1)))
     waves_oc = max(1, int((wave_schedule or {}).get("temporal_wave_out_ch", 1)))
     waves_ic = max(1, int((wave_schedule or {}).get("temporal_wave_in_ch", 1)))
+    both_ich_och_tiled = (waves_oc > 1 and waves_ic > 1)
     wave_coords = build_wave_coords(wave_count, waves_h, waves_oc, waves_ic)
 
     for tensor_name, group_id in role_to_group.items():
@@ -548,13 +576,25 @@ def _build_spm_dma_plan(
 
         if wave_schedule:
             if tensor_name == "activation":
-                per_wave_words = split_by_wave_dependency(
-                    words,
-                    wave_coords,
-                    active_fn=lambda c: c[1] == 0,
-                    key_fn=lambda c: (c[0], c[2]),
-                )
+                # Default loop assumption: ICH inner, OCH outer.
+                # When OCH and ICH are both tiled, activation kept for inner-loop reuse
+                # gets overwritten before next OCH, so it must be reloaded per (wh,och,ich).
+                if both_ich_och_tiled:
+                    per_wave_words = split_by_wave_dependency(
+                        words * waves_oc,
+                        wave_coords,
+                        active_fn=lambda c: True,
+                        key_fn=lambda c: (c[0], c[1], c[2]),
+                    )
+                else:
+                    per_wave_words = split_by_wave_dependency(
+                        words,
+                        wave_coords,
+                        active_fn=lambda c: c[1] == 0,
+                        key_fn=lambda c: (c[0], c[2]),
+                    )
             elif tensor_name == "weight":
+                # Weight depends on both OCH/ICH tile indices.
                 per_wave_words = split_by_wave_dependency(
                     words,
                     wave_coords,
@@ -562,6 +602,7 @@ def _build_spm_dma_plan(
                     key_fn=lambda c: (c[1], c[2]),
                 )
             elif tensor_name == "partial_sum":
+                # Input partial-sum is needed at the first ICH wave of each OCH tile.
                 per_wave_words = split_by_wave_dependency(
                     words,
                     wave_coords,
@@ -569,6 +610,7 @@ def _build_spm_dma_plan(
                     key_fn=lambda c: (c[0], c[1]),
                 )
             else:
+                # Output partial-sum writeback is done at the last ICH wave of each OCH tile.
                 per_wave_words = split_by_wave_dependency(
                     words,
                     wave_coords,
@@ -595,39 +637,222 @@ def _build_spm_dma_plan(
             "per_wave_words64": per_wave_words,
         }
 
+    def section_on_group(section_name: str, target_group: int) -> str:
+        if isinstance(section_name, str) and section_name.startswith("g") and "_" in section_name:
+            _, suffix = section_name.split("_", 1)
+            candidate = f"g{int(target_group)}_{suffix}"
+            if candidate in section_lookup:
+                return candidate
+        ping_fallback = f"g{int(target_group)}_ping"
+        if ping_fallback in section_lookup:
+            return ping_fallback
+        return section_name
+
+    def build_tensor_slice_addr_gen(tensor_name: str,
+                                    coord: Tuple[int, int, int],
+                                    words: int) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        if not tensor_shapes or not wave_schedule:
+            return None, None
+        raw_shape = tensor_shapes.get(tensor_name)
+        if not raw_shape or len(raw_shape) != 4:
+            return None, None
+
+        shape = [int(v) for v in raw_shape]
+        wh, woc, wic = coord
+        starts = [0, 0, 0, 0]
+        counts = [0, 0, 0, 0]
+
+        if tensor_name == "activation":
+            n, h, w, c = shape
+            h_start, h_count = wave_dim_range(h, waves_h, wh)
+            c_words_total = _ceil_div_int(c, 4)
+            c_start, c_count = wave_dim_range(c_words_total, waves_ic, wic)
+            starts = [0, h_start, 0, c_start]
+            counts = [n, h_count, w, c_count]
+        elif tensor_name == "weight":
+            oc, kh, kw, ic = shape
+            oc_start, oc_count = wave_dim_range(oc, waves_oc, woc)
+            ic_words_total = _ceil_div_int(ic, 4)
+            ic_start, ic_count = wave_dim_range(ic_words_total, waves_ic, wic)
+            starts = [oc_start, 0, 0, ic_start]
+            counts = [oc_count, kh, kw, ic_count]
+        elif tensor_name in ("partial_sum", "output"):
+            n, oh, ow, oc = shape
+            oh_start, oh_count = wave_dim_range(oh, waves_h, wh)
+            oc_words_total = _ceil_div_int(oc, 4)
+            oc_start, oc_count = wave_dim_range(oc_words_total, waves_oc, woc)
+            starts = [0, oh_start, 0, oc_start]
+            counts = [n, oh_count, ow, oc_count]
+        else:
+            return None, None
+
+        expected_words = int(counts[0] * counts[1] * counts[2] * counts[3])
+        if expected_words != int(words) or expected_words <= 0:
+            return None, {
+                "tensor": tensor_name,
+                "wave_coord": [int(wh), int(woc), int(wic)],
+                "shape": shape,
+                "starts": [int(v) for v in starts],
+                "counts": [int(v) for v in counts],
+                "expected_words64": int(expected_words),
+                "actual_words64": int(words),
+                "used": False,
+                "reason": "shape_words_mismatch",
+            }
+
+        addr_gen = build_packed_4d_slice_addr_gen(int(dram_mapping[tensor_name]), shape, starts, counts)
+        if addr_gen is None:
+            return None, {
+                "tensor": tensor_name,
+                "wave_coord": [int(wh), int(woc), int(wic)],
+                "shape": shape,
+                "starts": [int(v) for v in starts],
+                "counts": [int(v) for v in counts],
+                "expected_words64": int(expected_words),
+                "actual_words64": int(words),
+                "used": False,
+                "reason": "addr_gen_build_failed",
+            }
+
+        return addr_gen, {
+            "tensor": tensor_name,
+            "wave_coord": [int(wh), int(woc), int(wic)],
+            "shape": shape,
+            "starts": [int(v) for v in starts],
+            "counts": [int(v) for v in counts],
+            "expected_words64": int(expected_words),
+            "actual_words64": int(words),
+            "used": True,
+            "reason": "ok",
+        }
+
     waves = []
-    current_section_by_tensor: Dict[str, str] = {
-        tensor_name: str(tensor_mapping[tensor_name]["ping_section"])
-        for tensor_name in ["activation", "weight", "partial_sum", "output"]
-    }
-    has_transfer_by_tensor: Dict[str, bool] = {
-        tensor_name: False
-        for tensor_name in ["activation", "weight", "partial_sum", "output"]
-    }
+    current_section_by_key: Dict[Tuple[str, int], str] = {}
+    has_transfer_by_key: Dict[Tuple[str, int], bool] = {}
+
+    def tensor_effective_group(tensor_name: str, port_to_group: Dict[str, int]) -> int:
+        if tensor_name == "partial_sum":
+            return int(port_to_group["PLI"])
+        if tensor_name == "output":
+            return int(port_to_group["PLO"])
+        return int(tensor_mapping[tensor_name]["group_id"])
+
+    def section_tag_name(section_name: str) -> str:
+        if isinstance(section_name, str) and section_name.startswith("g") and "_" in section_name:
+            return section_name.split("_", 1)[1]
+        return "ping"
+
+    def section_matches_group(section_name: str, group_id: int) -> bool:
+        return isinstance(section_name, str) and section_name.startswith(f"g{int(group_id)}_")
+
+    def section_with_tag(group_id: int, tag: str) -> str:
+        candidate = f"g{int(group_id)}_{str(tag)}"
+        if candidate in section_lookup:
+            return candidate
+        return f"g{int(group_id)}_ping"
+
+    def assert_wave_transfer_invariants(wave_id: int,
+                                        transfer: Dict[str, Any],
+                                        runtime_sections: Dict[str, str],
+                                        port_to_group: Dict[str, int]) -> None:
+        tensor_name = str(transfer.get("tensor", ""))
+        if tensor_name not in ("partial_sum", "output"):
+            return
+
+        expected_group = int(port_to_group["PLI"] if tensor_name == "partial_sum" else port_to_group["PLO"])
+        actual_group = int(transfer.get("group_id", -1))
+        if actual_group != expected_group:
+            raise ValueError(
+                f"DMA invariant violated at wave {wave_id}: tensor={tensor_name} "
+                f"group_id={actual_group} expected_group={expected_group}"
+            )
+
+        transfer_section = str(transfer.get("section", ""))
+        if not section_matches_group(transfer_section, expected_group):
+            raise ValueError(
+                f"DMA invariant violated at wave {wave_id}: tensor={tensor_name} "
+                f"section={transfer_section} expected_group=g{expected_group}"
+            )
+
+        runtime_section = str(runtime_sections.get(tensor_name, ""))
+        if transfer_section != runtime_section:
+            raise ValueError(
+                f"DMA invariant violated at wave {wave_id}: tensor={tensor_name} "
+                f"runtime_section={runtime_section} transfer_section={transfer_section}"
+            )
     src_offsets = {
         "activation": 0,
         "weight": 0,
         "partial_sum": 0,
     }
     out_offset = 0
+    next_ps_phase_by_tile: Dict[Tuple[int, int], str] = {}
+    last_output_phase_by_tile: Dict[Tuple[int, int], str] = {}
 
     for wave_id in range(wave_count):
         transfers = []
-        selected_sections = {}
+        selected_sections: Dict[str, str] = {}
+
+        coord = wave_coords[wave_id] if wave_id < len(wave_coords) else (wave_id, 0, 0)
+        wh, woc, wic = coord
+        swap_pli_plo = bool(waves_ic > 1 and wic > 0 and (wic % 2 == 1))
+        port_to_group = {
+            "PS": channel_name_by_group["PS"],
+            "PD": channel_name_by_group["PD"],
+            "PLI": 3 if swap_pli_plo else 2,
+            "PLO": 2 if swap_pli_plo else 3,
+        }
+        spm_map_val = pack_spm_map(port_to_group)
+        spm_map_reason = "swap_pli_plo_for_psum_reuse" if swap_pli_plo else "default"
 
         for tensor_name in ["activation", "weight", "partial_sum", "output"]:
             mapping = tensor_mapping[tensor_name]
             words = int(mapping["per_wave_words64"][wave_id]) if wave_id < len(mapping["per_wave_words64"]) else 0
-            sec_name = current_section_by_tensor[tensor_name]
+
+            if tensor_name in ("partial_sum", "output"):
+                continue
+
+            eff_group_id = tensor_effective_group(tensor_name, port_to_group)
+            ping_sec = section_on_group(str(mapping["ping_section"]), eff_group_id)
+            pong_sec = section_on_group(str(mapping["pong_section"]), eff_group_id)
+            state_key = (tensor_name, eff_group_id)
+            sec_name = current_section_by_key.get(state_key, ping_sec)
+
             if words > 0:
-                if has_transfer_by_tensor[tensor_name]:
-                    ping_sec = str(mapping["ping_section"])
-                    pong_sec = str(mapping["pong_section"])
+                if has_transfer_by_key.get(state_key, False):
                     sec_name = pong_sec if sec_name == ping_sec else ping_sec
-                    current_section_by_tensor[tensor_name] = sec_name
                 else:
-                    has_transfer_by_tensor[tensor_name] = True
+                    has_transfer_by_key[state_key] = True
+
+                current_section_by_key[state_key] = sec_name
+
             selected_sections[tensor_name] = sec_name
+
+        tile_key = (int(wh), int(woc))
+        expected_ps_phase = str(next_ps_phase_by_tile.get(tile_key, "ping"))
+        ps_group_id = tensor_effective_group("partial_sum", port_to_group)
+        out_group_id = tensor_effective_group("output", port_to_group)
+        ps_sec_name = section_with_tag(ps_group_id, expected_ps_phase)
+        # Double-buffer handoff: consume from one phase, produce to the opposite phase.
+        out_phase = "pong" if expected_ps_phase == "ping" else "ping"
+        out_sec_name = section_with_tag(out_group_id, out_phase)
+
+        if wic > 0:
+            prev_out_phase = last_output_phase_by_tile.get(tile_key)
+            if prev_out_phase is None:
+                raise ValueError(
+                    f"DMA invariant violated at wave {wave_id}: missing previous output phase for tile={tile_key}"
+                )
+            if expected_ps_phase != prev_out_phase:
+                raise ValueError(
+                    f"DMA invariant violated at wave {wave_id}: partial_sum phase mismatch for tile={tile_key} "
+                    f"expected={prev_out_phase} actual={expected_ps_phase}"
+                )
+
+        selected_sections["partial_sum"] = ps_sec_name
+        selected_sections["output"] = out_sec_name
+        last_output_phase_by_tile[tile_key] = out_phase
+        next_ps_phase_by_tile[tile_key] = out_phase
 
         for tensor_name in ["activation", "weight", "partial_sum"]:
             mapping = tensor_mapping[tensor_name]
@@ -636,13 +861,14 @@ def _build_spm_dma_plan(
                 continue
 
             sec_name = selected_sections[tensor_name]
+            eff_group_id = tensor_effective_group(tensor_name, port_to_group)
             sec = section_lookup[sec_name]
             src_addr = int(dram_mapping[tensor_name]) + src_offsets[tensor_name] * word_bytes
             src_offsets[tensor_name] += words
 
             transfer = {
                 "tensor": tensor_name,
-                "group_id": int(mapping["group_id"]),
+                "group_id": eff_group_id,
                 "section": sec_name,
                 "direction": "dram_to_spm",
                 "src_dram_addr": src_addr,
@@ -651,47 +877,34 @@ def _build_spm_dma_plan(
                 "size_words64": words,
             }
 
-            # Output-channel tiling under NHWC makes partial_sum DRAM access non-contiguous.
-            if (
-                tensor_name == "partial_sum"
-                and tensor_shapes
-                and tensor_shapes.get("partial_sum")
-                and wave_schedule
-                and waves_oc > 1
-                and waves_h == 1
-                and wave_id < len(wave_coords)
-            ):
-                _, woc, _ = wave_coords[wave_id]
-                ps_shape = [int(v) for v in tensor_shapes["partial_sum"]]
-                c_words_total = (ps_shape[3] + 3) // 4
-                c_words_by_woc = split_evenly(c_words_total, waves_oc)
-                if 0 <= woc < len(c_words_by_woc):
-                    c_word_count = int(c_words_by_woc[woc])
-                    c_word_offset = int(sum(c_words_by_woc[:woc]))
-                    expected_words = int(ps_shape[0] * ps_shape[1] * ps_shape[2] * c_word_count)
-                    if expected_words == words and c_word_count > 0:
-                        src_addr_gen = build_nhwc_channel_chunk_addr_gen(
-                            int(dram_mapping["partial_sum"]),
-                            ps_shape,
-                            c_word_offset,
-                            c_word_count,
-                        )
-                        if src_addr_gen is not None:
-                            transfer["src_addr_gen"] = src_addr_gen
+            src_addr_gen = build_compact_linear_addr_gen(src_addr, words)
+            if src_addr_gen is not None:
+                transfer["src_addr_gen"] = src_addr_gen
+            dst_addr_gen = build_compact_linear_addr_gen(int(sec["global_linear_addr"]), words)
+            if dst_addr_gen is not None:
+                transfer["dst_addr_gen"] = dst_addr_gen
 
+            tensor_src_addr_gen, slice_info = build_tensor_slice_addr_gen(tensor_name, coord, words)
+            if tensor_src_addr_gen is not None:
+                transfer["src_addr_gen"] = tensor_src_addr_gen
+            if slice_info is not None:
+                transfer["src_slice_info"] = slice_info
+
+            assert_wave_transfer_invariants(wave_id, transfer, selected_sections, port_to_group)
             transfers.append(transfer)
 
         output_mapping = tensor_mapping["output"]
         output_words = int(output_mapping["per_wave_words64"][wave_id]) if wave_id < len(output_mapping["per_wave_words64"]) else 0
         if output_words > 0:
             output_sec_name = selected_sections["output"]
+            output_group_id = tensor_effective_group("output", port_to_group)
             output_sec = section_lookup[output_sec_name]
             dst_addr = int(dram_mapping["output"]) + out_offset * word_bytes
             out_offset += output_words
 
             transfer = {
                 "tensor": "output",
-                "group_id": int(output_mapping["group_id"]),
+                "group_id": output_group_id,
                 "section": output_sec_name,
                 "direction": "spm_to_dram",
                 "src_spm_addr": int(output_sec["global_linear_addr"]),
@@ -700,39 +913,44 @@ def _build_spm_dma_plan(
                 "size_words64": output_words,
             }
 
-            if (
-                tensor_shapes
-                and tensor_shapes.get("output")
-                and wave_schedule
-                and waves_oc > 1
-                and waves_h == 1
-                and wave_id < len(wave_coords)
-            ):
-                _, woc, _ = wave_coords[wave_id]
-                out_shape = [int(v) for v in tensor_shapes["output"]]
-                c_words_total = (out_shape[3] + 3) // 4
-                c_words_by_woc = split_evenly(c_words_total, waves_oc)
-                if 0 <= woc < len(c_words_by_woc):
-                    c_word_count = int(c_words_by_woc[woc])
-                    c_word_offset = int(sum(c_words_by_woc[:woc]))
-                    expected_words = int(out_shape[0] * out_shape[1] * out_shape[2] * c_word_count)
-                    if expected_words == output_words and c_word_count > 0:
-                        dst_addr_gen = build_nhwc_channel_chunk_addr_gen(
-                            int(dram_mapping["output"]),
-                            out_shape,
-                            c_word_offset,
-                            c_word_count,
-                        )
-                        if dst_addr_gen is not None:
-                            transfer["dst_addr_gen"] = dst_addr_gen
+            src_addr_gen = build_compact_linear_addr_gen(int(output_sec["global_linear_addr"]), output_words)
+            if src_addr_gen is not None:
+                transfer["src_addr_gen"] = src_addr_gen
+            dst_addr_gen = build_compact_linear_addr_gen(dst_addr, output_words)
+            if dst_addr_gen is not None:
+                transfer["dst_addr_gen"] = dst_addr_gen
 
+            tensor_dst_addr_gen, dst_slice_info = build_tensor_slice_addr_gen("output", coord, output_words)
+            if tensor_dst_addr_gen is not None:
+                transfer["dst_addr_gen"] = tensor_dst_addr_gen
+            if dst_slice_info is not None:
+                transfer["dst_slice_info"] = dst_slice_info
+
+            assert_wave_transfer_invariants(wave_id, transfer, selected_sections, port_to_group)
             transfers.append(transfer)
+            actual_phase = section_tag_name(output_sec_name)
+            expected_phase = last_output_phase_by_tile.get((int(wh), int(woc)))
+            if expected_phase is not None and actual_phase != expected_phase:
+                raise ValueError(
+                    f"DMA invariant violated at wave {wave_id}: output phase mismatch for tile={(int(wh), int(woc))} "
+                    f"expected={expected_phase} actual={actual_phase}"
+                )
 
         waves.append({
             "wave_id": wave_id,
             "sync": {
                 "compute_plan_idx": wave_id,
                 "signal": "dma_wave_done",
+            },
+            "spm_map": {
+                "map_val": int(spm_map_val),
+                "port_to_group": {
+                    "PS": int(port_to_group["PS"]),
+                    "PD": int(port_to_group["PD"]),
+                    "PLI": int(port_to_group["PLI"]),
+                    "PLO": int(port_to_group["PLO"]),
+                },
+                "reason": spm_map_reason,
             },
             "runtime_sections": selected_sections,
             "transfers": transfers,

@@ -2,7 +2,7 @@
  * @file test_spm_unit.cpp
  * @brief ScratchpadMemory (SPM) Unit Testbench
  *
- * SC_MODULE-based testbench (spm_tb) that exercises the SPM through 10 test cases:
+ * SC_MODULE-based testbench (spm_tb) that exercises the SPM through 11 test cases:
  *   TC1  : Basic Reset Verification
  *   TC2  : Simple DMA Write + Read
  *   TC3  : Simple NoC Write + Read (64-bit linear mode)
@@ -13,6 +13,7 @@
  *   TC8  : Multi-data NoC Write + Read  (burst, 4 ports / parallel mode)
  *   TC9  : Mixed DMA + NoC with random per-response back-pressure
  *   TC10 : Parallel <-> Linear Addressing Consistency
+ *   TC11 : Same-group DMA/NoC contention priority + response integrity
  */
 
 #include <systemc>
@@ -394,6 +395,18 @@ SC_MODULE(spm_tb) {
         tick(1);                    // consume R handshake
         dma_rready_i.write(false);
         return result;
+    }
+
+    /**
+     * Wait until a DMA read response is visible without consuming it.
+     * @return true if dma_rvalid_o asserted before timeout.
+     */
+    bool wait_dma_rvalid(int timeout = 300) {
+        for (int i = 0; i < timeout; ++i) {
+            if (dma_rvalid_o.read()) return true;
+            tick(1);
+        }
+        return false;
     }
 
     // =========================================================================
@@ -834,6 +847,156 @@ SC_MODULE(spm_tb) {
     }
 
     // =========================================================================
+    //  TC11 – Same-group DMA/NoC Contention Priority + Response Integrity
+    //
+    //  Part A: 同 group、同時發出 NoC read 與 DMA read，驗證 NoC response
+    //          先於 DMA read response 出現，符合目前仲裁順序
+    //          NoC > DMA write > DMA read。
+    //
+    //  Part B: 同一個 NoC port 連續發出多筆 read outstanding，同時穿插 DMA
+    //          write/read，驗證：
+    //          1) NoC read response 無遺漏
+    //          2) 回應順序與 issue 順序一致
+    //          3) DMA read 亦可正確完成
+    // =========================================================================
+    void tc11_same_group_contention_integrity() {
+        log("TC11: Same-group DMA/NoC contention priority + integrity");
+
+        constexpr int PORT = 2;  // default map: port 2 -> group 2
+        const uint32_t base_laddr = 64;
+
+        // -----------------------------------------------------------------
+        // Part A: same-cycle NoC read vs DMA read priority
+        // -----------------------------------------------------------------
+        log("  Part A: same-group concurrent NoC-read vs DMA-read priority");
+
+        const uint32_t noc_laddr_a = base_laddr;
+        const uint32_t dma_laddr_a = base_laddr + 1;
+        const uint64_t noc_pat_a   = 0xC211'0000'0000'00A1ull;
+        const uint64_t dma_pat_a   = 0xC211'0000'0000'00B2ull;
+        const uint32_t dma_byte_a  = noc_to_dma_byte(PORT, dma_laddr_a);
+
+        dma_write(noc_to_dma_byte(PORT, noc_laddr_a), noc_pat_a);
+        dma_write(dma_byte_a, dma_pat_a);
+        tick(2);
+
+        // 同一拍送出 NoC read 與 DMA AR
+        noc_req_t req{};
+        req.addr  = noc_laddr_a;
+        req.wen   = false;
+        req.wdata = 0;
+        noc_req_i[PORT].write(req);
+        noc_req_valid_i[PORT].write(true);
+
+        dma_araddr_i.write(dma_byte_a);
+        dma_arvalid_i.write(true);
+        dma_rready_i.write(false);  // 先觀察 valid 出現順序
+
+        bool noc_req_ok = false;
+        bool dma_ar_ok  = false;
+        for (int i = 0; i < 80 && !(noc_req_ok && dma_ar_ok); ++i) {
+            if (noc_req_ready_o[PORT].read()) noc_req_ok = true;
+            if (dma_arready_o.read()) dma_ar_ok = true;
+            tick(1);
+            if (noc_req_ok) noc_req_valid_i[PORT].write(false);
+            if (dma_ar_ok)  dma_arvalid_i.write(false);
+        }
+        SC_ASSERT("TB", noc_req_ok, "TC11-A: NoC read issue timeout");
+        SC_ASSERT("TB", dma_ar_ok,  "TC11-A: DMA AR issue timeout");
+
+        int noc_valid_cycle = -1;
+        int dma_valid_cycle = -1;
+        for (int i = 0; i < 120 && (noc_valid_cycle < 0 || dma_valid_cycle < 0); ++i) {
+            if (noc_valid_cycle < 0 && noc_resp_valid_o[PORT].read()) {
+                noc_valid_cycle = static_cast<int>(cycle());
+            }
+            if (dma_valid_cycle < 0 && dma_rvalid_o.read()) {
+                dma_valid_cycle = static_cast<int>(cycle());
+            }
+            if (noc_valid_cycle >= 0 && dma_valid_cycle >= 0) break;
+            tick(1);
+        }
+
+        SC_ASSERT("TB", noc_valid_cycle >= 0, "TC11-A: NoC response did not arrive");
+        SC_ASSERT("TB", dma_valid_cycle >= 0, "TC11-A: DMA read response did not arrive");
+        SC_ASSERT("TB", noc_valid_cycle <= dma_valid_cycle,
+                  "TC11-A: expected NoC response to appear before or with DMA read response");
+
+        noc_resp_t noc_resp_a = consume_noc_resp(PORT);
+        SC_ASSERT("TB", noc_resp_a.code == SPM_RESPONSE_CODE::SPM_OK,
+                  "TC11-A: NoC response code must be SPM_OK");
+        SC_ASSERT("TB", noc_resp_a.rdata.range(63, 0).to_uint64() == noc_pat_a,
+                  "TC11-A: NoC response data mismatch");
+
+        dma_rready_i.write(true);
+        SC_ASSERT("TB", wait_dma_rvalid(80), "TC11-A: DMA read valid missing after releasing rready");
+        uint64_t dma_got_a = dma_rdata_o.read().to_uint64();
+        tick(1);
+        dma_rready_i.write(false);
+        SC_ASSERT("TB", dma_got_a == dma_pat_a, "TC11-A: DMA read response data mismatch");
+
+        {
+            std::ostringstream oss;
+            oss << "    priority-observed noc_valid_cycle=" << noc_valid_cycle
+                << " dma_valid_cycle=" << dma_valid_cycle
+                << " noc_data=0x" << std::hex << noc_resp_a.rdata.range(63, 0).to_uint64()
+                << " dma_data=0x" << dma_got_a;
+            log(oss.str());
+        }
+
+        // -----------------------------------------------------------------
+        // Part B: NoC outstanding order + no-loss under DMA interleaving
+        // -----------------------------------------------------------------
+        log("  Part B: ordered NoC outstanding reads with interleaved DMA traffic");
+
+        constexpr int COUNT = 4;
+        std::vector<uint64_t> exp_noc(COUNT);
+        std::vector<uint64_t> got_noc;
+        got_noc.reserve(COUNT);
+
+        const uint32_t noc_base_b = base_laddr + 16;
+        for (int i = 0; i < COUNT; ++i) {
+            exp_noc[i] = 0xC322'0000'0000'0000ull | static_cast<uint64_t>(i);
+            dma_write(noc_to_dma_byte(PORT, noc_base_b + static_cast<uint32_t>(i)), exp_noc[i]);
+        }
+        tick(2);
+
+        // 先累積多筆 NoC read request，不立即消費 response。
+        for (int i = 0; i < COUNT; ++i) {
+            noc_issue(PORT, noc_base_b + static_cast<uint32_t>(i), false, sc_biguint<192>(0));
+        }
+
+        // 穿插 DMA write/read，模擬 cluster-like contention。
+        const uint32_t dma_mix_laddr = noc_base_b + 32;
+        const uint64_t dma_mix_pat   = 0xC322'FFFF'0000'00AAull;
+        dma_write(noc_to_dma_byte(PORT, dma_mix_laddr), dma_mix_pat);
+        tick(1);
+        uint64_t dma_mix_got = dma_read(noc_to_dma_byte(PORT, dma_mix_laddr));
+        SC_ASSERT("TB", dma_mix_got == dma_mix_pat, "TC11-B: interleaved DMA round-trip mismatch");
+
+        for (int i = 0; i < COUNT; ++i) {
+            noc_resp_t resp = consume_noc_resp(PORT);
+            SC_ASSERT("TB", resp.code == SPM_RESPONSE_CODE::SPM_OK,
+                      "TC11-B: NoC response code must be SPM_OK");
+            got_noc.push_back(resp.rdata.range(63, 0).to_uint64());
+        }
+
+        SC_ASSERT("TB", got_noc.size() == exp_noc.size(),
+                  "TC11-B: NoC response count mismatch (possible packet loss)");
+        for (int i = 0; i < COUNT; ++i) {
+            if (got_noc[i] != exp_noc[i]) {
+                std::ostringstream oss;
+                oss << "TC11-B: NoC response order/data mismatch at i=" << i
+                    << " exp=0x" << std::hex << exp_noc[i]
+                    << " got=0x" << got_noc[i];
+                SC_REPORT_ERROR("TB", oss.str().c_str());
+            }
+        }
+
+        log("  TC11 PASS");
+    }
+
+    // =========================================================================
     // Top-Level Test Runner (SC_THREAD)
     // =========================================================================
     void run_all_tests() {
@@ -867,10 +1030,11 @@ SC_MODULE(spm_tb) {
         tc8_multi_noc_parallel_burst();
         tc9_mixed_random_backpressure();
         tc10_parallel_linear_consistency();
+        tc11_same_group_contention_integrity();
 
         tick(4);
         log("==================================================");
-        log("[PASS] All 10 test cases passed.");
+        log("[PASS] All 11 test cases passed.");
         log("==================================================");
 
         sc_stop();

@@ -703,6 +703,11 @@ private:
 	sc_signal<sc_uint<32>> counter_rx_byte_reg;
 	sc_signal<sc_uint<32>> counter_stall_reg;
 
+	// Latched state for DONE generation and run tracking.
+	bool run_active_latched = false;
+	bool prev_any_busy_latched = false;
+	bool done_latched = false;
+
 	// Internal FIFOs for each NoC channel
 	sc_vector<hybridacc::FIFO<noc_req_payload_t>> noc_req_fifo; // De-couple AGU request generation and NoC transmission for PS/PD/PLI planes
 	sc_vector<hybridacc::FIFO<sc_uint<NOC_ADDR_BITS>>> read_noc_addr_wait_fifo; // Track encoded NoC addr(tag+ultra) for in-flight read requests for PS/PD/PLI planes
@@ -765,6 +770,9 @@ private:
 		counter_stall_reg.write(0);
 		interrupt.write(false);
 		arb_state.write(0);
+		run_active_latched = false;
+		prev_any_busy_latched = false;
+		done_latched = false;
 
 		for (int i = 0; i < NUM_SEND_PLANES; ++i) {
 			noc_req_fifo_clear_sig[i].write(false);
@@ -1157,11 +1165,39 @@ private:
 				any_busy = any_busy || agu_busy_sig[i].read();
 			}
 
+			const bool global_ctrl_write =
+				mmio_write.read() && (mmio_addr.read().to_uint() == MMIO_GLOBAL_CTRL);
+			const sc_uint<32> ctrl_wdata = mmio_wdata.read();
+			const bool global_reset_cmd = global_ctrl_write && ctrl_wdata[(int)HdduCtrllBit::CTRL_RESET];
+			const bool global_start_cmd = global_ctrl_write && ctrl_wdata[(int)HdduCtrllBit::CTRL_START];
+			const bool global_stop_cmd = global_ctrl_write && ctrl_wdata[(int)HdduCtrllBit::CTRL_STOP];
+
+			if (global_reset_cmd) {
+				run_active_latched = false;
+				done_latched = false;
+				prev_any_busy_latched = false;
+			}
+			if (global_start_cmd) {
+				run_active_latched = true;
+				done_latched = false;
+			}
+			if (global_stop_cmd) {
+				run_active_latched = false;
+				done_latched = false;
+			}
+
+			const bool done_pulse = run_active_latched && prev_any_busy_latched && !any_busy;
+			if (done_pulse) {
+				done_latched = true;
+				run_active_latched = false;
+			}
+			prev_any_busy_latched = any_busy;
+
 			sc_uint<32> status = global_status_reg.read();
 			status[(int)HdduStatusBit::BUSY] = any_busy;
-			status[(int)HdduStatusBit::DONE] = !any_busy;
+			status[(int)HdduStatusBit::DONE] = done_latched;
 			status[(int)HdduStatusBit::ERROR] = (err_code_reg.read() != 0);
-			status[(int)HdduStatusBit::IDLE] = false;
+			status[(int)HdduStatusBit::IDLE] = !run_active_latched && !any_busy && !done_latched && (err_code_reg.read() == 0);
 
 			const uint32_t plane_en = plane_en_reg.read().to_uint();
 			const bool plane_on_ps = ((plane_en >> PLANE_PS) & 0x1u) != 0;

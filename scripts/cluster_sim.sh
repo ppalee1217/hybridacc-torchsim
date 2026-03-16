@@ -9,7 +9,9 @@ if [ ! -z "$2" ]; then
     TB_NAME=$2
 fi
 
-TOP_DIR=$(pwd)
+# Resolve project root based on this script location (robust to caller CWD)
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+TOP_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 OUTPUT_DIR="$TOP_DIR/output"
 SIM_MODEL_DIR="$TOP_DIR/design/hybridacc-ESL"
 BUILD_DIR="$SIM_MODEL_DIR/build/cluster_sim"
@@ -42,8 +44,8 @@ usage() {
 Usage:
   cluster_sim.sh clean
   cluster_sim.sh build
-    cluster_sim.sh run [-d tb_dir] [-v] [-f] [--trace-file path] [--clock-period ns] [--timeout-cycles cycles] tb_name
-    cluster_sim.sh run-all [-d tb_dir] [-v] [-f] [--trace-file path] [--clock-period ns] [--timeout-cycles cycles]
+        cluster_sim.sh run [-d tb_dir] [-v] [-f] [--trace-file path] [--clock-period ns] [--timeout-cycles cycles] [--advanced] tb_name
+        cluster_sim.sh run-all [-d tb_dir] [-v] [-f] [--trace-file path] [--clock-period ns] [--timeout-cycles cycles] [--advanced]
 
 Examples:
     cluster_sim.sh run -d output/cluster-sim conv_k3c4
@@ -51,6 +53,7 @@ Examples:
     cluster_sim.sh run -f -d output/cluster-sim conv_k3c4
     cluster_sim.sh run -f --trace-file output/trace-cluster.json -d output/cluster-sim conv_k3c4
     cluster_sim.sh run --clock-period 5 --timeout-cycles 50000 -d output/cluster-sim conv_k3c4
+    cluster_sim.sh run --advanced -d output/cluster-sim conv_k3c4
     cluster_sim.sh run-all -d output/cluster-sim
 EOF
 }
@@ -65,7 +68,13 @@ run_single_tb() {
     local timeout_cycles="$6"
     local trace_enable="$7"
     local trace_file_hint="$8"
+    local advanced_mode="$9"
     local trace_file=""
+    local test_bin="test_cluster_sim"
+
+    if [ "$advanced_mode" == "1" ]; then
+        test_bin="test_cluster_sim_advanced"
+    fi
 
     # Check if we are pointing to a specific tb directory or a base directory
     # If tb is in tb_dir_base, adjust path
@@ -74,7 +83,7 @@ run_single_tb() {
     # If the user passed a path that already includes the test name or is absolute, handle it
     if [ ! -d "$sim_data_dir" ]; then
         # Try checking if tb_dir_base itself is the test dir
-        if [ -f "$tb_dir_base/config.txt" ]; then
+        if [ -f "$tb_dir_base/config.json" ] || [ -f "$tb_dir_base/config.txt" ]; then
             sim_data_dir="$tb_dir_base"
             # In this case tb name is just for logging
         elif [ -d "$tb" ]; then
@@ -92,8 +101,8 @@ run_single_tb() {
         return 1
     fi
 
-    if [ ! -x "$BUILD_DIR/test_cluster_sim" ]; then
-        err "Executable $BUILD_DIR/test_cluster_sim not found. Please run: cluster_sim.sh build"
+    if [ ! -x "$BUILD_DIR/$test_bin" ]; then
+        err "Executable $BUILD_DIR/$test_bin not found. Please run: cluster_sim.sh build"
         return 2
     fi
 
@@ -130,7 +139,7 @@ run_single_tb() {
     info "  clock_period=${clock_period}ns timeout_cycles=${timeout_cycles}"
     info "  log: $out_log"
 
-    local cmd=("$BUILD_DIR/test_cluster_sim"
+    local cmd=("$BUILD_DIR/$test_bin"
         -d "$sim_data_dir"
         "$run_mode_flag"
         --clock-period "$clock_period"
@@ -168,6 +177,7 @@ if [ "$MODE" == "run" ]; then
     TRACE_FILE=""
     CLOCK_PERIOD_ARG="$CLOCK_PERIOD"
     TIMEOUT_CYCLES_ARG="$TIMEOUT_CYCLES"
+    ADVANCED_MODE=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -215,6 +225,10 @@ if [ "$MODE" == "run" ]; then
                 fi
                 TIMEOUT_CYCLES_ARG="$2"
                 shift 2
+                ;;
+            --advanced)
+                ADVANCED_MODE=1
+                shift
                 ;;
             *)
                 TB_NAME="$1"
@@ -229,7 +243,11 @@ if [ "$MODE" == "run" ]; then
         exit 1
     fi
 
-    run_single_tb "$TB_NAME" "$TB_DIR" "$RUN_MODE_FLAG" "$VERBOSE_FLAG" "$CLOCK_PERIOD_ARG" "$TIMEOUT_CYCLES_ARG" "$TRACE_ENABLE" "$TRACE_FILE"
+    if [[ "$TB_DIR" != /* ]] && [ -d "$TOP_DIR/$TB_DIR" ]; then
+        TB_DIR="$TOP_DIR/$TB_DIR"
+    fi
+
+    run_single_tb "$TB_NAME" "$TB_DIR" "$RUN_MODE_FLAG" "$VERBOSE_FLAG" "$CLOCK_PERIOD_ARG" "$TIMEOUT_CYCLES_ARG" "$TRACE_ENABLE" "$TRACE_FILE" "$ADVANCED_MODE"
 
 elif [ "$MODE" == "run-all" ]; then
     shift
@@ -240,6 +258,7 @@ elif [ "$MODE" == "run-all" ]; then
     TRACE_FILE=""
     CLOCK_PERIOD_ARG="$CLOCK_PERIOD"
     TIMEOUT_CYCLES_ARG="$TIMEOUT_CYCLES"
+    ADVANCED_MODE=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -288,6 +307,10 @@ elif [ "$MODE" == "run-all" ]; then
                 TIMEOUT_CYCLES_ARG="$2"
                 shift 2
                 ;;
+            --advanced)
+                ADVANCED_MODE=1
+                shift
+                ;;
             *)
                 echo "Unknown argument: $1"
                 usage
@@ -295,6 +318,10 @@ elif [ "$MODE" == "run-all" ]; then
                 ;;
         esac
     done
+
+    if [[ "$TB_DIR" != /* ]] && [ -d "$TOP_DIR/$TB_DIR" ]; then
+        TB_DIR="$TOP_DIR/$TB_DIR"
+    fi
 
     if [ ! -d "$TB_DIR" ]; then
         err "TB directory '$TB_DIR' does not exist."
@@ -313,8 +340,8 @@ elif [ "$MODE" == "run-all" ]; then
         d=${d%/}
         tbname=$(basename "$d")
 
-        # Check if it looks like a test dir (has config.txt)
-        if [ -f "$d/config.txt" ]; then
+        # Check if it looks like a test dir (prefer config.json, keep config.txt compatibility)
+        if [ -f "$d/config.json" ] || [ -f "$d/config.txt" ]; then
             local_trace_file=""
             if [ "$TRACE_ENABLE" == "1" ] && [ -n "$TRACE_FILE" ]; then
                 base="${TRACE_FILE%.*}"
@@ -325,7 +352,7 @@ elif [ "$MODE" == "run-all" ]; then
                     local_trace_file="${base}-${tbname}.${ext}"
                 fi
             fi
-            run_single_tb "$tbname" "$TB_DIR" "$RUN_MODE_FLAG" "$VERBOSE_FLAG" "$CLOCK_PERIOD_ARG" "$TIMEOUT_CYCLES_ARG" "$TRACE_ENABLE" "$local_trace_file"
+            run_single_tb "$tbname" "$TB_DIR" "$RUN_MODE_FLAG" "$VERBOSE_FLAG" "$CLOCK_PERIOD_ARG" "$TIMEOUT_CYCLES_ARG" "$TRACE_ENABLE" "$local_trace_file" "$ADVANCED_MODE"
             rc=$?
             total=$((total+1))
             if [ $rc -eq 0 ]; then
@@ -338,6 +365,16 @@ elif [ "$MODE" == "run-all" ]; then
 
     info "Run-all summary: total=$total succeeded=$succ_count failed=$fail_count"
 
+    if [ $total -eq 0 ]; then
+        err "No valid test directories found under '$TB_DIR' (expected config.json/config.txt)."
+        exit 1
+    fi
+
+    if [ $fail_count -ne 0 ]; then
+        err "Run-all finished with failures."
+        exit 1
+    fi
+
 elif [ "$MODE" == "build" ]; then
     if [ -d "$BUILD_DIR" ]; then
         rm -rf "$BUILD_DIR"
@@ -348,10 +385,10 @@ elif [ "$MODE" == "build" ]; then
     cmake -DENABLE_DEBUG_UTILS=OFF $CMAKEFILE_DIR
     # cmake -DENABLE_DEBUG_UTILS=ON -DDEBUG_LEVEL_MIN=DEBUG_LEVEL_CLUSTER_COMPONENTS $CMAKEFILE_DIR
     # cmake -DENABLE_DEBUG_UTILS=ON -DDEBUG_LEVEL_MIN=DEBUG_LEVEL_NOC_COMPONENTS $CMAKEFILE_DIR
-    # Build only test_cluster_sim
-    make test_cluster_sim -j8
+    # Build both normal and advanced cluster simulation executables
+    make test_cluster_sim test_cluster_sim_advanced -j8
     cd ..
-    succ "Build complete: $BUILD_DIR/test_cluster_sim"
+    succ "Build complete: $BUILD_DIR/test_cluster_sim and $BUILD_DIR/test_cluster_sim_advanced"
 
 elif [ "$MODE" == "clean" ]; then
     if [ -d "$BUILD_DIR" ]; then

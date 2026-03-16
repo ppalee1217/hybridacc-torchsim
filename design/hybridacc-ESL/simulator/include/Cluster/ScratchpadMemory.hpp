@@ -359,13 +359,13 @@ SC_MODULE(ScratchpadMemory) {
                 s.c_str(), bytes, SRAM_BANK_LATENCY, SRAM_BANK_PIPELINE_DEPTH);
             banks[i]->clk       (clk);
             banks[i]->reset_n   (reset_n);
-            banks[i]->req_addr  (bank_req_addr_sig  [i]);
-            banks[i]->req_valid (bank_req_valid_sig [i]);
-            banks[i]->req_ready (bank_req_ready_sig [i]);
-            banks[i]->resp_data (bank_resp_data_sig [i]);
+            banks[i]->req_addr  (bank_req_addr_sig[i]);
+            banks[i]->req_valid (bank_req_valid_sig[i]);
+            banks[i]->req_ready (bank_req_ready_sig[i]);
+            banks[i]->resp_data (bank_resp_data_sig[i]);
             banks[i]->resp_valid(bank_resp_valid_sig[i]);
             banks[i]->resp_ready(bank_resp_ready_sig[i]);
-            banks[i]->write_en  (bank_write_en_sig  [i]);
+            banks[i]->write_en  (bank_write_en_sig[i]);
             banks[i]->write_addr(bank_write_addr_sig[i]);
             banks[i]->write_data(bank_write_data_sig[i]);
             banks[i]->write_mask(bank_write_mask_sig[i]);
@@ -398,26 +398,26 @@ SC_MODULE(ScratchpadMemory) {
                   dma_read_resp_fifo_push,  dma_read_resp_fifo_pop, dma_read_resp_fifo_clear);
 
         // --- Instantiate & wire per-group metadata FIFOs ---
-        group_meta_fifo.init(NUM_GROUPS, [](const char* n, size_t) {
+        group_meta_fifo.init(NUM_GROUPS,[](const char* n, size_t) {
             return new hybridacc::FIFO<ReadMeta>(n, GROUP_META_FIFO_DEPTH);
         });
         for (unsigned g = 0; g < NUM_GROUPS; ++g) {
             bind_fifo(group_meta_fifo[g],
-                      group_meta_fifo_empty[g], group_meta_fifo_full [g],
-                      group_meta_fifo_din  [g], group_meta_fifo_dout [g],
-                      group_meta_fifo_push [g], group_meta_fifo_pop  [g],
+                      group_meta_fifo_empty[g], group_meta_fifo_full[g],
+                      group_meta_fifo_din[g], group_meta_fifo_dout[g],
+                      group_meta_fifo_push[g], group_meta_fifo_pop[g],
                       group_meta_fifo_clear[g]);
         }
 
         // --- Instantiate & wire per-port response FIFOs ---
-        port_resp_fifo.init(NUM_NOC_PORTS, [](const char* n, size_t) {
+        port_resp_fifo.init(NUM_NOC_PORTS,[](const char* n, size_t) {
             return new hybridacc::FIFO<spm_resp_t>(n, PORT_RESP_FIFO_DEPTH);
         });
         for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) {
             bind_fifo(port_resp_fifo[p],
-                      port_resp_fifo_empty[p], port_resp_fifo_full [p],
-                      port_resp_fifo_din  [p], port_resp_fifo_dout [p],
-                      port_resp_fifo_push [p], port_resp_fifo_pop  [p],
+                      port_resp_fifo_empty[p], port_resp_fifo_full[p],
+                      port_resp_fifo_din[p], port_resp_fifo_dout[p],
+                      port_resp_fifo_push[p], port_resp_fifo_pop[p],
                       port_resp_fifo_clear[p]);
         }
 
@@ -478,7 +478,7 @@ SC_MODULE(ScratchpadMemory) {
             sensitive << group_meta_fifo_empty[g] << group_meta_fifo_dout[g];
             for (unsigned k = 0; k < BANKS_PER_GROUP; ++k) {
                 sensitive << bank_resp_valid_sig[g * BANKS_PER_GROUP + k]
-                          << bank_resp_data_sig [g * BANKS_PER_GROUP + k];
+                          << bank_resp_data_sig[g * BANKS_PER_GROUP + k];
             }
         }
         for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) sensitive << port_resp_fifo_full[p];
@@ -600,7 +600,7 @@ private:
     // =========================================================================
     void comb_dma_chan_ready() {
         s_axi_awready_o.write(!dma_aw_fifo_full.read());
-        s_axi_wready_o .write(!dma_w_data_fifo_full.read());
+        s_axi_wready_o.write(!dma_w_data_fifo_full.read());
 
         const unsigned inflight = dma_rd_inflight_cnt_reg.read().to_uint();
         const bool ar_ok = !dma_read_req_fifo_full.read() &&
@@ -616,18 +616,19 @@ private:
     // =========================================================================
     void comb_dma_chan_push() {
         dma_aw_fifo_push.write(s_axi_awvalid_i.read() && !dma_aw_fifo_full.read());
-        dma_aw_fifo_din .write(s_axi_awaddr_i .read());
+        dma_aw_fifo_din.write(s_axi_awaddr_i.read());
 
         dma_w_data_fifo_push.write(s_axi_wvalid_i.read() && !dma_w_data_fifo_full.read());
-        dma_w_data_fifo_din .write(s_axi_wdata_i .read());
+        dma_w_data_fifo_din.write(s_axi_wdata_i.read());
+
         dma_w_strb_fifo_push.write(s_axi_wvalid_i.read() && !dma_w_strb_fifo_full.read());
-        dma_w_strb_fifo_din .write(s_axi_wstrb_i .read());
+        dma_w_strb_fifo_din.write(s_axi_wstrb_i.read());
 
         const bool ar_ok = !dma_read_req_fifo_full.read() &&
                            !dma_read_resp_fifo_full.read() &&
                            (dma_rd_inflight_cnt_reg.read().to_uint() < DMA_MAX_OUTSTANDING);
         dma_read_req_fifo_push.write(s_axi_arvalid_i.read() && ar_ok);
-        dma_read_req_fifo_din .write(s_axi_araddr_i .read());
+        dma_read_req_fifo_din.write(s_axi_araddr_i.read());
     }
 
     // =========================================================================
@@ -638,18 +639,19 @@ private:
     void comb_dma_aw_w_merge() {
         const bool can = !dma_aw_fifo_empty.read() &&
                          !dma_w_data_fifo_empty.read() &&
+                         !dma_w_strb_fifo_empty.read() &&
                          !dma_write_req_fifo_full.read();
 
-        dma_aw_fifo_pop      .write(can);
-        dma_w_data_fifo_pop  .write(can);
-        dma_w_strb_fifo_pop  .write(can);
+        dma_aw_fifo_pop.write(can);
+        dma_w_data_fifo_pop.write(can);
+        dma_w_strb_fifo_pop.write(can);
         dma_write_req_fifo_push.write(can);
 
         DmaWriteReq merged;
         if (can) {
-            merged.addr = dma_aw_fifo_dout     .read();
-            merged.data = dma_w_data_fifo_dout .read();
-            merged.strb = dma_w_strb_fifo_dout .read();
+            merged.addr = dma_aw_fifo_dout.read();
+            merged.data = dma_w_data_fifo_dout.read();
+            merged.strb = dma_w_strb_fifo_dout.read();
         }
         dma_write_req_fifo_din.write(merged);
     }
@@ -674,29 +676,29 @@ private:
     void comb_bank_req_arb() {
         // --- Defaults ---
         for (unsigned b = 0; b < TOTAL_BANKS; ++b) {
-            bank_req_valid_sig [b].write(false);
-            bank_req_addr_sig  [b].write(0);
-            bank_write_en_sig  [b].write(false);
+            bank_req_valid_sig[b].write(false);
+            bank_req_addr_sig[b].write(0);
+            bank_write_en_sig[b].write(false);
             bank_write_addr_sig[b].write(0);
             bank_write_data_sig[b].write(0);
             bank_write_mask_sig[b].write(0);
         }
         for (unsigned g = 0; g < NUM_GROUPS; ++g) {
             group_meta_fifo_push[g].write(false);
-            group_meta_fifo_din [g].write(ReadMeta{});
+            group_meta_fifo_din[g].write(ReadMeta{});
         }
         for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) {
-            port_req_fire_sig    [p].write(false);
+            port_req_fire_sig[p].write(false);
             port_req_is_write_sig[p].write(false);
-            wr_resp_push_sig     [p].write(false);
-            wr_resp_data_sig     [p].write(spm_resp_t{});
+            wr_resp_push_sig[p].write(false);
+            wr_resp_data_sig[p].write(spm_resp_t{});
         }
-        dma_write_fire_sig    .write(false);
-        dma_read_fire_sig     .write(false);
+        dma_write_fire_sig.write(false);
+        dma_read_fire_sig.write(false);
         dma_write_req_fifo_pop.write(false);
-        dma_read_req_fifo_pop .write(false);
-        credit_stall_sig      .write(false);
-        arb_stall_sig         .write(false);
+        dma_read_req_fifo_pop.write(false);
+        credit_stall_sig.write(false);
+        arb_stall_sig.write(false);
 
         std::array<bool, NUM_GROUPS> group_busy{};
         group_busy.fill(false);
@@ -743,7 +745,7 @@ private:
                 uint32_t row = laddr - GROUP_LINEAR_WORDS;
                 if (req.wen) {
                     for (unsigned k = 0; k < BANKS_PER_GROUP; ++k) {
-                        bank_write_en_sig  [base_bank+k].write(true);
+                        bank_write_en_sig[base_bank+k].write(true);
                         bank_write_addr_sig[base_bank+k].write(
                             sc_uint<ADDR_WIDTH>(row * BYTES_PER_BANK_WORD));
                         sc_biguint<NOC_DATA_WIDTH> full_w = req.wdata;
@@ -764,7 +766,7 @@ private:
                     }
                     for (unsigned k = 0; k < BANKS_PER_GROUP; ++k) {
                         bank_req_valid_sig[base_bank+k].write(true);
-                        bank_req_addr_sig [base_bank+k].write(
+                        bank_req_addr_sig[base_bank+k].write(
                             sc_uint<ADDR_WIDTH>(row * BYTES_PER_BANK_WORD));
                     }
                     ReadMeta meta;
@@ -773,14 +775,14 @@ private:
                     meta.mode    = ReqMode::PARALLEL;
                     meta.addr    = laddr;
                     group_meta_fifo_push[g].write(true);
-                    group_meta_fifo_din [g].write(meta);
+                    group_meta_fifo_din[g].write(meta);
                     DEBUG_MSG(" META_PUSH PAR p=" << p << " g=" << g << " laddr=" << laddr << " @" << sc_time_stamp(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
                 }
             } else {
                 unsigned bidx = (laddr / BANK_DEPTH) + base_bank;
                 uint32_t row  = laddr % BANK_DEPTH;
                 if (req.wen) {
-                    bank_write_en_sig  [bidx].write(true);
+                    bank_write_en_sig[bidx].write(true);
                     bank_write_addr_sig[bidx].write(
                         sc_uint<ADDR_WIDTH>(row * BYTES_PER_BANK_WORD));
                     bank_write_data_sig[bidx].write(
@@ -794,7 +796,7 @@ private:
                         continue;
                     }
                     bank_req_valid_sig[bidx].write(true);
-                    bank_req_addr_sig [bidx].write(
+                    bank_req_addr_sig[bidx].write(
                         sc_uint<ADDR_WIDTH>(row * BYTES_PER_BANK_WORD));
                     ReadMeta meta;
                     meta.is_dma  = false;
@@ -802,7 +804,7 @@ private:
                     meta.mode    = ReqMode::LINEAR;
                     meta.addr    = laddr;
                     group_meta_fifo_push[g].write(true);
-                    group_meta_fifo_din [g].write(meta);
+                    group_meta_fifo_din[g].write(meta);
                     DEBUG_MSG(" META_PUSH LIN p=" << p << " g=" << g << " laddr=" << laddr << " @" << sc_time_stamp(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
                 }
             }
@@ -817,7 +819,7 @@ private:
             }
 
             group_busy[g] = true;
-            port_req_fire_sig    [p].write(true);
+            port_req_fire_sig[p].write(true);
             port_req_is_write_sig[p].write(req.wen ? true : false);
         }
 
@@ -834,13 +836,13 @@ private:
                 unsigned bidx = (lidx / BANK_DEPTH) + grp * BANKS_PER_GROUP;
                 uint32_t row  = lidx % BANK_DEPTH;
 
-                bank_write_en_sig  [bidx].write(true);
+                bank_write_en_sig[bidx].write(true);
                 bank_write_addr_sig[bidx].write(sc_uint<ADDR_WIDTH>(row * BYTES_PER_BANK_WORD));
                 bank_write_data_sig[bidx].write(wr.data);
                 bank_write_mask_sig[bidx].write(wr.strb);
 
                 dma_write_req_fifo_pop.write(true);
-                dma_write_fire_sig    .write(true);
+                dma_write_fire_sig.write(true);
                 group_busy[grp] = true;
             }
         }
@@ -863,7 +865,7 @@ private:
                 // Back pressure: bank pipeline must be ready
                 if (bank_req_ready_sig[bidx].read()) {
                     bank_req_valid_sig[bidx].write(true);
-                    bank_req_addr_sig [bidx].write(sc_uint<ADDR_WIDTH>(row * BYTES_PER_BANK_WORD));
+                    bank_req_addr_sig[bidx].write(sc_uint<ADDR_WIDTH>(row * BYTES_PER_BANK_WORD));
 
                     ReadMeta meta;
                     meta.is_dma  = true;
@@ -871,18 +873,18 @@ private:
                     meta.mode    = ReqMode::LINEAR;
                     meta.addr    = lidx;
                     group_meta_fifo_push[grp].write(true);
-                    group_meta_fifo_din [grp].write(meta);
+                    group_meta_fifo_din[grp].write(meta);
                     DEBUG_MSG(" META_PUSH DMA grp=" << grp << " addr=" << lidx << " @" << sc_time_stamp(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
 
                     dma_read_req_fifo_pop.write(true);
-                    dma_read_fire_sig    .write(true);
+                    dma_read_fire_sig.write(true);
                     group_busy[grp] = true;
                 }
             }
         }
 
         credit_stall_sig.write(local_credit_stall);
-        arb_stall_sig   .write(local_arb_stall);
+        arb_stall_sig.write(local_arb_stall);
     }
 
     // =========================================================================
@@ -997,7 +999,7 @@ private:
     void comb_spm_resp_output() {
         for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) {
             spm_resp_valid_o[p].write(!port_resp_fifo_empty[p].read());
-            spm_resp_o      [p].write(port_resp_fifo_dout  [p].read());
+            spm_resp_o[p].write(port_resp_fifo_dout[p].read());
         }
     }
 
@@ -1018,7 +1020,7 @@ private:
     void comb_dma_resp_b() {
         const bool pending = (dma_b_pending_cnt_reg.read() > 0);
         s_axi_bvalid_o.write(pending);
-        s_axi_bresp_o .write(0); // OKAY
+        s_axi_bresp_o.write(0); // OKAY
     }
 
     // =========================================================================
@@ -1027,9 +1029,9 @@ private:
     void comb_dma_resp_r() {
         const bool valid = !dma_read_resp_fifo_empty.read();
         s_axi_rvalid_o.write(valid);
-        s_axi_rdata_o .write(valid ? dma_read_resp_fifo_dout.read()
+        s_axi_rdata_o.write(valid ? dma_read_resp_fifo_dout.read()
                                    : sc_biguint<BANK_DATA_WIDTH>(0));
-        s_axi_rresp_o .write(0); // OKAY
+        s_axi_rresp_o.write(0); // OKAY
     }
 
     // =========================================================================
@@ -1038,7 +1040,7 @@ private:
     // =========================================================================
     void comb_dma_read_resp_fifo_push() {
         dma_read_resp_fifo_push.write(dma_read_merge_fire_sig.read());
-        dma_read_resp_fifo_din .write(dma_read_merge_data_sig.read());
+        dma_read_resp_fifo_din.write(dma_read_merge_data_sig.read());
     }
 
     // =========================================================================
@@ -1085,8 +1087,8 @@ private:
     // pmu_output_process
     // =========================================================================
     void pmu_output_process() {
-        pmu_cycle_cnt_o       .write(pmu_cycle_cnt_reg       .read());
-        pmu_arb_stall_cnt_o   .write(pmu_arb_stall_cnt_reg   .read());
+        pmu_cycle_cnt_o.write(pmu_cycle_cnt_reg.read());
+        pmu_arb_stall_cnt_o.write(pmu_arb_stall_cnt_reg.read());
         pmu_credit_stall_cnt_o.write(pmu_credit_stall_cnt_reg.read());
         for (unsigned p = 0; p < NUM_NOC_PORTS; ++p)
             pmu_port_txn_cnt_o[p].write(pmu_port_txn_cnt_reg[p].read());
@@ -1101,48 +1103,61 @@ private:
     void seq_process() {
         // ----- Reset -----
         for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) {
-            skid_valid_reg         [p].write(false);
-            skid_data_reg          [p].write(spm_req_t{});
-            credit_cnt_reg         [p].write(sc_uint<8>(MAX_OUTSTANDING));
-            active_map_reg         [p].write(sc_uint<2>(p % NUM_GROUPS));
-            pmu_port_txn_cnt_reg   [p].write(0);
-            port_resp_fifo_clear   [p].write(true);
+            skid_valid_reg[p].write(false);
+            skid_data_reg[p].write(spm_req_t{});
+            credit_cnt_reg[p].write(sc_uint<8>(MAX_OUTSTANDING));
+            active_map_reg[p].write(sc_uint<2>(p % NUM_GROUPS));
+            pmu_port_txn_cnt_reg[p].write(0);
+            port_resp_fifo_clear[p].write(true);
         }
         for (unsigned g = 0; g < NUM_GROUPS; ++g)
             group_meta_fifo_clear[g].write(true);
 
-        dma_b_pending_cnt_reg  .write(0);
+        dma_b_pending_cnt_reg.write(0);
         dma_rd_inflight_cnt_reg.write(0);
-        pmu_cycle_cnt_reg      .write(0);
-        pmu_arb_stall_cnt_reg  .write(0);
+        pmu_cycle_cnt_reg.write(0);
+        pmu_arb_stall_cnt_reg.write(0);
         pmu_credit_stall_cnt_reg.write(0);
 
         // Pulse all FIFO clears for one cycle
-        dma_aw_fifo_clear       .write(true);
-        dma_w_data_fifo_clear   .write(true);
-        dma_w_strb_fifo_clear   .write(true);
+        dma_aw_fifo_clear.write(true);
+        dma_w_data_fifo_clear.write(true);
+        dma_w_strb_fifo_clear.write(true);
         dma_write_req_fifo_clear.write(true);
-        dma_read_req_fifo_clear .write(true);
+        dma_read_req_fifo_clear.write(true);
         dma_read_resp_fifo_clear.write(true);
 
         wait();  // hold reset for one cycle
 
         // Deassert all clears
-        dma_aw_fifo_clear       .write(false);
-        dma_w_data_fifo_clear   .write(false);
-        dma_w_strb_fifo_clear   .write(false);
+        dma_aw_fifo_clear.write(false);
+        dma_w_data_fifo_clear.write(false);
+        dma_w_strb_fifo_clear.write(false);
         dma_write_req_fifo_clear.write(false);
-        dma_read_req_fifo_clear .write(false);
+        dma_read_req_fifo_clear.write(false);
         dma_read_resp_fifo_clear.write(false);
         for (unsigned g = 0; g < NUM_GROUPS; ++g)  group_meta_fifo_clear[g].write(false);
         for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) port_resp_fifo_clear[p].write(false);
 
         // ----- Main loop -----
         while (true) {
+            // WDATA and WSTRB are generated from the same AXI W handshake.
+            // If they diverge, the merged DMA write packet can carry mismatched mask/data.
+            if (dma_w_data_fifo_empty.read() != dma_w_strb_fifo_empty.read()) {
+                SC_REPORT_ERROR(
+                    name(),
+                    "dma_w_data_fifo_empty != dma_w_strb_fifo_empty (W channel desync)");
+            }
+            if (dma_w_data_fifo_full.read() != dma_w_strb_fifo_full.read()) {
+                SC_REPORT_ERROR(
+                    name(),
+                    "dma_w_data_fifo_full != dma_w_strb_fifo_full (W channel desync)");
+            }
+
             // -- PMU cycle / reset --
             if (pmu_rst_i.read()) {
-                pmu_cycle_cnt_reg      .write(0);
-                pmu_arb_stall_cnt_reg  .write(0);
+                pmu_cycle_cnt_reg.write(0);
+                pmu_arb_stall_cnt_reg.write(0);
                 pmu_credit_stall_cnt_reg.write(0);
                 for (unsigned p = 0; p < NUM_NOC_PORTS; ++p)
                     pmu_port_txn_cnt_reg[p].write(0);
@@ -1178,7 +1193,7 @@ private:
                 } else if (incoming && !fire) {
                     // New request stalled → save into skid buffer
                     skid_valid_reg[p].write(true);
-                    skid_data_reg [p].write(spm_req_i[p].read());
+                    skid_data_reg[p].write(spm_req_i[p].read());
                 }
                 // incoming && fire: request consumed directly, skid stays false
             }
@@ -1286,8 +1301,8 @@ private:
         const uint32_t tid_noc_resp_base = tid_noc_req_base + NUM_NOC_PORTS;
         const uint32_t tid_dma           = tid_noc_resp_base + NUM_NOC_PORTS;
 
-        auto btj = [](bool v) -> const char* { return v ? "true" : "false"; };
-        auto csv_u = [](const auto& arr) {
+        auto btj =[](bool v) -> const char* { return v ? "true" : "false"; };
+        auto csv_u =[](const auto& arr) {
             std::ostringstream o;
             for (size_t i = 0; i < arr.size(); ++i) { if (i) o << ","; o << arr[i]; }
             return o.str();
@@ -1323,7 +1338,7 @@ private:
             trace_init = true;
         }
 
-        auto trace_state = [&](std::string& last, const std::string& cur,
+        auto trace_state =[&](std::string& last, const std::string& cur,
                                const std::string& cat, uint32_t tid, const std::string& args) {
             if (cur != last) {
                 TRACE_EVENT(last, cat, TRACE_END,   trace_pid, tid, "{}");
@@ -1360,7 +1375,7 @@ private:
 
         trace_state(last_state_spm, spm_st, "SPM_State", tid_state,
                     std::string("{\"reset_n\": ") + btj(!in_reset)
-                    + ", \"map\": [" + csv_u(map_snap) + "]}");
+                    + ", \"map\":[" + csv_u(map_snap) + "]}");
 
         for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) {
             const bool req_v = spm_req_valid_i[p].read();
@@ -1399,10 +1414,10 @@ private:
         }
 
         const bool dma_aw_fire = s_axi_awvalid_i.read() && s_axi_awready_o.read();
-        const bool dma_w_fire  = s_axi_wvalid_i .read() && s_axi_wready_o .read();
+        const bool dma_w_fire  = s_axi_wvalid_i.read() && s_axi_wready_o.read();
         const bool dma_ar_fire = s_axi_arvalid_i.read() && s_axi_arready_o.read();
-        const bool dma_b_fire  = s_axi_bvalid_o .read() && s_axi_bready_i .read();
-        const bool dma_r_fire  = s_axi_rvalid_o .read() && s_axi_rready_i .read();
+        const bool dma_b_fire  = s_axi_bvalid_o.read() && s_axi_bready_i.read();
+        const bool dma_r_fire  = s_axi_rvalid_o.read() && s_axi_rready_i.read();
 
         std::string dma_st = "IDLE";
         if      (dma_b_fire || dma_r_fire)              dma_st = "RESP";

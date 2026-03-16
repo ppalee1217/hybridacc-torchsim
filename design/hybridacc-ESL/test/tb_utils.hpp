@@ -14,6 +14,10 @@
 #include <sstream>
 #include <variant>
 #include <memory>
+#include <array>
+#include <unordered_map>
+#include <iomanip>
+#include <limits>
 
 // -----------------------------------------------------------------------------
 // Simple JSON Parser (C++17)
@@ -468,4 +472,439 @@ struct Index4D {
 };
 
 // -----------------------------------------------------------------------------
-// Minimal JSON Parser for configuration
+// Cluster Simulation Testbench Utilities
+// -----------------------------------------------------------------------------
+
+namespace cluster_json {
+
+struct AguCfg {
+    uint32_t base_addr = 0;
+    uint32_t base_addr_h = 0;
+    uint16_t iter0 = 1;
+    uint16_t iter1 = 1;
+    uint16_t iter2 = 1;
+    uint16_t iter3 = 1;
+    int32_t stride0 = 0;
+    int32_t stride1 = 0;
+    int32_t stride2 = 0;
+    int32_t stride3 = 0;
+    uint32_t lane_cfg = 0;
+    uint32_t tag_base = 0;
+    uint32_t tag_stride0 = 0;
+    uint32_t tag_stride1 = 0;
+    uint32_t tag_ctrl = 0;
+    uint32_t mask_cfg = 0xF;
+    bool ultra = false;
+    bool enable = false;
+};
+
+inline std::ostream& operator<<(std::ostream& os, const AguCfg& cfg) {
+    os << "base_addr=0x" << std::hex << cfg.base_addr << std::dec
+       << " iter=[" << cfg.iter0 << "," << cfg.iter1 << "," << cfg.iter2 << "," << cfg.iter3 << "]"
+       << " stride=[" << cfg.stride0 << "," << cfg.stride1 << "," << cfg.stride2 << "," << cfg.stride3 << "]"
+       << " lane_cfg=0x" << std::hex << cfg.lane_cfg << std::dec
+       << " tag_base=0x" << std::hex << cfg.tag_base << std::dec
+       << " tag_stride=[" << cfg.tag_stride0 << "," << cfg.tag_stride1 << "]"
+       << " tag_ctrl=0x" << std::hex << cfg.tag_ctrl << std::dec
+       << " mask_cfg=0x" << std::hex << cfg.mask_cfg << std::dec
+       << " ultra=" << cfg.ultra
+       << " enable=" << cfg.enable;
+    return os;
+}
+
+struct ClusterPlan {
+    AguCfg agu_ps;
+    AguCfg agu_pd;
+    AguCfg agu_pli;
+    AguCfg agu_plo;
+    uint32_t global_mask = 0xF;
+    bool ultra_mode = false;
+    std::string name;
+};
+
+struct SpmSectionAddr {
+    uint32_t linear_addr = 0;
+    uint32_t parallel_addr = 0;
+};
+
+struct DmaAddrGen4D {
+    bool enabled = false;
+    uint32_t base_addr = 0;
+    std::array<uint32_t, 4> iter = {1, 1, 1, 1};
+    std::array<int32_t, 4> stride = {0, 0, 0, 8};
+};
+
+inline std::ostream& operator<<(std::ostream& os, const DmaAddrGen4D& gen) {
+    os << "AddrGen4D(enabled=" << gen.enabled
+       << ", base_addr=0x" << std::hex << gen.base_addr << std::dec
+       << ", iter=[" << gen.iter[0] << "," << gen.iter[1] << "," << gen.iter[2] << "," << gen.iter[3] << "]"
+       << ", stride=[" << gen.stride[0] << "," << gen.stride[1] << "," << gen.stride[2] << "," << gen.stride[3] << "]"
+       << ")";
+    return os;
+}
+
+struct DmaTransferCfg {
+    enum class Direction {
+        DramToSpm,
+        SpmToDram,
+    };
+
+    std::string tensor;
+    int group_id = -1;
+    std::string section;
+    Direction direction = Direction::DramToSpm;
+    uint32_t src_dram_addr = 0;
+    uint32_t dst_spm_addr = 0;
+    uint32_t src_spm_addr = 0;
+    uint32_t src_parallel_spm_addr = 0;
+    uint32_t dst_dram_addr = 0;
+    uint32_t dst_parallel_spm_addr = 0;
+    uint32_t size_words64 = 0;
+    DmaAddrGen4D src_addr_gen;
+    DmaAddrGen4D dst_addr_gen;
+};
+
+struct DmaWaveCfg {
+    uint32_t wave_id = 0;
+    int compute_plan_idx = -1;
+    uint32_t buf_sel = 0;
+    uint8_t spm_map_val = 0xE4;
+    bool has_spm_map = false;
+    std::string spm_map_reason;
+    std::vector<DmaTransferCfg> transfers;
+};
+
+inline std::string format_json(const std::shared_ptr<JsonValue>& v) {
+    if (!v || v->is_null()) return "null";
+    if (v->is_string()) return v->as_string();
+    if (v->is_number()) return std::to_string(v->as_int());
+    if (v->is_bool()) return v->as_bool() ? "true" : "false";
+    if (v->is_array()) {
+        std::stringstream ss;
+        ss << "[";
+        const auto& arr = v->as_array();
+        for (size_t i = 0; i < arr.size(); ++i) {
+            if (i > 0) ss << ",";
+            ss << format_json(arr[i]);
+        }
+        ss << "]";
+        return ss.str();
+    }
+    if (v->is_object()) {
+        std::stringstream ss;
+        ss << "{";
+        size_t count = 0;
+        for (const auto& [key, val] : v->as_object()) {
+            if (count++ > 0) ss << ",";
+            ss << key << ":" << format_json(val);
+        }
+        ss << "}";
+        return ss.str();
+    }
+    return "?";
+}
+
+inline bool json_to_bool(const std::shared_ptr<JsonValue>& node, bool default_value = false) {
+    if (!node) return default_value;
+    if (node->is_bool()) return node->as_bool();
+    return node->as_int64() != 0;
+}
+
+inline bool parse_u32_array4(const std::shared_ptr<JsonValue>& node, std::array<uint32_t, 4>& out) {
+    if (!node || !node->is_array()) return false;
+    const auto& arr = node->as_array();
+    if (arr.size() != 4) return false;
+    for (size_t i = 0; i < 4; ++i) {
+        if (!arr[i]) return false;
+        out[i] = static_cast<uint32_t>(arr[i]->as_int64());
+    }
+    return true;
+}
+
+inline bool parse_i32_array4(const std::shared_ptr<JsonValue>& node, std::array<int32_t, 4>& out) {
+    if (!node || !node->is_array()) return false;
+    const auto& arr = node->as_array();
+    if (arr.size() != 4) return false;
+    for (size_t i = 0; i < 4; ++i) {
+        if (!arr[i]) return false;
+        out[i] = static_cast<int32_t>(arr[i]->as_int64());
+    }
+    return true;
+}
+
+inline bool parse_addr_gen4d(const std::shared_ptr<JsonValue>& node, DmaAddrGen4D& out) {
+    if (!node || !node->is_object()) return false;
+    auto iter_v = (*node)["iter"];
+    auto stride_v = (*node)["stride"];
+    if (!iter_v || !stride_v) return false;
+
+    std::array<uint32_t, 4> iter = {1, 1, 1, 1};
+    std::array<int32_t, 4> stride = {0, 0, 0, 8};
+    if (!parse_u32_array4(iter_v, iter) || !parse_i32_array4(stride_v, stride)) return false;
+
+    out.enabled = true;
+    out.base_addr = (*node)["base_addr"] ? static_cast<uint32_t>((*node)["base_addr"]->as_int64()) : 0;
+    out.iter = iter;
+    out.stride = stride;
+    return true;
+}
+
+inline std::vector<uint32_t> build_dma_addr_list(const DmaAddrGen4D& gen,
+                                                 uint32_t fallback_base,
+                                                 uint32_t word_count) {
+    constexpr uint32_t kWordBytes = 8;
+    std::vector<uint32_t> out;
+    out.reserve(word_count);
+
+    if (!gen.enabled) {
+        for (uint32_t i = 0; i < word_count; ++i) {
+            out.push_back(fallback_base + i * kWordBytes);
+        }
+        return out;
+    }
+
+    for (uint32_t i0 = 0; i0 < gen.iter[0] && out.size() < word_count; ++i0) {
+        for (uint32_t i1 = 0; i1 < gen.iter[1] && out.size() < word_count; ++i1) {
+            for (uint32_t i2 = 0; i2 < gen.iter[2] && out.size() < word_count; ++i2) {
+                for (uint32_t i3 = 0; i3 < gen.iter[3] && out.size() < word_count; ++i3) {
+                    const int64_t addr_i64 = static_cast<int64_t>(gen.base_addr)
+                        + static_cast<int64_t>(i0) * static_cast<int64_t>(gen.stride[0])
+                        + static_cast<int64_t>(i1) * static_cast<int64_t>(gen.stride[1])
+                        + static_cast<int64_t>(i2) * static_cast<int64_t>(gen.stride[2])
+                        + static_cast<int64_t>(i3) * static_cast<int64_t>(gen.stride[3]);
+                    out.push_back(static_cast<uint32_t>(addr_i64));
+                }
+            }
+        }
+    }
+
+    if (out.size() < word_count) {
+        for (uint32_t i = static_cast<uint32_t>(out.size()); i < word_count; ++i) {
+            out.push_back(fallback_base + i * kWordBytes);
+        }
+    }
+    return out;
+}
+
+inline bool parse_agu_cfg(const std::shared_ptr<JsonValue>& node, AguCfg& out) {
+    if (!node || !node->is_object()) return false;
+    auto read_u32 = [&](const std::string& key, uint32_t& dst) {
+        auto v = (*node)[key];
+        if (v) dst = static_cast<uint32_t>(v->as_int64());
+    };
+    auto read_u16 = [&](const std::string& key, uint16_t& dst) {
+        auto v = (*node)[key];
+        if (v) dst = static_cast<uint16_t>(v->as_int64());
+    };
+    auto read_i32 = [&](const std::string& key, int32_t& dst) {
+        auto v = (*node)[key];
+        if (v) dst = static_cast<int32_t>(v->as_int64());
+    };
+
+    read_u32("base_addr", out.base_addr);
+    read_u32("base_addr_h", out.base_addr_h);
+    read_u16("iter0", out.iter0);
+    read_u16("iter1", out.iter1);
+    read_u16("iter2", out.iter2);
+    read_u16("iter3", out.iter3);
+    read_i32("stride0", out.stride0);
+    read_i32("stride1", out.stride1);
+    read_i32("stride2", out.stride2);
+    read_i32("stride3", out.stride3);
+    read_u32("lane_cfg", out.lane_cfg);
+    read_u32("tag_base", out.tag_base);
+    read_u32("tag_stride0", out.tag_stride0);
+    read_u32("tag_stride1", out.tag_stride1);
+    read_u32("tag_ctrl", out.tag_ctrl);
+    read_u32("mask_cfg", out.mask_cfg);
+    out.ultra = json_to_bool((*node)["ultra"], out.ultra);
+    out.enable = json_to_bool((*node)["enable"], out.enable);
+    return true;
+}
+
+inline std::vector<ClusterPlan> parse_cluster_plans(const std::shared_ptr<JsonValue>& software) {
+    std::vector<ClusterPlan> plans;
+    auto plan_arr = (*software)["cluster_plans"];
+    if (!plan_arr || !plan_arr->is_array()) return plans;
+
+    for (const auto& p : plan_arr->as_array()) {
+        if (!p || !p->is_object()) continue;
+        ClusterPlan plan;
+        auto name = (*p)["name"];
+        if (name && name->is_string()) plan.name = name->as_string();
+        auto global_mask = (*p)["global_mask"];
+        if (global_mask) plan.global_mask = static_cast<uint32_t>(global_mask->as_int64());
+        plan.ultra_mode = json_to_bool((*p)["ultra_mode"], false);
+        parse_agu_cfg((*p)["agu_ps"], plan.agu_ps);
+        parse_agu_cfg((*p)["agu_pd"], plan.agu_pd);
+        parse_agu_cfg((*p)["agu_pli"], plan.agu_pli);
+        parse_agu_cfg((*p)["agu_plo"], plan.agu_plo);
+        plans.push_back(std::move(plan));
+    }
+    return plans;
+}
+
+inline std::unordered_map<std::string, SpmSectionAddr> parse_spm_sections(const std::shared_ptr<JsonValue>& software) {
+    std::unordered_map<std::string, SpmSectionAddr> out;
+    auto spm = (*software)["spm"];
+    if (!spm) return out;
+
+    auto groups = (*spm)["groups"];
+    if (groups && groups->is_array()) {
+        for (const auto& g : groups->as_array()) {
+            if (!g || !g->is_object()) continue;
+            auto sections = (*g)["sections"];
+            if (!sections || !sections->is_array()) continue;
+            for (const auto& s : sections->as_array()) {
+                if (!s || !s->is_object() || !(*s)["name"]) continue;
+                const std::string name = (*s)["name"]->as_string();
+                SpmSectionAddr addr;
+                if ((*s)["global_linear_addr"]) addr.linear_addr = static_cast<uint32_t>((*s)["global_linear_addr"]->as_int64());
+                if ((*s)["global_parallel_addr"]) addr.parallel_addr = static_cast<uint32_t>((*s)["global_parallel_addr"]->as_int64());
+                if ((*s)["linear_spm_addr"]) addr.linear_addr = static_cast<uint32_t>((*s)["linear_spm_addr"]->as_int64());
+                if ((*s)["parallel_spm_addr"]) addr.parallel_addr = static_cast<uint32_t>((*s)["parallel_spm_addr"]->as_int64());
+                if ((*s)["spm_addr"]) addr.linear_addr = static_cast<uint32_t>((*s)["spm_addr"]->as_int64());
+                out[name] = addr;
+            }
+        }
+    }
+    return out;
+}
+
+inline uint32_t get_spm_tensor_addr_or_default(const std::shared_ptr<JsonValue>& software,
+                                               const std::string& tensor_name,
+                                               uint32_t default_addr,
+                                               bool prefer_parallel) {
+    auto spm = (*software)["spm"];
+    if (!spm) return default_addr;
+    auto tensor_mapping = (*spm)["tensor_mapping"];
+    if (!tensor_mapping) return default_addr;
+    auto t = (*tensor_mapping)[tensor_name];
+    if (!t) return default_addr;
+
+    bool has_linear = false;
+    bool has_parallel = false;
+    uint32_t linear_addr = 0;
+    uint32_t parallel_addr = 0;
+
+    if ((*t)["linear_spm_addr"]) {
+        has_linear = true;
+        linear_addr = static_cast<uint32_t>((*t)["linear_spm_addr"]->as_int64());
+    }
+    if ((*t)["parallel_spm_addr"]) {
+        has_parallel = true;
+        parallel_addr = static_cast<uint32_t>((*t)["parallel_spm_addr"]->as_int64());
+    }
+
+    if ((*t)["spm_addr"]) {
+        const uint32_t v = static_cast<uint32_t>((*t)["spm_addr"]->as_int64());
+        auto mode_v = (*t)["spm_mode"];
+        const std::string mode = (mode_v && mode_v->is_string()) ? mode_v->as_string() : "";
+        if (mode == "parallel") {
+            has_parallel = true;
+            parallel_addr = v;
+        } else {
+            has_linear = true;
+            linear_addr = v;
+        }
+    }
+
+    if (prefer_parallel) {
+        if (has_parallel) return parallel_addr;
+        if (has_linear) return linear_addr;
+    } else {
+        if (has_linear) return linear_addr;
+        if (has_parallel) return parallel_addr;
+    }
+    return default_addr;
+}
+
+inline std::vector<DmaWaveCfg> parse_dma_waves(
+    const std::shared_ptr<JsonValue>& software,
+    const std::unordered_map<std::string, SpmSectionAddr>& section_addr_map) {
+    std::vector<DmaWaveCfg> waves;
+    auto dma = (*software)["dma"];
+    if (!dma) return waves;
+
+    auto wave_arr = (*dma)["waves"];
+    if (!wave_arr || !wave_arr->is_array()) return waves;
+
+    for (const auto& w : wave_arr->as_array()) {
+        if (!w || !w->is_object()) continue;
+        DmaWaveCfg wave;
+        if ((*w)["wave_id"]) wave.wave_id = static_cast<uint32_t>((*w)["wave_id"]->as_int());
+        if ((*w)["buf_sel"]) wave.buf_sel = static_cast<uint32_t>((*w)["buf_sel"]->as_int());
+
+        auto spm_map = (*w)["spm_map"];
+        if (spm_map && spm_map->is_object()) {
+            if ((*spm_map)["map_val"]) {
+                wave.spm_map_val = static_cast<uint8_t>((*spm_map)["map_val"]->as_int64() & 0xFF);
+                wave.has_spm_map = true;
+            }
+            if ((*spm_map)["reason"] && (*spm_map)["reason"]->is_string()) {
+                wave.spm_map_reason = (*spm_map)["reason"]->as_string();
+            }
+        }
+
+        if ((*w)["spm_map_val"]) {
+            wave.spm_map_val = static_cast<uint8_t>((*w)["spm_map_val"]->as_int64() & 0xFF);
+            wave.has_spm_map = true;
+        }
+
+        auto sync = (*w)["sync"];
+        if (sync && (*sync)["compute_plan_idx"]) wave.compute_plan_idx = (*sync)["compute_plan_idx"]->as_int();
+
+        auto transfers = (*w)["transfers"];
+        if (transfers && transfers->is_array()) {
+            for (const auto& t : transfers->as_array()) {
+                if (!t || !t->is_object()) continue;
+                DmaTransferCfg cfg;
+                if ((*t)["tensor"]) cfg.tensor = (*t)["tensor"]->as_string();
+                if ((*t)["group_id"]) cfg.group_id = (*t)["group_id"]->as_int();
+                if ((*t)["section"]) cfg.section = (*t)["section"]->as_string();
+
+                auto dir = (*t)["direction"];
+                const std::string dir_s = (dir && dir->is_string()) ? dir->as_string() : "dram_to_spm";
+                cfg.direction = (dir_s == "spm_to_dram")
+                    ? DmaTransferCfg::Direction::SpmToDram
+                    : DmaTransferCfg::Direction::DramToSpm;
+
+                if ((*t)["src_dram_addr"]) cfg.src_dram_addr = static_cast<uint32_t>((*t)["src_dram_addr"]->as_int64());
+                if ((*t)["dst_spm_addr"]) cfg.dst_spm_addr = static_cast<uint32_t>((*t)["dst_spm_addr"]->as_int64());
+                if ((*t)["src_spm_addr"]) cfg.src_spm_addr = static_cast<uint32_t>((*t)["src_spm_addr"]->as_int64());
+                if ((*t)["dst_dram_addr"]) cfg.dst_dram_addr = static_cast<uint32_t>((*t)["dst_dram_addr"]->as_int64());
+                if ((*t)["src_parallel_spm_addr"]) cfg.src_parallel_spm_addr = static_cast<uint32_t>((*t)["src_parallel_spm_addr"]->as_int64());
+                if ((*t)["dst_parallel_spm_addr"]) cfg.dst_parallel_spm_addr = static_cast<uint32_t>((*t)["dst_parallel_spm_addr"]->as_int64());
+
+                if (cfg.dst_spm_addr == 0 && !cfg.section.empty()) {
+                    auto it = section_addr_map.find(cfg.section);
+                    if (it != section_addr_map.end()) {
+                        cfg.dst_spm_addr = it->second.linear_addr;
+                        cfg.dst_parallel_spm_addr = it->second.parallel_addr;
+                    }
+                }
+                if (cfg.src_spm_addr == 0 && !cfg.section.empty()) {
+                    auto it = section_addr_map.find(cfg.section);
+                    if (it != section_addr_map.end()) {
+                        cfg.src_spm_addr = it->second.linear_addr;
+                        cfg.src_parallel_spm_addr = it->second.parallel_addr;
+                    }
+                }
+
+                if ((*t)["size_words64"]) cfg.size_words64 = static_cast<uint32_t>((*t)["size_words64"]->as_int64());
+                if ((*t)["word_count"]) cfg.size_words64 = static_cast<uint32_t>((*t)["word_count"]->as_int64());
+
+                auto src_gen = (*t)["src_addr_gen"];
+                if (src_gen) parse_addr_gen4d(src_gen, cfg.src_addr_gen);
+                auto dst_gen = (*t)["dst_addr_gen"];
+                if (dst_gen) parse_addr_gen4d(dst_gen, cfg.dst_addr_gen);
+
+                wave.transfers.push_back(std::move(cfg));
+            }
+        }
+        waves.push_back(std::move(wave));
+    }
+    return waves;
+}
+
+} // namespace cluster_json
