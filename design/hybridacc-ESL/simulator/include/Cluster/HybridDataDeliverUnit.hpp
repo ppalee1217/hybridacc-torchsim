@@ -1306,9 +1306,11 @@ private:
 			if (spm_resp_valid[PLANE_PLO].read() && spm_resp_ready[PLANE_PLO].read()) {
 				const auto resp_code = spm_resp_payload[PLANE_PLO].read().code;
 				const auto wr_addr   = spm_req_payload[PLANE_PLO].read().addr;
+				const auto wr_data   = spm_req_payload[PLANE_PLO].read().wdata;
 				DEBUG_MSG("[HDDU][SPM] SPM_WRITE_RESP_RECEIVE"
 						  << " lane=" << PLANE_PLO
 						  << " addr=0x" << std::hex << wr_addr
+						  << " wdata=0x" << wr_data
 						  << " code=" << static_cast<int>(resp_code)
 						  << std::dec,
 						  DEBUG_LEVEL_CLUSTER_COMPONENTS);

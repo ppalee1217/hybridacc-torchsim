@@ -1,0 +1,18 @@
+{
+  "name": "conv_k1c12ich12och16s",
+  "mode": "conv2d",
+  "pe_program": "testbench/cluster/conv_k1c12ich12och16s/pe_program.asm",
+  "num_pes": 48,
+  "num_bus": 3,
+  "stride": 1,
+  "input_h": 48,
+  "input_w": 10,
+  "input_c": 12,
+  "out_ch": 16,
+  "kernel_h": 1,
+  "kernel_w": 1,
+  "seed": 123,
+  "padding": 0,
+  "ultra_mode": true,
+  "out_dir": "./output/cluster-sim/conv_k1c12ich12och16s"
+}

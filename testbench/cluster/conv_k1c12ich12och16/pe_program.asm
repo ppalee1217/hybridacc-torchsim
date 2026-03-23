@@ -3,7 +3,7 @@ conv2d_1x1:
 setup:
     SDMA.ADDR 0
     SDMA.LEN 48  # STORE 48 steps of kernel data (16 kernels * 3 vector each)
-    SDMA.LOOP 4  # loop for 4 kernel set
+    SDMA.LOOP 1  # loop for 1 kernel set
     SDMA.SD 4  # start DMA store operation
 
     LDMA.ADDR 0
@@ -21,7 +21,7 @@ compute_loop:
     VTSTORE vt2
 
 loop_window:
-    LOOPIN 199  # Loop for 199 input elements
+    LOOPIN 63  # Loop for 63 input elements
     SYS.CTRL (RST.PID, RST.TID, LDMA.ACT, CLEAR.P)
     LOOPIN 16  # Loop for 16 kernels
     VMACRN 0, 1

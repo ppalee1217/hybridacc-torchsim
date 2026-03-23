@@ -1,9 +1,9 @@
-conv2d_3x3:
+conv2d_1x1:
 
 setup:
     SDMA.ADDR 0
     SDMA.LEN 48  # STORE 48 steps of kernel data (16 kernels * 3 vector each)
-    SDMA.LOOP 4  # loop for 4 kernel sets
+    SDMA.LOOP 1  # loop for 1 kernel set
     SDMA.SD 4  # start DMA store operation
 
     LDMA.ADDR 0
@@ -13,27 +13,26 @@ setup:
     SYS.CTRL (SDMA.ACT)
 
 compute_loop:
-    LOOPIN 4  # Loop for 4 kernel sets
-preload_input:
+    #LOOPIN 4  # Loop for 4 kernel sets
+    SYS.SYNC (SWAPDM)
+
     VTSTORE vt0
     VTSTORE vt1
     VTSTORE vt2
-    SYS.SYNC (SWAPDM)
 
 loop_window:
-    LOOPIN 197  # Loop for 197 input elements
+    LOOPIN 9  # Loop for 9 input elements
     SYS.CTRL (RST.PID, RST.TID, LDMA.ACT, CLEAR.P)
     LOOPIN 16  # Loop for 16 kernels
     VMACRN 0, 1
     VMACRN 0, 1
     VMACRN 1, VTRST # reset vector register id
     LOOPEND
-    VPSUM_TSHIFT vp0, K3
-    VPSUM_VTSTORE vp1, vt2
-    VPSUM vp2
+    VPSUM_VTSTORE vp0, vt0
+    VPSUM_VTSTORE vp1, vt1
+    VPSUM_VTSTORE vp2, vt2
     VPSUM vp3
     LOOPEND
-
 last:
     SYS.CTRL (RST.PID, RST.TID, LDMA.ACT, CLEAR.P)
     LOOPIN 16  # Loop for 16 kernels
@@ -46,6 +45,6 @@ last:
     VPSUM vp2
     VPSUM vp3
 
-    LOOPEND
+    #LOOPEND  # End global loop
 
-    HALT  # End of program
+    HALT

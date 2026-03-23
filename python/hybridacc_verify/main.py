@@ -182,9 +182,9 @@ def main():
 
         elif mode == 'gemm':
             config = ClusterGemmConfig(**config_dict)
-            gemm_test = gen_cluster_gemm(config)
+            gemm_test = gen_cluster_gemm(config, args.assembler)
             print(f"[Main] Generated Cluster GEMM test: {gemm_test.name}")
-            save_dir = Path(config.out_dir) / gemm_test.name
+            save_dir = Path(config.out_dir)
             if not save_dir.exists():
                 save_dir.mkdir(parents=True, exist_ok=True)
             gemm_test.save(save_dir)
