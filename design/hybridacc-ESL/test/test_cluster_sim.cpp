@@ -320,9 +320,11 @@ struct SimRunnerOptions {
 	std::string trace_file;
 };
 
-// Testbench backend that instantiates the ComputeCluster and provides hooks for the driver to interact with it
-class ComputeClusterTbBackend {
+// Testbench backend that drives DUT via SystemC IO ports.
+class ComputeClusterTbBackend : public sc_core::sc_module {
 public:
+	SC_HAS_PROCESS(ComputeClusterTbBackend);
+
 	struct DmaWaveSyncRequest {
 		uint32_t wave_id = 0;
 		uint32_t latency_cycles = 1;
@@ -331,41 +333,41 @@ public:
 	int kClockPeriodNs = 10;
 	int timeout_cycles = 200;
 
-	sc_core::sc_clock clk;
-	sc_core::sc_signal<bool> reset_n;
-	sc_core::sc_signal<bool> power_enable_i;
-	sc_core::sc_signal<bool> interrupt_o;
+	sc_core::sc_in<bool> clk;
+	sc_core::sc_out<bool> reset_n;
+	sc_core::sc_out<bool> power_enable_i;
+	sc_core::sc_in<bool> interrupt_o;
 
-	sc_core::sc_signal<bool> s_axi_awvalid_i;
-	sc_core::sc_signal<bool> s_axi_awready_o;
-	sc_core::sc_signal<sc_dt::sc_uint<32>> s_axi_awaddr_i;
-	sc_core::sc_signal<bool> s_axi_wvalid_i;
-	sc_core::sc_signal<bool> s_axi_wready_o;
-	sc_core::sc_signal<sc_dt::sc_biguint<64>> s_axi_wdata_i;
-	sc_core::sc_signal<sc_dt::sc_uint<8>> s_axi_wstrb_i;
-	sc_core::sc_signal<bool> s_axi_bvalid_o;
-	sc_core::sc_signal<bool> s_axi_bready_i;
-	sc_core::sc_signal<sc_dt::sc_uint<2>> s_axi_bresp_o;
-	sc_core::sc_signal<bool> s_axi_arvalid_i;
-	sc_core::sc_signal<bool> s_axi_arready_o;
-	sc_core::sc_signal<sc_dt::sc_uint<32>> s_axi_araddr_i;
-	sc_core::sc_signal<bool> s_axi_rvalid_o;
-	sc_core::sc_signal<bool> s_axi_rready_i;
-	sc_core::sc_signal<sc_dt::sc_biguint<64>> s_axi_rdata_o;
-	sc_core::sc_signal<sc_dt::sc_uint<2>> s_axi_rresp_o;
+	sc_core::sc_out<bool> s_axi_awvalid_i;
+	sc_core::sc_in<bool> s_axi_awready_o;
+	sc_core::sc_out<sc_dt::sc_uint<32>> s_axi_awaddr_i;
+	sc_core::sc_out<bool> s_axi_wvalid_i;
+	sc_core::sc_in<bool> s_axi_wready_o;
+	sc_core::sc_out<sc_dt::sc_biguint<64>> s_axi_wdata_i;
+	sc_core::sc_out<sc_dt::sc_uint<8>> s_axi_wstrb_i;
+	sc_core::sc_in<bool> s_axi_bvalid_o;
+	sc_core::sc_out<bool> s_axi_bready_i;
+	sc_core::sc_in<sc_dt::sc_uint<2>> s_axi_bresp_o;
+	sc_core::sc_out<bool> s_axi_arvalid_i;
+	sc_core::sc_in<bool> s_axi_arready_o;
+	sc_core::sc_out<sc_dt::sc_uint<32>> s_axi_araddr_i;
+	sc_core::sc_in<bool> s_axi_rvalid_o;
+	sc_core::sc_out<bool> s_axi_rready_i;
+	sc_core::sc_in<sc_dt::sc_biguint<64>> s_axi_rdata_o;
+	sc_core::sc_in<sc_dt::sc_uint<2>> s_axi_rresp_o;
 
-	sc_core::sc_signal<bool> hsel_i;
-	sc_core::sc_signal<sc_dt::sc_uint<32>> haddr_i;
-	sc_core::sc_signal<bool> hwrite_i;
-	sc_core::sc_signal<sc_dt::sc_uint<2>> htrans_i;
-	sc_core::sc_signal<sc_dt::sc_uint<3>> hsize_i;
-	sc_core::sc_signal<sc_dt::sc_uint<3>> hburst_i;
-	sc_core::sc_signal<sc_dt::sc_uint<4>> hprot_i;
-	sc_core::sc_signal<bool> hready_i;
-	sc_core::sc_signal<sc_dt::sc_uint<32>> hwdata_i;
-	sc_core::sc_signal<bool> hready_o;
-	sc_core::sc_signal<bool> hresp_o;
-	sc_core::sc_signal<sc_dt::sc_uint<32>> hrdata_o;
+	sc_core::sc_out<bool> hsel_i;
+	sc_core::sc_out<sc_dt::sc_uint<32>> haddr_i;
+	sc_core::sc_out<bool> hwrite_i;
+	sc_core::sc_out<sc_dt::sc_uint<2>> htrans_i;
+	sc_core::sc_out<sc_dt::sc_uint<3>> hsize_i;
+	sc_core::sc_out<sc_dt::sc_uint<3>> hburst_i;
+	sc_core::sc_out<sc_dt::sc_uint<4>> hprot_i;
+	sc_core::sc_out<bool> hready_i;
+	sc_core::sc_out<sc_dt::sc_uint<32>> hwdata_i;
+	sc_core::sc_in<bool> hready_o;
+	sc_core::sc_in<bool> hresp_o;
+	sc_core::sc_in<sc_dt::sc_uint<32>> hrdata_o;
 
 	// consts
 	static constexpr unsigned SPM_NUM_NOC_CHANNEL = 4;
@@ -379,7 +381,7 @@ public:
 	static constexpr unsigned NOC_PORT_WIDTH_BITS = 64;
 	static constexpr unsigned NOC_NUM_PES_PER_PORT = 16;
 
-	hybridacc::ComputeCluster<
+	using DutType = hybridacc::ComputeCluster<
 		SPM_NUM_NOC_CHANNEL,
 		SPM_NUM_BANKS_PER_GROUP,
 		SPM_SRAM_BANK_WIDTH_BITS,
@@ -389,49 +391,58 @@ public:
 		SPM_ADDR_WIDTH,
 		NOC_NUM_PORTS,
 		NOC_PORT_WIDTH_BITS,
-		NOC_NUM_PES_PER_PORT> dut;
+		NOC_NUM_PES_PER_PORT>;
 
-	ComputeClusterTbBackend(int clock_period_ns = 10, int timeout_cycles = 200)
-		: kClockPeriodNs(clock_period_ns),
+	DutType& dut;
+
+	ComputeClusterTbBackend(
+		sc_core::sc_module_name name,
+		DutType& dut_ref,
+		int clock_period_ns = 10,
+		int timeout_cycles = 200)
+		: sc_core::sc_module(name),
+		  dut(dut_ref),
+		  kClockPeriodNs(clock_period_ns),
 		  timeout_cycles(timeout_cycles),
-		  clk("clk", sc_core::sc_time(clock_period_ns, sc_core::SC_NS)),
-		  dut("Cluster", hybridacc::NetWorkOnChipConfig(4, 4)) {
-		dut.clk(clk);
-		dut.reset_n(reset_n);
-		dut.power_enable_i(power_enable_i);
-		dut.interrupt_o(interrupt_o);
+		  clk("clk"),
+		  reset_n("reset_n"),
+		  power_enable_i("power_enable_i"),
+		  interrupt_o("interrupt_o"),
+		  s_axi_awvalid_i("s_axi_awvalid_i"),
+		  s_axi_awready_o("s_axi_awready_o"),
+		  s_axi_awaddr_i("s_axi_awaddr_i"),
+		  s_axi_wvalid_i("s_axi_wvalid_i"),
+		  s_axi_wready_o("s_axi_wready_o"),
+		  s_axi_wdata_i("s_axi_wdata_i"),
+		  s_axi_wstrb_i("s_axi_wstrb_i"),
+		  s_axi_bvalid_o("s_axi_bvalid_o"),
+		  s_axi_bready_i("s_axi_bready_i"),
+		  s_axi_bresp_o("s_axi_bresp_o"),
+		  s_axi_arvalid_i("s_axi_arvalid_i"),
+		  s_axi_arready_o("s_axi_arready_o"),
+		  s_axi_araddr_i("s_axi_araddr_i"),
+		  s_axi_rvalid_o("s_axi_rvalid_o"),
+		  s_axi_rready_i("s_axi_rready_i"),
+		  s_axi_rdata_o("s_axi_rdata_o"),
+		  s_axi_rresp_o("s_axi_rresp_o"),
+		  hsel_i("hsel_i"),
+		  haddr_i("haddr_i"),
+		  hwrite_i("hwrite_i"),
+		  htrans_i("htrans_i"),
+		  hsize_i("hsize_i"),
+		  hburst_i("hburst_i"),
+		  hprot_i("hprot_i"),
+		  hready_i("hready_i"),
+		  hwdata_i("hwdata_i"),
+		  hready_o("hready_o"),
+		  hresp_o("hresp_o"),
+		  hrdata_o("hrdata_o") {
+		dma_wave_done_.write(false);
 
-		dut.s_axi_awvalid_i(s_axi_awvalid_i);
-		dut.s_axi_awready_o(s_axi_awready_o);
-		dut.s_axi_awaddr_i(s_axi_awaddr_i);
-		dut.s_axi_wvalid_i(s_axi_wvalid_i);
-		dut.s_axi_wready_o(s_axi_wready_o);
-		dut.s_axi_wdata_i(s_axi_wdata_i);
-		dut.s_axi_wstrb_i(s_axi_wstrb_i);
-		dut.s_axi_bvalid_o(s_axi_bvalid_o);
-		dut.s_axi_bready_i(s_axi_bready_i);
-		dut.s_axi_bresp_o(s_axi_bresp_o);
-		dut.s_axi_arvalid_i(s_axi_arvalid_i);
-		dut.s_axi_arready_o(s_axi_arready_o);
-		dut.s_axi_araddr_i(s_axi_araddr_i);
-		dut.s_axi_rvalid_o(s_axi_rvalid_o);
-		dut.s_axi_rready_i(s_axi_rready_i);
-		dut.s_axi_rdata_o(s_axi_rdata_o);
-		dut.s_axi_rresp_o(s_axi_rresp_o);
+		SC_THREAD(dma_wave_process);
+	}
 
-		dut.hsel_i(hsel_i);
-		dut.haddr_i(haddr_i);
-		dut.hwrite_i(hwrite_i);
-		dut.htrans_i(htrans_i);
-		dut.hsize_i(hsize_i);
-		dut.hburst_i(hburst_i);
-		dut.hprot_i(hprot_i);
-		dut.hready_i(hready_i);
-		dut.hwdata_i(hwdata_i);
-		dut.hready_o(hready_o);
-		dut.hresp_o(hresp_o);
-		dut.hrdata_o(hrdata_o);
-
+	void end_of_elaboration() override {
 		reset_n.write(false);
 		power_enable_i.write(false);
 		s_axi_awvalid_i.write(false);
@@ -452,10 +463,6 @@ public:
 		hprot_i.write(0);
 		hready_i.write(true);
 		hwdata_i.write(0);
-		dma_wave_done_.write(false);
-
-		sc_core::sc_spawn(sc_bind(&ComputeClusterTbBackend::dma_wave_process, this), "tb_dma_wave_process");
-		tick(1);
 	}
 
 	void mmio_write(uint32_t addr, uint32_t data) {
@@ -570,7 +577,7 @@ private:
 
 	void tick(uint32_t n = 1) {
 		for (uint32_t i = 0; i < n; ++i) {
-			sc_core::sc_start(kClockPeriodNs, sc_core::SC_NS);
+			wait(clk.negedge_event());
 		}
 	}
 
@@ -1044,6 +1051,8 @@ private:
 			pe_prog = read_binary_file<uint16_t>(pe_prog_path.string());
 		} else {
 			std::cerr << "Warning: pe_program.bin not found at " << pe_prog_path << ". Using empty program." << std::endl;
+			throw std::runtime_error("PE program binary not found");
+			 // pe_prog remains empty
 		}
 
 		std::vector<uint32_t> scan_chain_data;
@@ -1279,6 +1288,110 @@ private:
 	std::unordered_map<uint32_t, uint64_t> dram_shadow_;
 };
 
+class ClusterSimTestBench : public sc_core::sc_module {
+public:
+	SC_HAS_PROCESS(ClusterSimTestBench);
+
+	ClusterSimTestBench(
+		sc_core::sc_module_name name,
+		const SimRunnerOptions& options,
+		ComputeClusterTbBackend& backend)
+		: sc_core::sc_module(name),
+		  options_(options),
+		  backend_(backend) {
+		SC_THREAD(control_process);
+	}
+
+	bool verify() const {
+		if (!run_finished_) {
+			std::cerr << "[test_cluster_sim] simulation ended before testbench finished" << std::endl;
+			return false;
+		}
+		return pass_;
+	}
+
+private:
+	void control_process() {
+		DriverHooks hooks;
+		if (options_.verbose) {
+			hooks.mmio_write = [&](uint32_t a, uint32_t d) {
+				std::cout << "[hook] mmio_write addr=0x" << std::hex << a << " data=0x" << d << std::dec << std::endl;
+				backend_.mmio_write(a, d);
+			};
+			hooks.mmio_read = [&](uint32_t a) -> uint32_t {
+				const uint32_t v = backend_.mmio_read(a);
+				std::cout << "[hook] mmio_read addr=0x" << std::hex << a << " -> 0x" << v << std::dec << std::endl;
+				return v;
+			};
+			hooks.data_write64 = [&](uint32_t a, uint64_t d) {
+				std::cout << "[hook] data_write64 addr=0x" << std::hex << a << " data=0x" << d << std::dec << std::endl;
+				backend_.data_write64(a, d);
+			};
+			hooks.data_write64_burst = [&](const std::vector<uint32_t>& addrs, const std::vector<uint64_t>& words) {
+				const uint32_t first = addrs.empty() ? 0 : addrs.front();
+				std::cout << "[hook] data_write64_burst first_addr=0x" << std::hex << first << std::dec
+						  << " words=" << words.size() << std::endl;
+				backend_.data_write64_burst(addrs, words);
+			};
+			hooks.data_read64 = [&](uint32_t a) -> uint64_t {
+				const uint64_t v = backend_.data_read64(a);
+				std::cout << "[hook] data_read64 addr=0x" << std::hex << a << " -> 0x" << v << std::dec << std::endl;
+				return v;
+			};
+			hooks.data_read64_burst = [&](const std::vector<uint32_t>& addrs, std::vector<uint64_t>& out) {
+				const uint32_t first = addrs.empty() ? 0 : addrs.front();
+				backend_.data_read64_burst(addrs, out);
+				std::cout << "[hook] data_read64_burst first_addr=0x" << std::hex << first << std::dec
+						  << " words=" << out.size() << std::endl;
+			};
+			hooks.set_power_enable = [&](bool on) {
+				std::cout << "[hook] set_power_enable on=" << (on ? 1 : 0) << std::endl;
+				backend_.set_power_enable(on);
+			};
+			hooks.set_reset_n = [&](bool rst_n) {
+				std::cout << "[hook] set_reset_n rst_n=" << (rst_n ? 1 : 0) << std::endl;
+				backend_.set_reset_n(rst_n);
+			};
+			hooks.wait_cycles = [&](uint32_t n) {
+				std::cout << "[hook] wait_cycles n=" << n << std::endl;
+				backend_.wait_cycles(n);
+			};
+			hooks.wait_interrupt = [&](uint32_t timeout) -> bool {
+				std::cout << "[hook] wait_interrupt timeout_cycles=" << timeout << std::endl;
+				const bool hit = backend_.wait_interrupt_asserted(timeout);
+				std::cout << "[hook] wait_interrupt result=" << (hit ? 1 : 0) << std::endl;
+				return hit;
+			};
+		} else {
+			hooks.mmio_write = [&](uint32_t a, uint32_t d) { backend_.mmio_write(a, d); };
+			hooks.mmio_read = [&](uint32_t a) -> uint32_t { return backend_.mmio_read(a); };
+			hooks.data_write64 = [&](uint32_t a, uint64_t d) { backend_.data_write64(a, d); };
+			hooks.data_write64_burst = [&](const std::vector<uint32_t>& addrs, const std::vector<uint64_t>& words) { backend_.data_write64_burst(addrs, words); };
+			hooks.data_read64 = [&](uint32_t a) -> uint64_t { return backend_.data_read64(a); };
+			hooks.data_read64_burst = [&](const std::vector<uint32_t>& addrs, std::vector<uint64_t>& out) { backend_.data_read64_burst(addrs, out); };
+			hooks.set_power_enable = [&](bool on) { backend_.set_power_enable(on); };
+			hooks.set_reset_n = [&](bool rst_n) { backend_.set_reset_n(rst_n); };
+			hooks.wait_cycles = [&](uint32_t n) { backend_.wait_cycles(n); };
+			hooks.wait_interrupt = [&](uint32_t timeout) -> bool { return backend_.wait_interrupt_asserted(timeout); };
+		}
+
+		ClusterSimDriver driver(std::move(hooks));
+		ScenarioRunner runner(driver, backend_);
+		if (!options_.dry_run) {
+			std::cout << "[test_cluster_sim] non-dry-run currently uses ComputeCluster TB backend" << std::endl;
+		}
+
+		pass_ = runner.run(options_);
+		run_finished_ = true;
+		sc_core::sc_stop();
+	}
+
+	SimRunnerOptions options_;
+	ComputeClusterTbBackend& backend_;
+	bool pass_ = false;
+	bool run_finished_ = false;
+};
+
 
 } // namespace cluster_sim
 
@@ -1370,83 +1483,122 @@ int sc_main(int argc, char* argv[]) {
 		return 1;
 	}
 
-	ComputeClusterTbBackend backend(options.clock_period_ns);
+	sc_core::sc_clock clk("clk", sc_core::sc_time(options.clock_period_ns, sc_core::SC_NS));
+	sc_core::sc_signal<bool> reset_n;
+	sc_core::sc_signal<bool> power_enable_i;
+	sc_core::sc_signal<bool> interrupt_o;
+
+	sc_core::sc_signal<bool> s_axi_awvalid_i;
+	sc_core::sc_signal<bool> s_axi_awready_o;
+	sc_core::sc_signal<sc_dt::sc_uint<32>> s_axi_awaddr_i;
+	sc_core::sc_signal<bool> s_axi_wvalid_i;
+	sc_core::sc_signal<bool> s_axi_wready_o;
+	sc_core::sc_signal<sc_dt::sc_biguint<64>> s_axi_wdata_i;
+	sc_core::sc_signal<sc_dt::sc_uint<8>> s_axi_wstrb_i;
+	sc_core::sc_signal<bool> s_axi_bvalid_o;
+	sc_core::sc_signal<bool> s_axi_bready_i;
+	sc_core::sc_signal<sc_dt::sc_uint<2>> s_axi_bresp_o;
+	sc_core::sc_signal<bool> s_axi_arvalid_i;
+	sc_core::sc_signal<bool> s_axi_arready_o;
+	sc_core::sc_signal<sc_dt::sc_uint<32>> s_axi_araddr_i;
+	sc_core::sc_signal<bool> s_axi_rvalid_o;
+	sc_core::sc_signal<bool> s_axi_rready_i;
+	sc_core::sc_signal<sc_dt::sc_biguint<64>> s_axi_rdata_o;
+	sc_core::sc_signal<sc_dt::sc_uint<2>> s_axi_rresp_o;
+
+	sc_core::sc_signal<bool> hsel_i;
+	sc_core::sc_signal<sc_dt::sc_uint<32>> haddr_i;
+	sc_core::sc_signal<bool> hwrite_i;
+	sc_core::sc_signal<sc_dt::sc_uint<2>> htrans_i;
+	sc_core::sc_signal<sc_dt::sc_uint<3>> hsize_i;
+	sc_core::sc_signal<sc_dt::sc_uint<3>> hburst_i;
+	sc_core::sc_signal<sc_dt::sc_uint<4>> hprot_i;
+	sc_core::sc_signal<bool> hready_i;
+	sc_core::sc_signal<sc_dt::sc_uint<32>> hwdata_i;
+	sc_core::sc_signal<bool> hready_o;
+	sc_core::sc_signal<bool> hresp_o;
+	sc_core::sc_signal<sc_dt::sc_uint<32>> hrdata_o;
+
+	ComputeClusterTbBackend::DutType dut("Cluster", hybridacc::NetWorkOnChipConfig(4, 4));
+	dut.clk(clk);
+	dut.reset_n(reset_n);
+	dut.power_enable_i(power_enable_i);
+	dut.interrupt_o(interrupt_o);
+
+	dut.s_axi_awvalid_i(s_axi_awvalid_i);
+	dut.s_axi_awready_o(s_axi_awready_o);
+	dut.s_axi_awaddr_i(s_axi_awaddr_i);
+	dut.s_axi_wvalid_i(s_axi_wvalid_i);
+	dut.s_axi_wready_o(s_axi_wready_o);
+	dut.s_axi_wdata_i(s_axi_wdata_i);
+	dut.s_axi_wstrb_i(s_axi_wstrb_i);
+	dut.s_axi_bvalid_o(s_axi_bvalid_o);
+	dut.s_axi_bready_i(s_axi_bready_i);
+	dut.s_axi_bresp_o(s_axi_bresp_o);
+	dut.s_axi_arvalid_i(s_axi_arvalid_i);
+	dut.s_axi_arready_o(s_axi_arready_o);
+	dut.s_axi_araddr_i(s_axi_araddr_i);
+	dut.s_axi_rvalid_o(s_axi_rvalid_o);
+	dut.s_axi_rready_i(s_axi_rready_i);
+	dut.s_axi_rdata_o(s_axi_rdata_o);
+	dut.s_axi_rresp_o(s_axi_rresp_o);
+
+	dut.hsel_i(hsel_i);
+	dut.haddr_i(haddr_i);
+	dut.hwrite_i(hwrite_i);
+	dut.htrans_i(htrans_i);
+	dut.hsize_i(hsize_i);
+	dut.hburst_i(hburst_i);
+	dut.hprot_i(hprot_i);
+	dut.hready_i(hready_i);
+	dut.hwdata_i(hwdata_i);
+	dut.hready_o(hready_o);
+	dut.hresp_o(hresp_o);
+	dut.hrdata_o(hrdata_o);
+
+	ComputeClusterTbBackend backend("cluster_backend", dut, options.clock_period_ns, options.timeout_cycles);
+	backend.clk(clk);
+	backend.reset_n(reset_n);
+	backend.power_enable_i(power_enable_i);
+	backend.interrupt_o(interrupt_o);
+	backend.s_axi_awvalid_i(s_axi_awvalid_i);
+	backend.s_axi_awready_o(s_axi_awready_o);
+	backend.s_axi_awaddr_i(s_axi_awaddr_i);
+	backend.s_axi_wvalid_i(s_axi_wvalid_i);
+	backend.s_axi_wready_o(s_axi_wready_o);
+	backend.s_axi_wdata_i(s_axi_wdata_i);
+	backend.s_axi_wstrb_i(s_axi_wstrb_i);
+	backend.s_axi_bvalid_o(s_axi_bvalid_o);
+	backend.s_axi_bready_i(s_axi_bready_i);
+	backend.s_axi_bresp_o(s_axi_bresp_o);
+	backend.s_axi_arvalid_i(s_axi_arvalid_i);
+	backend.s_axi_arready_o(s_axi_arready_o);
+	backend.s_axi_araddr_i(s_axi_araddr_i);
+	backend.s_axi_rvalid_o(s_axi_rvalid_o);
+	backend.s_axi_rready_i(s_axi_rready_i);
+	backend.s_axi_rdata_o(s_axi_rdata_o);
+	backend.s_axi_rresp_o(s_axi_rresp_o);
+	backend.hsel_i(hsel_i);
+	backend.haddr_i(haddr_i);
+	backend.hwrite_i(hwrite_i);
+	backend.htrans_i(htrans_i);
+	backend.hsize_i(hsize_i);
+	backend.hburst_i(hburst_i);
+	backend.hprot_i(hprot_i);
+	backend.hready_i(hready_i);
+	backend.hwdata_i(hwdata_i);
+	backend.hready_o(hready_o);
+	backend.hresp_o(hresp_o);
+	backend.hrdata_o(hrdata_o);
+
+	ClusterSimTestBench tb("cluster_tb", options, backend);
 	if (options.enable_trace) {
-		backend.dut.enable_perffeto_trace();
+		dut.enable_perffeto_trace();
 		PerfettoTrace::getInstance().open(options.trace_file);
 	}
-	DriverHooks hooks;
 
-	if (options.verbose) {
-		hooks.mmio_write = [&](uint32_t a, uint32_t d) {
-			std::cout << "[hook] mmio_write addr=0x" << std::hex << a << " data=0x" << d << std::dec << std::endl;
-			backend.mmio_write(a, d);
-		};
-		hooks.mmio_read = [&](uint32_t a) -> uint32_t {
-			const uint32_t v = backend.mmio_read(a);
-			std::cout << "[hook] mmio_read addr=0x" << std::hex << a << " -> 0x" << v << std::dec << std::endl;
-			return v;
-		};
-		hooks.data_write64 = [&](uint32_t a, uint64_t d) {
-			std::cout << "[hook] data_write64 addr=0x" << std::hex << a << " data=0x" << d << std::dec << std::endl;
-			backend.data_write64(a, d);
-		};
-		hooks.data_write64_burst = [&](const std::vector<uint32_t>& addrs, const std::vector<uint64_t>& words) {
-			const uint32_t first = addrs.empty() ? 0 : addrs.front();
-			std::cout << "[hook] data_write64_burst first_addr=0x" << std::hex << first << std::dec
-					  << " words=" << words.size() << std::endl;
-			backend.data_write64_burst(addrs, words);
-		};
-		hooks.data_read64 = [&](uint32_t a) -> uint64_t {
-			const uint64_t v = backend.data_read64(a);
-			std::cout << "[hook] data_read64 addr=0x" << std::hex << a << " -> 0x" << v << std::dec << std::endl;
-			return v;
-		};
-		hooks.data_read64_burst = [&](const std::vector<uint32_t>& addrs, std::vector<uint64_t>& out) {
-			const uint32_t first = addrs.empty() ? 0 : addrs.front();
-			backend.data_read64_burst(addrs, out);
-			std::cout << "[hook] data_read64_burst first_addr=0x" << std::hex << first << std::dec
-					  << " words=" << out.size() << std::endl;
-		};
-		hooks.set_power_enable = [&](bool on) {
-			std::cout << "[hook] set_power_enable on=" << (on ? 1 : 0) << std::endl;
-			backend.set_power_enable(on);
-		};
-		hooks.set_reset_n = [&](bool rst_n) {
-			std::cout << "[hook] set_reset_n rst_n=" << (rst_n ? 1 : 0) << std::endl;
-			backend.set_reset_n(rst_n);
-		};
-		hooks.wait_cycles = [&](uint32_t n) {
-			std::cout << "[hook] wait_cycles n=" << n << std::endl;
-			backend.wait_cycles(n);
-		};
-		hooks.wait_interrupt = [&](uint32_t timeout) -> bool {
-			std::cout << "[hook] wait_interrupt timeout_cycles=" << timeout << std::endl;
-			const bool hit = backend.wait_interrupt_asserted(timeout);
-			std::cout << "[hook] wait_interrupt result=" << (hit ? 1 : 0) << std::endl;
-			return hit;
-		};
-	} else {
-		hooks.mmio_write = [&](uint32_t a, uint32_t d) { backend.mmio_write(a, d);};
-		hooks.mmio_read = [&](uint32_t a) -> uint32_t { return backend.mmio_read(a);};
-		hooks.data_write64 = [&](uint32_t a, uint64_t d) { backend.data_write64(a, d); };
-		hooks.data_write64_burst = [&](const std::vector<uint32_t>& addrs, const std::vector<uint64_t>& words) { backend.data_write64_burst(addrs, words); };
-		hooks.data_read64 = [&](uint32_t a) -> uint64_t { return backend.data_read64(a); };
-		hooks.data_read64_burst = [&](const std::vector<uint32_t>& addrs, std::vector<uint64_t>& out) { backend.data_read64_burst(addrs, out); };
-		hooks.set_power_enable = [&](bool on) { backend.set_power_enable(on); };
-		hooks.set_reset_n = [&](bool rst_n) { backend.set_reset_n(rst_n); };
-		hooks.wait_cycles = [&](uint32_t n) { backend.wait_cycles(n); };
-		hooks.wait_interrupt = [&](uint32_t timeout) -> bool { return backend.wait_interrupt_asserted(timeout); };
-	}
-
-	ClusterSimDriver driver(std::move(hooks));
-	ScenarioRunner runner(driver, backend);
-
-	if (!options.dry_run) {
-		std::cout << "[test_cluster_sim] non-dry-run currently uses ComputeCluster TB backend" << std::endl;
-	}
-
-	const bool pass = runner.run(options);
+	sc_core::sc_start();
+	const bool pass = tb.verify();
 	const std::string case_name =
 		(options.scenario == ScenarioKind::Conv2D)
 			? "conv2d"

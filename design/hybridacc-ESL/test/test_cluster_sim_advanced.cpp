@@ -212,41 +212,41 @@ public:
 	int kClockPeriodNs = 10;
 	int timeout_cycles = 200;
 
-	sc_core::sc_clock clk;
-	sc_core::sc_signal<bool> reset_n;
-	sc_core::sc_signal<bool> power_enable_i;
-	sc_core::sc_signal<bool> interrupt_o;
+	sc_core::sc_in<bool> clk;
+	sc_core::sc_out<bool> reset_n;
+	sc_core::sc_out<bool> power_enable_i;
+	sc_core::sc_in<bool> interrupt_o;
 
-	sc_core::sc_signal<bool> s_axi_awvalid_i;
-	sc_core::sc_signal<bool> s_axi_awready_o;
-	sc_core::sc_signal<sc_dt::sc_uint<32>> s_axi_awaddr_i;
-	sc_core::sc_signal<bool> s_axi_wvalid_i;
-	sc_core::sc_signal<bool> s_axi_wready_o;
-	sc_core::sc_signal<sc_dt::sc_biguint<64>> s_axi_wdata_i;
-	sc_core::sc_signal<sc_dt::sc_uint<8>> s_axi_wstrb_i;
-	sc_core::sc_signal<bool> s_axi_bvalid_o;
-	sc_core::sc_signal<bool> s_axi_bready_i;
-	sc_core::sc_signal<sc_dt::sc_uint<2>> s_axi_bresp_o;
-	sc_core::sc_signal<bool> s_axi_arvalid_i;
-	sc_core::sc_signal<bool> s_axi_arready_o;
-	sc_core::sc_signal<sc_dt::sc_uint<32>> s_axi_araddr_i;
-	sc_core::sc_signal<bool> s_axi_rvalid_o;
-	sc_core::sc_signal<bool> s_axi_rready_i;
-	sc_core::sc_signal<sc_dt::sc_biguint<64>> s_axi_rdata_o;
-	sc_core::sc_signal<sc_dt::sc_uint<2>> s_axi_rresp_o;
+	sc_core::sc_out<bool> s_axi_awvalid_i;
+	sc_core::sc_in<bool> s_axi_awready_o;
+	sc_core::sc_out<sc_dt::sc_uint<32>> s_axi_awaddr_i;
+	sc_core::sc_out<bool> s_axi_wvalid_i;
+	sc_core::sc_in<bool> s_axi_wready_o;
+	sc_core::sc_out<sc_dt::sc_biguint<64>> s_axi_wdata_i;
+	sc_core::sc_out<sc_dt::sc_uint<8>> s_axi_wstrb_i;
+	sc_core::sc_in<bool> s_axi_bvalid_o;
+	sc_core::sc_out<bool> s_axi_bready_i;
+	sc_core::sc_in<sc_dt::sc_uint<2>> s_axi_bresp_o;
+	sc_core::sc_out<bool> s_axi_arvalid_i;
+	sc_core::sc_in<bool> s_axi_arready_o;
+	sc_core::sc_out<sc_dt::sc_uint<32>> s_axi_araddr_i;
+	sc_core::sc_in<bool> s_axi_rvalid_o;
+	sc_core::sc_out<bool> s_axi_rready_i;
+	sc_core::sc_in<sc_dt::sc_biguint<64>> s_axi_rdata_o;
+	sc_core::sc_in<sc_dt::sc_uint<2>> s_axi_rresp_o;
 
-	sc_core::sc_signal<bool> hsel_i;
-	sc_core::sc_signal<sc_dt::sc_uint<32>> haddr_i;
-	sc_core::sc_signal<bool> hwrite_i;
-	sc_core::sc_signal<sc_dt::sc_uint<2>> htrans_i;
-	sc_core::sc_signal<sc_dt::sc_uint<3>> hsize_i;
-	sc_core::sc_signal<sc_dt::sc_uint<3>> hburst_i;
-	sc_core::sc_signal<sc_dt::sc_uint<4>> hprot_i;
-	sc_core::sc_signal<bool> hready_i;
-	sc_core::sc_signal<sc_dt::sc_uint<32>> hwdata_i;
-	sc_core::sc_signal<bool> hready_o;
-	sc_core::sc_signal<bool> hresp_o;
-	sc_core::sc_signal<sc_dt::sc_uint<32>> hrdata_o;
+	sc_core::sc_out<bool> hsel_i;
+	sc_core::sc_out<sc_dt::sc_uint<32>> haddr_i;
+	sc_core::sc_out<bool> hwrite_i;
+	sc_core::sc_out<sc_dt::sc_uint<2>> htrans_i;
+	sc_core::sc_out<sc_dt::sc_uint<3>> hsize_i;
+	sc_core::sc_out<sc_dt::sc_uint<3>> hburst_i;
+	sc_core::sc_out<sc_dt::sc_uint<4>> hprot_i;
+	sc_core::sc_out<bool> hready_i;
+	sc_core::sc_out<sc_dt::sc_uint<32>> hwdata_i;
+	sc_core::sc_in<bool> hready_o;
+	sc_core::sc_in<bool> hresp_o;
+	sc_core::sc_in<sc_dt::sc_uint<32>> hrdata_o;
 
 	// consts
 	static constexpr unsigned SPM_NUM_NOC_CHANNEL = 4;
@@ -260,7 +260,7 @@ public:
 	static constexpr unsigned NOC_PORT_WIDTH_BITS = 64;
 	static constexpr unsigned NOC_NUM_PES_PER_PORT = 16;
 
-	hybridacc::ComputeCluster<
+	using DutType = hybridacc::ComputeCluster<
 		SPM_NUM_NOC_CHANNEL,
 		SPM_NUM_BANKS_PER_GROUP,
 		SPM_SRAM_BANK_WIDTH_BITS,
@@ -270,51 +270,55 @@ public:
 		SPM_ADDR_WIDTH,
 		NOC_NUM_PORTS,
 		NOC_PORT_WIDTH_BITS,
-		NOC_NUM_PES_PER_PORT> dut;
+		NOC_NUM_PES_PER_PORT>;
 
-	ComputeClusterTestBench(sc_core::sc_module_name name, const SimRunnerOptions& options)
+	ComputeClusterTestBench(
+		sc_core::sc_module_name name,
+		const SimRunnerOptions& options)
 		: sc_core::sc_module(name),
 		  options_(options),
 		  kClockPeriodNs(options.clock_period_ns),
 		  timeout_cycles(options.timeout_cycles),
-		  clk("clk", sc_core::sc_time(options.clock_period_ns, sc_core::SC_NS)),
-		  dut("Cluster", hybridacc::NetWorkOnChipConfig(4, 4)) {
-		dut.clk(clk);
-		dut.reset_n(reset_n);
-		dut.power_enable_i(power_enable_i);
-		dut.interrupt_o(interrupt_o);
+		  clk("clk"),
+		  reset_n("reset_n"),
+		  power_enable_i("power_enable_i"),
+		  interrupt_o("interrupt_o"),
+		  s_axi_awvalid_i("s_axi_awvalid_i"),
+		  s_axi_awready_o("s_axi_awready_o"),
+		  s_axi_awaddr_i("s_axi_awaddr_i"),
+		  s_axi_wvalid_i("s_axi_wvalid_i"),
+		  s_axi_wready_o("s_axi_wready_o"),
+		  s_axi_wdata_i("s_axi_wdata_i"),
+		  s_axi_wstrb_i("s_axi_wstrb_i"),
+		  s_axi_bvalid_o("s_axi_bvalid_o"),
+		  s_axi_bready_i("s_axi_bready_i"),
+		  s_axi_bresp_o("s_axi_bresp_o"),
+		  s_axi_arvalid_i("s_axi_arvalid_i"),
+		  s_axi_arready_o("s_axi_arready_o"),
+		  s_axi_araddr_i("s_axi_araddr_i"),
+		  s_axi_rvalid_o("s_axi_rvalid_o"),
+		  s_axi_rready_i("s_axi_rready_i"),
+		  s_axi_rdata_o("s_axi_rdata_o"),
+		  s_axi_rresp_o("s_axi_rresp_o"),
+		  hsel_i("hsel_i"),
+		  haddr_i("haddr_i"),
+		  hwrite_i("hwrite_i"),
+		  htrans_i("htrans_i"),
+		  hsize_i("hsize_i"),
+		  hburst_i("hburst_i"),
+		  hprot_i("hprot_i"),
+		  hready_i("hready_i"),
+		  hwdata_i("hwdata_i"),
+		  hready_o("hready_o"),
+		  hresp_o("hresp_o"),
+		  hrdata_o("hrdata_o") {
+		dma_wave_done_.write(false);
 
-		dut.s_axi_awvalid_i(s_axi_awvalid_i);
-		dut.s_axi_awready_o(s_axi_awready_o);
-		dut.s_axi_awaddr_i(s_axi_awaddr_i);
-		dut.s_axi_wvalid_i(s_axi_wvalid_i);
-		dut.s_axi_wready_o(s_axi_wready_o);
-		dut.s_axi_wdata_i(s_axi_wdata_i);
-		dut.s_axi_wstrb_i(s_axi_wstrb_i);
-		dut.s_axi_bvalid_o(s_axi_bvalid_o);
-		dut.s_axi_bready_i(s_axi_bready_i);
-		dut.s_axi_bresp_o(s_axi_bresp_o);
-		dut.s_axi_arvalid_i(s_axi_arvalid_i);
-		dut.s_axi_arready_o(s_axi_arready_o);
-		dut.s_axi_araddr_i(s_axi_araddr_i);
-		dut.s_axi_rvalid_o(s_axi_rvalid_o);
-		dut.s_axi_rready_i(s_axi_rready_i);
-		dut.s_axi_rdata_o(s_axi_rdata_o);
-		dut.s_axi_rresp_o(s_axi_rresp_o);
+		SC_THREAD(dma_process);
+		SC_THREAD(cluster_control_process);
+	}
 
-		dut.hsel_i(hsel_i);
-		dut.haddr_i(haddr_i);
-		dut.hwrite_i(hwrite_i);
-		dut.htrans_i(htrans_i);
-		dut.hsize_i(hsize_i);
-		dut.hburst_i(hburst_i);
-		dut.hprot_i(hprot_i);
-		dut.hready_i(hready_i);
-		dut.hwdata_i(hwdata_i);
-		dut.hready_o(hready_o);
-		dut.hresp_o(hresp_o);
-		dut.hrdata_o(hrdata_o);
-
+	void end_of_elaboration() override {
 		reset_n.write(false);
 		power_enable_i.write(false);
 		s_axi_awvalid_i.write(false);
@@ -335,10 +339,6 @@ public:
 		hprot_i.write(0);
 		hready_i.write(true);
 		hwdata_i.write(0);
-		dma_wave_done_.write(false);
-
-		SC_THREAD(dma_process);
-		SC_THREAD(cluster_control_process);
 	}
 
 	/** @brief Mark testbench as started so control process can begin execution. */
@@ -778,7 +778,7 @@ private:
 	 */
 	void tick(uint32_t n = 1) {
 		for (uint32_t i = 0; i < n; ++i) {
-			wait(clk.posedge_event());
+			wait(clk.negedge_event());
 		}
 	}
 
@@ -958,7 +958,7 @@ private:
 			}
 
 			// wait for next cycle to sample ready/valid signals
-			wait(clk.negedge_event());
+			// wait(clk.negedge_event());
 
 			bool aw_ready = s_axi_awready_o.read();
 			bool w_ready = s_axi_wready_o.read();
@@ -1026,7 +1026,7 @@ private:
 			}
 
 			// wait for next cycle to sample ready/valid signals
-			wait(clk.negedge_event());
+			// wait(clk.negedge_event());
 
 			bool ar_ready = s_axi_arready_o.read();
 			bool r_valid = s_axi_rvalid_o.read();
@@ -1086,7 +1086,7 @@ private:
 					work_ok = execute_dma_wave_transfers(req.wave, req.stage_direction);
 				}
 				for (uint32_t c = 0; c < req.latency_cycles; ++c) {
-					wait(clk.posedge_event());
+					wait_cycles(1);
 				}
 				const uint64_t wave_stage_key = make_wave_stage_key(req.wave_id, req.stage_direction);
 				dma_wave_result_[wave_stage_key] = work_ok;
@@ -1099,7 +1099,7 @@ private:
 						  << " ok=" << (work_ok ? "1" : "0")
 						  << std::endl;
 				dma_wave_done_.write(true);
-				wait(clk.posedge_event());
+				wait_cycles(1);
 				dma_wave_done_.write(false);
 			}
 		}
@@ -1181,7 +1181,7 @@ private:
 	void cluster_control_process() {
 		wait(sc_core::SC_ZERO_TIME);
 		while (!started_) {
-			wait(clk.posedge_event());
+			wait_cycles(1);
 		}
 
 		if (options_.test_path.empty()) {
@@ -1859,7 +1859,6 @@ private:
 		if (!scan_chain_data.empty()) {
 			send_scan_chain_words_reverse(scan_chain_data);
 			wait_cycles(5);
-			dut.noc.dump_state();
 		}
 		load_pe_program(pe_prog);
 
@@ -2155,9 +2154,115 @@ int sc_main(int argc, char* argv[]) {
 		return 1;
 	}
 
+	sc_core::sc_clock clk("clk", sc_core::sc_time(options.clock_period_ns, sc_core::SC_NS));
+	sc_core::sc_signal<bool> reset_n;
+	sc_core::sc_signal<bool> power_enable_i;
+	sc_core::sc_signal<bool> interrupt_o;
+
+	sc_core::sc_signal<bool> s_axi_awvalid_i;
+	sc_core::sc_signal<bool> s_axi_awready_o;
+	sc_core::sc_signal<sc_dt::sc_uint<32>> s_axi_awaddr_i;
+	sc_core::sc_signal<bool> s_axi_wvalid_i;
+	sc_core::sc_signal<bool> s_axi_wready_o;
+	sc_core::sc_signal<sc_dt::sc_biguint<64>> s_axi_wdata_i;
+	sc_core::sc_signal<sc_dt::sc_uint<8>> s_axi_wstrb_i;
+	sc_core::sc_signal<bool> s_axi_bvalid_o;
+	sc_core::sc_signal<bool> s_axi_bready_i;
+	sc_core::sc_signal<sc_dt::sc_uint<2>> s_axi_bresp_o;
+	sc_core::sc_signal<bool> s_axi_arvalid_i;
+	sc_core::sc_signal<bool> s_axi_arready_o;
+	sc_core::sc_signal<sc_dt::sc_uint<32>> s_axi_araddr_i;
+	sc_core::sc_signal<bool> s_axi_rvalid_o;
+	sc_core::sc_signal<bool> s_axi_rready_i;
+	sc_core::sc_signal<sc_dt::sc_biguint<64>> s_axi_rdata_o;
+	sc_core::sc_signal<sc_dt::sc_uint<2>> s_axi_rresp_o;
+
+	sc_core::sc_signal<bool> hsel_i;
+	sc_core::sc_signal<sc_dt::sc_uint<32>> haddr_i;
+	sc_core::sc_signal<bool> hwrite_i;
+	sc_core::sc_signal<sc_dt::sc_uint<2>> htrans_i;
+	sc_core::sc_signal<sc_dt::sc_uint<3>> hsize_i;
+	sc_core::sc_signal<sc_dt::sc_uint<3>> hburst_i;
+	sc_core::sc_signal<sc_dt::sc_uint<4>> hprot_i;
+	sc_core::sc_signal<bool> hready_i;
+	sc_core::sc_signal<sc_dt::sc_uint<32>> hwdata_i;
+	sc_core::sc_signal<bool> hready_o;
+	sc_core::sc_signal<bool> hresp_o;
+	sc_core::sc_signal<sc_dt::sc_uint<32>> hrdata_o;
+
+	ComputeClusterTestBench::DutType dut("Cluster", hybridacc::NetWorkOnChipConfig(4, 4));
+	dut.clk(clk);
+	dut.reset_n(reset_n);
+	dut.power_enable_i(power_enable_i);
+	dut.interrupt_o(interrupt_o);
+
+	dut.s_axi_awvalid_i(s_axi_awvalid_i);
+	dut.s_axi_awready_o(s_axi_awready_o);
+	dut.s_axi_awaddr_i(s_axi_awaddr_i);
+	dut.s_axi_wvalid_i(s_axi_wvalid_i);
+	dut.s_axi_wready_o(s_axi_wready_o);
+	dut.s_axi_wdata_i(s_axi_wdata_i);
+	dut.s_axi_wstrb_i(s_axi_wstrb_i);
+	dut.s_axi_bvalid_o(s_axi_bvalid_o);
+	dut.s_axi_bready_i(s_axi_bready_i);
+	dut.s_axi_bresp_o(s_axi_bresp_o);
+	dut.s_axi_arvalid_i(s_axi_arvalid_i);
+	dut.s_axi_arready_o(s_axi_arready_o);
+	dut.s_axi_araddr_i(s_axi_araddr_i);
+	dut.s_axi_rvalid_o(s_axi_rvalid_o);
+	dut.s_axi_rready_i(s_axi_rready_i);
+	dut.s_axi_rdata_o(s_axi_rdata_o);
+	dut.s_axi_rresp_o(s_axi_rresp_o);
+
+	dut.hsel_i(hsel_i);
+	dut.haddr_i(haddr_i);
+	dut.hwrite_i(hwrite_i);
+	dut.htrans_i(htrans_i);
+	dut.hsize_i(hsize_i);
+	dut.hburst_i(hburst_i);
+	dut.hprot_i(hprot_i);
+	dut.hready_i(hready_i);
+	dut.hwdata_i(hwdata_i);
+	dut.hready_o(hready_o);
+	dut.hresp_o(hresp_o);
+	dut.hrdata_o(hrdata_o);
+
 	ComputeClusterTestBench tb("cluster_tb", options);
+	tb.clk(clk);
+	tb.reset_n(reset_n);
+	tb.power_enable_i(power_enable_i);
+	tb.interrupt_o(interrupt_o);
+	tb.s_axi_awvalid_i(s_axi_awvalid_i);
+	tb.s_axi_awready_o(s_axi_awready_o);
+	tb.s_axi_awaddr_i(s_axi_awaddr_i);
+	tb.s_axi_wvalid_i(s_axi_wvalid_i);
+	tb.s_axi_wready_o(s_axi_wready_o);
+	tb.s_axi_wdata_i(s_axi_wdata_i);
+	tb.s_axi_wstrb_i(s_axi_wstrb_i);
+	tb.s_axi_bvalid_o(s_axi_bvalid_o);
+	tb.s_axi_bready_i(s_axi_bready_i);
+	tb.s_axi_bresp_o(s_axi_bresp_o);
+	tb.s_axi_arvalid_i(s_axi_arvalid_i);
+	tb.s_axi_arready_o(s_axi_arready_o);
+	tb.s_axi_araddr_i(s_axi_araddr_i);
+	tb.s_axi_rvalid_o(s_axi_rvalid_o);
+	tb.s_axi_rready_i(s_axi_rready_i);
+	tb.s_axi_rdata_o(s_axi_rdata_o);
+	tb.s_axi_rresp_o(s_axi_rresp_o);
+	tb.hsel_i(hsel_i);
+	tb.haddr_i(haddr_i);
+	tb.hwrite_i(hwrite_i);
+	tb.htrans_i(htrans_i);
+	tb.hsize_i(hsize_i);
+	tb.hburst_i(hburst_i);
+	tb.hprot_i(hprot_i);
+	tb.hready_i(hready_i);
+	tb.hwdata_i(hwdata_i);
+	tb.hready_o(hready_o);
+	tb.hresp_o(hresp_o);
+	tb.hrdata_o(hrdata_o);
 	if (options.enable_trace) {
-		tb.dut.enable_perffeto_trace();
+		dut.enable_perffeto_trace();
 		PerfettoTrace::getInstance().open(options.trace_file);
 	}
 	tb.init();

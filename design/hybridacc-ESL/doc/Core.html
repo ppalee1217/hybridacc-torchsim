@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>HACC Core Controller 硬體架構規格書</title>
+	<style>
+		:root {
+			--bg: #f3efe7;
+			--paper: #fffdf8;
+			--ink: #1d2430;
+			--muted: #5c6472;
+			--line: #d9cfbf;
+			--accent: #8b2e1c;
+			--accent-soft: #efe1d3;
+			--accent-2: #235b63;
+			--shadow: 0 18px 48px rgba(33, 28, 20, 0.12);
+			--mono-bg: #f7f3ec;
+		}
+
+		* { box-sizing: border-box; }
+
+		body {
+			margin: 0;
+			background:
+				radial-gradient(circle at top left, rgba(139, 46, 28, 0.08), transparent 28%),
+				radial-gradient(circle at top right, rgba(35, 91, 99, 0.08), transparent 24%),
+				linear-gradient(180deg, #f7f2ea 0%, #f1ece3 100%);
+			color: var(--ink);
+			font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif;
+			line-height: 1.7;
+		}
+
+		.shell {
+			width: min(1400px, calc(100vw - 40px));
+			margin: 24px auto 48px;
+		}
+
+		.hero {
+			background: linear-gradient(135deg, rgba(139, 46, 28, 0.95), rgba(35, 91, 99, 0.92));
+			color: #fff8f1;
+			padding: 36px 40px;
+			border-radius: 24px;
+			box-shadow: var(--shadow);
+			position: relative;
+			overflow: hidden;
+		}
+
+		.hero::after {
+			content: "";
+			position: absolute;
+			inset: auto -80px -100px auto;
+			width: 260px;
+			height: 260px;
+			background: radial-gradient(circle, rgba(255,255,255,0.25), transparent 65%);
+			border-radius: 50%;
+		}
+
+		h1, h2, h3 { line-height: 1.25; }
+		h1 { margin: 0 0 12px; font-size: clamp(32px, 5vw, 48px); }
+		h2 { margin: 0 0 12px; font-size: 28px; }
+		h3 { margin: 0 0 8px; font-size: 20px; }
+
+		.hero p {
+			margin: 0;
+			max-width: 920px;
+			color: rgba(255, 248, 241, 0.92);
+			font-size: 16px;
+		}
+
+		.grid {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+			gap: 18px;
+			margin-top: 24px;
+		}
+
+		.card {
+			background: var(--paper);
+			border: 1px solid rgba(139, 46, 28, 0.12);
+			border-radius: 22px;
+			box-shadow: var(--shadow);
+			padding: 24px;
+		}
+
+		.card p { margin: 0; color: var(--muted); }
+
+		.diagram-section {
+			margin-top: 28px;
+			display: grid;
+			gap: 20px;
+		}
+
+		.diagram-card {
+			background: var(--paper);
+			border-radius: 24px;
+			border: 1px solid rgba(35, 91, 99, 0.14);
+			box-shadow: var(--shadow);
+			padding: 22px;
+		}
+
+		.diagram-card p {
+			margin: 0 0 14px;
+			color: var(--muted);
+		}
+
+		svg {
+			width: 100%;
+			height: auto;
+			display: block;
+			background: linear-gradient(180deg, #fffefb 0%, #f8f3ea 100%);
+			border-radius: 18px;
+			border: 1px solid var(--line);
+			overflow: visible;
+		}
+
+		.mirror {
+			margin-top: 28px;
+			background: var(--paper);
+			border-radius: 28px;
+			box-shadow: var(--shadow);
+			border: 1px solid rgba(139, 46, 28, 0.12);
+			overflow: hidden;
+		}
+
+		.mirror-header {
+			padding: 20px 24px;
+			background: linear-gradient(90deg, var(--accent-soft), rgba(35, 91, 99, 0.08));
+			border-bottom: 1px solid var(--line);
+		}
+
+		.mirror pre {
+			margin: 0;
+			padding: 24px;
+			overflow: auto;
+			background: transparent;
+			color: var(--ink);
+			font-family: "Iosevka Term", "Cascadia Mono", "Consolas", monospace;
+			font-size: 13px;
+			line-height: 1.65;
+			white-space: pre-wrap;
+			word-break: break-word;
+		}
+
+		.mirror-object {
+			width: 100%;
+			min-height: 1400px;
+			border: 0;
+			display: block;
+			background: #fffdf8;
+		}
+	</style>
+</head>
+<body>
+	<div class="shell">
+		<section class="hero">
+			<h1>HACC Core Controller 硬體架構規格書</h1>
+			<p>本頁將 Core.md 的內容完整鏡射到 HTML，並額外補上多張內嵌 SVG micro-architecture block diagrams，讓 reviewer、RTL 工程師與系統整合工程師能直接對照控制器的資料路徑、命令路徑、載入路徑與 block execution 路徑。</p>
+		</section>
+
+		<section class="grid">
+			<article class="card">
+				<h3>設計核心</h3>
+				<p>極簡 control core、descriptor SRAM、block expander、cluster command engine、DMA engine 與多 cluster replicated frontends。</p>
+			</article>
+			<article class="card">
+				<h3>載入路徑</h3>
+				<p>`.hacc.core/.job/.block/.dma/.agu/.patch` 主要進 local memory；`.hacc.pe/.scan` 轉成 NoC AHB command stream；runtime tensor data 才走 AXI4-Lite SPM path。</p>
+			</article>
+			<article class="card">
+				<h3>契約基準</h3>
+				<p>目前 cluster 介面以 ComputeCluster 實作為準：AHB `0x0000~0x00FF` SPM config、`0x1000~0x1FFF` HDDU MMIO、`0x2000` NoC command；AXI4-Lite data path 對應 SPM 線性視窗。</p>
+			</article>
+		</section>
+
+		<section class="diagram-section">
+			<article class="diagram-card">
+				<h2>Top-level Controller Diagram</h2>
+				<p>整體控制器分成 host/loader、local memory、descriptor execution、DMA、cluster command 與 interrupt/perf 六大區塊。</p>
+				<svg viewBox="0 0 1320 520" role="img" aria-label="HACC Core Controller top-level block diagram">
+					<defs>
+						<marker id="arrowHead" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+							<path d="M0,0 L0,6 L9,3 z" fill="#38424d"></path>
+						</marker>
+					</defs>
+					<style>
+						svg { shape-rendering: geometricPrecision; text-rendering: geometricPrecision; }
+						.box { fill: #fffdf9; stroke: #8b2e1c; stroke-width: 2; }
+						.box2 { fill: #f1f7f7; stroke: #235b63; stroke-width: 2; }
+						.box3 { fill: #f8efe3; stroke: #7d5a10; stroke-width: 2; }
+						.txt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #1d2430; font-size: 16px; font-weight: 700; dominant-baseline: middle; text-anchor: middle; }
+						.subtxt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #44505f; font-size: 13px; font-weight: 500; dominant-baseline: middle; }
+						.small { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; font-size: 12px; fill: #5a6876; dominant-baseline: middle; }
+						.arrow { stroke: #38424d; stroke-width: 2.2; fill: none; marker-end: url(#arrowHead); vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+						.dashed { stroke-dasharray: 8 6; }
+						path[marker-end] { vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+					</style>
+					<rect x="28" y="26" width="1264" height="466" fill="#fffdf8" stroke="#d9cfbf" stroke-width="2" rx="24"></rect>
+					<rect class="box" x="60" y="70" width="220" height="98"></rect>
+					<text class="txt" x="170" y="108" text-anchor="middle">Host CSR / Mailbox</text>
+					<text class="subtxt" x="170" y="132" text-anchor="middle">manifest queue, run control, status</text>
+
+					<rect class="box" x="60" y="214" width="220" height="110"></rect>
+					<text class="txt" x="170" y="254" text-anchor="middle">Boot ROM + Core Frontend</text>
+					<text class="subtxt" x="170" y="278" text-anchor="middle">native ISA, CSR access, command push</text>
+
+					<rect class="box3" x="330" y="60" width="230" height="132"></rect>
+					<text class="txt" x="445" y="100" text-anchor="middle">Section Loader</text>
+					<text class="subtxt" x="445" y="125" text-anchor="middle">ELF manifest consumer</text>
+					<text class="subtxt" x="445" y="147" text-anchor="middle">local section copy + route transform</text>
+
+					<rect class="box3" x="330" y="224" width="230" height="100"></rect>
+					<text class="txt" x="445" y="264" text-anchor="middle">Local Memory</text>
+					<text class="subtxt" x="445" y="288" text-anchor="middle">I-SRAM / Descriptor SRAM / Event SRAM</text>
+
+					<rect class="box2" x="620" y="60" width="258" height="264"></rect>
+					<text class="txt" x="749" y="98" text-anchor="middle">Execution Complex</text>
+					<text class="subtxt" x="749" y="126" text-anchor="middle">Job Manager / Block Fetch / Block Expander</text>
+					<text class="subtxt" x="749" y="148" text-anchor="middle">Wave Scheduler / Timeout / Error / IRQ</text>
+					<rect x="654" y="174" width="190" height="48" class="box"></rect>
+					<text class="subtxt" x="749" y="203" text-anchor="middle">expanded wave control / cluster mask</text>
+					<rect x="654" y="240" width="190" height="48" class="box"></rect>
+					<text class="subtxt" x="749" y="269" text-anchor="middle">profile / AGU / DMA / patch runtime data</text>
+
+					<rect class="box2" x="930" y="68" width="160" height="112"></rect>
+					<text class="txt" x="1010" y="105" text-anchor="middle">DMA Engine</text>
+					<text class="subtxt" x="1010" y="130" text-anchor="middle">DRAM ↔ SPM</text>
+					<text class="subtxt" x="1010" y="152" text-anchor="middle">AXI4 burst + AXI4-Lite beats</text>
+
+					<rect class="box2" x="930" y="212" width="160" height="112"></rect>
+					<text class="txt" x="1010" y="248" text-anchor="middle">Cluster Cmd Engine</text>
+					<text class="subtxt" x="1010" y="273" text-anchor="middle">HDDU MMIO path</text>
+					<text class="subtxt" x="1010" y="295" text-anchor="middle">NoC command path</text>
+
+					<rect class="box" x="1140" y="60" width="112" height="120"></rect>
+					<text class="txt" x="1196" y="98" text-anchor="middle">Clusters</text>
+					<text class="subtxt" x="1196" y="125" text-anchor="middle">AXI4-Lite</text>
+					<text class="subtxt" x="1196" y="147" text-anchor="middle">AHB-Lite</text>
+
+					<rect class="box" x="1140" y="210" width="112" height="112"></rect>
+					<text class="txt" x="1196" y="248" text-anchor="middle">IRQ / Perf</text>
+					<text class="subtxt" x="1196" y="272" text-anchor="middle">done/error</text>
+
+					<path class="arrow" d="M280 118 H330"></path>
+					<path class="arrow" d="M280 268 H330"></path>
+					<path class="arrow" d="M560 126 H620"></path>
+					<path class="arrow" d="M560 274 H620"></path>
+					<path class="arrow" d="M878 126 H930"></path>
+					<path class="arrow" d="M878 268 H930"></path>
+					<path class="arrow" d="M1090 124 H1140"></path>
+					<path class="arrow" d="M1090 268 H1140"></path>
+					<path class="arrow dashed" d="M1140 266 H1090"></path>
+					<path class="arrow dashed" d="M1140 110 H1090"></path>
+					<text class="small" x="316" y="110">host control</text>
+					<text class="small" x="590" y="116">descriptor load</text>
+					<text class="small" x="889" y="116">SPM data path</text>
+					<text class="small" x="889" y="258">AHB cmd path</text>
+				</svg>
+			</article>
+
+			<article class="diagram-card">
+				<h2>Section Type to Hardware Route</h2>
+				<p>這張圖把 `.hacc.*` section 與實際硬體路徑關係視覺化，避免 reviewer 把 control/program payload 跟 runtime tensor payload 混在一起。</p>
+				<svg viewBox="0 0 1320 540" role="img" aria-label="Section types to hardware routes diagram">
+					<defs>
+						<marker id="arrowHead2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+							<path d="M0,0 L0,6 L9,3 z" fill="#38424d"></path>
+						</marker>
+					</defs>
+					<style>
+						svg { shape-rendering: geometricPrecision; text-rendering: geometricPrecision; }
+						.box { fill: #fffdf9; stroke: #8b2e1c; stroke-width: 2; }
+						.box2 { fill: #f1f7f7; stroke: #235b63; stroke-width: 2; }
+						.box3 { fill: #f8efe3; stroke: #7d5a10; stroke-width: 2; }
+						.txt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #1d2430; font-size: 16px; font-weight: 700; dominant-baseline: middle; text-anchor: middle; }
+						.subtxt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #44505f; font-size: 13px; font-weight: 500; dominant-baseline: middle; }
+						.small { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; font-size: 12px; fill: #5a6876; dominant-baseline: middle; }
+						.arrow { stroke: #38424d; stroke-width: 2.2; fill: none; marker-end: url(#arrowHead2); vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+						.dashed { stroke-dasharray: 8 6; }
+						path[marker-end] { vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+					</style>
+					<rect x="30" y="26" width="1260" height="488" fill="#fffdf8" stroke="#d9cfbf" stroke-width="2" rx="24"></rect>
+					<rect class="box" x="56" y="60" width="238" height="390"></rect>
+					<text class="txt" x="175" y="95" text-anchor="middle">ELF Sections</text>
+					<text class="subtxt" x="175" y="132">.hacc.core</text>
+					<text class="subtxt" x="175" y="160">.hacc.job / .hacc.block</text>
+					<text class="subtxt" x="175" y="188">.hacc.profile / .hacc.agu</text>
+					<text class="subtxt" x="175" y="216">.hacc.dma / .hacc.patch</text>
+					<text class="subtxt" x="175" y="244">.hacc.pe</text>
+					<text class="subtxt" x="175" y="272">.hacc.scan</text>
+					<text class="subtxt" x="175" y="300">runtime tensor payload</text>
+
+					<rect class="box3" x="372" y="60" width="244" height="390"></rect>
+					<text class="txt" x="494" y="95" text-anchor="middle">Controller Transform</text>
+					<text class="subtxt" x="494" y="132">section loader direct write</text>
+					<text class="subtxt" x="494" y="162">descriptor table store</text>
+					<text class="subtxt" x="494" y="192">runtime apply through scheduler</text>
+					<text class="subtxt" x="494" y="222">NoC command emission</text>
+					<text class="subtxt" x="494" y="252">SPM DMA beats</text>
+
+					<rect class="box2" x="686" y="60" width="248" height="390"></rect>
+					<text class="txt" x="810" y="95" text-anchor="middle">Final Hardware Path</text>
+					<text class="subtxt" x="810" y="132">local I-SRAM</text>
+					<text class="subtxt" x="810" y="160">local Descriptor SRAM</text>
+					<text class="subtxt" x="810" y="188">cluster AHB HDDU passthrough</text>
+					<text class="subtxt" x="810" y="216">cluster AHB 0x2000 NoC command</text>
+					<text class="subtxt" x="810" y="244">cluster AXI4-Lite SPM window</text>
+
+					<rect class="box" x="1004" y="60" width="236" height="390"></rect>
+					<text class="txt" x="1122" y="95" text-anchor="middle">Reviewer Rule</text>
+					<text class="subtxt" x="1122" y="132">program / scan never use AXI data path</text>
+					<text class="subtxt" x="1122" y="162">profile / AGU are runtime-applied control data</text>
+					<text class="subtxt" x="1122" y="192">tensor payload is the only SPM AXI data traffic</text>
+					<text class="subtxt" x="1122" y="222">descriptor-heavy sections stay local</text>
+
+					<path class="arrow" d="M294 122 C330 122, 336 122, 372 122"></path>
+					<path class="arrow" d="M294 158 C330 158, 336 158, 372 158"></path>
+					<path class="arrow" d="M294 192 C330 192, 336 192, 372 192"></path>
+					<path class="arrow" d="M294 240 C330 240, 336 240, 372 240"></path>
+					<path class="arrow" d="M294 270 C330 270, 336 270, 372 270"></path>
+					<path class="arrow" d="M294 300 C330 300, 336 300, 372 300"></path>
+
+					<path class="arrow" d="M616 122 C650 122, 652 122, 686 122"></path>
+					<path class="arrow" d="M616 158 C650 158, 652 158, 686 158"></path>
+					<path class="arrow" d="M616 192 C650 192, 652 192, 686 192"></path>
+					<path class="arrow" d="M616 240 C650 240, 652 240, 686 240"></path>
+					<path class="arrow" d="M616 270 C650 270, 652 270, 686 270"></path>
+					<path class="arrow" d="M616 300 C650 300, 652 300, 686 300"></path>
+				</svg>
+			</article>
+
+			<article class="diagram-card">
+				<h2>Section Loader Micro-architecture</h2>
+				<p>section loader 必須同時處理 local write、SPM AXI payload 與 NoC AHB command 轉換三種不同目的地。</p>
+				<svg viewBox="0 0 1320 480" role="img" aria-label="Section loader micro-architecture block diagram">
+					<defs>
+						<marker id="arrowHead3" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+							<path d="M0,0 L0,6 L9,3 z" fill="#38424d"></path>
+						</marker>
+					</defs>
+					<style>
+						svg { shape-rendering: geometricPrecision; text-rendering: geometricPrecision; }
+						.box { fill: #fffdf9; stroke: #8b2e1c; stroke-width: 2; }
+						.box2 { fill: #f1f7f7; stroke: #235b63; stroke-width: 2; }
+						.box3 { fill: #f8efe3; stroke: #7d5a10; stroke-width: 2; }
+						.txt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #1d2430; font-size: 16px; font-weight: 700; dominant-baseline: middle; text-anchor: middle; }
+						.subtxt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #44505f; font-size: 13px; font-weight: 500; dominant-baseline: middle; }
+						.small { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; font-size: 12px; fill: #5a6876; dominant-baseline: middle; }
+						.arrow { stroke: #38424d; stroke-width: 2.2; fill: none; marker-end: url(#arrowHead3); vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+						.dashed { stroke-dasharray: 8 6; }
+						path[marker-end] { vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+					</style>
+					<rect x="28" y="26" width="1264" height="430" fill="#fffdf8" stroke="#d9cfbf" stroke-width="2" rx="24"></rect>
+					<rect class="box" x="60" y="98" width="184" height="84"></rect>
+					<text class="txt" x="152" y="130" text-anchor="middle">Manifest FIFO</text>
+					<text class="subtxt" x="152" y="154" text-anchor="middle">section_type, dst_kind, size</text>
+
+					<rect class="box3" x="300" y="78" width="214" height="124"></rect>
+					<text class="txt" x="407" y="114" text-anchor="middle">Section FSM</text>
+					<text class="subtxt" x="407" y="138" text-anchor="middle">IDLE / FETCH / ROUTE / VERIFY</text>
+					<text class="subtxt" x="407" y="160" text-anchor="middle">LD_WRITE_LOCAL / LD_WRITE_CLUSTER</text>
+
+					<rect class="box2" x="570" y="70" width="190" height="140"></rect>
+					<text class="txt" x="665" y="108" text-anchor="middle">DRAM AXI Reader</text>
+					<text class="subtxt" x="665" y="132" text-anchor="middle">burst read payload</text>
+					<text class="subtxt" x="665" y="154" text-anchor="middle">align / checksum assist</text>
+
+					<rect class="box" x="826" y="48" width="398" height="118"></rect>
+					<text class="txt" x="1025" y="84" text-anchor="middle">Destination Dispatcher</text>
+					<text class="subtxt" x="1025" y="108" text-anchor="middle">route to I-SRAM / DESC-SRAM / Event SRAM / SPM AXI / NoC AHB command</text>
+
+					<rect class="box" x="826" y="214" width="160" height="88"></rect>
+					<text class="txt" x="906" y="248" text-anchor="middle">Local Writers</text>
+					<text class="subtxt" x="906" y="272" text-anchor="middle">I-SRAM / DESC / Event</text>
+
+					<rect class="box2" x="1022" y="214" width="160" height="88"></rect>
+					<text class="txt" x="1102" y="248" text-anchor="middle">SPM AXI Path</text>
+					<text class="subtxt" x="1102" y="272" text-anchor="middle">runtime tensor payload</text>
+
+					<rect class="box3" x="1022" y="328" width="160" height="88"></rect>
+					<text class="txt" x="1102" y="362" text-anchor="middle">NoC AHB Path</text>
+					<text class="subtxt" x="1102" y="386" text-anchor="middle">PE program / scan chain</text>
+
+					<path class="arrow" d="M244 140 H300"></path>
+					<path class="arrow" d="M514 140 H570"></path>
+					<path class="arrow" d="M760 118 H826"></path>
+					<path class="arrow" d="M1025 166 V214"></path>
+					<path class="arrow" d="M1102 166 V214"></path>
+					<path class="arrow" d="M1102 302 V328"></path>
+				</svg>
+			</article>
+
+			<article class="diagram-card">
+				<h2>Block Execution Pipeline</h2>
+				<p>這張圖把 Job Manager、Block Fetch、Block Expander、Wave Scheduler 與 cluster execution 的 pipeline 串起來。</p>
+				<svg viewBox="0 0 1320 430" role="img" aria-label="Block execution pipeline diagram">
+					<defs>
+						<marker id="arrowHead4" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+							<path d="M0,0 L0,6 L9,3 z" fill="#38424d"></path>
+						</marker>
+					</defs>
+					<style>
+						svg { shape-rendering: geometricPrecision; text-rendering: geometricPrecision; }
+						.box { fill: #fffdf9; stroke: #8b2e1c; stroke-width: 2; }
+						.box2 { fill: #f1f7f7; stroke: #235b63; stroke-width: 2; }
+						.box3 { fill: #f8efe3; stroke: #7d5a10; stroke-width: 2; }
+						.txt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #1d2430; font-size: 16px; font-weight: 700; dominant-baseline: middle; text-anchor: middle; }
+						.subtxt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #44505f; font-size: 13px; font-weight: 500; dominant-baseline: middle; }
+						.small { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; font-size: 12px; fill: #5a6876; dominant-baseline: middle; }
+						.arrow { stroke: #38424d; stroke-width: 2.2; fill: none; marker-end: url(#arrowHead4); vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+						.dashed { stroke-dasharray: 8 6; }
+						path[marker-end] { vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+					</style>
+					<rect x="28" y="28" width="1264" height="374" fill="#fffdf8" stroke="#d9cfbf" stroke-width="2" rx="24"></rect>
+					<rect class="box" x="60" y="126" width="162" height="84"></rect>
+					<text class="txt" x="141" y="158" text-anchor="middle">Job Manager</text>
+					<text class="subtxt" x="141" y="182" text-anchor="middle">active job context</text>
+
+					<rect class="box" x="280" y="126" width="162" height="84"></rect>
+					<text class="txt" x="361" y="158" text-anchor="middle">Block Fetch</text>
+					<text class="subtxt" x="361" y="182" text-anchor="middle">descriptor SRAM read</text>
+
+					<rect class="box3" x="500" y="96" width="232" height="146"></rect>
+					<text class="txt" x="616" y="130" text-anchor="middle">Block Expander</text>
+					<text class="subtxt" x="616" y="156" text-anchor="middle">loop counter + formula engine</text>
+					<text class="subtxt" x="616" y="178" text-anchor="middle">patch lookup + emit formatter</text>
+
+					<rect class="box2" x="792" y="96" width="210" height="146"></rect>
+					<text class="txt" x="897" y="130" text-anchor="middle">Wave Scheduler</text>
+					<text class="subtxt" x="897" y="156" text-anchor="middle">prefetch / apply / start / wait / drain</text>
+					<text class="subtxt" x="897" y="178" text-anchor="middle">timeout + sync policy</text>
+
+					<rect class="box2" x="1062" y="76" width="170" height="92"></rect>
+					<text class="txt" x="1147" y="110" text-anchor="middle">DMA Engine</text>
+					<text class="subtxt" x="1147" y="134" text-anchor="middle">SPM AXI path</text>
+
+					<rect class="box3" x="1062" y="196" width="170" height="92"></rect>
+					<text class="txt" x="1147" y="230" text-anchor="middle">Cmd Engine</text>
+					<text class="subtxt" x="1147" y="254" text-anchor="middle">HDDU / NoC AHB path</text>
+
+					<path class="arrow" d="M222 168 H280"></path>
+					<path class="arrow" d="M442 168 H500"></path>
+					<path class="arrow" d="M732 168 H792"></path>
+					<path class="arrow" d="M1002 134 H1062"></path>
+					<path class="arrow" d="M1002 230 H1062"></path>
+					<path class="arrow" d="M1232 122 C1260 122,1260 322,970 322 C820 322,820 256,792 256"></path>
+					<text class="small" x="1032" y="342">done / error / completion feedback</text>
+				</svg>
+			</article>
+
+			<article class="diagram-card">
+				<h2>Block Expander Internal Diagram</h2>
+				<p>Block Expander 是 block-first 架構的核心；這張圖把 loop 展開、公式運算、patch 覆寫與 emit FIFO 切得更細。</p>
+				<svg viewBox="0 0 1320 430" role="img" aria-label="Block expander internal block diagram">
+					<defs>
+						<marker id="arrowHead5" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+							<path d="M0,0 L0,6 L9,3 z" fill="#38424d"></path>
+						</marker>
+					</defs>
+					<style>
+						svg { shape-rendering: geometricPrecision; text-rendering: geometricPrecision; }
+						.box { fill: #fffdf9; stroke: #8b2e1c; stroke-width: 2; }
+						.box2 { fill: #f1f7f7; stroke: #235b63; stroke-width: 2; }
+						.box3 { fill: #f8efe3; stroke: #7d5a10; stroke-width: 2; }
+						.txt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #1d2430; font-size: 16px; font-weight: 700; dominant-baseline: middle; text-anchor: middle; }
+						.subtxt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #44505f; font-size: 13px; font-weight: 500; dominant-baseline: middle; }
+						.small { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; font-size: 12px; fill: #5a6876; dominant-baseline: middle; }
+						.arrow { stroke: #38424d; stroke-width: 2.2; fill: none; marker-end: url(#arrowHead5); vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+						.dashed { stroke-dasharray: 8 6; }
+						path[marker-end] { vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+					</style>
+					<rect x="28" y="28" width="1264" height="374" fill="#fffdf8" stroke="#d9cfbf" stroke-width="2" rx="24"></rect>
+					<rect class="box" x="60" y="134" width="170" height="84"></rect>
+					<text class="txt" x="145" y="166" text-anchor="middle">Block FIFO</text>
+					<text class="subtxt" x="145" y="190" text-anchor="middle">block desc input</text>
+					<rect class="box3" x="286" y="90" width="188" height="126"></rect>
+					<text class="txt" x="380" y="125" text-anchor="middle">Loop Counter Engine</text>
+					<text class="subtxt" x="380" y="150" text-anchor="middle">loop_rank / loop_dims / curr_idx</text>
+					<text class="subtxt" x="380" y="172" text-anchor="middle">repeat_rem / logical_wave_id</text>
+					<rect class="box2" x="538" y="90" width="204" height="126"></rect>
+					<text class="txt" x="640" y="125" text-anchor="middle">Formula Engine</text>
+					<text class="subtxt" x="640" y="150" text-anchor="middle">AGU delta / DMA formula / section map</text>
+					<text class="subtxt" x="640" y="172" text-anchor="middle">profile_id / pe_program_id</text>
+					<rect class="box3" x="806" y="90" width="180" height="126"></rect>
+					<text class="txt" x="896" y="125" text-anchor="middle">Patch Lookup</text>
+					<text class="subtxt" x="896" y="150" text-anchor="middle">CAM or sorted table</text>
+					<text class="subtxt" x="896" y="172" text-anchor="middle">field mask override</text>
+					<rect class="box" x="1050" y="90" width="188" height="126"></rect>
+					<text class="txt" x="1144" y="125" text-anchor="middle">Emit Formatter</text>
+					<text class="subtxt" x="1144" y="150" text-anchor="middle">wave control packaging</text>
+					<text class="subtxt" x="1144" y="172" text-anchor="middle">DMA req vector / block tag</text>
+					<rect class="box" x="1050" y="258" width="188" height="74"></rect>
+					<text class="txt" x="1144" y="289" text-anchor="middle">Emit FIFO</text>
+					<text class="subtxt" x="1144" y="312" text-anchor="middle">to Wave Scheduler</text>
+					<path class="arrow" d="M230 176 H286"></path>
+					<path class="arrow" d="M474 154 H538"></path>
+					<path class="arrow" d="M742 154 H806"></path>
+					<path class="arrow" d="M986 154 H1050"></path>
+					<path class="arrow" d="M1144 216 V258"></path>
+				</svg>
+			</article>
+
+			<article class="diagram-card">
+				<h2>Wave Scheduler State Diagram</h2>
+				<p>Wave Scheduler 的核心不是大量 script 解碼，而是固定狀態機：prefetch、apply、start、wait、drain、commit。</p>
+				<svg viewBox="0 0 1320 420" role="img" aria-label="Wave scheduler state machine diagram">
+					<defs>
+						<marker id="arrowHead6" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+							<path d="M0,0 L0,6 L9,3 z" fill="#38424d"></path>
+						</marker>
+					</defs>
+					<style>
+						svg { shape-rendering: geometricPrecision; text-rendering: geometricPrecision; }
+						.box { fill: #fffdf9; stroke: #8b2e1c; stroke-width: 2; }
+						.box2 { fill: #f1f7f7; stroke: #235b63; stroke-width: 2; }
+						.box3 { fill: #f8efe3; stroke: #7d5a10; stroke-width: 2; }
+						.txt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #1d2430; font-size: 16px; font-weight: 700; dominant-baseline: middle; text-anchor: middle; }
+						.subtxt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #44505f; font-size: 13px; font-weight: 500; dominant-baseline: middle; }
+						.small { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; font-size: 12px; fill: #5a6876; dominant-baseline: middle; }
+						.arrow { stroke: #38424d; stroke-width: 2.2; fill: none; marker-end: url(#arrowHead6); vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+						.dashed { stroke-dasharray: 8 6; }
+						path[marker-end] { vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+					</style>
+					<rect x="28" y="28" width="1264" height="364" fill="#fffdf8" stroke="#d9cfbf" stroke-width="2" rx="24"></rect>
+					<rect class="box" x="84" y="152" width="130" height="64"></rect><text class="txt" x="149" y="190" text-anchor="middle">WS_IDLE</text>
+					<rect class="box2" x="268" y="152" width="140" height="64"></rect><text class="txt" x="338" y="190" text-anchor="middle">WS_PREFETCH</text>
+					<rect class="box3" x="462" y="152" width="132" height="64"></rect><text class="txt" x="528" y="190" text-anchor="middle">WS_APPLY</text>
+					<rect class="box" x="648" y="152" width="132" height="64"></rect><text class="txt" x="714" y="190" text-anchor="middle">WS_START</text>
+					<rect class="box2" x="834" y="152" width="132" height="64"></rect><text class="txt" x="900" y="190" text-anchor="middle">WS_WAIT</text>
+					<rect class="box3" x="1020" y="152" width="132" height="64"></rect><text class="txt" x="1086" y="190" text-anchor="middle">WS_DRAIN</text>
+					<rect class="box" x="1194" y="152" width="78" height="64"></rect><text class="txt" x="1233" y="190" text-anchor="middle">COMMIT</text>
+					<path class="arrow" d="M214 184 H268"></path>
+					<path class="arrow" d="M408 184 H462"></path>
+					<path class="arrow" d="M594 184 H648"></path>
+					<path class="arrow" d="M780 184 H834"></path>
+					<path class="arrow" d="M966 184 H1020"></path>
+					<path class="arrow" d="M1152 184 H1194"></path>
+					<path class="arrow dashed" d="M1233 216 V286 H149 V216"></path>
+					<text class="small" x="302" y="146">launch DMA if needed</text>
+					<text class="small" x="499" y="146">HDDU MMIO / NoC command setup</text>
+					<text class="small" x="874" y="146">wait irq / poll / timeout</text>
+					<text class="small" x="1184" y="286">next logical wave or done</text>
+				</svg>
+			</article>
+
+			<article class="diagram-card">
+				<h2>DMA Engine Data Path</h2>
+				<p>DMA engine 需要同時理解 formula mode 與 address-list mode，並在 DRAM AXI burst 與 cluster AXI4-Lite single-beat 間做節奏轉換。</p>
+				<svg viewBox="0 0 1320 440" role="img" aria-label="DMA engine data path diagram">
+					<defs>
+						<marker id="arrowHead7" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+							<path d="M0,0 L0,6 L9,3 z" fill="#38424d"></path>
+						</marker>
+					</defs>
+					<style>
+						svg { shape-rendering: geometricPrecision; text-rendering: geometricPrecision; }
+						.box { fill: #fffdf9; stroke: #8b2e1c; stroke-width: 2; }
+						.box2 { fill: #f1f7f7; stroke: #235b63; stroke-width: 2; }
+						.box3 { fill: #f8efe3; stroke: #7d5a10; stroke-width: 2; }
+						.txt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #1d2430; font-size: 16px; font-weight: 700; dominant-baseline: middle; text-anchor: middle; }
+						.subtxt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #44505f; font-size: 13px; font-weight: 500; dominant-baseline: middle; }
+						.small { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; font-size: 12px; fill: #5a6876; dominant-baseline: middle; }
+						.arrow { stroke: #38424d; stroke-width: 2.2; fill: none; marker-end: url(#arrowHead7); vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+						.dashed { stroke-dasharray: 8 6; }
+						path[marker-end] { vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+					</style>
+					<rect x="28" y="28" width="1264" height="384" fill="#fffdf8" stroke="#d9cfbf" stroke-width="2" rx="24"></rect>
+					<rect class="box" x="56" y="144" width="166" height="84"></rect>
+					<text class="txt" x="139" y="176" text-anchor="middle">DMA Request</text>
+					<text class="subtxt" x="139" y="200" text-anchor="middle">mode / addr / size</text>
+					<rect class="box3" x="278" y="96" width="198" height="132"></rect>
+					<text class="txt" x="377" y="132" text-anchor="middle">Descriptor Decoder</text>
+					<text class="subtxt" x="377" y="156" text-anchor="middle">formula mode</text>
+					<text class="subtxt" x="377" y="178" text-anchor="middle">address-list mode</text>
+					<rect class="box2" x="530" y="96" width="190" height="132"></rect>
+					<text class="txt" x="625" y="132" text-anchor="middle">Address Generator</text>
+					<text class="subtxt" x="625" y="156" text-anchor="middle">DRAM burst addresses</text>
+					<text class="subtxt" x="625" y="178" text-anchor="middle">cluster AXI-lite beat addresses</text>
+					<rect class="box" x="774" y="82" width="180" height="78"></rect>
+					<text class="txt" x="864" y="114" text-anchor="middle">Read FIFO</text>
+					<text class="subtxt" x="864" y="136" text-anchor="middle">unpack burst payload</text>
+					<rect class="box" x="774" y="198" width="180" height="78"></rect>
+					<text class="txt" x="864" y="230" text-anchor="middle">Write FIFO</text>
+					<text class="subtxt" x="864" y="252" text-anchor="middle">pack writeback payload</text>
+					<rect class="box2" x="1008" y="82" width="240" height="194"></rect>
+					<text class="txt" x="1128" y="116" text-anchor="middle">Outstanding Tracker + AXI Adapt</text>
+					<text class="subtxt" x="1128" y="142" text-anchor="middle">DRAM AXI4 burst master</text>
+					<text class="subtxt" x="1128" y="166" text-anchor="middle">cluster AXI4-Lite single-beat master</text>
+					<text class="subtxt" x="1128" y="190" text-anchor="middle">WSTRB handling / error capture</text>
+					<path class="arrow" d="M222 186 H278"></path>
+					<path class="arrow" d="M476 162 H530"></path>
+					<path class="arrow" d="M720 124 H774"></path>
+					<path class="arrow" d="M720 238 H774"></path>
+					<path class="arrow" d="M954 124 H1008"></path>
+					<path class="arrow" d="M954 238 H1008"></path>
+				</svg>
+			</article>
+
+			<article class="diagram-card">
+				<h2>Cluster Command Engine Routing</h2>
+				<p>cluster command engine 必須明確分成 HDDU MMIO passthrough 與 NoC sideband 兩條 AHB 路徑，不能再退回舊版抽象 command CSR 模型。</p>
+				<svg viewBox="0 0 1320 420" role="img" aria-label="Cluster command engine routing diagram">
+					<defs>
+						<marker id="arrowHead8" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+							<path d="M0,0 L0,6 L9,3 z" fill="#38424d"></path>
+						</marker>
+					</defs>
+					<style>
+						svg { shape-rendering: geometricPrecision; text-rendering: geometricPrecision; }
+						.box { fill: #fffdf9; stroke: #8b2e1c; stroke-width: 2; }
+						.box2 { fill: #f1f7f7; stroke: #235b63; stroke-width: 2; }
+						.box3 { fill: #f8efe3; stroke: #7d5a10; stroke-width: 2; }
+						.txt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #1d2430; font-size: 16px; font-weight: 700; dominant-baseline: middle; text-anchor: middle; }
+						.subtxt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #44505f; font-size: 13px; font-weight: 500; dominant-baseline: middle; }
+						.small { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; font-size: 12px; fill: #5a6876; dominant-baseline: middle; }
+						.arrow { stroke: #38424d; stroke-width: 2.2; fill: none; marker-end: url(#arrowHead8); vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+						.dashed { stroke-dasharray: 8 6; }
+						path[marker-end] { vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+					</style>
+					<rect x="28" y="28" width="1264" height="364" fill="#fffdf8" stroke="#d9cfbf" stroke-width="2" rx="24"></rect>
+					<rect class="box" x="70" y="150" width="190" height="82"></rect>
+					<text class="txt" x="165" y="182" text-anchor="middle">cluster_cmd_t</text>
+					<text class="subtxt" x="165" y="206" text-anchor="middle">op_kind / mask / data</text>
+					<rect class="box3" x="322" y="114" width="188" height="118"></rect>
+					<text class="txt" x="416" y="148" text-anchor="middle">Mask Walker</text>
+					<text class="subtxt" x="416" y="172" text-anchor="middle">cluster bit 0 -> N-1</text>
+					<text class="subtxt" x="416" y="194" text-anchor="middle">per-cluster sequencing</text>
+					<rect class="box2" x="574" y="72" width="204" height="94"></rect>
+					<text class="txt" x="676" y="108" text-anchor="middle">HDDU MMIO Path</text>
+					<text class="subtxt" x="676" y="132" text-anchor="middle">AHB 0x1000 ~ 0x1FFF</text>
+					<rect class="box2" x="574" y="214" width="204" height="94"></rect>
+					<text class="txt" x="676" y="250" text-anchor="middle">NoC Command Path</text>
+					<text class="subtxt" x="676" y="274" text-anchor="middle">AHB 0x2000 NOC_CMD_DATA</text>
+					<rect class="box" x="850" y="96" width="170" height="190"></rect>
+					<text class="txt" x="935" y="132" text-anchor="middle">AHB Sequencer</text>
+					<text class="subtxt" x="935" y="158" text-anchor="middle">NONSEQ address phase</text>
+					<text class="subtxt" x="935" y="182" text-anchor="middle">next-cycle hwdata</text>
+					<text class="subtxt" x="935" y="206" text-anchor="middle">hready / hresp check</text>
+					<rect class="box" x="1082" y="132" width="168" height="114"></rect>
+					<text class="txt" x="1166" y="168" text-anchor="middle">Cluster AHB Port</text>
+					<text class="subtxt" x="1166" y="192" text-anchor="middle">per-cluster master</text>
+					<path class="arrow" d="M260 191 H322"></path>
+					<path class="arrow" d="M510 144 H574"></path>
+					<path class="arrow" d="M510 240 H574"></path>
+					<path class="arrow" d="M778 119 H850"></path>
+					<path class="arrow" d="M778 261 H850"></path>
+					<path class="arrow" d="M1020 189 H1082"></path>
+				</svg>
+			</article>
+
+			<article class="diagram-card">
+				<h2>IRQ / Completion / Timeout Feedback</h2>
+				<p>完成與錯誤回授是 scheduler 可用性的核心，必須先 sticky capture，再用 mask/timeout 邏輯整合。</p>
+				<svg viewBox="0 0 1320 410" role="img" aria-label="IRQ completion timeout feedback diagram">
+					<defs>
+						<marker id="arrowHead9" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+							<path d="M0,0 L0,6 L9,3 z" fill="#38424d"></path>
+						</marker>
+					</defs>
+					<style>
+						svg { shape-rendering: geometricPrecision; text-rendering: geometricPrecision; }
+						.box { fill: #fffdf9; stroke: #8b2e1c; stroke-width: 2; }
+						.box2 { fill: #f1f7f7; stroke: #235b63; stroke-width: 2; }
+						.box3 { fill: #f8efe3; stroke: #7d5a10; stroke-width: 2; }
+						.txt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #1d2430; font-size: 16px; font-weight: 700; dominant-baseline: middle; text-anchor: middle; }
+						.subtxt { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; fill: #44505f; font-size: 13px; font-weight: 500; dominant-baseline: middle; }
+						.small { font-family: "Noto Sans CJK TC", "Noto Sans TC", "Noto Sans", "Liberation Sans", "DejaVu Sans", sans-serif; font-style: normal; font-size: 12px; fill: #5a6876; dominant-baseline: middle; }
+						.arrow { stroke: #38424d; stroke-width: 2.2; fill: none; marker-end: url(#arrowHead9); vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+						.dashed { stroke-dasharray: 8 6; }
+						path[marker-end] { vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+					</style>
+					<rect x="28" y="28" width="1264" height="354" fill="#fffdf8" stroke="#d9cfbf" stroke-width="2" rx="24"></rect>
+					<rect class="box" x="70" y="142" width="184" height="74"></rect>
+					<text class="txt" x="162" y="174" text-anchor="middle">cluster_irq[N:0]</text>
+					<text class="subtxt" x="162" y="198" text-anchor="middle">async inputs</text>
+					<rect class="box3" x="316" y="114" width="190" height="130"></rect>
+					<text class="txt" x="411" y="149" text-anchor="middle">IRQ Synchronizer</text>
+					<text class="subtxt" x="411" y="173" text-anchor="middle">CDC + glitch guard</text>
+					<text class="subtxt" x="411" y="195" text-anchor="middle">sticky capture</text>
+					<rect class="box2" x="568" y="114" width="198" height="130"></rect>
+					<text class="txt" x="667" y="149" text-anchor="middle">Completion Bitmap</text>
+					<text class="subtxt" x="667" y="173" text-anchor="middle">done / error bitmap</text>
+					<text class="subtxt" x="667" y="195" text-anchor="middle">mask comparator</text>
+					<rect class="box3" x="828" y="114" width="198" height="130"></rect>
+					<text class="txt" x="927" y="149" text-anchor="middle">Timeout / Error Unit</text>
+					<text class="subtxt" x="927" y="173" text-anchor="middle">watchdog / source priority</text>
+					<text class="subtxt" x="927" y="195" text-anchor="middle">ERR_CODE / ERR_AUX latch</text>
+					<rect class="box" x="1088" y="114" width="164" height="130"></rect>
+					<text class="txt" x="1170" y="149" text-anchor="middle">Wave Scheduler</text>
+					<text class="subtxt" x="1170" y="173" text-anchor="middle">wait mask / next wave</text>
+					<text class="subtxt" x="1170" y="195" text-anchor="middle">abort / drain / commit</text>
+					<path class="arrow" d="M254 179 H316"></path>
+					<path class="arrow" d="M506 179 H568"></path>
+					<path class="arrow" d="M766 179 H828"></path>
+					<path class="arrow" d="M1026 179 H1088"></path>
+				</svg>
+			</article>
+		</section>
+
+		<section class="mirror">
+			<div class="mirror-header">
+				<h2>Core.md 內容鏡射</h2>
+				<p>以下區塊直接內嵌同目錄下的 Core.md 原文，讓 HTML 與 Markdown 保持同步；若預覽器不支援內嵌文字檔，則顯示備援文字內容。</p>
+			</div>
+			<object class="mirror-object" data="Core.md" type="text/plain">
+				<pre>若目前預覽器無法直接內嵌 Core.md，請直接開啟同目錄下的 Core.md 取得完整且與 HTML 同步的原文規格。</pre>
+			</object>
+		</section>
+	</div>
+</body>
+</html>

@@ -320,6 +320,15 @@ add_executable(test_cluster_sim
     mvp_compiler.hpp
 )
 
+# Core Controller Unit Tests
+add_executable(test_core_unit
+    core_unit_tests/test_core_unit.cpp
+)
+
+add_executable(test_core_controller_integration
+    core_unit_tests/test_core_controller_integration.cpp
+)
+
 add_executable(test_cluster_sim_advanced
     test_cluster_sim_advanced.cpp
 )
@@ -331,7 +340,24 @@ if(ENABLE_DEBUG_UTILS)
     target_compile_definitions(test_cluster_sim_advanced PRIVATE DEBUG_UTILS)
     target_compile_definitions(test_cluster_sim_advanced PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
     target_compile_definitions(test_cluster_sim_advanced PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
+    target_compile_definitions(test_core_unit PRIVATE DEBUG_UTILS)
+    target_compile_definitions(test_core_unit PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
+    target_compile_definitions(test_core_unit PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
+    target_compile_definitions(test_core_controller_integration PRIVATE DEBUG_UTILS)
+    target_compile_definitions(test_core_controller_integration PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
+    target_compile_definitions(test_core_controller_integration PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
 endif()
+
+target_link_libraries(test_core_unit
+    systemc
+    pthread
+)
+
+target_link_libraries(test_core_controller_integration
+    pe_simulator
+    systemc
+    pthread
+)
 
 target_link_libraries(test_cluster_sim
     pe_simulator
@@ -363,5 +389,21 @@ add_custom_target(run_cluster_sim_advanced
     COMMENT "Running advanced ComputeCluster simulation"
 )
 
+add_custom_target(run_core_unit_test
+    COMMAND ./test_core_unit
+    DEPENDS test_core_unit
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running HACC core controller unit test"
+)
+
+add_custom_target(run_core_controller_integration
+    COMMAND ./test_core_controller_integration
+    DEPENDS test_core_controller_integration
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running HACC core controller integration test"
+)
+
 add_test(NAME ComputeCluster_Simulation COMMAND test_cluster_sim)
 add_test(NAME ComputeCluster_Simulation_Advanced COMMAND test_cluster_sim_advanced)
+add_test(NAME HACC_Core_Unit_Tests COMMAND test_core_unit)
+add_test(NAME HACC_Core_Controller_Integration COMMAND test_core_controller_integration)
