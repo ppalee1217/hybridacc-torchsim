@@ -1,0 +1,932 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>HybridAcc Core Controller 規格（HACC Native Core-ISA）</title>
+	<style>
+		:root {
+			--bg: #0b1020;
+			--panel: #121a30;
+			--panel-2: #17223f;
+			--text: #e8ecf8;
+			--muted: #a6b0cc;
+			--line: #2a355d;
+			--accent: #73a1ff;
+			--ok: #6fe3b1;
+			--warn: #ffd479;
+			--mono-bg: #0d152b;
+		}
+		* { box-sizing: border-box; }
+		body {
+			margin: 0;
+			color: var(--text);
+			background: linear-gradient(180deg, #070b16 0%, #0b1020 160px);
+			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", Roboto, sans-serif;
+			line-height: 1.6;
+		}
+		a { color: var(--accent); text-decoration: none; }
+		a:hover { text-decoration: underline; }
+		.page {
+			max-width: 1080px;
+			margin: 0 auto;
+			padding: 20px;
+			display: grid;
+			grid-template-columns: 240px 1fr;
+			gap: 20px;
+		}
+		.toc {
+			position: sticky;
+			top: 12px;
+			align-self: start;
+			background: var(--panel);
+			border: 1px solid var(--line);
+			border-radius: 12px;
+			padding: 14px;
+			max-height: calc(100vh - 24px);
+			overflow: auto;
+		}
+		.toc h2 { margin: 0 0 10px; font-size: 16px; }
+		.toc ul { margin: 0; padding-left: 18px; }
+		.toc li { margin: 3px 0; }
+		.content {
+			background: var(--panel);
+			border: 1px solid var(--line);
+			border-radius: 12px;
+			padding: 20px 22px 36px;
+		}
+		h1, h2, h3, h4 { line-height: 1.3; }
+		h1 { margin-top: 0; font-size: 30px; }
+		h2 {
+			margin-top: 34px;
+			padding-top: 10px;
+			border-top: 1px solid var(--line);
+			font-size: 24px;
+		}
+		h3 { margin-top: 22px; font-size: 19px; color: #d7e4ff; }
+		h4 { margin-top: 14px; font-size: 16px; color: #c2d3ff; }
+		p, li { color: #e0e6f7; }
+		.lead {
+			background: var(--panel-2);
+			border: 1px solid var(--line);
+			border-radius: 10px;
+			padding: 12px 14px;
+			color: #dbe4ff;
+			margin: 14px 0;
+		}
+		.grid {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+			gap: 12px;
+			margin: 12px 0 18px;
+		}
+		.card {
+			border: 1px solid var(--line);
+			background: #101831;
+			border-radius: 10px;
+			padding: 10px 12px;
+		}
+		.card h4 { margin: 0 0 6px; }
+		pre {
+			margin: 12px 0;
+			border-radius: 10px;
+			border: 1px solid var(--line);
+			background: var(--mono-bg);
+			color: #dce7ff;
+			padding: 12px;
+			overflow: auto;
+			line-height: 1.45;
+			font-size: 13px;
+		}
+		code {
+			font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+			background: #0f1b39;
+			border: 1px solid #243767;
+			border-radius: 4px;
+			padding: 0 4px;
+			color: #d7e5ff;
+		}
+		table {
+			border-collapse: collapse;
+			width: 100%;
+			margin: 12px 0;
+			border: 1px solid var(--line);
+			background: #101831;
+			border-radius: 10px;
+			overflow: hidden;
+		}
+		th, td {
+			border-bottom: 1px solid var(--line);
+			border-right: 1px solid var(--line);
+			padding: 8px 10px;
+			vertical-align: top;
+		}
+		th { background: #172546; text-align: left; }
+		tr:last-child td { border-bottom: none; }
+		td:last-child, th:last-child { border-right: none; }
+		.muted { color: var(--muted); }
+		.tag {
+			display: inline-block;
+			background: #1a2c55;
+			border: 1px solid #31497f;
+			color: #cfe1ff;
+			border-radius: 999px;
+			padding: 2px 8px;
+			font-size: 12px;
+			margin-right: 6px;
+		}
+		.ok { color: var(--ok); }
+		.warn { color: var(--warn); }
+		@media (max-width: 980px) {
+			.page { grid-template-columns: 1fr; }
+			.toc { position: static; max-height: none; }
+		}
+	</style>
+</head>
+<body>
+	<div class="page">
+		<aside class="toc">
+			<h2>章節目錄</h2>
+			<ul>
+				<li><a href="#summary">快速摘要</a></li>
+				<li><a href="#sec0">0. 設計目標與邊界</a></li>
+				<li><a href="#sec1">1. 架構總覽</a></li>
+				<li><a href="#sec2">2. 位址模型與 MMIO</a></li>
+				<li><a href="#sec3">3. HACC 指令集</a></li>
+				<li><a href="#sec4">4. .hacc 可讀格式</a></li>
+				<li><a href="#sec5">5. Compiler/Packager</a></li>
+				<li><a href="#sec6">6. 封裝格式</a></li>
+				<li><a href="#sec7">7. Core 程式範本</a></li>
+				<li><a href="#sec8">8. 大量 Wave 策略</a></li>
+				<li><a href="#sec9">9. 客製化 Unit 行為</a></li>
+				<li><a href="#sec10">10. 版本化與 capability</a></li>
+				<li><a href="#sec11">11. 驗證與可觀測性</a></li>
+				<li><a href="#sec12">12. Boot/Load Ownership</a></li>
+				<li><a href="#sec13">13. readable text 格式</a></li>
+				<li><a href="#sec14">14. 編譯與轉換流程</a></li>
+				<li><a href="#sec15">15. readable text 範例</a></li>
+				<li><a href="#sec16">16. 預期 Core ASM</a></li>
+				<li><a href="#sec17">17. 總結</a></li>
+			</ul>
+			<p class="muted" style="margin-top:12px; font-size:12px;">本頁為單檔靜態文件，無外部 CSS/JS 依賴，可離線開啟。</p>
+		</aside>
+
+		<main class="content">
+			<h1>HybridAcc Core Controller 規格（HACC Native Core-ISA）</h1>
+			<p class="lead">
+				目標：在 <strong>不使用 RISC-V CPU core</strong> 的前提下，定義可直接驅動 HybridAcc 的精簡 Core-ISA。<br />
+				核心方向：<strong>少數控制指令 + 硬體微序列執行 + descriptor 資料驅動</strong>。
+			</p>
+
+			<section id="summary">
+				<h2>快速摘要</h2>
+				<div class="grid">
+					<div class="card">
+						<h4>控制面定位</h4>
+						<ul>
+							<li>Core 僅負責提交、同步、錯誤處理</li>
+							<li>wave 細節由 DFU/WSU/PAU/DRU 等硬體單元展開</li>
+						</ul>
+					</div>
+					<div class="card">
+						<h4>可擴展策略</h4>
+						<ul>
+							<li><code>code O(1), data O(Nwave)</code></li>
+							<li>支援數千至數萬 wave 以 descriptor 驅動</li>
+						</ul>
+					</div>
+					<div class="card">
+						<h4>程式模型</h4>
+						<ul>
+							<li>固定 core stub：<code>HCFG→HLAUNCH→HKICK→HWAIT</code></li>
+							<li>Conv/GEMM 差異主要落在資料 section</li>
+						</ul>
+					</div>
+				</div>
+			</section>
+
+			<section id="sec0">
+				<h2>0. 設計目標與邊界</h2>
+				<h3>0.1 目標</h3>
+				<ol>
+					<li>定義可獨立實作的 <strong>HACC Native ISA</strong>（非 RV32I 相容）。</li>
+					<li>Core 僅處理任務提交與例外；資料搬移與 cluster 控制由硬體完成。</li>
+					<li>支援大量 wave 執行且 core 程式維持常數大小。</li>
+				</ol>
+				<h3>0.2 邊界</h3>
+				<ol>
+					<li>不變更 PE ALU 指令語意。</li>
+					<li>不變更 HDDU/AGU/Cluster/DMA 的既有 MMIO map。</li>
+					<li>MVP 採單 context、單 command queue。</li>
+				</ol>
+				<h3>0.3 原則</h3>
+				<ol>
+					<li>ISA 語意停留於工作提交/同步/查狀態層級。</li>
+					<li>wave prefetch/apply/start/sync/drain 全由硬體狀態機處理。</li>
+					<li>busy/error/wave_id 等可觀測狀態需可由 CSR 讀取。</li>
+				</ol>
+			</section>
+
+			<section id="sec1">
+				<h2>1. 架構總覽</h2>
+				<h3>1.1 總體架構</h3>
+<pre>+--------------------+        +------------------------------+
+| HACC Core Frontend | -----> | HACC Command Queue           |
+| (Native ISA)       |        +------------------------------+
+|  - PC/Decoder      |                    |
+|  - 16 GPR          |                    v
++--------------------+        +------------------------------+
+															| HACC Execution Complex        |
+															|  - Descriptor Fetch Unit      |
+															|  - Wave Scheduler             |
+															|  - Profile Apply Unit         |
+															|  - Cluster Broadcast Unit     |
+															|  - DMA Range Unit             |
+															|  - Sync/Timeout Unit          |
+															|  - Error/IRQ Unit             |
+															+------------------------------+
+																						|
+																+-----------+-----------+
+																| MMIO Bus / Desc Memory |
+																+------------------------+</pre>
+				<h3>1.2 執行模型</h3>
+				<ol>
+					<li>Core Frontend 解碼後送高階命令至 Command Queue。</li>
+					<li>Execution Complex 依 JobDesc/WaveDesc 自主執行。</li>
+					<li>Core 可 blocking wait 或 polling 讀狀態。</li>
+				</ol>
+				<h3>1.3 粒度</h3>
+				<ul>
+					<li><strong>Job</strong>：table base / policy / wave range</li>
+					<li><strong>Batch</strong>：一次提交多個 wave</li>
+					<li><strong>Wave</strong>：硬體 scheduler 自動展開</li>
+				</ul>
+			</section>
+
+			<section id="sec2">
+				<h2>2. 位址模型與 MMIO 版圖</h2>
+				<h3>2.1 固定位址</h3>
+				<ul>
+					<li><code>CLUSTER_MMIO_BASE = 0x0000_0000</code></li>
+					<li><code>CLUSTER_STRIDE = 0x0001_0000</code></li>
+					<li><code>DMA_BASE = 0x8000_0000</code></li>
+					<li><code>HACC_CSR_BASE = 0x9000_0000</code></li>
+					<li><code>DESC_MEM_BASE = 0xA000_0000</code></li>
+				</ul>
+				<h3>2.2 Cluster 位址換算</h3>
+<pre>cluster_addr = CLUSTER_MMIO_BASE + cluster_id * CLUSTER_STRIDE + local_offset</pre>
+				<p>local window：</p>
+				<ol>
+					<li><code>0x0000~0x00FF</code>：SPM config</li>
+					<li><code>0x1000~0x1FFF</code>：HDDU passthrough</li>
+					<li><code>0x2000~0x20FF</code>：NoC command</li>
+				</ol>
+
+				<h3>2.3 HACC CSR 空間（Core 可見）</h3>
+				<table>
+					<thead>
+						<tr><th>Offset</th><th>Name</th><th>說明</th></tr>
+					</thead>
+					<tbody>
+						<tr><td>0x000</td><td>HACC_CTRL</td><td>bit0 START / bit1 ABORT / bit2 RESET</td></tr>
+						<tr><td>0x004</td><td>HACC_STATUS</td><td>bit0 BUSY / bit1 DONE / bit2 ERROR / bit3 IRQ_PENDING</td></tr>
+						<tr><td>0x008</td><td>HACC_JOB_BASE_LO</td><td>Job base 低 32 位</td></tr>
+						<tr><td>0x00C</td><td>HACC_JOB_BASE_HI</td><td>Job base 高 32 位</td></tr>
+						<tr><td>0x010</td><td>HACC_WAVE_BEGIN</td><td>起始 wave id</td></tr>
+						<tr><td>0x014</td><td>HACC_WAVE_COUNT</td><td>wave 總數</td></tr>
+						<tr><td>0x018</td><td>HACC_ERR_CODE</td><td>錯誤主碼</td></tr>
+						<tr><td>0x01C</td><td>HACC_ERR_AUX</td><td>錯誤輔助資訊</td></tr>
+						<tr><td>0x020</td><td>HACC_LAST_WAVE_ID</td><td>最後完成/處理 wave</td></tr>
+						<tr><td>0x024</td><td>HACC_PERF_CYCLE</td><td>效能計數</td></tr>
+						<tr><td>0x028</td><td>HACC_PERF_MMIO_CNT</td><td>MMIO 計數</td></tr>
+						<tr><td>0x02C</td><td>HACC_PERF_DMA_CNT</td><td>DMA 計數</td></tr>
+					</tbody>
+				</table>
+
+				<h3>2.4 Descriptor 記憶體佈局</h3>
+				<ol>
+					<li><code>JOB_DESC_TABLE</code></li>
+					<li><code>WAVE_DESC_TABLE</code></li>
+					<li><code>PROFILE_TABLE</code></li>
+					<li><code>DMA_DESC_TABLE</code></li>
+					<li><code>CONST_TABLE</code>（可選）</li>
+				</ol>
+			</section>
+
+			<section id="sec3">
+				<h2>3. HACC 指令（詳細 ISA 規格）</h2>
+				<p class="lead">本章定義「非 RISC-V」原生 HACC 指令格式與語意。</p>
+
+				<h3>3.1 架構狀態</h3>
+				<ol>
+					<li><code>PC</code>：32-bit 程式計數器</li>
+					<li><code>GPR[0..15]</code>：16 個 32-bit 通用暫存器，<code>r0=0</code></li>
+					<li><code>PRED</code>：條件旗標（Z/E）</li>
+					<li><code>SYS</code>：系統狀態（halt/exception mask）</li>
+				</ol>
+
+				<h3>3.2 指令長度與對齊</h3>
+				<ol>
+					<li>固定 32-bit 指令寬度</li>
+					<li>位址需 4-byte 對齊</li>
+					<li>Little-endian 儲存</li>
+				</ol>
+
+				<h3>3.3 編碼格式</h3>
+				<h4>Format-R（雙來源 + 目的）</h4>
+<pre>[31:26] OPC   [25:22] RD   [21:18] RS1   [17:14] RS2   [13:0] FUNC/IMM14</pre>
+				<h4>Format-I（來源 + 立即數）</h4>
+<pre>[31:26] OPC   [25:22] RD   [21:18] RS1   [17:0] IMM18</pre>
+				<h4>Format-J（控制流）</h4>
+<pre>[31:26] OPC   [25:0] IMM26 (signed, &lt;&lt;2)</pre>
+
+				<h3>3.4 Opcode 類別</h3>
+				<ul>
+					<li><code>0x00~0x0B</code>：Core 控制（MOVI/MOV/ADD/AND/OR/SLL/SRL/CMP/JMP/BR）</li>
+					<li><code>0x0C~0x0F</code>：CSR（CSR_RD/CSR_WR）</li>
+					<li><code>0x10~0x1F</code>：HACC 控制（CFG/LAUNCH/KICK/WAIT/POLL/ERR/ABORT）</li>
+					<li><code>0x20~0x2F</code>：除錯與追蹤（STEP/TRACE/BREAK）</li>
+				</ul>
+
+				<h3>3.5 MVP 指令表</h3>
+				<h4>A) 基礎控制</h4>
+				<table>
+					<thead><tr><th>#</th><th>指令</th><th>語意</th></tr></thead>
+					<tbody>
+						<tr><td>1</td><td><code>MOVI rd, imm18</code></td><td><code>rd = sign_ext(imm18)</code></td></tr>
+						<tr><td>2</td><td><code>MOV rd, rs1</code></td><td><code>rd = rs1</code></td></tr>
+						<tr><td>3</td><td><code>ADD rd, rs1, rs2</code></td><td><code>rd = rs1 + rs2</code></td></tr>
+						<tr><td>4</td><td><code>AND rd, rs1, rs2</code></td><td><code>rd = rs1 &amp; rs2</code></td></tr>
+						<tr><td>5</td><td><code>OR rd, rs1, rs2</code></td><td><code>rd = rs1 | rs2</code></td></tr>
+						<tr><td>6</td><td><code>SLL rd, rs1, imm5</code></td><td><code>rd = rs1 &lt;&lt; imm5</code></td></tr>
+						<tr><td>7</td><td><code>SRL rd, rs1, imm5</code></td><td><code>rd = rs1 &gt;&gt; imm5</code></td></tr>
+						<tr><td>8</td><td><code>CMP rs1, rs2</code></td><td>設定 <code>PRED.Z = (rs1 == rs2)</code></td></tr>
+						<tr><td>9</td><td><code>JMP imm26</code></td><td><code>PC = PC + (sign_ext(imm26) &lt;&lt; 2)</code></td></tr>
+						<tr><td>10</td><td><code>BRZ imm26</code></td><td>若 <code>PRED.Z==1</code> 則分支</td></tr>
+					</tbody>
+				</table>
+				<p class="muted">說明：上述 10 條用於最小控制流程，非資料面主力運算 ISA。</p>
+
+				<h4>B) CSR 存取</h4>
+				<ul>
+					<li><code>CSR_WR csr_id, rs1</code>：將 <code>rs1</code> 寫入 CSR</li>
+					<li><code>CSR_RD rd, csr_id</code>：CSR 讀入 <code>rd</code></li>
+				</ul>
+
+				<h4>C) HACC 任務控制</h4>
+				<ol start="13">
+					<li><code>HCFG rs1</code>：<code>rs1</code> 指向 JobConfig base（等效寫入 <code>HACC_JOB_BASE_*</code>）</li>
+					<li><code>HLAUNCH rs1, rs2</code>：<code>wave_begin=rs1</code>、<code>wave_count=rs2</code>，僅入 queue（non-blocking）</li>
+					<li><code>HKICK</code>：觸發 scheduler doorbell</li>
+					<li><code>HWAIT rs1</code>：wait mask（bit0 done / bit1 error / bit2 timeout），blocking 等待任一成立</li>
+					<li><code>HPOLL rd</code>：<code>rd = HACC_STATUS</code></li>
+					<li><code>HERR rd</code>：<code>rd = ERR_CODE[15:0] | (ERR_AUX[31:16] &lt;&lt; 16)</code></li>
+					<li><code>HABORT</code>：中止並清空 inflight</li>
+					<li><code>HBREAK</code>：進入 debug halt</li>
+				</ol>
+
+				<h3>3.6 指令時序語意</h3>
+				<ol>
+					<li><code>HCFG/HLAUNCH/HKICK</code> 為順序一致（提交順序 = 可觀察執行順序）。</li>
+					<li><code>HWAIT</code> 為強同步點；返回時 <code>STATUS/ERR/LAST_WAVE_ID</code> 必須可見。</li>
+					<li><code>HABORT</code> 完成條件：Execution Complex idle + MMIO sequencer drained。</li>
+				</ol>
+
+				<h3>3.7 例外與錯誤碼</h3>
+				<table>
+					<thead><tr><th>ERR_CODE</th><th>含義</th></tr></thead>
+					<tbody>
+						<tr><td>0x01</td><td>Descriptor bounds error</td></tr>
+						<tr><td>0x02</td><td>DMA channel error</td></tr>
+						<tr><td>0x03</td><td>Cluster MMIO timeout</td></tr>
+						<tr><td>0x04</td><td>Illegal sync policy</td></tr>
+						<tr><td>0x05</td><td>Queue overflow</td></tr>
+						<tr><td>0x06</td><td>Unsupported capability</td></tr>
+					</tbody>
+				</table>
+				<p><code>ERR_AUX</code>：<code>[7:0]=channel_id</code>、<code>[15:8]=cluster_id</code>、<code>[31:16]=wave_id</code></p>
+			</section>
+
+			<section id="sec4">
+				<h2>4. <code>.hacc</code> 可讀格式</h2>
+				<h3>4.1 設計重點</h3>
+				<p><code>.hacc</code> 以「描述資料 + 執行策略」為主，避免手寫 per-wave 指令碼。</p>
+
+				<h3>4.2 檔案骨架</h3>
+<pre>program &lt;name&gt; {
+	meta { ... }
+	hardware { ... }
+	tensors { ... }
+	pe_programs { ... }
+	scan_chain { ... }
+	hddu_profiles { ... }
+	dma_plan { ... }
+	wave_graph { ... }
+	runtime_policy { ... }
+}</pre>
+
+				<h3>4.3 必填欄位</h3>
+				<p><span class="tag">cluster_count</span><span class="tag">deploy_mask</span><span class="tag">cluster_stride</span><span class="tag">dma_base</span><span class="tag">wave_count</span><span class="tag">scheduler_policy</span><span class="tag">timeout_cycle</span></p>
+
+				<h3>4.4 <code>wave_graph</code> 語意</h3>
+				<ul>
+					<li>每筆 wave 需包含：<code>cluster_mask</code>、<code>profile_id</code>、<code>pe_program_id</code>、<code>prefetch_begin/count</code>、<code>drain_begin/count</code>、<code>sync_policy</code></li>
+					<li>壓縮語法：<code>repeat(n)</code>、<code>tile_loop(i,j,k)</code>、<code>delta_rule(field, base, step)</code></li>
+				</ul>
+
+				<h3>4.5 <code>runtime_policy</code></h3>
+				<ul>
+					<li><code>error_action = trap | skip | abort</code></li>
+					<li><code>retry_max</code></li>
+					<li><code>profile_mode = full | delta | auto</code></li>
+					<li><code>completion_bitmap = on | off</code></li>
+				</ul>
+			</section>
+
+			<section id="sec5">
+				<h2>5. Compiler/Packager 流程</h2>
+<pre>.hacc
+	-&gt; Parser(AST)
+	-&gt; Semantic Check
+	-&gt; Wave DAG &amp; Policy IR
+	-&gt; Descriptor Lowering
+			 - JOB_CONFIG
+			 - WAVE_DESC
+			 - PROFILE_TABLE
+			 - DMA_DESC
+	-&gt; Core Stub Emit (HACC Native ISA)
+	-&gt; Packager (.hap / .elf)</pre>
+
+				<h3>5.2 Semantic Check（必做）</h3>
+				<ol>
+					<li><code>deploy_mask</code> 不超出 <code>cluster_count</code></li>
+					<li>wave DAG 無循環</li>
+					<li>DMA 覆蓋 tensor byte range</li>
+					<li>profile/pe_program 引用合法</li>
+					<li>sync policy 與 capability 相容</li>
+				</ol>
+
+				<h3>5.3 Core Stub Emit</h3>
+				<p>編譯器固定輸出：<code>HCFG → HLAUNCH → HKICK → HWAIT → HPOLL/HERR/HABORT</code></p>
+
+				<h3>5.4 Packager</h3>
+				<ol>
+					<li>section 對齊與版本資訊</li>
+					<li>descriptor 壓縮（RLE/delta/formula）</li>
+					<li>生成 debug map（wave_id → source）</li>
+					<li>支援輸出 <code>HAP container</code> 與 <code>ELF container</code>（payload 語意等價）</li>
+				</ol>
+			</section>
+
+			<section id="sec6">
+				<h2>6. 封裝格式</h2>
+				<h3>6.1 Header</h3>
+<pre>struct HaccPkgHeader {
+	uint32_t magic;          // 'HACP'
+	uint16_t version_major;
+	uint16_t version_minor;
+	uint32_t section_count;
+	uint32_t entry_offset;   // Native ISA entry
+	uint32_t flags;          // bit0: little-endian, bit1: desc-compressed
+	uint32_t target_caps;    // capability bitmap
+};</pre>
+
+				<h3>6.2 Section Type</h3>
+<pre>enum SectionType : uint32_t {
+	SEC_META           = 0,
+	SEC_CORE_STUB      = 1,
+	SEC_JOB_CONFIG     = 2,
+	SEC_WAVE_DESC      = 3,
+	SEC_PROFILE_TABLE  = 4,
+	SEC_DMA_DESC       = 5,
+	SEC_PE_PROGRAM     = 6,
+	SEC_SCAN_CHAIN     = 7,
+	SEC_DEBUG_MAP      = 8,
+	SEC_SYMBOL         = 9
+};</pre>
+
+				<h3>6.3 Loader 順序</h3>
+				<ol>
+					<li>驗證 <code>magic/version/target_caps</code></li>
+					<li>載入 PE/scan-chain/profile/dma/wave descriptors</li>
+					<li>設定 <code>PC = SEC_CORE_STUB.entry</code></li>
+					<li>啟動 HACC Native Core</li>
+				</ol>
+
+				<h3>6.4 ELF 輸出格式定義（新增）</h3>
+				<p class="lead">目的：讓編譯輸出可直接被標準 ELF tooling 識別與載入，同時保留 HACC descriptor-driven 執行模型。</p>
+
+				<h4>6.4.1 ELF 基本屬性</h4>
+				<ol>
+					<li><code>ELFCLASS32</code>（32-bit）</li>
+					<li><code>ELFDATA2LSB</code>（little-endian）</li>
+					<li><code>e_type = ET_EXEC</code>（MVP）</li>
+					<li><code>e_machine = EM_NONE</code>（MVP；後續可升級為 HACC 專用 machine id）</li>
+					<li><code>e_entry</code> 指向 <code>.hacc_core_stub</code> 起始位址</li>
+				</ol>
+
+				<h4>6.4.2 Section 命名與對映</h4>
+				<table>
+					<thead><tr><th>ELF Section</th><th>對應既有 payload</th><th>說明</th></tr></thead>
+					<tbody>
+						<tr><td><code>.hacc.meta</code></td><td><code>SEC_META</code></td><td>版本/target/caps</td></tr>
+						<tr><td><code>.hacc.core_stub</code></td><td><code>SEC_CORE_STUB</code></td><td>Native ISA core 程式</td></tr>
+						<tr><td><code>.hacc.job</code></td><td><code>SEC_JOB_CONFIG</code></td><td>Job config</td></tr>
+						<tr><td><code>.hacc.wave</code></td><td><code>SEC_WAVE_DESC</code></td><td>Wave descriptors</td></tr>
+						<tr><td><code>.hacc.profile</code></td><td><code>SEC_PROFILE_TABLE</code></td><td>HDDU profile table</td></tr>
+						<tr><td><code>.hacc.dma</code></td><td><code>SEC_DMA_DESC</code></td><td>DMA descriptors</td></tr>
+						<tr><td><code>.hacc.pe</code></td><td><code>SEC_PE_PROGRAM</code></td><td>PE program blob</td></tr>
+						<tr><td><code>.hacc.scan</code></td><td><code>SEC_SCAN_CHAIN</code></td><td>Scan chain data</td></tr>
+						<tr><td><code>.hacc.debug</code></td><td><code>SEC_DEBUG_MAP</code></td><td>除錯映射</td></tr>
+						<tr><td><code>.hacc.sym</code></td><td><code>SEC_SYMBOL</code></td><td>符號資訊（可選）</td></tr>
+					</tbody>
+				</table>
+
+				<h4>6.4.3 Program Header（Segment）建議</h4>
+				<ol>
+					<li><code>PT_LOAD RX</code>：<code>.hacc.core_stub</code></li>
+					<li><code>PT_LOAD RO</code>：<code>.hacc.meta/.hacc.job/.hacc.wave/.hacc.profile/.hacc.dma</code></li>
+					<li><code>PT_LOAD RO</code>：<code>.hacc.pe/.hacc.scan</code></li>
+					<li><code>PT_NOTE</code>（可選）：build id / compiler version / target_caps</li>
+				</ol>
+
+				<h4>6.4.4 載入規範（ELF 路徑）</h4>
+				<ol>
+					<li>Loader 解析 ELF header 與 program headers。</li>
+					<li>依 section 名稱定位 HACC payload，搬運到目標記憶體。</li>
+					<li>將 <code>.hacc.job/.hacc.wave</code> base 寫入對應 CSR。</li>
+					<li>令 <code>PC = e_entry</code>，啟動 Core。</li>
+				</ol>
+
+				<h4>6.4.5 相容性規則</h4>
+				<ol>
+					<li><code>.hap</code> 與 <code>.elf</code> 的 descriptor 內容必須語意等價。</li>
+					<li>相同輸入下，兩格式需產生一致的 <code>LAST_WAVE_ID/ERR_CODE</code> 行為。</li>
+					<li>壓縮旗標可透過 ELF note 或 <code>.hacc.meta</code> 同步宣告。</li>
+				</ol>
+			</section>
+
+			<section id="sec7">
+				<h2>7. Core 程式範本（HACC Native ISA）</h2>
+<pre># r0 固定 0
+# r1: job_cfg_ptr
+# r2: wave_begin
+# r3: wave_count
+# r4: wait_mask
+# r5: status
+# r6: err
+
+start:
+	MOVI   r1, JOBCFG_PTR_LO
+	HCFG   r1
+
+	MOVI   r2, 0
+	MOVI   r3, WAVE_COUNT
+	HLAUNCH r2, r3
+	HKICK
+
+wait_done:
+	MOVI   r4, 0b011
+	HWAIT  r4
+	HPOLL  r5
+
+	MOVI   r6, 0x4
+	AND    r5, r5, r6
+	CMP    r5, r0
+	BRZ    finish
+
+on_error:
+	HERR   r6
+	HABORT
+	HBREAK
+
+finish:
+	HBREAK</pre>
+
+				<h3>7.1 可執行該範例的 MVP 子集</h3>
+				<p><span class="tag">MOVI</span><span class="tag">CMP</span><span class="tag">BRZ</span><span class="tag">HCFG</span><span class="tag">HLAUNCH</span><span class="tag">HKICK</span><span class="tag">HWAIT</span><span class="tag">HPOLL</span><span class="tag">HERR</span><span class="tag">HABORT</span><span class="tag">HBREAK</span></p>
+			</section>
+
+			<section id="sec8">
+				<h2>8. 大量 Wave（數千～數萬）策略</h2>
+				<h3>8.1 核心策略</h3>
+				<ol>
+					<li><strong>Code 固定，資料擴張</strong>：<code>code O(1), data O(Nwave)</code></li>
+					<li>Wave 以 chunk 提交（建議每批 256~2048）</li>
+					<li>DFU 預抓下一批 descriptor 降低停頓</li>
+				</ol>
+				<h3>8.2 描述壓縮</h3>
+				<ul>
+					<li><code>delta profile</code></li>
+					<li><code>run-length wave</code></li>
+					<li><code>formula wave</code></li>
+				</ul>
+<pre>addr = base0 + i*delta_i + j*delta_j + k*delta_k</pre>
+				<h3>8.3 排程模式</h3>
+				<ul>
+					<li><span class="ok">in_order</span>：穩定、易除錯</li>
+					<li><span class="ok">overlap_prefetch</span>：預設模式，適度重疊</li>
+					<li><span class="warn">aggressive</span>：高吞吐，需更嚴格 buffer 管理</li>
+				</ul>
+				<h3>8.4 錯誤恢復</h3>
+				<ol>
+					<li>wave completion bitmap 記錄已完成項目</li>
+					<li>可從 <code>wave_begin = last_success + 1</code> 續跑</li>
+					<li>timeout wave 可標記 bad-wave 並依 policy skip/abort</li>
+				</ol>
+			</section>
+
+			<section id="sec9">
+				<h2>9. 客製化 Unit 硬體功能與行為</h2>
+				<div class="grid">
+					<div class="card"><h4>9.1 DFU</h4><p>抓取 wave/profile/dma 相關 descriptor，供 scheduler FIFO 使用。</p><p class="muted">錯誤：table 越界、格式非法、memory timeout。</p></div>
+					<div class="card"><h4>9.2 WSU</h4><p>依 sync/scheduler policy 進行 dispatch 與 inflight window 管理。</p><p class="muted">模式：in_order / overlap_prefetch / aggressive。</p></div>
+					<div class="card"><h4>9.3 PAU</h4><p>將 profile 套用到 HDDU/AGU，支援 full / delta。</p><p class="muted">寫入順序：iter → stride → base → mask → ctrl。</p></div>
+					<div class="card"><h4>9.4 CBU</h4><p>將 cluster bitmap 展開為有序 MMIO writes。</p><p class="muted">timeout 對應 <code>ERR_CODE=0x03</code>。</p></div>
+					<div class="card"><h4>9.5 DRU</h4><p>掃描 DMA_DESC、配置 channel、追蹤 inflight counter。</p><p class="muted">錯誤：DMA status / deadlock / 非法 descriptor。</p></div>
+					<div class="card"><h4>9.6 STU</h4><p>實作 wait 條件與 watchdog；timeout 時寫回錯誤資訊。</p><p class="muted">policy=skip 可繼續、policy=abort 則全系統 stop。</p></div>
+					<div class="card"><h4>9.7 MSU</h4><p>串行化 MMIO、控制可見性與 flush 規則。</p><p class="muted">同 target register 寫入不可重排。</p></div>
+					<div class="card"><h4>9.8 EIU</h4><p>匯總錯誤、產生 IRQ 與 debug break。</p><p class="muted">優先級：descriptor 越界 &gt; DMA 致命 &gt; MMIO timeout &gt; policy 非法。</p></div>
+				</div>
+			</section>
+
+			<section id="sec10">
+				<h2>10. 版本化與 capability</h2>
+				<h3>10.1 Capability Bitmap</h3>
+				<ol>
+					<li>bit0：CBU</li>
+					<li>bit1：DRU</li>
+					<li>bit2：WSU overlap</li>
+					<li>bit3：PAU delta</li>
+					<li>bit4：completion bitmap</li>
+					<li>bit5：debug step mode</li>
+				</ol>
+				<h3>10.2 編譯器降級策略</h3>
+				<ol>
+					<li>無 bit3：強制 profile full write</li>
+					<li>無 bit2：強制 <code>in_order</code></li>
+					<li>無 bit4：不輸出可恢復執行資訊</li>
+				</ol>
+			</section>
+
+			<section id="sec11">
+				<h2>11. 驗證與可觀測性</h2>
+				<h3>11.1 最低 trace 事件</h3>
+				<ul>
+					<li><code>EV_WAVE_DISPATCH(wave_id)</code></li>
+					<li><code>EV_WAVE_DONE(wave_id)</code></li>
+					<li><code>EV_DMA_START(desc_id,ch)</code></li>
+					<li><code>EV_DMA_DONE(desc_id,ch)</code></li>
+					<li><code>EV_ERROR(code,aux)</code></li>
+				</ul>
+				<h3>11.2 建議覆蓋測試</h3>
+				<ol>
+					<li>單波 smoke（full profile）</li>
+					<li>多波 overlap（含 prefetch/drain 重疊）</li>
+					<li>timeout/error injection</li>
+					<li>續跑（resume from last_success）</li>
+				</ol>
+			</section>
+
+			<section id="sec12">
+				<h2>12. Boot/Load Ownership 與啟動時序</h2>
+				<h3>12.1 Ownership</h3>
+				<ol>
+					<li><strong>外部 Loader</strong>：解析 <code>.hap</code> 或 <code>.elf</code>、搬運 sections、寫入啟動 CSR。</li>
+					<li><strong>HACC Native Core</strong>：執行 <code>HCFG/HLAUNCH/HKICK/HWAIT</code>，錯誤時 <code>HERR/HABORT</code>。</li>
+					<li><strong>Execution Complex</strong>：讀 descriptor、展開 MMIO/DMA 微流程、回報 done/error。</li>
+				</ol>
+
+				<h3>12.2 載入流程</h3>
+				<ol>
+					<li>Loader 檢查 <code>magic/version/target_caps</code></li>
+					<li>搬運 sections 至目標位址</li>
+					<li>寫入 <code>HACC_JOB_BASE_LO/HI</code>、<code>HACC_WAVE_BEGIN</code>、<code>HACC_WAVE_COUNT</code></li>
+					<li>設 <code>PC = SEC_CORE_STUB.entry</code> 並釋放 reset</li>
+					<li>Core 執行：<code>HCFG → HLAUNCH → HKICK → HWAIT</code></li>
+					<li>done 回報完成；error 走 <code>HERR → HABORT</code></li>
+				</ol>
+
+				<h3>12.3 責任邊界（必須遵守）</h3>
+				<ul>
+					<li>HACC Core <strong>不解析</strong> <code>.hap</code></li>
+					<li>HACC Core <strong>不解析</strong> <code>.elf</code></li>
+					<li>HACC Core <strong>不負責</strong> 大量 section 搬運</li>
+					<li>DFU 僅讀 descriptor，不承擔 package parser</li>
+				</ul>
+			</section>
+
+			<section id="sec13">
+				<h2>13. readable program text file 格式（Native ISA）</h2>
+				<h3>13.1 檔案結構</h3>
+<pre>program &lt;name&gt; {
+	 meta { ... }
+	 hardware { ... }
+	 grouping { ... }
+	 tensors { ... }
+	 pe_programs { ... }
+	 scan_chain { ... }
+	 hddu_profiles { ... }
+	 dma_plan { ... }
+	 wave_graph { ... }
+	 runtime_policy { ... }
+	 launch_plan { ... }   # optional
+}</pre>
+
+				<h3>13.2 區塊語意</h3>
+				<ol>
+					<li><code>meta</code>：版本/平台/cluster_count/deploy_mask</li>
+					<li><code>hardware</code>：stride/base、dma base、硬體限制</li>
+					<li><code>grouping</code>：cluster 分群別名</li>
+					<li><code>tensors</code>：邏輯 tensor 對映</li>
+					<li><code>pe_programs</code>：PE 程式來源與部署</li>
+					<li><code>scan_chain</code>：scan chain 字序</li>
+					<li><code>hddu_profiles</code>：profile 靜態/動態欄位</li>
+					<li><code>dma_plan</code>：DMA descriptor 定義</li>
+					<li><code>wave_graph</code>：依賴與執行策略</li>
+					<li><code>runtime_policy</code>：timeout/retry/error_action</li>
+					<li><code>launch_plan</code>：切批策略（可選）</li>
+				</ol>
+
+				<h3>13.3 最小欄位約束</h3>
+				<ol>
+					<li><code>cluster_count/deploy_mask/cluster_stride/dma_base</code> 必填</li>
+					<li><code>wave_graph</code> 每筆必含 cluster/profile/program/prefetch/drain/sync</li>
+					<li><code>runtime_policy.timeout_cycle</code> 必填</li>
+				</ol>
+			</section>
+
+			<section id="sec14">
+				<h2>14. readable text file 的編譯與轉換流程</h2>
+<pre>.hacc text
+	 -&gt; Parser(AST)
+	 -&gt; Semantic Check
+	 -&gt; Wave DAG + Schedule IR
+	 -&gt; Lowering
+					- SEC_PE_PROGRAM
+					- SEC_SCAN_CHAIN
+					- SEC_PROFILE_TABLE
+					- SEC_DMA_DESC
+					- SEC_WAVE_DESC
+					- SEC_JOB_CONFIG
+	 -&gt; Core Stub Emit (HACC Native ISA)
+	 -&gt; Packager (.hap / .elf)</pre>
+
+				<h3>14.2 Semantic Check 必做</h3>
+				<ol>
+					<li><code>deploy_mask</code> 不超出 <code>cluster_count</code></li>
+					<li>grouping 不重疊（除非顯式允許）</li>
+					<li>wave DAG 無循環</li>
+					<li>DMA bytes 覆蓋 tensor 需求</li>
+					<li>profile/pe_program/dma 引用合法</li>
+					<li><code>sync_policy</code> 與 <code>target_caps</code> 相容</li>
+				</ol>
+
+				<h3>14.3 主要輸出 Section</h3>
+				<p><span class="tag">SEC_CORE_STUB</span><span class="tag">SEC_JOB_CONFIG</span><span class="tag">SEC_WAVE_DESC</span><span class="tag">SEC_PROFILE_TABLE</span><span class="tag">SEC_DMA_DESC</span><span class="tag">SEC_PE_PROGRAM</span><span class="tag">SEC_SCAN_CHAIN</span><span class="tag">SEC_DEBUG_MAP</span></p>
+			</section>
+
+			<section id="sec15">
+				<h2>15. readable text file 範例（節錄）</h2>
+				<h3>15.1 Conv2D</h3>
+<pre>program conv2d_k3c4 {
+	 meta { version="1.0" target="sim" cluster_count=2 deploy_mask=0b0011 }
+	 hardware { cluster_stride=0x00010000 dma_base=0x80000000 }
+	 grouping { group g_conv clusters=[0,1] }
+	 pe_programs {
+			pe_program conv_main {
+				 format="pe-asm-v1"
+				 deploy={group:g_conv, pe_range:"0..47"}
+				 source_file="pe/conv_main.peasm"
+			}
+	 }
+	 scan_chain {
+			order=reverse
+			words=[0x40100208,0x40100208,0x40100208,0x40100208]
+	 }
+	 hddu_profiles { profile conv_wave { plane_en=0xF plane_mode=0x1 max_outstanding=16 } }
+	 dma_plan {
+			desc load_w   { ch=0 src="dram://W.bin"  dst=0x00002000 bytes=0x9000 }
+			desc load_x0  { ch=1 src="dram://X0.bin" dst=0x00020000 bytes=0x24000 }
+			desc store_y0 { ch=2 src=0x00070000 dst="dram://Y0.bin" bytes=0x80000 }
+	 }
+	 wave_graph {
+			wave 0 {
+				 cluster_mask=0b0011
+				 profile_id=conv_wave
+				 pe_program_id=conv_main
+				 prefetch=[load_w,load_x0]
+				 drain=[store_y0]
+				 sync_policy="wait_cluster_then_drain"
+			}
+	 }
+	 runtime_policy { timeout_cycle=1000000 retry_max=0 error_action=abort }
+}</pre>
+
+				<h3>15.2 GEMM</h3>
+<pre>program gemm_m128_n128_k64 {
+	 meta { version="1.0" target="sim" cluster_count=4 deploy_mask=0b1111 }
+	 hardware { cluster_stride=0x00010000 dma_base=0x80000000 }
+	 grouping { group g_all clusters=[0,1,2,3] }
+	 pe_programs {
+			pe_program gemm_main {
+				 format="pe-asm-v1"
+				 deploy={group:g_all, pe_range:"0..47"}
+				 source_file="pe/gemm_main.peasm"
+			}
+	 }
+	 hddu_profiles { profile gemm_wave { plane_en=0xB plane_mode=0x2 max_outstanding=16 } }
+	 dma_plan {
+			desc load_a0  { ch=0 src="dram://A0.bin" dst=0x00010000 bytes=0x2000 }
+			desc load_b0  { ch=1 src="dram://B0.bin" dst=0x00020000 bytes=0x2000 }
+			desc store_c0 { ch=2 src=0x00040000 dst="dram://C0.bin" bytes=0x10000 }
+	 }
+	 wave_graph {
+			wave 0 {
+				 cluster_mask=0b1111
+				 profile_id=gemm_wave
+				 pe_program_id=gemm_main
+				 prefetch=[load_a0,load_b0]
+				 drain=[store_c0]
+				 sync_policy="wait_both"
+			}
+	 }
+	 runtime_policy { timeout_cycle=1000000 retry_max=1 error_action=abort }
+}</pre>
+			</section>
+
+			<section id="sec16">
+				<h2>16. 兩個範例經 core-compiler 後的預期 Core ASM</h2>
+				<h3>16.1 Conv2D 預期 Core ASM</h3>
+<pre># core_stub.conv2d.native.s
+start:
+	 MOVI   r1, JOBCFG_CONV_PTR
+	 HCFG   r1
+	 MOVI   r2, 0
+	 MOVI   r3, CONV_WAVE_COUNT
+	 HLAUNCH r2, r3
+	 HKICK
+wait_loop:
+	 MOVI   r4, 0b011
+	 HWAIT  r4
+	 HPOLL  r5
+	 MOVI   r6, 0x4
+	 AND    r5, r5, r6
+	 CMP    r5, r0
+	 BRZ    finish
+error:
+	 HERR   r6
+	 HABORT
+	 HBREAK
+finish:
+	 HBREAK</pre>
+
+				<h3>16.2 GEMM 預期 Core ASM</h3>
+<pre># core_stub.gemm.native.s
+start:
+	 MOVI   r1, JOBCFG_GEMM_PTR
+	 HCFG   r1
+	 MOVI   r2, 0
+	 MOVI   r3, GEMM_WAVE_COUNT
+	 HLAUNCH r2, r3
+	 HKICK
+wait_loop:
+	 MOVI   r4, 0b011
+	 HWAIT  r4
+	 HPOLL  r5
+	 MOVI   r6, 0x4
+	 AND    r5, r5, r6
+	 CMP    r5, r0
+	 BRZ    finish
+error:
+	 HERR   r6
+	 HABORT
+	 HBREAK
+finish:
+	 HBREAK</pre>
+
+				<h3>16.3 對應關係說明</h3>
+				<ol>
+					<li>Conv2D/GEMM 差異主要在 <code>JOB_CONFIG/WAVE_DESC/PROFILE_TABLE/DMA_DESC</code>。</li>
+					<li>Core ASM 模板可共用，僅替換 <code>JOBCFG_*_PTR</code> 與 <code>*_WAVE_COUNT</code>。</li>
+					<li>核心目標：以資料差異取代指令膨脹。</li>
+				</ol>
+			</section>
+
+			<section id="sec17">
+				<h2>17. 總結</h2>
+				<p>
+					本規格將 Core Controller 明確定義為 <strong>HACC Native ISA 控制前端</strong>，
+					並將主體複雜度放在可觀測硬體單元（DFU/WSU/PAU/CBU/DRU/STU/MSU/EIU）。
+				</p>
+				<ol>
+					<li>ISA 可獨立實作（含編碼、狀態、例外）</li>
+					<li>各客製化單元具清楚功能與狀態行為</li>
+					<li>以 descriptor 驅動大規模 wave，兼顧吞吐與可維護性</li>
+					<li>編譯輸出可選 <code>.hap</code> 或 <code>.elf</code>，利於標準工具鏈整合</li>
+				</ol>
+			</section>
+		</main>
+	</div>
+</body>
+</html>

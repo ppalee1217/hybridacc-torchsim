@@ -1,0 +1,9 @@
+name: gemm_basic
+op_type: gemm
+dtype: int16
+M: 64
+N: 64
+K: 128
+trans_a: false
+trans_b: false
+with_nlu: false

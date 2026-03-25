@@ -1,0 +1,112 @@
+{
+  "stage": "stage0",
+  "op_name": "conv2d_basic",
+  "op_type": 0,
+  "input_shape": [
+    1,
+    128,
+    200,
+    200
+  ],
+  "output_shape": [
+    1,
+    256,
+    200,
+    200
+  ],
+  "schedule_count": 1,
+  "loop_extents": [
+    15,
+    1,
+    16,
+    32
+  ],
+  "loop_names": [
+    "tile_oh",
+    "tile_ow",
+    "tile_oc",
+    "tile_ic"
+  ],
+  "total_waves": 7680,
+  "num_clusters": 2,
+  "cluster_mask": 3,
+  "sections": {
+    "core_words": 61,
+    "job_words": 19,
+    "block_words": 38,
+    "profile_words": 184320,
+    "dma_words": 38400,
+    "agu_words": 53760,
+    "nlu_words": 0,
+    "pe_words": 72,
+    "scan_words": 6,
+    "patch_words": 2560
+  },
+  "schedules": [
+    {
+      "stage_name": "conv2d_split_0",
+      "loop_extents": [
+        15,
+        1,
+        16,
+        32
+      ],
+      "loop_starts": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "loop_names": [
+        "tile_oh",
+        "tile_ow",
+        "tile_oc",
+        "tile_ic"
+      ],
+      "total_waves": 7680,
+      "num_clusters": 2,
+      "cluster_mask": 3,
+      "cluster_index": -1,
+      "cluster_axis": "tile_oc",
+      "window_h": 3,
+      "window_w": 3,
+      "input_h_offset": 0,
+      "input_w_offset": 0,
+      "activation_buffer_tiles": 3,
+      "weight_buffer_tiles": 85,
+      "output_buffer_tiles": 1
+    }
+  ],
+  "blocks": [
+    {
+      "loop_rank": 3,
+      "loop_extent": [
+        15,
+        1,
+        8,
+        32
+      ],
+      "cluster_mask": 1,
+      "rule_stride": 256,
+      "total_waves": 3840,
+      "patch_count": 256,
+      "flags": 4
+    },
+    {
+      "loop_rank": 3,
+      "loop_extent": [
+        15,
+        1,
+        8,
+        32
+      ],
+      "cluster_mask": 2,
+      "rule_stride": 256,
+      "total_waves": 3840,
+      "patch_count": 256,
+      "flags": 2
+    }
+  ],
+  "patch_count": 512,
+  "nlu_rule_count": 0
+}

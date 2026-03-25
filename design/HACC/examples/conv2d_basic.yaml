@@ -1,0 +1,15 @@
+name: conv2d_basic
+op_type: conv2d
+dtype: int16
+n: 1
+ic: 128
+ih: 200
+iw: 200
+oc: 256
+kh: 3
+kw: 3
+stride_h: 1
+stride_w: 1
+pad_h: 1
+pad_w: 1
+with_nlu: false

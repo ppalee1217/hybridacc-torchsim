@@ -17,7 +17,9 @@ dependencies = [
 [project.scripts]
 log-parser = "log_parser.cli:main"
 trace-parser = "trace_parser.cli:main"
+hacc = "hacc.cli:main"
+hacc-elfdump = "hacc.elfdump:main"
 
 [tool.setuptools.packages.find]
-where = ["./python"]
-include = ["hybridacc_verify*", "trace_parser*", "log_parser*"]
+where = ["./python", "./design/HACC"]
+include = ["hybridacc_verify*", "trace_parser*", "log_parser*", "hacc*"]
