@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/test_noc_sim.dir/test_noc_sim.cpp.o -o test_noc_sim   -L/home/yoyo/work/MasterResearch/HybridAcc/libs/systemc-2.3.3/lib64  -Wl,-rpath,/home/yoyo/work/MasterResearch/HybridAcc/libs/systemc-2.3.3/lib64 libpe_simulator.a -lsystemc -lpthread 

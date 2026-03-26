@@ -1,0 +1,53 @@
+{
+  "template_name": "gemm_template",
+  "parameters": [
+    {"index": 0, "name": "KERNEL_DMA_STORE_LEN", "default": 64},
+    {"index": 1, "name": "KERNEL_DMA_LOAD_LEN", "default": 256},
+    {"index": 2, "name": "INPUT_DIM", "default": 32},
+    {"index": 3, "name": "OUTPUT_DIM", "default": 8},
+    {"index": 4, "name": "PSUM_COUNT", "default": 24},
+    {"index": 5, "name": "NUM_OF_KERNEL_SETS", "default": 32},
+    {"index": 6, "name": "NUM_OF_N_TILES", "default": 2},
+    {"index": 7, "name": "NUM_OF_M_TILES", "default": 2},
+    {"index": 8, "name": "K_TILE_DIM", "default": 32}
+  ],
+  "patches": [
+    {"offset": 1, "param_index": 5},
+    {"offset": 3, "param_index": 0},
+    {"offset": 6, "param_index": 1},
+    {"offset": 9, "param_index": 6},
+    {"offset": 11, "param_index": 7},
+    {"offset": 13, "param_index": 8},
+    {"offset": 17, "param_index": 6},
+    {"offset": 22, "param_index": 4}
+  ],
+  "instructions": [
+    {"index": 0, "word": "0x004C", "dec": 76, "disasm": "SYSCTRL (CLEAR.P)"},
+    {"index": 1, "word": "0x07F0", "dec": 2032, "disasm": "SDMA.LOOP 32"},
+    {"index": 2, "word": "0x0020", "dec": 32, "disasm": "SDMA.ADDR 0"},
+    {"index": 3, "word": "0x0FE8", "dec": 4072, "disasm": "SDMA.LEN 64"},
+    {"index": 4, "word": "0x09D8", "dec": 2520, "disasm": "SDMA.SD 4"},
+    {"index": 5, "word": "0x0000", "dec": 0, "disasm": "LDMA.ADDR 0"},
+    {"index": 6, "word": "0x3FC8", "dec": 16328, "disasm": "LDMA.LEN 256"},
+    {"index": 7, "word": "0x0358", "dec": 856, "disasm": "LDMA.LHB 1"},
+    {"index": 8, "word": "0x200C", "dec": 8204, "disasm": "SYSCTRL (SDMA.ACT)"},
+    {"index": 9, "word": "0x0044", "dec": 68, "disasm": "LOOPIN 2"},
+    {"index": 10, "word": "0x006C", "dec": 108, "disasm": "SYS.SYNC (SWAPDM)"},
+    {"index": 11, "word": "0x0044", "dec": 68, "disasm": "LOOPIN 2"},
+    {"index": 12, "word": "0x0B4C", "dec": 2892, "disasm": "SYSCTRL (LDMA.ACT, RST.PID, RST.TID, CLEAR.P)"},
+    {"index": 13, "word": "0x07C4", "dec": 1988, "disasm": "LOOPIN 32"},
+    {"index": 14, "word": "0x0078", "dec": 120, "disasm": "VTSTORE VT0"},
+    {"index": 15, "word": "0x0278", "dec": 632, "disasm": "VTSTORE VT1"},
+    {"index": 16, "word": "0x0478", "dec": 1144, "disasm": "VTSTORE VT2"},
+    {"index": 17, "word": "0x0044", "dec": 68, "disasm": "LOOPIN 2"},
+    {"index": 18, "word": "0x0A4A", "dec": 2634, "disasm": "VMULR 1, VT1"},
+    {"index": 19, "word": "0x0A4A", "dec": 2634, "disasm": "VMULR 1, VT1"},
+    {"index": 20, "word": "0x0E6B", "dec": 3691, "disasm": "VMULRN 1, VTRST ; LOOPEND"},
+    {"index": 21, "word": "0x0015", "dec": 21, "disasm": "NOP ; LOOPEND"},
+    {"index": 22, "word": "0x05C4", "dec": 1476, "disasm": "LOOPIN 24"},
+    {"index": 23, "word": "0x0853", "dec": 2131, "disasm": "VPSUMR 1 ; LOOPEND"},
+    {"index": 24, "word": "0x0015", "dec": 21, "disasm": "NOP ; LOOPEND"},
+    {"index": 25, "word": "0x0015", "dec": 21, "disasm": "NOP ; LOOPEND"},
+    {"index": 26, "word": "0x001C", "dec": 28, "disasm": "HALT"}
+  ]
+}

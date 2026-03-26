@@ -4,91 +4,28 @@
 
 #include <array>
 #include <cstdint>
-#include <string>
 
+#include "Core/DecodeStage.hpp"
+#include "Core/ExecuteStage.hpp"
+#include "Core/FetchStage.hpp"
+#include "Core/MemoryStage.hpp"
+#include "Core/PipelineTypes.hpp"
 #include "Core/Types.hpp"
+#include "Core/WritebackStage.hpp"
 
 using namespace sc_core;
 using namespace sc_dt;
 
 namespace hybridacc::core {
 
-enum class ExecState : uint8_t {
-	FETCH_REQ = 0,
-	FETCH_CAPTURE = 1,
-	EXECUTE = 2,
-	LS_WAIT = 3,
-	CMD_REQ = 4,
-	CMD_RESP = 5,
-	WAIT_EVENT = 6,
-	HALTED = 7,
-	FAULT = 8,
-};
-
-inline std::ostream& operator<<(std::ostream& os, ExecState state) {
-	switch (state) {
-	case ExecState::FETCH_REQ: return os << "FETCH_REQ";
-	case ExecState::FETCH_CAPTURE: return os << "FETCH_CAPTURE";
-	case ExecState::EXECUTE: return os << "EXECUTE";
-	case ExecState::LS_WAIT: return os << "LS_WAIT";
-	case ExecState::CMD_REQ: return os << "CMD_REQ";
-	case ExecState::CMD_RESP: return os << "CMD_RESP";
-	case ExecState::WAIT_EVENT: return os << "WAIT_EVENT";
-	case ExecState::HALTED: return os << "HALTED";
-	case ExecState::FAULT: return os << "FAULT";
-	default: return os << "UNKNOWN_EXEC_STATE";
-	}
-}
-
-inline void sc_trace(sc_trace_file* tf, const ExecState& state, const std::string& name) {
-	sc_core::sc_trace(tf, static_cast<uint32_t>(state), name);
-}
-
-enum class PendingOp : uint8_t {
-	NONE = 0,
-	LOAD_WORD = 1,
-	LOAD_BYTE = 2,
-	STORE_WORD = 3,
-	STORE_BYTE = 4,
-	PUSH = 5,
-	POP = 6,
-	CMD_WRITE = 7,
-	CMD_READ = 8,
-	STREAM = 9,
-	WAIT_EVENT = 10,
-	WFI = 11,
-};
-
-inline std::ostream& operator<<(std::ostream& os, PendingOp op) {
-	switch (op) {
-	case PendingOp::NONE: return os << "NONE";
-	case PendingOp::LOAD_WORD: return os << "LOAD_WORD";
-	case PendingOp::LOAD_BYTE: return os << "LOAD_BYTE";
-	case PendingOp::STORE_WORD: return os << "STORE_WORD";
-	case PendingOp::STORE_BYTE: return os << "STORE_BYTE";
-	case PendingOp::PUSH: return os << "PUSH";
-	case PendingOp::POP: return os << "POP";
-	case PendingOp::CMD_WRITE: return os << "CMD_WRITE";
-	case PendingOp::CMD_READ: return os << "CMD_READ";
-	case PendingOp::STREAM: return os << "STREAM";
-	case PendingOp::WAIT_EVENT: return os << "WAIT_EVENT";
-	case PendingOp::WFI: return os << "WFI";
-	default: return os << "UNKNOWN_PENDING_OP";
-	}
-}
-
-inline void sc_trace(sc_trace_file* tf, const PendingOp& op, const std::string& name) {
-	sc_core::sc_trace(tf, static_cast<uint32_t>(op), name);
-}
-
 template <unsigned DATA_SRAM_BYTES = 65536>
 SC_MODULE(CoreMcu) {
 public:
-	static constexpr uint32_t kResetPc = kIsramBase;
-	static constexpr uint32_t kResetSp = kDataSramBase + DATA_SRAM_BYTES;
-
 	sc_in<bool> clk{"clk"};
 	sc_in<bool> reset_n{"reset_n"};
+	sc_in<bool> enable_i{"enable_i"};
+	sc_in<sc_uint<32>> boot_addr_i{"boot_addr_i"};
+	sc_in<sc_uint<32>> trap_vector_i{"trap_vector_i"};
 
 	sc_out<bool> if_req_valid_o{"if_req_valid_o"};
 	sc_out<sc_uint<32>> if_addr_o{"if_addr_o"};
@@ -102,861 +39,393 @@ public:
 	sc_in<bool> ls_resp_valid_i{"ls_resp_valid_i"};
 	sc_in<sc_uint<32>> ls_resp_rdata_i{"ls_resp_rdata_i"};
 
-	sc_out<bool> cmd_req_valid_o{"cmd_req_valid_o"};
-	sc_out<McuCmdReq> cmd_req_o{"cmd_req_o"};
-	sc_in<bool> cmd_req_ready_i{"cmd_req_ready_i"};
-	sc_in<bool> cmd_resp_valid_i{"cmd_resp_valid_i"};
-	sc_in<McuCmdResp> cmd_resp_i{"cmd_resp_i"};
+	sc_out<bool> mmio_req_valid_o{"mmio_req_valid_o"};
+	sc_out<MmioRequest> mmio_req_o{"mmio_req_o"};
+	sc_in<bool> mmio_resp_valid_i{"mmio_resp_valid_i"};
+	sc_in<MmioResponse> mmio_resp_i{"mmio_resp_i"};
 
-	sc_in<bool> irq_taken_i{"irq_taken_i"};
-	sc_in<sc_uint<32>> irq_vector_i{"irq_vector_i"};
-	sc_in<sc_uint<32>> irq_pending_lo_i{"irq_pending_lo_i"};
-	sc_in<sc_uint<32>> irq_pending_hi_i{"irq_pending_hi_i"};
-	sc_in<sc_uint<8>> irq_cause_id_i{"irq_cause_id_i"};
-	sc_out<sc_uint<32>> irq_enable_lo_o{"irq_enable_lo_o"};
-	sc_out<sc_uint<32>> irq_enable_hi_o{"irq_enable_hi_o"};
-	sc_out<sc_uint<32>> irq_ack_lo_o{"irq_ack_lo_o"};
-	sc_out<sc_uint<32>> irq_ack_hi_o{"irq_ack_hi_o"};
-
-	sc_vector<sc_signal<sc_uint<32>>> gpr_reg{"gpr_reg", kCoreGprCount};
-	sc_signal<sc_uint<32>> pc_reg{"pc_reg"};
-	sc_signal<sc_uint<32>> sr_reg{"sr_reg"};
-	sc_signal<sc_uint<32>> epc_reg{"epc_reg"};
-	sc_signal<sc_uint<32>> esr_reg{"esr_reg"};
-	sc_signal<sc_uint<32>> current_instr_reg{"current_instr_reg"};
-	sc_signal<sc_uint<32>> fault_code_reg{"fault_code_reg"};
-	sc_signal<sc_uint<32>> fault_aux_reg{"fault_aux_reg"};
-	sc_signal<sc_uint<64>> cycle_count_reg{"cycle_count_reg"};
-	sc_signal<sc_uint<64>> instret_count_reg{"instret_count_reg"};
-	sc_signal<ExecState> exec_state_reg{"exec_state_reg"};
-	sc_signal<PendingOp> pending_op_reg{"pending_op_reg"};
-	sc_signal<sc_uint<4>> pending_rd_reg{"pending_rd_reg"};
-	sc_signal<sc_uint<32>> pending_next_pc_reg{"pending_next_pc_reg"};
-	sc_signal<sc_uint<32>> pending_addr_reg{"pending_addr_reg"};
-	sc_signal<sc_uint<32>> pending_store_data_reg{"pending_store_data_reg"};
-	sc_signal<sc_uint<4>> pending_wstrb_reg{"pending_wstrb_reg"};
-	sc_signal<sc_uint<2>> pending_byte_lane_reg{"pending_byte_lane_reg"};
-	sc_signal<McuCmdReq> pending_cmd_reg{"pending_cmd_reg"};
-	sc_signal<sc_uint<32>> stream_addr_reg{"stream_addr_reg"};
-	sc_signal<sc_uint<32>> stream_remaining_reg{"stream_remaining_reg"};
-	sc_signal<StreamDestination> stream_dst_reg{"stream_dst_reg"};
-	sc_signal<bool> stream_first_reg{"stream_first_reg"};
-	sc_signal<sc_uint<32>> wait_mask_lo_reg{"wait_mask_lo_reg"};
-	sc_signal<sc_uint<32>> wait_mask_hi_reg{"wait_mask_hi_reg"};
-	sc_signal<bool> if_req_valid_reg{"if_req_valid_reg"};
-	sc_signal<sc_uint<32>> if_addr_reg{"if_addr_reg"};
-	sc_signal<bool> ls_req_valid_reg{"ls_req_valid_reg"};
-	sc_signal<bool> ls_req_write_reg{"ls_req_write_reg"};
-	sc_signal<sc_uint<32>> ls_req_addr_reg{"ls_req_addr_reg"};
-	sc_signal<sc_uint<32>> ls_req_wdata_reg{"ls_req_wdata_reg"};
-	sc_signal<sc_uint<4>> ls_req_wstrb_reg{"ls_req_wstrb_reg"};
-	sc_signal<bool> cmd_req_valid_reg{"cmd_req_valid_reg"};
-	sc_signal<McuCmdReq> cmd_req_reg{"cmd_req_reg"};
-	sc_signal<sc_uint<32>> irq_enable_lo_reg{"irq_enable_lo_reg"};
-	sc_signal<sc_uint<32>> irq_enable_hi_reg{"irq_enable_hi_reg"};
-	sc_signal<sc_uint<32>> irq_ack_lo_reg{"irq_ack_lo_reg"};
-	sc_signal<sc_uint<32>> irq_ack_hi_reg{"irq_ack_hi_reg"};
-	sc_signal<bool> single_step_reg{"single_step_reg"};
+	sc_in<bool> irq_meip_i{"irq_meip_i"};
+	sc_in<bool> irq_mtip_i{"irq_mtip_i"};
 
 	SC_CTOR(CoreMcu) {
 		SC_CTHREAD(seq_process, clk.pos());
 		reset_signal_is(reset_n, false);
-
-		SC_METHOD(comb_if_process);
-		sensitive << if_req_valid_reg << if_addr_reg;
-
-		SC_METHOD(comb_ls_process);
-		sensitive << ls_req_valid_reg << ls_req_write_reg << ls_req_addr_reg << ls_req_wdata_reg << ls_req_wstrb_reg;
-
-		SC_METHOD(comb_cmd_process);
-		sensitive << cmd_req_valid_reg << cmd_req_reg;
-
-		SC_METHOD(comb_irq_process);
-		sensitive << irq_enable_lo_reg << irq_enable_hi_reg << irq_ack_lo_reg << irq_ack_hi_reg;
 	}
 
-	uint32_t debug_read_csr(uint32_t csr_id) const {
-		return read_csr(csr_id);
-	}
-
-	uint32_t debug_read_pc() const {
-		return pc_reg.read().to_uint();
-	}
-
-	bool debug_is_halted() const {
-		return exec_state_reg.read() == ExecState::HALTED;
-	}
-
-	uint32_t debug_read_gpr(uint32_t index) const {
-		return index < kCoreGprCount ? read_gpr(index) : 0u;
-	}
+	uint32_t debug_read_pc() const { return pc_reg_; }
+	uint32_t debug_read_gpr(uint32_t index) const { return index < kCoreGprCount ? gpr_[index] : 0u; }
+	bool debug_is_halted() const { return halted_; }
+	uint32_t debug_read_csr(uint32_t csr_id) const { return read_csr(csr_id); }
+	MmioRequest debug_last_mmio_request() const { return last_mmio_request_; }
 
 private:
-	void comb_if_process() {
-		if_req_valid_o.write(if_req_valid_reg.read());
-		if_addr_o.write(if_addr_reg.read());
-	}
+	std::array<uint32_t, kCoreGprCount> gpr_{};
+	uint32_t pc_reg_ = kIsramBase;
+	uint32_t fetch_addr_reg_ = kIsramBase;
+	uint32_t mstatus_reg_ = 0u;
+	uint32_t misa_reg_ = 0x40000100u;
+	uint32_t mie_reg_ = 0u;
+	uint32_t mtvec_reg_ = kIsramBase;
+	uint32_t mscratch_reg_ = 0u;
+	uint32_t mepc_reg_ = 0u;
+	uint32_t mcause_reg_ = 0u;
+	uint32_t mtval_reg_ = 0u;
+	uint32_t mip_reg_ = 0u;
+	uint64_t mcycle_reg_ = 0u;
+	uint64_t minstret_reg_ = 0u;
+	bool halted_ = false;
+	bool faulted_ = false;
+	bool in_trap_ = false;
+	uint32_t last_fault_code_ = 0u;
+	MmioRequest last_mmio_request_{};
 
-	void comb_ls_process() {
-		ls_req_valid_o.write(ls_req_valid_reg.read());
-		ls_req_write_o.write(ls_req_write_reg.read());
-		ls_req_addr_o.write(ls_req_addr_reg.read());
-		ls_req_wdata_o.write(ls_req_wdata_reg.read());
-		ls_req_wstrb_o.write(ls_req_wstrb_reg.read());
-	}
+	IfIdLatch ifid_{};
+	IdExLatch idex_{};
+	ExMemLatch exmem_{};
+	MemWbLatch memwb_{};
+	MemoryTransaction mem_txn_{};
 
-	void comb_cmd_process() {
-		cmd_req_valid_o.write(cmd_req_valid_reg.read());
-		cmd_req_o.write(cmd_req_reg.read());
-	}
-
-	void comb_irq_process() {
-		irq_enable_lo_o.write(irq_enable_lo_reg.read());
-		irq_enable_hi_o.write(irq_enable_hi_reg.read());
-		irq_ack_lo_o.write(irq_ack_lo_reg.read());
-		irq_ack_hi_o.write(irq_ack_hi_reg.read());
-	}
-
-	uint32_t read_gpr(unsigned index) const {
-		return index == 0u ? 0u : gpr_reg[index].read().to_uint();
-	}
-
-	uint32_t reg_field_25_22(uint32_t instruction) const {
-		return (instruction >> 22) & 0x0Fu;
-	}
-
-	uint32_t reg_field_21_18(uint32_t instruction) const {
-		return (instruction >> 18) & 0x0Fu;
-	}
-
-	void write_gpr(unsigned index, uint32_t value) {
-		if (index != 0u && index < kCoreGprCount) {
-			gpr_reg[index].write(value);
-		}
-	}
-
-	bool sr_bit(uint32_t bit_index) const {
-		return ((sr_reg.read().to_uint() >> bit_index) & 0x1u) != 0u;
-	}
-
-	void write_sr_bit(uint32_t bit_index, bool value) {
-		uint32_t sr_value = sr_reg.read().to_uint();
-		if (value) {
-			sr_value |= (1u << bit_index);
-		} else {
-			sr_value &= ~(1u << bit_index);
-		}
-		sr_reg.write(sr_value);
-	}
-
-	uint32_t update_sr_bit(uint32_t sr_value, uint32_t bit_index, bool value) const {
-		if (value) {
-			return sr_value | (1u << bit_index);
-		}
-		return sr_value & ~(1u << bit_index);
-	}
-
-	uint32_t nz_flags_value(uint32_t sr_value, uint32_t value) const {
-		sr_value = update_sr_bit(sr_value, kSrZBit, value == 0u);
-		sr_value = update_sr_bit(sr_value, kSrNBit, (value & 0x80000000u) != 0u);
-		return sr_value;
-	}
-
-	uint32_t add_flags_value(uint32_t sr_value, uint32_t lhs, uint32_t rhs, uint32_t result) const {
-		const uint64_t wide_sum = static_cast<uint64_t>(lhs) + static_cast<uint64_t>(rhs);
-		sr_value = nz_flags_value(sr_value, result);
-		sr_value = update_sr_bit(sr_value, kSrCBit, (wide_sum >> 32) != 0u);
-		const bool overflow = ((~(lhs ^ rhs) & (lhs ^ result)) & 0x80000000u) != 0u;
-		return update_sr_bit(sr_value, kSrVBit, overflow);
-	}
-
-	uint32_t sub_flags_value(uint32_t sr_value, uint32_t lhs, uint32_t rhs, uint32_t result) const {
-		sr_value = nz_flags_value(sr_value, result);
-		sr_value = update_sr_bit(sr_value, kSrCBit, lhs >= rhs);
-		const bool overflow = (((lhs ^ rhs) & (lhs ^ result)) & 0x80000000u) != 0u;
-		return update_sr_bit(sr_value, kSrVBit, overflow);
-	}
-
-	uint32_t core_status_value() const {
-		uint32_t value = 0u;
-		const ExecState state = exec_state_reg.read();
-		if (state != ExecState::HALTED && state != ExecState::FAULT) {
-			value |= kCoreStatusRunningBit;
-		}
-		if (state == ExecState::HALTED) {
-			value |= kCoreStatusHaltedBit;
-		}
-		if (state == ExecState::FAULT || sr_bit(kSrFaultBit)) {
-			value |= kCoreStatusFaultBit;
-		}
-		if (sr_bit(kSrInIsrBit)) {
-			value |= kCoreStatusInIsrBit;
-		}
-		return value;
+	void reset_state() {
+		gpr_.fill(0u);
+		pc_reg_ = boot_addr_i.read().to_uint();
+		fetch_addr_reg_ = boot_addr_i.read().to_uint();
+		mstatus_reg_ = 0u;
+		misa_reg_ = 0x40000100u;
+		mie_reg_ = 0u;
+		mtvec_reg_ = trap_vector_i.read().to_uint();
+		mscratch_reg_ = 0u;
+		mepc_reg_ = 0u;
+		mcause_reg_ = 0u;
+		mtval_reg_ = 0u;
+		mip_reg_ = 0u;
+		mcycle_reg_ = 0u;
+		minstret_reg_ = 0u;
+		halted_ = false;
+		faulted_ = false;
+		in_trap_ = false;
+		last_fault_code_ = 0u;
+		last_mmio_request_ = {};
+		ifid_ = {};
+		idex_ = {};
+		exmem_ = {};
+		memwb_ = {};
+		mem_txn_ = {};
 	}
 
 	uint32_t read_csr(uint32_t csr_id) const {
 		switch (csr_id) {
-		case kCsrCoreCtrl:
-			return (single_step_reg.read() ? kCoreCtrlSingleStepBit : 0u);
-		case kCsrCoreStatus:
-			return core_status_value();
-		case kCsrIrqPendingLo:
-			return irq_pending_lo_i.read().to_uint();
-		case kCsrIrqPendingHi:
-			return irq_pending_hi_i.read().to_uint();
-		case kCsrIrqEnableLo:
-			return irq_enable_lo_reg.read().to_uint();
-		case kCsrIrqEnableHi:
-			return irq_enable_hi_reg.read().to_uint();
-		case kCsrIrqCauseId:
-			return irq_cause_id_i.read().to_uint();
-		case kCsrEpc:
-			return epc_reg.read().to_uint();
-		case kCsrEsr:
-			return esr_reg.read().to_uint();
-		case kCsrFaultCode:
-			return fault_code_reg.read().to_uint();
-		case kCsrFaultAux:
-			return fault_aux_reg.read().to_uint();
-		case kCsrCycleCntLo:
-			return static_cast<uint32_t>(cycle_count_reg.read().to_uint64() & 0xFFFFFFFFull);
-		case kCsrCycleCntHi:
-			return static_cast<uint32_t>((cycle_count_reg.read().to_uint64() >> 32) & 0xFFFFFFFFull);
-		case kCsrInstretCntLo:
-			return static_cast<uint32_t>(instret_count_reg.read().to_uint64() & 0xFFFFFFFFull);
-		case kCsrInstretCntHi:
-			return static_cast<uint32_t>((instret_count_reg.read().to_uint64() >> 32) & 0xFFFFFFFFull);
-		default:
-			return 0u;
-		}
-	}
-
-	void apply_core_ctrl(uint32_t value) {
-		if ((value & kCoreCtrlClrFaultBit) != 0u) {
-			fault_code_reg.write(static_cast<uint32_t>(ErrorCode::NONE));
-			fault_aux_reg.write(0u);
-			write_sr_bit(kSrFaultBit, false);
-			if (exec_state_reg.read() == ExecState::FAULT) {
-				exec_state_reg.write(ExecState::FETCH_REQ);
-			}
-		}
-		single_step_reg.write((value & kCoreCtrlSingleStepBit) != 0u);
-		if ((value & kCoreCtrlHaltReqBit) != 0u) {
-			exec_state_reg.write(ExecState::HALTED);
-		}
-		if ((value & kCoreCtrlRunBit) != 0u && exec_state_reg.read() == ExecState::HALTED && !sr_bit(kSrFaultBit)) {
-			exec_state_reg.write(ExecState::FETCH_REQ);
+		case 0x300u: return mstatus_reg_;
+		case 0x301u: return misa_reg_;
+		case 0x304u: return mie_reg_;
+		case 0x305u: return mtvec_reg_;
+		case 0x340u: return mscratch_reg_;
+		case 0x341u: return mepc_reg_;
+		case 0x342u: return mcause_reg_;
+		case 0x343u: return mtval_reg_;
+		case 0x344u: return mip_reg_;
+		case 0xB00u: return static_cast<uint32_t>(mcycle_reg_);
+		case 0xB80u: return static_cast<uint32_t>(mcycle_reg_ >> 32);
+		case 0xB02u: return static_cast<uint32_t>(minstret_reg_);
+		case 0xB82u: return static_cast<uint32_t>(minstret_reg_ >> 32);
+		default: return 0u;
 		}
 	}
 
 	void write_csr(uint32_t csr_id, uint32_t value) {
 		switch (csr_id) {
-		case kCsrCoreCtrl:
-			apply_core_ctrl(value);
-			break;
-		case kCsrIrqEnableLo:
-			irq_enable_lo_reg.write(value);
-			break;
-		case kCsrIrqEnableHi:
-			irq_enable_hi_reg.write(value);
-			break;
-		case kCsrIrqAckLo:
-			irq_ack_lo_reg.write(value);
-			break;
-		case kCsrIrqAckHi:
-			irq_ack_hi_reg.write(value);
-			break;
-		case kCsrEpc:
-			epc_reg.write(value);
-			break;
-		case kCsrEsr:
-			esr_reg.write(value);
-			break;
-		default:
-			break;
+		case 0x300u: mstatus_reg_ = value; break;
+		case 0x304u: mie_reg_ = value; break;
+		case 0x305u: mtvec_reg_ = value; break;
+		case 0x340u: mscratch_reg_ = value; break;
+		case 0x341u: mepc_reg_ = value; break;
+		case 0x342u: mcause_reg_ = value; break;
+		case 0x343u: mtval_reg_ = value; break;
+		case 0xB00u: mcycle_reg_ = (mcycle_reg_ & 0xFFFFFFFF00000000ull) | value; break;
+		case 0xB80u: mcycle_reg_ = (static_cast<uint64_t>(value) << 32) | static_cast<uint32_t>(mcycle_reg_); break;
+		case 0xB02u: minstret_reg_ = (minstret_reg_ & 0xFFFFFFFF00000000ull) | value; break;
+		case 0xB82u: minstret_reg_ = (static_cast<uint64_t>(value) << 32) | static_cast<uint32_t>(minstret_reg_); break;
+		default: break;
 		}
 	}
 
-	void set_fault(ErrorCode code, uint32_t aux) {
-		fault_code_reg.write(static_cast<uint32_t>(code));
-		fault_aux_reg.write(aux);
-		write_sr_bit(kSrFaultBit, true);
-		exec_state_reg.write(ExecState::FAULT);
-		if_req_valid_reg.write(false);
-		ls_req_valid_reg.write(false);
-		cmd_req_valid_reg.write(false);
+	uint32_t apply_csr_op(const DecodedInstruction& decoded, uint32_t rs1_value, uint32_t& old_value) const {
+		old_value = read_csr(decoded.csr);
+		const uint32_t source = (decoded.csr_op == CsrOp::CSRRWI || decoded.csr_op == CsrOp::CSRRSI || decoded.csr_op == CsrOp::CSRRCI)
+			? decoded.imm
+			: rs1_value;
+		switch (decoded.csr_op) {
+		case CsrOp::CSRRW:
+		case CsrOp::CSRRWI:
+			return source;
+		case CsrOp::CSRRS:
+		case CsrOp::CSRRSI:
+			return old_value | source;
+		case CsrOp::CSRRC:
+		case CsrOp::CSRRCI:
+			return old_value & ~source;
+		default:
+			return old_value;
+		}
 	}
 
-	void retire_to(uint32_t next_pc) {
-		pc_reg.write(next_pc);
-		instret_count_reg.write(instret_count_reg.read().to_uint64() + 1ull);
-		pending_op_reg.write(PendingOp::NONE);
-		if (single_step_reg.read()) {
-			exec_state_reg.write(ExecState::HALTED);
+	uint32_t forward_value(uint8_t reg, uint32_t base_value) const {
+		if (reg == 0u) {
+			return 0u;
+		}
+		if (exmem_.valid && exmem_.decoded.reg_write && !exmem_.decoded.mem_read && exmem_.decoded.rd == reg) {
+			if (exmem_.decoded.csr_op != CsrOp::NONE) {
+				return exmem_.csr_old_value;
+			}
+			if (exmem_.decoded.branch_op == BranchOp::JAL || exmem_.decoded.branch_op == BranchOp::JALR) {
+				return exmem_.decoded.pc + 4u;
+			}
+			return exmem_.alu_result;
+		}
+		if (memwb_.valid && memwb_.reg_write && memwb_.rd == reg) {
+			return memwb_.write_value;
+		}
+		return base_value;
+	}
+
+	bool has_load_use_hazard() const {
+		if (!ifid_.valid || !idex_.valid || !idex_.decoded.mem_read || idex_.decoded.rd == 0u) {
+			return false;
+		}
+		const auto next_decoded = DecodeStage::decode(ifid_);
+		return (next_decoded.use_rs1 && next_decoded.rs1 == idex_.decoded.rd) || (next_decoded.use_rs2 && next_decoded.rs2 == idex_.decoded.rd);
+	}
+
+	bool interrupt_pending() const {
+		const bool global_enable = (mstatus_reg_ & (1u << 3)) != 0u;
+		const bool ext_enable = (mie_reg_ & (1u << 11)) != 0u;
+		const bool timer_enable = (mie_reg_ & (1u << 7)) != 0u;
+		return global_enable && ((irq_meip_i.read() && ext_enable) || (irq_mtip_i.read() && timer_enable));
+	}
+
+	void enter_trap(uint32_t cause, uint32_t tval) {
+		mepc_reg_ = pc_reg_;
+		mcause_reg_ = cause;
+		mtval_reg_ = tval;
+		in_trap_ = true;
+		pc_reg_ = mtvec_reg_;
+		fetch_addr_reg_ = mtvec_reg_;
+		ifid_ = {};
+		idex_ = {};
+		exmem_ = {};
+		memwb_ = {};
+		mem_txn_ = {};
+	}
+
+	void drive_idle_outputs() {
+		if_req_valid_o.write(enable_i.read() && !halted_);
+		if_addr_o.write(fetch_addr_reg_);
+		ls_req_valid_o.write(false);
+		ls_req_write_o.write(false);
+		ls_req_addr_o.write(0u);
+		ls_req_wdata_o.write(0u);
+		ls_req_wstrb_o.write(0u);
+		mmio_req_valid_o.write(false);
+		mmio_req_o.write(MmioRequest{});
+	}
+
+	void issue_memory_request(const ExMemLatch& exmem) {
+		const uint32_t addr = exmem.alu_result;
+		if (is_data_sram_addr(addr, DATA_SRAM_BYTES)) {
+			ls_req_valid_o.write(true);
+			ls_req_write_o.write(exmem.decoded.mem_write);
+			ls_req_addr_o.write(addr);
+			ls_req_wdata_o.write(MemoryStage::store_data(exmem.decoded.mem_op, exmem.rs2_value, addr));
+			ls_req_wstrb_o.write(MemoryStage::write_strobe(exmem.decoded.mem_op, addr));
 		} else {
-			exec_state_reg.write(ExecState::FETCH_REQ);
+			MmioRequest request{};
+			request.write = exmem.decoded.mem_write;
+			request.addr = addr;
+			request.wdata = MemoryStage::store_data(exmem.decoded.mem_op, exmem.rs2_value, addr);
+			request.wstrb = MemoryStage::write_strobe(exmem.decoded.mem_op, addr);
+			last_mmio_request_ = request;
+			mmio_req_valid_o.write(true);
+			mmio_req_o.write(request);
 		}
-	}
-
-	bool take_interrupt_if_possible() {
-		if (!irq_taken_i.read() || !sr_bit(kSrIrqEnableBit) || sr_bit(kSrInIsrBit)) {
-			return false;
-		}
-		epc_reg.write(pc_reg.read());
-		esr_reg.write(sr_reg.read());
-		uint32_t sr_value = sr_reg.read().to_uint();
-		sr_value &= ~(1u << kSrIrqEnableBit);
-		sr_value |= (1u << kSrInIsrBit);
-		sr_reg.write(sr_value);
-		pc_reg.write(irq_vector_i.read());
-		exec_state_reg.write(ExecState::FETCH_REQ);
-		if_req_valid_reg.write(false);
-		ls_req_valid_reg.write(false);
-		cmd_req_valid_reg.write(false);
-		return true;
-	}
-
-	void start_load(PendingOp op, uint32_t addr, uint32_t wdata, uint32_t wstrb, uint32_t next_pc, uint8_t rd, uint8_t lane) {
-		pending_op_reg.write(op);
-		pending_addr_reg.write(addr);
-		pending_store_data_reg.write(wdata);
-		pending_wstrb_reg.write(wstrb & 0xFu);
-		pending_next_pc_reg.write(next_pc);
-		pending_rd_reg.write(rd & 0xFu);
-		pending_byte_lane_reg.write(lane & 0x3u);
-		ls_req_addr_reg.write(addr);
-		ls_req_wdata_reg.write(wdata);
-		ls_req_wstrb_reg.write(wstrb & 0xFu);
-		ls_req_write_reg.write(op == PendingOp::STORE_WORD || op == PendingOp::STORE_BYTE || op == PendingOp::PUSH);
-		ls_req_valid_reg.write(true);
-		exec_state_reg.write(ExecState::LS_WAIT);
-	}
-
-	void start_command(PendingOp op, const McuCmdReq& req, uint32_t next_pc, uint8_t rd) {
-		pending_op_reg.write(op);
-		pending_cmd_reg.write(req);
-		pending_next_pc_reg.write(next_pc);
-		pending_rd_reg.write(rd & 0xFu);
-		cmd_req_reg.write(req);
-		cmd_req_valid_reg.write(true);
-		exec_state_reg.write(ExecState::CMD_REQ);
-	}
-
-	void handle_ls_response() {
-		const PendingOp pending_op = pending_op_reg.read();
-		const uint32_t next_pc = pending_next_pc_reg.read().to_uint();
-		ls_req_valid_reg.write(false);
-		switch (pending_op) {
-		case PendingOp::LOAD_WORD:
-		case PendingOp::POP:
-			write_gpr(pending_rd_reg.read().to_uint(), ls_resp_rdata_i.read().to_uint());
-			if (pending_op == PendingOp::POP) {
-				write_gpr(13u, pending_addr_reg.read().to_uint() + 4u);
-			}
-			retire_to(next_pc);
-			break;
-		case PendingOp::LOAD_BYTE: {
-			const uint32_t shift = pending_byte_lane_reg.read().to_uint() * 8u;
-			const uint32_t value = (ls_resp_rdata_i.read().to_uint() >> shift) & 0xFFu;
-			write_gpr(pending_rd_reg.read().to_uint(), value);
-			retire_to(next_pc);
-			break;
-		}
-		case PendingOp::STORE_WORD:
-		case PendingOp::STORE_BYTE:
-		case PendingOp::PUSH:
-			if (pending_op == PendingOp::PUSH) {
-				write_gpr(13u, pending_addr_reg.read().to_uint());
-			}
-			retire_to(next_pc);
-			break;
-		case PendingOp::STREAM: {
-			McuCmdReq req{};
-			req.kind = CommandKind::STREAM_WORD;
-			req.stream_dst = stream_dst_reg.read();
-			req.stream_flags = 0u;
-			req.target_mask = 0u;
-			req.addr = 0u;
-			req.data = ls_resp_rdata_i.read().to_uint();
-			req.word_count = 1u;
-			const uint32_t remaining = stream_remaining_reg.read().to_uint();
-			if (stream_first_reg.read()) {
-				req.stream_flags |= 0x2u;
-			}
-			if (remaining == 1u) {
-				req.stream_flags |= 0x1u | 0x4u;
-			}
-			start_command(PendingOp::STREAM, req, next_pc, 0u);
-			break;
-		}
-		default:
-			set_fault(ErrorCode::LOCAL_MEMORY_BOUNDS_FAULT, pending_addr_reg.read().to_uint());
-			break;
-		}
-	}
-
-	void handle_cmd_response() {
-		const McuCmdResp resp = cmd_resp_i.read();
-		const PendingOp pending_op = pending_op_reg.read();
-		const uint32_t next_pc = pending_next_pc_reg.read().to_uint();
-		cmd_req_valid_reg.write(false);
-		if (resp.error) {
-			set_fault(resp.error_target_id != 0u ? ErrorCode::BROADCAST_TARGET_FAULT : ErrorCode::COMMAND_ERROR,
-				(static_cast<uint32_t>(resp.error_target_id) << 16) | (resp.aux & 0xFFFFu));
-			return;
-		}
-		switch (pending_op) {
-		case PendingOp::CMD_READ:
-			write_gpr(pending_rd_reg.read().to_uint(), resp.rdata);
-			retire_to(next_pc);
-			break;
-		case PendingOp::CMD_WRITE:
-			retire_to(next_pc);
-			break;
-		case PendingOp::STREAM: {
-			const uint32_t remaining = stream_remaining_reg.read().to_uint();
-			if (remaining <= 1u) {
-				retire_to(next_pc);
-			} else {
-				stream_remaining_reg.write(remaining - 1u);
-				stream_addr_reg.write(stream_addr_reg.read().to_uint() + 4u);
-				stream_first_reg.write(false);
-				start_load(PendingOp::STREAM, stream_addr_reg.read().to_uint() + 4u, 0u, 0u, next_pc, 0u, 0u);
-			}
-			break;
-		}
-		default:
-			retire_to(next_pc);
-			break;
-		}
-	}
-
-	uint32_t imm_high_value(int32_t imm18) const {
-		return (static_cast<uint32_t>(imm18) & 0x3FFFFu) << 14;
-	}
-
-	bool check_word_alignment(uint32_t addr) {
-		if ((addr & 0x3u) != 0u) {
-			set_fault(ErrorCode::UNALIGNED_WORD_ACCESS, addr);
-			return false;
-		}
-		return true;
 	}
 
 	void seq_process() {
-		for (unsigned index = 0; index < kCoreGprCount; ++index) {
-			gpr_reg[index].write(0u);
-		}
-		pc_reg.write(kResetPc);
-		sr_reg.write(0u);
-		epc_reg.write(0u);
-		esr_reg.write(0u);
-		current_instr_reg.write(0u);
-		fault_code_reg.write(static_cast<uint32_t>(ErrorCode::NONE));
-		fault_aux_reg.write(0u);
-		cycle_count_reg.write(0ull);
-		instret_count_reg.write(0ull);
-		exec_state_reg.write(ExecState::FETCH_REQ);
-		pending_op_reg.write(PendingOp::NONE);
-		pending_rd_reg.write(0u);
-		pending_next_pc_reg.write(0u);
-		pending_addr_reg.write(0u);
-		pending_store_data_reg.write(0u);
-		pending_wstrb_reg.write(0u);
-		pending_byte_lane_reg.write(0u);
-		pending_cmd_reg.write(McuCmdReq{});
-		stream_addr_reg.write(0u);
-		stream_remaining_reg.write(0u);
-		stream_dst_reg.write(StreamDestination::DMA);
-		stream_first_reg.write(false);
-		wait_mask_lo_reg.write(0u);
-		wait_mask_hi_reg.write(0u);
-		if_req_valid_reg.write(false);
-		if_addr_reg.write(kResetPc);
-		ls_req_valid_reg.write(false);
-		ls_req_write_reg.write(false);
-		ls_req_addr_reg.write(0u);
-		ls_req_wdata_reg.write(0u);
-		ls_req_wstrb_reg.write(0u);
-		cmd_req_valid_reg.write(false);
-		cmd_req_reg.write(McuCmdReq{});
-		irq_enable_lo_reg.write(0u);
-		irq_enable_hi_reg.write(0u);
-		irq_ack_lo_reg.write(0u);
-		irq_ack_hi_reg.write(0u);
-		single_step_reg.write(false);
-		write_gpr(13u, kResetSp);
+		reset_state();
+		drive_idle_outputs();
 		wait();
 
 		while (true) {
-			cycle_count_reg.write(cycle_count_reg.read().to_uint64() + 1ull);
-			irq_ack_lo_reg.write(0u);
-			irq_ack_hi_reg.write(0u);
+			mcycle_reg_ += 1u;
+			mip_reg_ = (irq_meip_i.read() ? (1u << 11) : 0u) | (irq_mtip_i.read() ? (1u << 7) : 0u);
+			drive_idle_outputs();
 
-			switch (exec_state_reg.read()) {
-			case ExecState::FETCH_REQ:
-				if (take_interrupt_if_possible()) {
-					break;
-				}
-				if_req_valid_reg.write(true);
-				if_addr_reg.write(pc_reg.read());
-				exec_state_reg.write(ExecState::FETCH_CAPTURE);
-				break;
+			if (!enable_i.read()) {
+				reset_state();
+				wait();
+				continue;
+			}
 
-			case ExecState::FETCH_CAPTURE:
-				if_req_valid_reg.write(false);
-				current_instr_reg.write(if_rdata_i.read());
-				exec_state_reg.write(ExecState::EXECUTE);
-				break;
+			if (interrupt_pending() && !halted_ && !mem_txn_.active) {
+				enter_trap((1u << 31) | (irq_meip_i.read() ? 11u : 7u), 0u);
+				wait();
+				continue;
+			}
 
-			case ExecState::EXECUTE: {
-				const uint32_t instruction = current_instr_reg.read().to_uint();
-				const uint8_t opcode = opcode_of(instruction);
-				const uint8_t rd = rd_of(instruction);
-				const uint8_t rs1 = rs1_of(instruction);
-				const uint8_t rs2 = rs2_of(instruction);
-				const uint8_t format_s_rs2 = static_cast<uint8_t>(reg_field_25_22(instruction));
-				const uint8_t format_s_rs1 = static_cast<uint8_t>(reg_field_21_18(instruction));
-				const uint8_t format_b_rs1 = static_cast<uint8_t>(reg_field_25_22(instruction));
-				const uint8_t format_b_rs2 = static_cast<uint8_t>(reg_field_21_18(instruction));
-				const int32_t imm18 = imm18_of(instruction);
-				const uint32_t pc = pc_reg.read().to_uint();
-				const uint32_t next_pc = pc + 4u;
-				const uint32_t rs1_value = read_gpr(rs1);
-				const uint32_t rs2_value = read_gpr(rs2);
-				const uint32_t format_s_rs1_value = read_gpr(format_s_rs1);
-				const uint32_t format_s_rs2_value = read_gpr(format_s_rs2);
-				const uint32_t format_b_rs1_value = read_gpr(format_b_rs1);
-				const uint32_t format_b_rs2_value = read_gpr(format_b_rs2);
-				const uint32_t sr_value = sr_reg.read().to_uint();
+			WritebackStage::commit_gpr(gpr_, memwb_);
+			if (memwb_.valid && memwb_.csr_write) {
+				write_csr(memwb_.csr, memwb_.csr_value);
+			}
+			if (memwb_.valid) {
+				minstret_reg_ += 1u;
+			}
+			if (memwb_.halt) {
+				halted_ = true;
+			}
+			if (memwb_.fault) {
+				faulted_ = true;
+				last_fault_code_ = memwb_.fault_code;
+				halted_ = true;
+			}
 
-				switch (static_cast<Opcode>(opcode)) {
-				case Opcode::NOP:
-					retire_to(next_pc);
-					break;
-				case Opcode::MOVI:
-					write_gpr(rd, static_cast<uint32_t>(imm18));
-					sr_reg.write(nz_flags_value(sr_value, static_cast<uint32_t>(imm18)));
-					retire_to(next_pc);
-					break;
-				case Opcode::MOVHI:
-					write_gpr(rd, imm_high_value(imm18));
-					sr_reg.write(nz_flags_value(sr_value, imm_high_value(imm18)));
-					retire_to(next_pc);
-					break;
-				case Opcode::MOV:
-					write_gpr(rd, rs1_value);
-					sr_reg.write(nz_flags_value(sr_value, rs1_value));
-					retire_to(next_pc);
-					break;
-				case Opcode::ADD: {
-					const uint32_t result = rs1_value + rs2_value;
-					write_gpr(rd, result);
-					sr_reg.write(add_flags_value(sr_value, rs1_value, rs2_value, result));
-					retire_to(next_pc);
-					break;
-				}
-				case Opcode::ADDI: {
-					const uint32_t rhs = static_cast<uint32_t>(imm18);
-					const uint32_t result = rs1_value + rhs;
-					write_gpr(rd, result);
-					sr_reg.write(add_flags_value(sr_value, rs1_value, rhs, result));
-					retire_to(next_pc);
-					break;
-				}
-				case Opcode::SUB: {
-					const uint32_t result = rs1_value - rs2_value;
-					write_gpr(rd, result);
-					sr_reg.write(sub_flags_value(sr_value, rs1_value, rs2_value, result));
-					retire_to(next_pc);
-					break;
-				}
-				case Opcode::AND:
-					write_gpr(rd, rs1_value & rs2_value);
-					sr_reg.write(nz_flags_value(sr_value, rs1_value & rs2_value));
-					retire_to(next_pc);
-					break;
-				case Opcode::OR:
-					write_gpr(rd, rs1_value | rs2_value);
-					sr_reg.write(nz_flags_value(sr_value, rs1_value | rs2_value));
-					retire_to(next_pc);
-					break;
-				case Opcode::XOR:
-					write_gpr(rd, rs1_value ^ rs2_value);
-					sr_reg.write(nz_flags_value(sr_value, rs1_value ^ rs2_value));
-					retire_to(next_pc);
-					break;
-				case Opcode::SHL: {
-					const uint32_t result = rs1_value << (imm18 & 0x1F);
-					write_gpr(rd, result);
-					sr_reg.write(nz_flags_value(sr_value, result));
-					retire_to(next_pc);
-					break;
-				}
-				case Opcode::SHR: {
-					const uint32_t result = rs1_value >> (imm18 & 0x1F);
-					write_gpr(rd, result);
-					sr_reg.write(nz_flags_value(sr_value, result));
-					retire_to(next_pc);
-					break;
-				}
-				case Opcode::CMP: {
-					const uint32_t result = rs1_value - rs2_value;
-					sr_reg.write(sub_flags_value(sr_value, rs1_value, rs2_value, result));
-					retire_to(next_pc);
-					break;
-				}
-				case Opcode::CMPI: {
-					const uint32_t rhs = static_cast<uint32_t>(imm18);
-					const uint32_t result = rs1_value - rhs;
-					sr_reg.write(sub_flags_value(sr_value, rs1_value, rhs, result));
-					retire_to(next_pc);
-					break;
-				}
-				case Opcode::B:
-					retire_to(pc + branch_offset_bytes26(instruction));
-					break;
-				case Opcode::BEQ:
-					retire_to(format_b_rs1_value == format_b_rs2_value ? pc + branch_offset_bytes18(instruction) : next_pc);
-					break;
-				case Opcode::BNE:
-					retire_to(format_b_rs1_value != format_b_rs2_value ? pc + branch_offset_bytes18(instruction) : next_pc);
-					break;
-				case Opcode::BLT:
-					retire_to(static_cast<int32_t>(format_b_rs1_value) < static_cast<int32_t>(format_b_rs2_value) ? pc + branch_offset_bytes18(instruction) : next_pc);
-					break;
-				case Opcode::BGE:
-					retire_to(static_cast<int32_t>(format_b_rs1_value) >= static_cast<int32_t>(format_b_rs2_value) ? pc + branch_offset_bytes18(instruction) : next_pc);
-					break;
-				case Opcode::CALL:
-					write_gpr(14u, next_pc);
-					retire_to(pc + branch_offset_bytes26(instruction));
-					break;
-				case Opcode::CALLR:
-					write_gpr(14u, next_pc);
-					retire_to(rs1_value);
-					break;
-				case Opcode::RET:
-					retire_to(read_gpr(14u));
-					break;
-				case Opcode::HLT:
-					exec_state_reg.write(ExecState::HALTED);
-					instret_count_reg.write(instret_count_reg.read().to_uint64() + 1ull);
-					break;
-				case Opcode::LDW: {
-					const uint32_t addr = rs1_value + static_cast<uint32_t>(imm18);
-					if (check_word_alignment(addr)) {
-						start_load(PendingOp::LOAD_WORD, addr, 0u, 0u, next_pc, rd, 0u);
-					}
-					break;
-				}
-				case Opcode::STW: {
-					const uint32_t addr = format_s_rs1_value + static_cast<uint32_t>(imm18);
-					if (check_word_alignment(addr)) {
-						start_load(PendingOp::STORE_WORD, addr, format_s_rs2_value, 0xFu, next_pc, 0u, 0u);
-					}
-					break;
-				}
-				case Opcode::LDB: {
-					const uint32_t addr = rs1_value + static_cast<uint32_t>(imm18);
-					start_load(PendingOp::LOAD_BYTE, addr & ~0x3u, 0u, 0u, next_pc, rd, static_cast<uint8_t>(addr & 0x3u));
-					break;
-				}
-				case Opcode::STB: {
-					const uint32_t addr = format_s_rs1_value + static_cast<uint32_t>(imm18);
-					const uint32_t shift = (addr & 0x3u) * 8u;
-					start_load(PendingOp::STORE_BYTE, addr & ~0x3u, (format_s_rs2_value & 0xFFu) << shift, 1u << (addr & 0x3u), next_pc, 0u, static_cast<uint8_t>(addr & 0x3u));
-					break;
-				}
-				case Opcode::PUSH: {
-					const uint32_t addr = read_gpr(13u) - 4u;
-					if (check_word_alignment(addr)) {
-						start_load(PendingOp::PUSH, addr, rs1_value, 0xFu, next_pc, 0u, 0u);
-					}
-					break;
-				}
-				case Opcode::POP: {
-					const uint32_t addr = read_gpr(13u);
-					if (check_word_alignment(addr)) {
-						start_load(PendingOp::POP, addr, 0u, 0u, next_pc, rd, 0u);
-					}
-					break;
-				}
-				case Opcode::CSRRD:
-					write_gpr(rd, read_csr(static_cast<uint32_t>(imm18)));
-					retire_to(next_pc);
-					break;
-				case Opcode::CSRWR:
-					write_csr(static_cast<uint32_t>(imm18), rs1_value);
-					retire_to(next_pc);
-					break;
-				case Opcode::CSRSI: {
-					const uint32_t csr_id = func14_of(instruction) & 0x3FFFu;
-					write_csr(csr_id, read_csr(csr_id) | rs1_value);
-					retire_to(next_pc);
-					break;
-				}
-				case Opcode::CSRCL: {
-					const uint32_t csr_id = func14_of(instruction) & 0x3FFFu;
-					write_csr(csr_id, read_csr(csr_id) & ~rs1_value);
-					retire_to(next_pc);
-					break;
-				}
-				case Opcode::MMIOW: {
-					McuCmdReq req{};
-					req.kind = CommandKind::MMIO_WRITE;
-					req.addr = rs1_value + static_cast<uint32_t>(imm18);
-					req.data = read_gpr(rd);
-					start_command(PendingOp::CMD_WRITE, req, next_pc, 0u);
-					break;
-				}
-				case Opcode::MMIOR: {
-					McuCmdReq req{};
-					req.kind = CommandKind::MMIO_READ;
-					req.addr = rs1_value + static_cast<uint32_t>(imm18);
-					start_command(PendingOp::CMD_READ, req, next_pc, rd);
-					break;
-				}
-				case Opcode::MMIOWB: {
-					McuCmdReq req{};
-					req.kind = CommandKind::MMIO_WRITE_BROADCAST;
-					req.addr = rs1_value + (func14_of(instruction) & 0x3FFFu);
-					req.data = read_gpr(rs2);
-					req.target_mask = read_gpr(rd);
-					start_command(PendingOp::CMD_WRITE, req, next_pc, 0u);
-					break;
-				}
-				case Opcode::MMIORD: {
-					McuCmdReq req{};
-					req.kind = CommandKind::MMIO_READ_BROADCAST;
-					req.addr = rs1_value + (func14_of(instruction) & 0x3FFFu);
-					req.target_mask = read_gpr(rd);
-					start_command(PendingOp::CMD_READ, req, next_pc, rs2);
-					break;
-				}
-				case Opcode::STRM: {
-					const uint32_t count = read_gpr(rs2);
-					if (count == 0u) {
-						retire_to(next_pc);
+			MemWbLatch next_memwb{};
+			ExMemLatch next_exmem = exmem_;
+			IdExLatch next_idex = idex_;
+			IfIdLatch next_ifid = ifid_;
+			bool stall_pipeline = halted_;
+			bool hold_fetch = false;
+			bool flush_decode = false;
+			bool flush_fetch = false;
+			uint32_t next_fetch_addr = fetch_addr_reg_ + 4u;
+
+			if (mem_txn_.active) {
+				if (!mem_txn_.request_issued) {
+					issue_memory_request(mem_txn_.exmem);
+					mem_txn_.request_issued = true;
+					stall_pipeline = true;
+				} else {
+					const bool response_valid = mem_txn_.uses_mmio ? mmio_resp_valid_i.read() : ls_resp_valid_i.read();
+					if (response_valid) {
+						const uint32_t raw = mem_txn_.uses_mmio ? mmio_resp_i.read().rdata : ls_resp_rdata_i.read().to_uint();
+						next_memwb.valid = true;
+						next_memwb.rd = mem_txn_.exmem.decoded.rd;
+						next_memwb.reg_write = mem_txn_.exmem.decoded.reg_write;
+						next_memwb.write_value = mem_txn_.exmem.decoded.mem_read ? MemoryStage::load_data(mem_txn_.exmem.decoded.mem_op, raw, mem_txn_.exmem.alu_result) : 0u;
+						next_memwb.pc = mem_txn_.exmem.decoded.pc;
+						mem_txn_ = {};
+						next_exmem = {};
 					} else {
-						stream_addr_reg.write(rs1_value);
-						stream_remaining_reg.write(count);
-						stream_dst_reg.write(static_cast<StreamDestination>(rd & 0x3u));
-						stream_first_reg.write(true);
-						start_load(PendingOp::STREAM, rs1_value, 0u, 0u, next_pc, 0u, 0u);
+						stall_pipeline = true;
 					}
-					break;
 				}
-				case Opcode::STRMI: {
-					McuCmdReq req{};
-					req.kind = CommandKind::STREAM_WORD;
-					req.stream_dst = static_cast<StreamDestination>(rd & 0x3u);
-					req.data = rs1_value;
-					req.word_count = 1u;
-					start_command(PendingOp::CMD_WRITE, req, next_pc, 0u);
-					break;
+			} else if (exmem_.valid) {
+				if (exmem_.fault || exmem_.decoded.trap) {
+					next_memwb.valid = true;
+					next_memwb.fault = true;
+					next_memwb.fault_code = exmem_.fault ? exmem_.fault_code : 2u;
+					next_exmem = {};
+				} else if (exmem_.decoded.mem_read || exmem_.decoded.mem_write) {
+					mem_txn_.active = true;
+					mem_txn_.request_issued = false;
+					mem_txn_.uses_mmio = !is_data_sram_addr(exmem_.alu_result, DATA_SRAM_BYTES);
+					mem_txn_.exmem = exmem_;
+					stall_pipeline = true;
+				} else {
+					next_memwb.valid = true;
+					next_memwb.rd = exmem_.decoded.rd;
+					next_memwb.reg_write = exmem_.decoded.reg_write;
+					next_memwb.write_value = exmem_.decoded.csr_op != CsrOp::NONE ? exmem_.csr_old_value :
+						((exmem_.decoded.branch_op == BranchOp::JAL || exmem_.decoded.branch_op == BranchOp::JALR) ? exmem_.decoded.pc + 4u : exmem_.alu_result);
+					next_memwb.csr_write = exmem_.decoded.csr_op != CsrOp::NONE;
+					next_memwb.csr = exmem_.decoded.csr;
+					next_memwb.csr_value = exmem_.csr_new_value;
+					next_memwb.halt = exmem_.decoded.halt;
+					next_memwb.pc = exmem_.decoded.pc;
+					next_exmem = {};
 				}
-				case Opcode::STRMC: {
-					McuCmdReq req{};
-					req.kind = CommandKind::STREAM_CTRL;
-					req.stream_dst = static_cast<StreamDestination>(rd & 0x3u);
-					req.stream_flags = static_cast<uint8_t>(func14_of(instruction) & 0x3Fu);
-					start_command(PendingOp::CMD_WRITE, req, next_pc, 0u);
-					break;
-				}
-				case Opcode::WFI:
-					pending_op_reg.write(PendingOp::WFI);
-					pending_next_pc_reg.write(next_pc);
-					wait_mask_lo_reg.write(rs1_value);
-					wait_mask_hi_reg.write(0u);
-					exec_state_reg.write(ExecState::WAIT_EVENT);
-					break;
-				case Opcode::WAIT:
-					pending_op_reg.write(PendingOp::WAIT_EVENT);
-					pending_next_pc_reg.write(next_pc);
-					pending_rd_reg.write(rd);
-					wait_mask_lo_reg.write(rs1_value);
-					wait_mask_hi_reg.write(0u);
-					exec_state_reg.write(ExecState::WAIT_EVENT);
-					break;
-				case Opcode::ACKIRQ:
-					irq_ack_lo_reg.write(rs1_value);
-					retire_to(next_pc);
-					break;
-				case Opcode::EI:
-					write_sr_bit(kSrIrqEnableBit, true);
-					retire_to(next_pc);
-					break;
-				case Opcode::DI:
-					write_sr_bit(kSrIrqEnableBit, false);
-					retire_to(next_pc);
-					break;
-				case Opcode::IRET:
-					if (!sr_bit(kSrInIsrBit)) {
-						set_fault(ErrorCode::IRET_OUTSIDE_ISR, instruction);
+			}
+
+			if (!stall_pipeline) {
+				if (idex_.valid) {
+					const auto& decoded = idex_.decoded;
+					ExMemLatch produced{};
+					produced.valid = decoded.valid;
+					produced.decoded = decoded;
+					const uint32_t rs1_value = forward_value(decoded.rs1, idex_.rs1_value);
+					const uint32_t rs2_value = forward_value(decoded.rs2, idex_.rs2_value);
+					produced.rs2_value = rs2_value;
+					uint32_t rhs_value = decoded.use_rs2 ? rs2_value : decoded.imm;
+					if ((decoded.instruction & 0x7Fu) == 0x17u) {
+						produced.alu_result = decoded.pc + decoded.imm;
+					} else if (decoded.mem_read || decoded.mem_write || decoded.branch_op == BranchOp::JALR) {
+						produced.alu_result = rs1_value + decoded.imm;
 					} else {
-						sr_reg.write(esr_reg.read());
-						retire_to(epc_reg.read().to_uint());
+						produced.alu_result = ExecuteStage::alu(decoded.alu_op, rs1_value, rhs_value);
 					}
-					break;
-				default:
-					set_fault(ErrorCode::ILLEGAL_OPCODE, instruction);
-					break;
+					if (decoded.csr_op != CsrOp::NONE) {
+						produced.csr_new_value = apply_csr_op(decoded, rs1_value, produced.csr_old_value);
+					}
+					if (decoded.branch_op == BranchOp::JAL) {
+						produced.branch_taken = true;
+						produced.branch_target = decoded.pc + decoded.imm;
+					} else if (decoded.branch_op == BranchOp::JALR) {
+						produced.branch_taken = true;
+						produced.branch_target = (rs1_value + decoded.imm) & ~1u;
+					} else if (decoded.branch_op != BranchOp::NONE) {
+						produced.branch_taken = ExecuteStage::branch_taken(decoded.branch_op, rs1_value, rs2_value);
+						produced.branch_target = decoded.pc + decoded.imm;
+					}
+					if (decoded.trap) {
+						produced.fault = true;
+						produced.fault_code = 2u;
+					}
+					next_exmem = produced;
+					if (produced.branch_taken) {
+						pc_reg_ = produced.branch_target;
+						next_fetch_addr = produced.branch_target;
+						flush_decode = true;
+						flush_fetch = true;
+					}
+				} else {
+					next_exmem = {};
 				}
-				break;
+
+				if (!flush_decode) {
+					if (has_load_use_hazard()) {
+						next_idex = {};
+						next_ifid = ifid_;
+						next_fetch_addr = fetch_addr_reg_;
+						hold_fetch = true;
+					} else if (ifid_.valid) {
+						const auto decoded = DecodeStage::decode(ifid_);
+						next_idex.valid = decoded.valid;
+						next_idex.decoded = decoded;
+						next_idex.rs1_value = gpr_[decoded.rs1];
+						next_idex.rs2_value = gpr_[decoded.rs2];
+					} else {
+						next_idex = {};
+					}
+				} else {
+					next_idex = {};
+				}
+
+				if (!flush_fetch && !hold_fetch && !halted_) {
+					next_ifid = FetchStage::latch(fetch_addr_reg_, if_rdata_i.read().to_uint());
+					pc_reg_ = fetch_addr_reg_;
+				} else if (flush_fetch) {
+					next_ifid = {};
+				}
+			} else {
+				next_idex = idex_;
+				next_ifid = ifid_;
+				next_fetch_addr = fetch_addr_reg_;
 			}
 
-			case ExecState::LS_WAIT:
-				if (ls_resp_valid_i.read()) {
-					handle_ls_response();
-				}
-				break;
+			memwb_ = next_memwb;
+			exmem_ = next_exmem;
+			idex_ = next_idex;
+			ifid_ = next_ifid;
+			fetch_addr_reg_ = next_fetch_addr;
+			gpr_[0] = 0u;
 
-			case ExecState::CMD_REQ:
-				if (cmd_req_ready_i.read()) {
-					cmd_req_valid_reg.write(false);
-					exec_state_reg.write(ExecState::CMD_RESP);
-				}
-				break;
-
-			case ExecState::CMD_RESP:
-				if (cmd_resp_valid_i.read()) {
-					handle_cmd_response();
-				}
-				break;
-
-			case ExecState::WAIT_EVENT: {
-				const uint32_t pending_lo = irq_pending_lo_i.read().to_uint();
-				const uint32_t pending_hi = irq_pending_hi_i.read().to_uint();
-				const uint32_t mask_lo = wait_mask_lo_reg.read().to_uint();
-				const uint32_t mask_hi = wait_mask_hi_reg.read().to_uint();
-				const bool any_event = ((mask_lo == 0u || (pending_lo & mask_lo) != 0u) && (mask_hi == 0u || (pending_hi & mask_hi) != 0u)) || irq_taken_i.read();
-				if (pending_op_reg.read() == PendingOp::WFI) {
-					if (take_interrupt_if_possible()) {
-						break;
-					}
-					if (any_event) {
-						retire_to(pending_next_pc_reg.read().to_uint());
-					}
-				} else if (pending_op_reg.read() == PendingOp::WAIT_EVENT && any_event) {
-					write_gpr(pending_rd_reg.read().to_uint(), 1u);
-					retire_to(pending_next_pc_reg.read().to_uint());
-				}
-				break;
-			}
-
-			case ExecState::HALTED:
-				if (irq_taken_i.read() && sr_bit(kSrIrqEnableBit)) {
-					take_interrupt_if_possible();
-				}
-				break;
-
-			case ExecState::FAULT:
-				break;
-			}
-
-			gpr_reg[0].write(0u);
 			wait();
 		}
 	}

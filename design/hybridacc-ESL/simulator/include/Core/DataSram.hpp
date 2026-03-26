@@ -21,7 +21,6 @@ public:
 	sc_in<bool> reset_n{"reset_n"};
 
 	sc_in<bool> loader_req_valid_i{"loader_req_valid_i"};
-	sc_in<bool> loader_req_write_i{"loader_req_write_i"};
 	sc_in<sc_uint<32>> loader_req_addr_i{"loader_req_addr_i"};
 	sc_in<sc_uint<32>> loader_req_wdata_i{"loader_req_wdata_i"};
 	sc_in<sc_uint<4>> loader_req_wstrb_i{"loader_req_wstrb_i"};
@@ -83,7 +82,7 @@ private:
 
 		while (true) {
 			mcu_resp_valid_o.write(false);
-			if (loader_req_valid_i.read() && loader_req_write_i.read()) {
+			if (loader_req_valid_i.read()) {
 				apply_write(loader_req_addr_i.read().to_uint(), loader_req_wdata_i.read().to_uint(), loader_req_wstrb_i.read().to_uint());
 			}
 			if (mcu_req_valid_i.read()) {

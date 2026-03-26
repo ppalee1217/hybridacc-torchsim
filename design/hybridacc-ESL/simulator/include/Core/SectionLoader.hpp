@@ -45,7 +45,7 @@ public:
 private:
 	ManifestHeader active_header_{};
 	bool active_ = false;
-	uint32_t word_index_ = 0u;
+	uint32_t next_word_index_ = 0u;
 
 	void seq_process() {
 		manifest_header_ready_o.write(false);
@@ -70,36 +70,32 @@ private:
 				manifest_header_ready_o.write(true);
 				if (manifest_header_valid_i.read()) {
 					active_header_ = manifest_header_i.read();
-					active_ = true;
-					word_index_ = 0u;
-					loader_busy_o.write(true);
-					if (active_header_.word_count == 0u) {
-						active_ = false;
+					next_word_index_ = 0u;
+					active_ = active_header_.word_count != 0u;
+					if (!active_) {
 						loader_done_o.write(true);
-						loader_busy_o.write(false);
 					}
 				}
 			} else {
 				manifest_payload_ready_o.write(true);
 				if (manifest_payload_valid_i.read()) {
-					const ManifestPayloadBeat beat = manifest_payload_i.read();
-					const uint32_t addr = active_header_.dst_base + (word_index_ * 4u);
+					const auto beat = manifest_payload_i.read();
+					const uint32_t target_addr = active_header_.dst_base + next_word_index_ * 4u;
 					if (active_header_.dst_kind == DestinationKind::ISRAM || active_header_.section_type == SectionType::CORE) {
 						isram_wr_valid_o.write(true);
-						isram_wr_addr_o.write(addr);
+						isram_wr_addr_o.write(target_addr);
 						isram_wr_data_o.write(beat.data);
 						isram_wr_strb_o.write(0xFu);
 					} else {
 						data_wr_valid_o.write(true);
-						data_wr_addr_o.write(kDataSramBase + addr);
+						data_wr_addr_o.write(kDataSramBase + target_addr);
 						data_wr_data_o.write(beat.data);
 						data_wr_strb_o.write(0xFu);
 					}
-					word_index_ += 1u;
-					if (beat.last || word_index_ >= active_header_.word_count) {
+					++next_word_index_;
+					if (beat.last || next_word_index_ >= active_header_.word_count) {
 						active_ = false;
 						loader_done_o.write(true);
-						loader_busy_o.write(false);
 					}
 				}
 			}

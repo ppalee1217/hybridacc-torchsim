@@ -1,0 +1,486 @@
+# HybridAcc-CC：ELF 佈局與連結規格
+
+> 前置閱讀：[00_Overview.md](00_Overview.md)、[03_CodeGeneration.md](03_CodeGeneration.md)
+
+---
+
+## 1. 總覽
+
+Stage 4 使用 `riscv32-unknown-elf-gcc` 將 Stage 2/3 產生的 C 原始碼和 PE payload header 交叉編譯並連結，生成 ELF 格式的韌體映像。此文件定義：
+
+- 目標記憶體區域對應
+- ELF section 配置
+- Linker script 設計
+- GCC 編譯參數
+- 映像驗證規則
+
+---
+
+## 2. 目標記憶體架構
+
+`cc_core_mcu` 的記憶體由兩塊 on-chip SRAM 組成，皆透過 AHB bus 連接：
+
+```
+┌──────────────────────────────────────────────┐
+│  I-SRAM (cc_isram)                           │
+│  Base: 0x0000_0000    Size: 16 KB (16384 B)  │
+│  用途: 程式碼 (.text)                          │
+│  屬性: Read + Execute                         │
+└──────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────┐
+│  Data-SRAM (cc_data_sram)                    │
+│  Base: 0x1000_0000    Size: 64 KB (65536 B)  │
+│  用途: 資料 (.data, .bss, .rodata, .stack)    │
+│  屬性: Read + Write                           │
+└──────────────────────────────────────────────┘
+```
+
+MMIO 區域不佔用 SRAM 空間，由 address decoder 路由到相應的 slave：
+
+| 區域 | 起始位址 | 結束位址 | 說明 |
+|------|----------|----------|------|
+| I-SRAM | `0x0000_0000` | `0x0000_3FFF` | 16 KB |
+| Data-SRAM | `0x1000_0000` | `0x1000_FFFF` | 64 KB |
+| Local MMIO | `0x2000_0000` | `0x2000_0FFF` | Core status, cluster mask |
+| DMA MMIO | `0x2000_1000` | `0x2000_1FFF` | DMA engine registers |
+| PLIC | `0x0C00_0000` | `0x0FFF_FFFF` | Platform-Level Interrupt Controller |
+| Cluster Unicast | `0x4000_0000` | `0x4FFF_FFFF` | Per-cluster MMIO |
+| Cluster Broadcast | `0x5000_0000` | `0x5FFF_FFFF` | Broadcast MMIO |
+| NLU | `0x6000_0000` | `0x6FFF_FFFF` | Neural Lookup Unit |
+
+---
+
+## 3. ELF Section 配置
+
+### 3.1 Section 清單
+
+| Section | 儲存位置 | 載入位址 (LMA) | 執行位址 (VMA) | 內容 |
+|---------|----------|----------------|----------------|------|
+| `.text.start` | I-SRAM | `0x0000_0000` | `0x0000_0000` | `_start` 進入點（必須位於 address 0） |
+| `.text` | I-SRAM | `.text.start` 之後 | 同 LMA | 所有韌體函數（`main`, `layer_*`, `trap_handler`） |
+| `.rodata` | Data-SRAM | `0x1000_0000` | `0x1000_0000` | PE program arrays, 常數表, AGU data tables |
+| `.data` | Data-SRAM | `.rodata` 之後 | 同 LMA | 已初始化全域變數 |
+| `.bss` | Data-SRAM | 不佔 ELF 空間 | `.data` 之後 | 未初始化全域變數（startup 時清零） |
+| `.stack` | Data-SRAM | — | Data-SRAM 末端向下成長 | 執行堆疊 |
+
+### 3.2 記憶體佈局圖
+
+```
+I-SRAM (0x0000_0000 .. 0x0000_3FFF):
+┌─────────────────────────┐  0x0000_0000
+│ .text.start             │    _start entry (jump to main)
+│   (aligned 4)           │
+├─────────────────────────┤
+│ .text                   │    trap_handler
+│                         │    main
+│                         │    layer_conv1
+│                         │    layer_conv2
+│                         │    layer_fc1
+│                         │    helper functions
+├─────────────────────────┤
+│ (unused)                │
+└─────────────────────────┘  0x0000_3FFF
+
+Data-SRAM (0x1000_0000 .. 0x1000_FFFF):
+┌─────────────────────────┐  0x1000_0000
+│ .rodata                 │    pe_prog_conv1[]
+│                         │    pe_prog_conv2[]
+│                         │    pe_prog_fc1[]
+│                         │    (其他常數表)
+├─────────────────────────┤
+│ .data                   │    已初始化全域變數
+├─────────────────────────┤
+│ .bss                    │    未初始化全域變數（清零）
+├─────────────────────────┤
+│                         │
+│ (unused / heap)         │
+│                         │
+├─────────────────────────┤  _stack_bottom
+│ ▼ .stack ▼              │    向低位址成長
+│                         │
+└─────────────────────────┘  0x1000_FFFF = _stack_top
+```
+
+### 3.3 Stack 配置
+
+Stack 配置在 Data-SRAM 的最高端，向低位址成長：
+
+```
+_stack_top    = 0x1001_0000  (Data-SRAM end + 1, sp 初始值)
+_stack_bottom = _stack_top - STACK_SIZE
+```
+
+預設 `STACK_SIZE = 4096` bytes（4 KB）。Layer 函數主要使用暫存器操作 MMIO，stack 深度很淺（函數呼叫深度 ≤ 3），4 KB 充分足夠。
+
+---
+
+## 4. Linker Script
+
+### 4.1 Linker Script 模板（`linker.ld.j2`）
+
+```ld
+/* ═══════════════════════════════════════════════════════
+ * HybridAcc-CC Linker Script
+ * Auto-generated by hybridacc-cc — DO NOT EDIT
+ * ═══════════════════════════════════════════════════════ */
+OUTPUT_ARCH(riscv)
+ENTRY(_start)
+
+MEMORY
+{
+    ISRAM  (rx)  : ORIGIN = 0x00000000, LENGTH = {{ isram_size }}
+    DSRAM  (rw)  : ORIGIN = 0x10000000, LENGTH = {{ dsram_size }}
+}
+
+_stack_size = {{ stack_size }};
+
+SECTIONS
+{
+    /* ── Code ── */
+    .text.start 0x00000000 :
+    {
+        KEEP(*(.text.start))
+    } > ISRAM
+
+    .text : ALIGN(4)
+    {
+        *(.text .text.*)
+    } > ISRAM
+
+    _etext = .;
+
+    /* ── Read-only data ── */
+    .rodata 0x10000000 : AT(0x10000000)
+    {
+        *(.rodata .rodata.*)
+        . = ALIGN(4);
+    } > DSRAM
+
+    /* ── Initialized data ── */
+    .data : ALIGN(4)
+    {
+        _sdata = .;
+        *(.data .data.*)
+        . = ALIGN(4);
+        _edata = .;
+    } > DSRAM
+
+    /* ── Uninitialized data ── */
+    .bss : ALIGN(4)
+    {
+        _sbss = .;
+        *(.bss .bss.*)
+        *(COMMON)
+        . = ALIGN(4);
+        _ebss = .;
+    } > DSRAM
+
+    /* ── Stack ── */
+    _stack_top = ORIGIN(DSRAM) + LENGTH(DSRAM);
+    _stack_bottom = _stack_top - _stack_size;
+
+    /* ── Assertions ── */
+    ASSERT(_etext <= ORIGIN(ISRAM) + LENGTH(ISRAM),
+           "ERROR: .text overflow in I-SRAM")
+    ASSERT(_ebss <= _stack_bottom,
+           "ERROR: .data+.bss overflow into stack region")
+    ASSERT(_stack_size >= 1024,
+           "ERROR: Stack size too small")
+}
+```
+
+### 4.2 Linker Script 參數
+
+| 參數 | 預設值 | 說明 |
+|------|--------|------|
+| `isram_size` | `16K` (16384) | I-SRAM 容量，取決於硬體配置 |
+| `dsram_size` | `64K` (65536) | Data-SRAM 容量 |
+| `stack_size` | `4K` (4096) | Stack 保留空間 |
+
+### 4.3 關鍵 ASSERT
+
+Linker 會在連結階段驗證以下條件：
+
+1. **`.text` 不溢出 I-SRAM**：所有韌體代碼必須 fit 在 16 KB 內
+2. **`.data` + `.bss` 不侵入 stack 區域**：PE payload arrays 等 rodata 加上全域資料不得覆蓋 stack
+3. **Stack 最小 1 KB**：防止誤設過小的 stack
+
+---
+
+## 5. GCC 編譯參數
+
+### 5.1 完整編譯命令
+
+```bash
+riscv32-unknown-elf-gcc \
+    -march=rv32i_zicsr \
+    -mabi=ilp32 \
+    -nostdlib \
+    -ffreestanding \
+    -O2 \
+    -Wall -Wextra \
+    -Wl,--gc-sections \
+    -ffunction-sections -fdata-sections \
+    -T linker.ld \
+    -I . \
+    -o firmware.elf \
+    firmware_main.c firmware_layers.c
+```
+
+### 5.2 參數解釋
+
+| 參數 | 用途 |
+|------|------|
+| `-march=rv32i_zicsr` | 目標指令集：RV32I + Zicsr 擴展（CSR instructions） |
+| `-mabi=ilp32` | ABI：32-bit int/long/pointer，soft-float |
+| `-nostdlib` | 不連結 C standard library（no libc, no crt0） |
+| `-ffreestanding` | Freestanding environment（不假設 OS 存在） |
+| `-O2` | 最佳化等級 2（平衡 code size 和效能） |
+| `-Wall -Wextra` | 啟用所有基本警告 |
+| `-Wl,--gc-sections` | 移除未使用的 section（配合 `-ffunction-sections`） |
+| `-ffunction-sections` | 每個 function 放在獨立 section（利於 GC） |
+| `-fdata-sections` | 每個 data item 放在獨立 section |
+| `-T linker.ld` | 使用自訂 linker script |
+| `-I .` | Header include 路徑（`firmware_hw.h`, `firmware_payload.h`） |
+
+### 5.3 替代方案（分步編譯）
+
+若需要除錯中間產物（例如查看每個 .o 的 size），可分步進行：
+
+```bash
+# Step 1: Compile .c → .o
+riscv32-unknown-elf-gcc \
+    -march=rv32i_zicsr -mabi=ilp32 \
+    -nostdlib -ffreestanding -O2 \
+    -ffunction-sections -fdata-sections \
+    -I . \
+    -c firmware_main.c -o firmware_main.o
+
+riscv32-unknown-elf-gcc \
+    -march=rv32i_zicsr -mabi=ilp32 \
+    -nostdlib -ffreestanding -O2 \
+    -ffunction-sections -fdata-sections \
+    -I . \
+    -c firmware_layers.c -o firmware_layers.o
+
+# Step 2: Link .o → .elf
+riscv32-unknown-elf-gcc \
+    -march=rv32i_zicsr -mabi=ilp32 \
+    -nostdlib -ffreestanding \
+    -Wl,--gc-sections \
+    -T linker.ld \
+    -o firmware.elf firmware_main.o firmware_layers.o
+```
+
+### 5.4 Size Report
+
+編譯後可用 `riscv32-unknown-elf-size` 檢查各 section 大小：
+
+```bash
+riscv32-unknown-elf-size firmware.elf
+# 輸出格式:
+#    text    data     bss     dec     hex filename
+#    3456    1024       8    4488    1188 firmware.elf
+```
+
+---
+
+## 6. ELF 結構分析
+
+### 6.1 ELF Header 需求
+
+| 欄位 | 值 |
+|------|-----|
+| Class | ELF32 |
+| Data | Little endian |
+| OS/ABI | UNIX System V |
+| Machine | RISC-V |
+| Entry point | `0x00000000` (= `_start`) |
+
+### 6.2 Program Headers（Loadable Segments）
+
+Linker 產生的 ELF 映像包含以下 "LOAD" segments：
+
+| Segment | (p_vaddr) VMA | (p_paddr) LMA | (p_filesz) File Size | (p_memsz) Mem Size | Flags |
+|---------|---------------|---------------|---------------------|---------------------|-------|
+| PT_LOAD #0 | `0x0000_0000` | `0x0000_0000` | `.text` 實際大小 | 同 filesz | R + X |
+| PT_LOAD #1 | `0x1000_0000` | `0x1000_0000` | `.rodata` + `.data` 大小 | 含 `.bss` 大小 | R + W |
+
+### 6.3 Section → Segment 映射
+
+```
+PT_LOAD #0 (ISRAM):
+  ├── .text.start
+  └── .text
+
+PT_LOAD #1 (DSRAM):
+  ├── .rodata
+  ├── .data
+  └── .bss        (p_filesz 不含 bss；p_memsz 含)
+```
+
+---
+
+## 7. 映像載入流程
+
+### 7.1 Simulator 載入
+
+在 SystemC simulator 中，ELF 載入由 `cc_core_mcu` 的 memory initialization 處理：
+
+```
+1. 開啟 firmware.elf
+2. 解析 ELF header, 確認 EM_RISCV, ELFCLASS32
+3. 遍歷 Program Headers:
+   a. PT_LOAD #0: 將 p_filesz bytes 複製到 cc_isram[0..p_filesz-1]
+   b. PT_LOAD #1: 將 p_filesz bytes 複製到 cc_data_sram[offset..offset+p_filesz-1]
+                   將 bss 區域（p_filesz..p_memsz）清零
+4. 設定 PC = e_entry (0x00000000)
+5. 開始 simulation
+```
+
+### 7.2 硬體載入（未來）
+
+真實硬體上，韌體映像可透過以下途徑載入：
+
+1. **Boot ROM → SPI Flash**：硬體 boot ROM 從 flash 讀取 ELF，解析後複製到 SRAM
+2. **Host DMA**：System-level DMA 從 host 記憶體直接寫入 I-SRAM/Data-SRAM
+3. **JTAG Debug**：透過 debug interface 直接寫入記憶體
+
+所有途徑最終效果相同：I-SRAM 包含 .text，Data-SRAM 包含 .rodata + .data，BSS 清零。
+
+---
+
+## 8. Size Validation 與 Overflow 偵測
+
+### 8.1 Compile-time 檢查
+
+Linker script 的 ASSERT 在連結階段即可捕捉溢出：
+
+```
+# 若 .text 超出 16KB:
+riscv32-unknown-elf-ld: firmware.elf section `.text' will not fit in region `ISRAM'
+riscv32-unknown-elf-ld: region `ISRAM' overflowed by 1234 bytes
+
+# 若 .rodata+.data+.bss 侵入 stack:
+ERROR: .data+.bss overflow into stack region
+```
+
+### 8.2 Post-link 驗證（Python）
+
+hybridacc-cc 在 GCC 成功後再進行 Python-side 二次驗證：
+
+```python
+import subprocess
+import re
+
+def validate_elf(elf_path: str,
+                 isram_limit: int = 16384,
+                 dsram_limit: int = 65536,
+                 stack_size: int = 4096) -> None:
+    """
+    Validate ELF size constraints after linking.
+
+    Raises:
+        ValueError: if any section exceeds its memory region
+    """
+    result = subprocess.run(
+        ["riscv32-unknown-elf-size", elf_path],
+        capture_output=True, text=True, check=True
+    )
+    # Parse output: "   text    data     bss     dec     hex filename"
+    lines = result.stdout.strip().split("\n")
+    parts = lines[1].split()
+    text_size = int(parts[0])
+    data_size = int(parts[1])
+    bss_size  = int(parts[2])
+
+    if text_size > isram_limit:
+        raise ValueError(
+            f"[E010] .text ({text_size} B) exceeds I-SRAM ({isram_limit} B) "
+            f"by {text_size - isram_limit} bytes"
+        )
+
+    dsram_used = data_size + bss_size
+    dsram_available = dsram_limit - stack_size
+    if dsram_used > dsram_available:
+        raise ValueError(
+            f"[E011] .data+.bss ({dsram_used} B) exceeds Data-SRAM available "
+            f"({dsram_available} B, {dsram_limit} - {stack_size} stack) "
+            f"by {dsram_used - dsram_available} bytes"
+        )
+
+    # Print size report
+    print(f"[INFO] ELF Size Report:")
+    print(f"  .text   = {text_size:>6} / {isram_limit} B "
+          f"({text_size*100/isram_limit:.1f}%)")
+    print(f"  .data   = {data_size:>6} B")
+    print(f"  .bss    = {bss_size:>6} B")
+    print(f"  D-SRAM  = {dsram_used:>6} / {dsram_available} B "
+          f"({dsram_used*100/dsram_available:.1f}%)")
+    print(f"  stack   = {stack_size:>6} B (reserved)")
+```
+
+---
+
+## 9. `.rodata` 內容明細
+
+### 9.1 PE Program Arrays
+
+每個 layer 的 patched PE program array 佔用：
+
+```
+size_bytes = num_instructions × sizeof(uint16_t)  → 對齊到 4-byte boundary
+```
+
+例如：
+- `pe_prog_conv1[36]` → 36 × 2 = 72 bytes → aligned 72 B
+- `pe_prog_fc1[27]` → 27 × 2 = 54 bytes → aligned 56 B
+
+### 9.2 AGU Data Tables（data-driven 模式）
+
+若 codegen 使用 data-driven AGU 配置（見 [03_CodeGeneration.md §9.1](03_CodeGeneration.md)），每個 layer 的 AGU table 佔用：
+
+```
+4 banks × 15 registers × 2 words (reg + val) × 4 bytes = 480 bytes per layer
+```
+
+### 9.3 估算公式
+
+```
+rodata_total = Σ_layers ( pe_program_size_aligned + agu_table_size_if_datadriven )
+```
+
+---
+
+## 10. 與 Simulator 的介面契約
+
+### 10.1 ELF 載入規範
+
+Simulator 必須支援：
+
+1. **ELF32 Little-Endian RISC-V** 格式
+2. **多 segment 載入**：至少支援 2 個 LOAD segment（ISRAM + DSRAM）
+3. **BSS 零初始化**：`p_memsz > p_filesz` 的部分必須清零
+4. **Entry point**：PC 初始值設定為 `e_entry`（固定 0x00000000）
+
+### 10.2 Runtime 期望
+
+韌體執行期間，simulator 需要：
+
+1. **MMIO 存取路由正確**：Core.md §6.4 address map 全部實現
+2. **Cluster broadcast 一寫多達**：`CLUSTER_MASK` 所選的所有 cluster 都收到 write
+3. **HDDU_STATUS polling 返回正確值**：busy/done/error bit 正確反映 PE 執行狀態
+4. **`wfi` 指令**：停止 fetch，降低 simulation 資源消耗
+
+### 10.3 Completion 偵測
+
+外部 testbench 檢查韌體完成的方式：
+
+```
+方式 1: 觀察 PC == _start + trap_handler 永遠循環地址（wfi loop）
+方式 2: 觀察 CORE_STATUS register == 0x00000002（firmware done signal）
+方式 3: 觀察 ebreak 指令執行（若 main 使用 ebreak 取代 wfi）
+```
+
+推薦使用**方式 2**（MMIO status register），因為最明確且不依賴 PC 值。
