@@ -265,7 +265,7 @@ PE program 以 JSON template 格式管理，包含：
 - **輸入張量**：`[N, H, W, C_in]`（channels_last layout）
 - **權重張量**：`[OC, KH=3, KW=3, C_in]`
 - **輸出張量**：`[N, H_out, W_out, OC]`
-- **限制**：`C_in` 必須為 4 的倍數；`OC ≤ 16`
+- **限制**：`C_in` 必須為 4 的倍數；tile_ic=4, tile_oc=min(OC,16) 為固定 tile 維度
 
 ### 4.2 Conv2D 1×1
 
@@ -274,7 +274,7 @@ PE program 以 JSON template 格式管理，包含：
 - **輸入張量**：`[N, H, W, C_in]`
 - **權重張量**：`[OC, KH=1, KW=1, C_in]`
 - **輸出張量**：`[N, H_out, W_out, OC]`
-- **限制**：`C_in` 必須為 12 的倍數；`OC ≤ 16`
+- **限制**：`C_in` 必須為 12 的倍數；tile_ic=12, tile_oc=min(OC,16) 為固定 tile 維度
 
 ### 4.3 GEMM
 
@@ -348,8 +348,14 @@ class HardwareDesc:
     num_clusters: int    # 1..16
     num_pes: int         # per cluster
     num_bus: int         # per cluster
-    spm_size_bytes: int  # per cluster SPM
+    spm_banks_per_group: int  # SPM banks per group（參照 SPM.md）
+    spm_bank_depth: int       # words per bank（每 word = 8 bytes）
     dram_base: int       # external DRAM base
+
+    @property
+    def group_capacity(self) -> int:
+        """Per-group linear capacity (bytes) = banks_per_group × bank_depth × 8"""
+        return self.spm_banks_per_group * self.spm_bank_depth * 8
 
 @dataclass
 class WorkloadIR:
@@ -391,26 +397,68 @@ class HdduConfig:
     plane_mode: int            # software-defined mode flag
 
 @dataclass
+class SpmGroupLayout:
+    """Per-group SPM address layout (see SPM.md)."""
+    ping_base: int       # ping buffer 起始地址 (group-local byte offset)
+    pong_base: int       # pong buffer 起始地址
+    size: int            # 單個 buffer 的大小 (bytes)
+    pingpong: bool = True    # 強制 ping-pong（always True）
+    spm_mode: str = "linear" # "linear" or "parallel"（parallel 時 ping/pong 位於 parallel 地址範圍）
+
+@dataclass
+class SpmPerGroupLayout:
+    """4 Groups 各自的地址配置"""
+    ps: SpmGroupLayout   # Group 0 (weight / A)
+    pd: SpmGroupLayout   # Group 1 (activation / B)
+    pli: SpmGroupLayout  # Group 2 (partial-sum in)
+    plo: SpmGroupLayout  # Group 3 (partial-sum out)
+
+@dataclass
+class TilingResult:
+    """Tiling 搜尋結果"""
+    loop_dims: List[str]          # e.g., ["oc_tile", "h_tile", "w_tile", "ic_tile"]
+    loop_bounds: Dict[str, int]   # e.g., {"oc_tile": 1, "h_tile": 2, "w_tile": 1, "ic_tile": 1}
+    total_waves: int              # product of all loop bounds
+    reduction_dims: List[str]     # reduction 維度（Conv2D: ["ic_tile"], GEMM: ["k_tile"]）
+
+@dataclass
+class ClusterMapping:
+    """Multi-cluster spatial tile 分配"""
+    active_clusters: List[int]    # 參與計算的 cluster IDs
+    split_dim: Optional[str]      # 切分維度（e.g. "h_tile", "oc_tile", "n_tile"）
+    shared_tensor: Optional[str]  # 共用張量（e.g. "weight", "input", "A"）
+    tile_ranges: Dict[int, Tuple[int, int]]  # cluster_id → (tile_start, tile_end)
+
+@dataclass
 class LayerHwConfig:
     name: str
     op_type: str
 
     # Cluster config
     target_cluster_mask: int         # broadcast mask
-    spm_config_map: int              # SPM port → group mapping
+    spm_config_map: int              # SPM port → group mapping (default: 0xE4)
 
     # HDDU
     hddu: HdduConfig
-    agu_ps: AguBankConfig            # AGU bank 0 (weight / A)
-    agu_pd: AguBankConfig            # AGU bank 1 (activation / B)
-    agu_pli: AguBankConfig           # AGU bank 2 (partial-sum in)
-    agu_plo: AguBankConfig           # AGU bank 3 (partial-sum out)
+    agu_ps: AguBankConfig            # AGU bank 0 (weight / A) → Group 0
+    agu_pd: AguBankConfig            # AGU bank 1 (activation / B) → Group 1
+    agu_pli: AguBankConfig           # AGU bank 2 (partial-sum in) → Group 2
+    agu_plo: AguBankConfig           # AGU bank 3 (partial-sum out) → Group 3
 
     # NoC
     scan_chain: List[ScanChainEntry] # 反序 shift
     pe_program: PeProgramRef
 
-    # DMA descriptors (optional, for future DRAM tiling)
+    # SPM per-group layout（NEW: 取代 flat layout）
+    spm_layout: SpmPerGroupLayout
+
+    # Tiling（NEW）
+    tiling: Optional[TilingResult]   # None 表示整個 layer fit 進單一 wave
+
+    # Cluster mapping（NEW）
+    cluster_mapping: Optional[ClusterMapping]  # None 表示單 cluster
+
+    # DMA descriptors（含 ping-pong 目標地址）
     dma_transfers: List[Dict]
 
 @dataclass

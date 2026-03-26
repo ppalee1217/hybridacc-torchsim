@@ -164,7 +164,7 @@ GEMM 目前不需要額外屬性，傳入空 dict `{}` 即可。
 - `weight.shape` = `[OC, 3, 3, C_in]`
 - `output.shape` = `[N, H-2, W-2, OC]`（valid padding, stride=1）
 - `C_in` 必須為 4 的倍數（packing 要求）
-- `OC ≤ 16`（scan-chain 限制）
+- `OC > 16` 時由編譯器自動 tiling（tile_oc=16）
 
 **Conv2D 1×1：**
 - `weight.shape` = `[OC, 1, 1, C_in]`
@@ -541,6 +541,15 @@ void main(void) {
 
 **原因**：PE instruction payload 為 10-bit，value - 1 必須 ≤ 1023。
 **修正**：調整 tensor 維度以使參數在範圍內。
+
+#### E009：SPM/AGU Mode Mismatch
+
+```
+[ERROR] E009: conv1x1: group PS has spm_mode=linear but AGU ultra=True
+```
+
+**原因**：SPM parallel mode 與 AGU ultra mode 必須同時啟用或同時關閉。Conv2D 1×1 和 GEMM 的 PS/PLI/PLO 須為 Parallel + Ultra，PD 須為 Linear + Normal；Conv2D 3×3 全部 Linear + Normal。
+**修正**：確認 operator template 正確匹配 SPM/AGU 模式（見 [02_OperatorLowering.md §7](02_OperatorLowering.md)）。
 
 #### E010：I-SRAM Overflow
 

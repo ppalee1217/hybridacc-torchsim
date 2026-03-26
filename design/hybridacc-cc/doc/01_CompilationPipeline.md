@@ -61,9 +61,11 @@ name: "resnet_block_1"
 
 hardware:
   num_clusters: 4
-  num_pes: 64         # per cluster
-  num_bus: 4           # per cluster
-  spm_size_bytes: 32768  # 32 KB per cluster
+  num_pes: 64              # per cluster
+  num_bus: 4                # per cluster
+  spm_banks_per_group: 3   # SPM banks per group（參照 SPM.md）
+  spm_bank_depth: 4096     # words per bank（每 word = 8 bytes）
+  # 衍生值：group_capacity = 3 × 4096 × 8 = 96 KB/group
   dram_base: 0x80000000
 
 ops:
@@ -136,7 +138,8 @@ ops:
 | `num_clusters` | int | 是 | — | 1 ≤ n ≤ 16 |
 | `num_pes` | int | 否 | 64 | 1 ≤ n ≤ 256，必須為 2 的冪 |
 | `num_bus` | int | 否 | 4 | 1 ≤ n ≤ 16 |
-| `spm_size_bytes` | int | 否 | 32768 | ≥ 4096，必須為 2 的冪 |
+| `spm_banks_per_group` | int | 否 | 3 | 1 ≤ n ≤ 8，SPM 每 Group 的 bank 數（參照 SPM.md） |
+| `spm_bank_depth` | int | 否 | 4096 | ≥ 1024，必須為 2 的冪，每 bank 的 word 數 |
 | `dram_base` | int | 否 | 0x80000000 | 4KB 對齊 |
 
 #### 每個 `ops[]` 項目
@@ -179,7 +182,8 @@ Frontend 除了 schema 驗證外，還必須執行以下語意檢查：
 2. **通道對齊**：conv2d_3x3 的 `C_in` 必須為 4 的倍數；conv2d_1x1 的 `C_in` 必須為 12 的倍數。
 3. **輸出形狀**：`H_out = (H_in + 2*padding - KH) / stride + 1`，必須為正整數。
 4. **GEMM 維度**：`A.shape[1]` 必須等於 `B.shape[0]`；`C.shape = [A.shape[0], B.shape[1]]`。
-5. **SPM 容量**：各 layer 所需的 working set 不超過 `spm_size_bytes`（初版不做精確檢查，只做粗估 warning）。
+5. **SPM 容量（強制 ping-pong 檢查）**：各 layer 經 tiling 後的 wave tile，其 PS/PD/PLI/PLO 各自的 buffer size 不得超過 SPM Group 的半容量（`half_group_capacity = spm_banks_per_group × spm_bank_depth × 8 / 2`）。所有 Group 強制使用 ping-pong 雙緩衝，不存在降級模式。檢查失敗為 hard error（`E_SPM_HALF_CAP_OVERFLOW`）。
+6. **SPM/AGU 模式一致性**：Conv2D 1×1 與 GEMM 的 PS/PLI/PLO 必須使用 SPM Parallel Mode + AGU ultra mode（`CTRL.bit3=1`），PD 必須使用 Linear Mode + Normal mode。Conv2D 3×3 全部使用 Linear + Normal。不匹配為 hard error（`E_SPM_ULTRA_MODE_MISMATCH`）。
 
 ### 2.5 輸出
 
@@ -204,12 +208,16 @@ Frontend 除了 schema 驗證外，還必須執行以下語意檢查：
 此階段是整個編譯器最核心的演算法階段，負責：
 
 1. 決定每個 layer 的 PE kernel template 選擇
-2. 計算 template patch 參數
-3. 計算 4 個 AGU bank 的完整暫存器配置
-4. 計算 scan-chain 配置（PE router 連線拓撲）
-5. 決定 cluster mask（哪些 cluster 參與此 layer）
-6. 計算 SPM 地址分配（weight / activation / partial-sum / output 在 SPM 中的 base address）
-7. 生成 DMA 描述子（若需從 DRAM 搬運資料）
+2. 計算 tiling 參數（wave tile 維度，受 per-group SPM 容量約束）
+3. 計算 SPM per-group address layout（含 ping-pong 雙緩衝地址配置）
+4. 精確驗證每個 SPM Group 的容量（hard error，非粗估 warning）
+5. 計算 multi-cluster mapping（spatial tile → cluster 的分配策略）
+6. 計算 PE template patch 參數（基於 tiled 維度，而非原始張量維度）
+7. 計算 4 個 AGU bank 的完整暫存器配置（per-group base address + ping/pong 交替）
+8. 計算 scan-chain 配置（PE router 連線拓撲）
+9. 計算 temporal schedule（wave loop 結構 + DMA/compute overlap 流水線）
+10. 決定 cluster mask（依 multi-cluster mapping 決定）
+11. 生成 DMA 描述子（配合 ping-pong 目標地址）
 
 ### 3.2 演算法概述
 
@@ -218,25 +226,37 @@ def lower_op(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
     # 1. 根據 op_type 選擇 PE kernel template
     template = select_pe_template(op.op_type)
 
-    # 2. 計算 tiling 參數（若張量超過 SPM 容量）
-    tiling = compute_tiling(op, hw)
+    # 2. 計算 SPM per-group 容量
+    group_capacity = hw.spm_banks_per_group * hw.spm_bank_depth * 8
 
-    # 3. 計算 SPM layout（各 buffer 的 base address）
-    spm_layout = compute_spm_layout(op, hw, tiling)
+    # 3. 計算 tiling（wave tile 維度，受 per-group 容量約束）
+    tiling = compute_tiling(op, hw, group_capacity)
 
-    # 4. 計算 4 個 AGU bank 配置
-    agu_configs = compute_agu_configs(op, spm_layout, tiling)
+    # 4. 計算 SPM per-group layout（含 ping-pong 地址配置）
+    spm_layout = compute_spm_layout(op, hw, tiling, group_capacity)
 
-    # 5. 計算 scan-chain（PE router 拓撲）
-    scan_chain = compute_scan_chain(hw.num_pes, hw.num_bus, op.op_type)
+    # 5. 精確驗證 per-group SPM 容量
+    validate_per_group_capacity(spm_layout, group_capacity)
 
-    # 6. 計算 PE template patch 參數
+    # 6. 計算 multi-cluster mapping（spatial tile → cluster 分配）
+    cluster_mapping = compute_cluster_mapping(op, hw, tiling)
+
+    # 7. 計算 PE template patch 參數（基於 tiled 維度）
     pe_params = compute_pe_params(op, tiling, hw)
 
-    # 7. 決定 cluster mask
-    cluster_mask = compute_cluster_mask(hw.num_clusters)
+    # 8. 計算 4 個 AGU bank 配置（per-group base address + ping/pong）
+    agu_configs = compute_agu_configs(op, spm_layout, tiling)
 
-    # 8. 組裝完整 LayerHwConfig
+    # 9. 計算 scan-chain（PE router 拓撲）
+    scan_chain = compute_scan_chain(hw.num_pes, hw.num_bus, op.op_type)
+
+    # 10. 計算 temporal schedule（wave loop + DMA/compute overlap）
+    schedule = compute_temporal_schedule(tiling, cluster_mapping)
+
+    # 11. 決定 cluster mask
+    cluster_mask = compute_cluster_mask(cluster_mapping)
+
+    # 12. 組裝完整 LayerHwConfig
     return LayerHwConfig(...)
 ```
 
@@ -532,7 +552,11 @@ ENTRY(_start)
 | E003 | `SHAPE_MISMATCH` | Stage 0 | 張量形狀不一致 |
 | E004 | `UNSUPPORTED_OP` | Stage 1 | 不支援的算子類型 |
 | E005 | `CHANNEL_ALIGN_ERROR` | Stage 1 | 通道數不符 PE kernel 要求 |
-| E006 | `TILING_FAILED` | Stage 1 | 無法 fit SPM |
+| E006 | `TILING_FAILED` | Stage 1 | 無法找到任何 fit SPM per-group 容量的 tile 組合 |
+| E012 | `SPM_HALF_CAP_OVERFLOW` | Stage 1 | SPM 半容量不足（wave tile > half_group_capacity，無法滿足強制 ping-pong） |
+| E013 | `CLUSTER_REDUCTION_SPLIT` | Stage 1 | Multi-cluster 沿 reduction 維度切分（IC/K），會導致跨 cluster partial sum |
+| E014 | `CLUSTER_MAPPING_FAILED` | Stage 1 | 無法將 spatial tiles 分配到 clusters |
+| E015 | `AGU_ADDR_OVERLAP` | Stage 1 | Ping/pong buffer 地址空間重疊 |
 | E007 | `PE_TEMPLATE_NOT_FOUND` | Stage 3 | 找不到指定的 PE kernel JSON |
 | E008 | `GCC_NOT_FOUND` | Stage 4 | 交叉編譯器缺失 |
 | E009 | `ISRAM_OVERFLOW` | Stage 4 | Firmware text 超過 I-SRAM 容量 |
