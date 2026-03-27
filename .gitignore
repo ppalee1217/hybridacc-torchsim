@@ -51,3 +51,8 @@ packages/
 **/__pycache__/
 **/*.egg-info/
 uv.lock
+
+# RTL simulation files
+design/hybridacc-RTL/sim/
+design/hybridacc-RTL/csrc/
+design/hybridacc-RTL/ucli.key
