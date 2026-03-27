@@ -1,119 +1,154 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Exit on error
-set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="${SCRIPT_DIR}/install"
 
-# Project Root
-PROJECT_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
-PACKAGES_DIR="$PROJECT_ROOT/packages"
-LIBS_DIR="$PROJECT_ROOT/libs"
-SYSTEMC_VERSION="2.3.3"
+usage() {
+    cat <<EOF
+Usage:
+  scripts/setup.sh all [--riscv-prefix PATH] [--no-source]
+  scripts/setup.sh install <systemc|riscv|pe|python|all> [tool options]
+  scripts/setup.sh env [--riscv-prefix PATH] [--no-source]
+  scripts/setup.sh fast <cluster-sim|noc-sim|pe-sim|cluster-test|run-test> [args...]
 
-SYSTEMC_PACKAGE="$PACKAGES_DIR/systemc-$SYSTEMC_VERSION"
-SYSTEMC_LIB="$LIBS_DIR/systemc-$SYSTEMC_VERSION"
+Examples:
+  scripts/setup.sh all
+  scripts/setup.sh install riscv --prefix \$HOME/.local/riscv
+  scripts/setup.sh env --riscv-prefix \$HOME/.local/riscv
+  scripts/setup.sh fast cluster-sim run conv_k3c4
+EOF
+}
 
-# 1. Setup SystemC
-echo "=== 1 ==="
-echo "Setting up SystemC..."
+run_install() {
+    local target="$1"
+    shift || true
 
-if [ -d "$SYSTEMC_PACKAGE" ]; then
-    echo "SystemC directory already exists at $SYSTEMC_PACKAGE. Skipping download and extraction."
-else
-    echo "SystemC not found. Creating libs directory..."
-    mkdir -p "$PACKAGES_DIR"
+    case "${target}" in
+        systemc)
+            "${INSTALL_DIR}/install_systemc.sh" "$@"
+            ;;
+        riscv)
+            "${INSTALL_DIR}/install_riscv_toolchain.sh" "$@"
+            ;;
+        pe)
+            "${INSTALL_DIR}/install_hybridacc_pe_toolchain.sh" "$@"
+            ;;
+        python)
+            "${INSTALL_DIR}/install_python_project.sh" "$@"
+            ;;
+        all)
+            "${INSTALL_DIR}/install_systemc.sh"
+            "${INSTALL_DIR}/install_riscv_toolchain.sh"
+            "${INSTALL_DIR}/install_hybridacc_pe_toolchain.sh"
+            "${INSTALL_DIR}/install_python_project.sh"
+            ;;
+        *)
+            echo "Unknown install target: ${target}"
+            usage
+            exit 1
+            ;;
+    esac
+}
 
-    cd "$PACKAGES_DIR"
+run_fast_entry() {
+    local target="$1"
+    shift || true
+    case "${target}" in
+        cluster-sim)
+            exec "${SCRIPT_DIR}/fast_entry/cluster_sim.sh" "$@"
+            ;;
+        noc-sim)
+            exec "${SCRIPT_DIR}/fast_entry/noc_sim.sh" "$@"
+            ;;
+        pe-sim)
+            exec "${SCRIPT_DIR}/fast_entry/pe_sim.sh" "$@"
+            ;;
+        cluster-test)
+            exec "${SCRIPT_DIR}/fast_entry/cluster_test.sh" "$@"
+            ;;
+        run-test)
+            exec "${SCRIPT_DIR}/fast_entry/run_test.sh" "$@"
+            ;;
+        *)
+            echo "Unknown fast entry target: ${target}"
+            usage
+            exit 1
+            ;;
+    esac
+}
 
-    echo "Downloading SystemC $SYSTEMC_VERSION..."
-    # Check for wget or curl
-    if command -v wget &> /dev/null; then
-        wget -c "https://www.accellera.org/images/downloads/standards/systemc/systemc-$SYSTEMC_VERSION.tar.gz" -O systemc.tar.gz
-    elif command -v curl &> /dev/null; then
-        curl -L "https://www.accellera.org/images/downloads/standards/systemc/systemc-$SYSTEMC_VERSION.tar.gz" -o systemc.tar.gz
-    else
-        echo "Error: Neither wget nor curl found. Please install one of them."
+if [[ $# -eq 0 ]]; then
+    usage
+    exit 1
+fi
+
+CMD="$1"
+shift
+
+case "${CMD}" in
+    all)
+        RISCV_PREFIX="${HOME}/.local/riscv"
+        NO_SOURCE=0
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --riscv-prefix)
+                    RISCV_PREFIX="$2"
+                    shift 2
+                    ;;
+                --no-source)
+                    NO_SOURCE=1
+                    shift
+                    ;;
+                *)
+                    echo "Unknown option for all: $1"
+                    usage
+                    exit 1
+                    ;;
+            esac
+        done
+
+        run_install all
+        if [[ "${NO_SOURCE}" == "1" ]]; then
+            "${INSTALL_DIR}/configure_shell_env.sh" --riscv-prefix "${RISCV_PREFIX}" --no-source
+        else
+            "${INSTALL_DIR}/configure_shell_env.sh" --riscv-prefix "${RISCV_PREFIX}"
+        fi
+        ;;
+
+    install)
+        if [[ $# -lt 1 ]]; then
+            echo "Missing install target"
+            usage
+            exit 1
+        fi
+        TARGET="$1"
+        shift
+        run_install "${TARGET}" "$@"
+        ;;
+
+    env)
+        "${INSTALL_DIR}/configure_shell_env.sh" "$@"
+        ;;
+
+    fast)
+        if [[ $# -lt 1 ]]; then
+            echo "Missing fast entry target"
+            usage
+            exit 1
+        fi
+        TARGET="$1"
+        shift
+        run_fast_entry "${TARGET}" "$@"
+        ;;
+
+    -h|--help|help)
+        usage
+        ;;
+
+    *)
+        echo "Unknown command: ${CMD}"
+        usage
         exit 1
-    fi
-
-    # The tarball usually extracts to systemc-2.3.3
-    echo "Extracting SystemC..."
-    tar -xzf systemc.tar.gz
-
-    # Clean up tarball
-    rm systemc.tar.gz
-fi
-
-if [ -d "$SYSTEMC_LIB" ]; then
-    echo "SystemC already installed at $SYSTEMC_LIB"
-else
-    echo "Installing SystemC..."
-
-    mkdir -p "$SYSTEMC_PACKAGE"/build
-    cd "$SYSTEMC_PACKAGE"/build
-    cmake "$SYSTEMC_PACKAGE" -DCMAKE_INSTALL_PREFIX="$SYSTEMC_LIB" -DCMAKE_CXX_STANDARD=17
-    make -j$(nproc)
-    make install
-    rm -rf "$SYSTEMC_PACKAGE"/build
-
-    echo "SystemC setup complete."
-fi
-
-# 2. Set SYSTEMC_LIB environment variable
-echo "=== 2 ==="
-echo "Setting SYSTEMC_LIB environment variable..."
-if grep -q "export SYSTEMC_LIB=" ~/.bashrc; then
-    echo "SYSTEMC_LIB already set in ~/.bashrc. Updating value..."
-    sed -i "s|export SYSTEMC_LIB=.*|export SYSTEMC_LIB=$SYSTEMC_LIB|" ~/.bashrc
-else
-    echo "Adding SYSTEMC_LIB to ~/.bashrc..."
-    echo "export SYSTEMC_LIB=$SYSTEMC_LIB" >> ~/.bashrc
-fi
-
-# 3. Setup uv env
-echo "=== 3 ==="
-echo "Setting up uv environment..."
-
-# Check if uv is installed
-if ! command -v uv &> /dev/null; then
-    echo "uv not found. Installing uv..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-
-    # Add uv to PATH for the current session if it was just installed
-    if [ -f "$HOME/.cargo/env" ]; then
-        source "$HOME/.cargo/env"
-    elif [ -f "$HOME/.local/bin/env" ]; then
-         export PATH="$HOME/.local/bin:$PATH"
-    fi
-fi
-
-# Create virtual environment and install dependencies
-# Assuming the python project is in python/ directory
-if [ -d "$PROJECT_ROOT/python" ]; then
-    echo "Setting up Python environment in $PROJECT_ROOT..."
-    cd "$PROJECT_ROOT"
-
-    # Create venv if it doesn't exist
-    if [ ! -d ".venv" ]; then
-        uv venv
-    else
-        echo "Virtual environment already exists."
-    fi
-
-    # Activate venv
-    source .venv/bin/activate
-
-    # Prefer modern pyproject at repo root; fall back to python/setup.py editable install
-    if [ -f "$PROJECT_ROOT/pyproject.toml" ]; then
-        echo "Installing python package from project root (pyproject.toml)..."
-        uv pip install -e .
-    else
-        echo "Warning: no pyproject.toml or python/setup.py found; skipping python install."
-    fi
-
-    echo "uv environment setup complete."
-else
-    echo "Warning: python directory not found. Skipping python setup."
-fi
-
-echo "Setup script finished successfully."
-echo "Please run 'source ~/.bashrc' to apply environment variable changes."
+        ;;
+esac

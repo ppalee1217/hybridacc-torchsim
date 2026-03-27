@@ -430,6 +430,60 @@ class ClusterMapping:
     tile_ranges: Dict[int, Tuple[int, int]]  # cluster_id → (tile_start, tile_end)
 
 @dataclass
+class TilingParams:
+    """Compile-time 萃取的 tiling 常數 — firmware runtime 以 base + idx × stride 計算 per-wave 配置.
+
+    取代舊版的 WaveConfig[] + DmaTransferDesc[] (O(waves))，
+    改為 O(1) compile-time 常數 + runtime 乘加推導。
+    """
+    # Loop bounds (for oc, h, w, ic nested loop)
+    num_oc_tiles: int
+    num_h_tiles: int
+    num_w_tiles: int              # GEMM 設 1
+    num_ic_tiles: int             # Conv2D: IC, GEMM: K (reduction dim)
+
+    # SPM ping/pong base per group [PS, PD, PLI, PLO]
+    spm_ping: List[int]           # 4 elements
+    spm_pong: List[int]           # 4 elements
+
+    # AGU ping/pong base per bank [PS, PD, PLI, PLO]
+    agu_ping: List[int]           # 4 elements
+    agu_pong: List[int]           # 4 elements
+
+    # SPM group mapping (PLI/PLO swap)
+    spm_map_even: int             # ic even → 0xE4
+    spm_map_odd: int              # ic odd  → 0xD8
+
+    # DRAM base addresses
+    dram_weight_base: int
+    dram_input_base: int
+    dram_output_base: int
+
+    # DRAM strides (per tile index increment)
+    dram_ps_oc_stride: int
+    dram_ps_ic_stride: int
+    dram_pd_h_stride: int
+    dram_pd_w_stride: int
+    dram_pd_ic_stride: int
+    dram_out_oc_stride: int
+    dram_out_h_stride: int
+    dram_out_w_stride: int
+
+    # DMA word counts (constant per wave)
+    dma_ps_words: int
+    dma_pd_words: int
+    dma_plo_words: int
+
+    # Weight reuse
+    ps_reuse_across_spatial: bool
+
+    # Parallel-mode DMA
+    bank_depth_bytes: int
+    parallel_groups: int          # bitmask
+    dma_ps_words_per_bank: int
+    dma_plo_words_per_bank: int
+
+@dataclass
 class LayerHwConfig:
     name: str
     op_type: str
@@ -458,8 +512,9 @@ class LayerHwConfig:
     # Cluster mapping（NEW）
     cluster_mapping: Optional[ClusterMapping]  # None 表示單 cluster
 
-    # DMA descriptors（含 ping-pong 目標地址）
-    dma_transfers: List[Dict]
+    # Tiling parameters — compile-time 常數（取代舊版 waves: List[WaveConfig]）
+    # firmware runtime 以 base + idx × stride 從 TilingParams 動態計算 per-wave 配置
+    tiling_params: TilingParams
 
 @dataclass
 class HardwareIR:

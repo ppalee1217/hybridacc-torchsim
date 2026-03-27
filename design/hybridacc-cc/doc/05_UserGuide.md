@@ -11,22 +11,32 @@
 | 項目 | 要求 |
 |------|------|
 | OS | Linux x86_64（Ubuntu 20.04+ 或同等） |
-| Python | 3.8+ |
+| Python | 3.12+（由 uv 自動管理） |
+| uv | 0.4+（[安裝指南](https://docs.astral.sh/uv/getting-started/installation/)） |
 | RISC-V GCC | `riscv32-unknown-elf-gcc` 12.x+（含 `rv32i_zicsr` support） |
 | PE ISA Toolchain | `ha-asm`, `ha-objdump`, `ha-package`（來自 `hybridacc_tools`） |
 
 ### 1.2 安裝 hybridacc-cc
 
-hybridacc-cc 作為 `hybridacc_tools` Python monorepo 的一部分，使用 pip 安裝：
+hybridacc-cc 作為 `hybridacc_tools` Python monorepo 的一部分，使用 uv 安裝：
 
 ```bash
 cd /path/to/HybridAcc
-pip install -e .
+uv sync
 ```
 
-安裝後，`hacc-compile` CLI 命令即可使用：
+`uv sync` 會自動建立 `.venv`（若不存在）、安裝 Python 3.12+ 並以 editable mode 安裝所有依賴。
+
+安裝後，透過 `uv run` 執行 CLI 命令：
 
 ```bash
+uv run hacc-compile --help
+```
+
+或先啟動 venv 後直接使用：
+
+```bash
+source .venv/bin/activate
 hacc-compile --help
 ```
 
@@ -44,6 +54,12 @@ riscv32-unknown-elf-gcc -march=rv32i_zicsr -mabi=ilp32 -E -x c /dev/null
 ```
 
 若未安裝，參考 [RISC-V GNU Toolchain](https://github.com/riscv-collab/riscv-gnu-toolchain) 建置。
+或是使用 `scripts/install/install_riscv_toolchain.sh`：
+
+```bash
+cd /path/to/HybridAcc
+scripts/install/install_riscv_toolchain.sh
+```
 
 ### 1.4 確認 PE ISA Toolchain
 
@@ -52,7 +68,7 @@ ha-asm --help
 ha-package --help
 ```
 
-若未安裝，同樣透過 `pip install -e .` 在 HybridAcc 根目錄安裝。
+若未安裝，同樣透過 `uv sync` 在 HybridAcc 根目錄安裝。
 
 ---
 
@@ -184,13 +200,13 @@ GEMM 目前不需要額外屬性，傳入空 dict `{}` 即可。
 ### 3.1 基本用法
 
 ```bash
-hacc-compile workload.yaml -o output_dir/
+uv run hacc-compile workload.yaml -o output_dir/
 ```
 
 ### 3.2 完整 CLI 參數
 
 ```bash
-hacc-compile [OPTIONS] WORKLOAD_YAML
+uv run hacc-compile [OPTIONS] WORKLOAD_YAML
 
 位置引數:
   WORKLOAD_YAML          Workload YAML 檔案路徑
@@ -214,9 +230,10 @@ hacc-compile [OPTIONS] WORKLOAD_YAML
 output_dir/
 ├── firmware.elf               # 最終 ELF 韌體映像
 ├── firmware_main.c            # 主程式原始碼（可審查）
-├── firmware_layers.c          # Layer 函數原始碼
-├── firmware_hw.h              # 硬體抽象 header
-├── firmware_payload.h         # PE payload 數據 header
+├── firmware_data.c            # Per-layer config struct table (.rodata)
+├── firmware_ops.c             # 共用 runtime 函式（run_layer, wave loop, DMA）
+├── firmware_hw.h              # 硬體抽象 header（含 DMA MMIO）
+├── firmware_payload.h         # PE template + scan chain + patch 描述表
 ├── linker.ld                  # Linker script
 ├── workload_ir.json           # (--dump-ir) WorkloadIR
 ├── hardware_ir.json           # (--dump-ir) HardwareIR
@@ -260,7 +277,7 @@ ops:
 #### Step 2：編譯
 
 ```bash
-hacc-compile simple_conv.yaml -o build/ --dump-ir -v
+uv run hacc-compile simple_conv.yaml -o build/ --dump-ir -v
 ```
 
 #### Step 3：預期輸出
@@ -271,7 +288,7 @@ hacc-compile simple_conv.yaml -o build/ --dump-ir -v
 [INFO] Stage 1: Lowering to HardwareIR ...
 [INFO]   conv1: template=conv1d_k3c4s1, num_pes=16, spm_total=8960 B
 [INFO] Stage 2: Generating C firmware ...
-[INFO]   Generated 4 files: firmware_main.c, firmware_layers.c, firmware_hw.h, firmware_payload.h
+[INFO]   Generated 5 files: firmware_main.c, firmware_data.c, firmware_ops.c, firmware_hw.h, firmware_payload.h
 [INFO] Stage 3: Preparing PE payloads ...
 [INFO]   conv1: 36 instructions, 5 patches applied
 [INFO] Stage 4: Compiling ELF ...
@@ -289,7 +306,7 @@ hacc-compile simple_conv.yaml -o build/ --dump-ir -v
 
 ```bash
 # 查看生成的 C 程式碼
-cat build/firmware_layers.c
+cat build/firmware_data.c
 
 # 查看 HardwareIR
 cat build/hardware_ir.json | python -m json.tool
@@ -340,7 +357,7 @@ ops:
 #### Step 2：編譯
 
 ```bash
-hacc-compile mixed_network.yaml -o build_mixed/ --dump-ir -v
+uv run hacc-compile mixed_network.yaml -o build_mixed/ --dump-ir -v
 ```
 
 #### Step 3：預期韌體行為
@@ -451,7 +468,7 @@ void main(void) {
   "stages": {
     "frontend": {"status": "ok", "ops_count": 3},
     "lowering": {"status": "ok", "layers_count": 3},
-    "codegen": {"status": "ok", "files": ["firmware_main.c", "firmware_layers.c", "firmware_hw.h", "firmware_payload.h"]},
+    "codegen": {"status": "ok", "files": ["firmware_main.c", "firmware_data.c", "firmware_ops.c", "firmware_hw.h", "firmware_payload.h"]},
     "pe_prep": {"status": "ok", "payloads": 3},
     "elf_link": {"status": "ok", "gcc_return_code": 0}
   },
@@ -576,7 +593,7 @@ void main(void) {
 
 ```bash
 # 生成 IR dump 但不編譯
-hacc-compile workload.yaml -o debug/ --dump-ir --no-compile
+uv run hacc-compile workload.yaml -o debug/ --dump-ir --no-compile
 
 # 查看 lowering 結果
 python -m json.tool debug/hardware_ir.json
@@ -627,7 +644,7 @@ cd /path/to/HybridAcc/output/cluster-sim/
 若韌體需要更大的 call stack（例如使用了較深的 helper function 嵌套）：
 
 ```bash
-hacc-compile workload.yaml -o build/ --stack-size 8192
+uv run hacc-compile workload.yaml -o build/ --stack-size 8192
 ```
 
 ### 7.2 指定 GCC 路徑
@@ -635,7 +652,7 @@ hacc-compile workload.yaml -o build/ --stack-size 8192
 若系統安裝了多個版本的 RISC-V GCC：
 
 ```bash
-hacc-compile workload.yaml -o build/ \
+uv run hacc-compile workload.yaml -o build/ \
   --gcc /opt/riscv/bin/riscv32-unknown-elf-gcc
 ```
 
@@ -645,10 +662,10 @@ hacc-compile workload.yaml -o build/ \
 
 ```bash
 # 只生成 .c/.h，不呼叫 GCC
-hacc-compile workload.yaml -o build/ --no-compile
+uv run hacc-compile workload.yaml -o build/ --no-compile
 
-# 手動修改 firmware_layers.c（若需要）
-vim build/firmware_layers.c
+# 手動修改 firmware_data.c（若需要調整 per-layer 參數）
+vim build/firmware_data.c
 
 # 手動編譯
 cd build/
@@ -658,13 +675,13 @@ riscv32-unknown-elf-gcc \
     -Wl,--gc-sections \
     -ffunction-sections -fdata-sections \
     -T linker.ld -I . \
-    -o firmware.elf firmware_main.c firmware_layers.c
+    -o firmware.elf firmware_main.c firmware_data.c firmware_ops.c
 ```
 
 ### 7.4 Debug Build（無最佳化）
 
 ```bash
-hacc-compile workload.yaml -o build_debug/ --opt-level 0 -v
+uv run hacc-compile workload.yaml -o build_debug/ --opt-level 0 -v
 ```
 
 `-O0` 產生的 code 較大但保留所有 debug info，方便使用 GDB 或 simulator trace 對照。
@@ -708,13 +725,13 @@ v0.1 產生的 ELF 設計為 simulator 驗證用途。FPGA / ASIC 的 boot loade
 │                                                             │
 │  1. 撰寫 workload.yaml                                      │
 │     ↓                                                       │
-│  2. hacc-compile workload.yaml -o build/ --dump-ir -v       │
+│  2. uv run hacc-compile workload.yaml -o build/ --dump-ir -v│
 │     ↓                                                       │
 │  3. 檢查 compile_report.json 確認無錯誤                       │
 │     ↓                                                       │
 │  4. (Optional) 檢查 hardware_ir.json 確認 lowering 正確       │
 │     ↓                                                       │
-│  5. (Optional) 檢查 firmware_layers.c 確認 MMIO 序列          │
+│  5. (Optional) 檢查 firmware_data.c 確認 layer/wave 配置       │
 │     ↓                                                       │
 │  6. 載入 firmware.elf 到 simulator 驗證                       │
 │     ↓                                                       │

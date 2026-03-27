@@ -84,10 +84,12 @@ I-SRAM (0x0000_0000 .. 0x0000_3FFF):
 
 Data-SRAM (0x1000_0000 .. 0x1000_FFFF):
 ┌─────────────────────────┐  0x1000_0000
-│ .rodata                 │    pe_prog_conv1[]
-│                         │    pe_prog_conv2[]
-│                         │    pe_prog_fc1[]
-│                         │    (其他常數表)
+│ .rodata                 │    pe_tmpl_conv1d_k3c4s1[]
+│                         │    noc_scan_chain_64pe[]
+│                         │    patch_conv1[] (PePatchEntry)
+│                         │    layer_configs[] (LayerConfig)
+│                         │      含 TilingParams (compile-time 常數)
+│                         │      O(1) per layer, 不再有 wave_cfgs/dma_descs
 ├─────────────────────────┤
 │ .data                   │    已初始化全域變數
 ├─────────────────────────┤
@@ -225,7 +227,7 @@ riscv32-unknown-elf-gcc \
     -T linker.ld \
     -I . \
     -o firmware.elf \
-    firmware_main.c firmware_layers.c
+    firmware_main.c firmware_data.c firmware_ops.c
 ```
 
 ### 5.2 參數解釋
@@ -262,7 +264,14 @@ riscv32-unknown-elf-gcc \
     -nostdlib -ffreestanding -O2 \
     -ffunction-sections -fdata-sections \
     -I . \
-    -c firmware_layers.c -o firmware_layers.o
+    -c firmware_data.c -o firmware_data.o
+
+riscv32-unknown-elf-gcc \
+    -march=rv32i_zicsr -mabi=ilp32 \
+    -nostdlib -ffreestanding -O2 \
+    -ffunction-sections -fdata-sections \
+    -I . \
+    -c firmware_ops.c -o firmware_ops.o
 
 # Step 2: Link .o → .elf
 riscv32-unknown-elf-gcc \
@@ -270,7 +279,7 @@ riscv32-unknown-elf-gcc \
     -nostdlib -ffreestanding \
     -Wl,--gc-sections \
     -T linker.ld \
-    -o firmware.elf firmware_main.o firmware_layers.o
+    -o firmware.elf firmware_main.o firmware_data.o firmware_ops.o
 ```
 
 ### 5.4 Size Report
@@ -425,25 +434,35 @@ def validate_elf(elf_path: str,
 
 ## 9. `.rodata` 內容明細
 
-### 9.1 PE Program Arrays
+### 9.1 PE Template + Patch + Scan Chain Arrays
 
-每個 layer 的 patched PE program array 佔用：
+Data-driven 架構下，`.rodata` 包含共用的 PE template、pre-encoded scan chain、以及 per-layer 的 patch descriptor和 config struct：
 
 ```
-size_bytes = num_instructions × sizeof(uint16_t)  → 對齊到 4-byte boundary
+PE template:  num_instructions × sizeof(uint16_t)  → 對齊到 4-byte boundary
+Scan chain:   num_pes × sizeof(uint32_t)
+Patch entries: patch_count × 3 bytes (offset + encoded_val)
 ```
 
 例如：
-- `pe_prog_conv1[36]` → 36 × 2 = 72 bytes → aligned 72 B
-- `pe_prog_fc1[27]` → 27 × 2 = 54 bytes → aligned 56 B
+- `pe_tmpl_conv1d_k3c4s1[36]` → 36 × 2 = 72 bytes → aligned 72 B（多 layer 共用）
+- `noc_scan_chain_64pe[64]` → 64 × 4 = 256 bytes（同 topology 共用）
+- `patch_conv1[5]` → 5 × 3 = 15 bytes → aligned 16 B
 
-### 9.2 AGU Data Tables（data-driven 模式）
+### 9.2 Layer Config Tables（Compile-time + Runtime 協同）
 
-若 codegen 使用 data-driven AGU 配置（見 [03_CodeGeneration.md §9.1](03_CodeGeneration.md)），每個 layer 的 AGU table 佔用：
+Data-driven 架構的主要 .rodata 開銷（見 [03_CodeGeneration.md §9](03_CodeGeneration.md)）：
 
 ```
-4 banks × 15 registers × 2 words (reg + val) × 4 bytes = 480 bytes per layer
+LayerConfig（含 TilingParams）:  ~280 bytes per layer
+    其中 TilingParams:           ~128 bytes（compile-time 常數: loop bounds, strides, bases）
+
+不再存在:
+    WaveConfig:   已由 runtime 計算取代（舊版 ~28 bytes per wave）
+    DmaTransferDesc: 已由 runtime 計算取代（舊版 ~16 bytes per descriptor）
 ```
+
+> .rodata 大小為 **O(layers)**，不再與 wave 數量相關。即使某 layer 有 1000 個 wave，仍為 ~280 B。
 
 ### 9.3 估算公式
 

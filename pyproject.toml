@@ -7,6 +7,7 @@ dependencies = [
     "numpy",
     "torch",
     "pyyaml",
+    "jinja2>=3.1",
     "pandas>=2.0.3",
     "matplotlib>=3.7.5",
     "textual>=0.70.0",
@@ -14,10 +15,19 @@ dependencies = [
     "tqdm>=4.67.3",
 ]
 
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+package = true
+
 [project.scripts]
 log-parser = "log_parser.cli:main"
 trace-parser = "trace_parser.cli:main"
+hacc-compile = "hybridacc_cc.cli:main"
+hacc-setup = "hybridacc_cc.setup_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["./python"]
-include = ["hybridacc_verify*", "trace_parser*", "log_parser*"]
+include = ["hybridacc_verify*", "trace_parser*", "log_parser*", "hybridacc_cc*"]

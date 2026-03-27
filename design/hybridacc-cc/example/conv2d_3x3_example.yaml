@@ -1,0 +1,35 @@
+# HybridAcc-CC Workload: Conv2D 3x3 Example
+# Usage: hacc-compile conv2d_3x3_example.yaml -o build/
+
+name: conv2d_3x3_example
+
+hardware:
+  num_clusters: 4
+  num_pes: 64
+  num_bus: 4
+  spm_banks_per_group: 3
+  spm_bank_depth: 4096
+  dram_base: 0x80000000
+
+tensors:
+  input:
+    shape: [1, 14, 14, 16]
+    dtype: fp16
+    layout: NHWC
+  weight:
+    shape: [16, 3, 3, 16]
+    dtype: fp16
+    layout: OIHW
+  output:
+    shape: [1, 12, 12, 16]
+    dtype: fp16
+    layout: NHWC
+
+ops:
+  - name: conv1
+    type: conv2d_3x3
+    inputs: [input, weight]
+    outputs: [output]
+    attrs:
+      stride: 1
+      padding: 0

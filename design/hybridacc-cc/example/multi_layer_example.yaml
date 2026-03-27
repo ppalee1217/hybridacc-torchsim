@@ -1,0 +1,51 @@
+# HybridAcc-CC Workload: Multi-layer Example (Conv2D 3x3 + Conv2D 1x1)
+# Usage: hacc-compile multi_layer_example.yaml -o build/
+
+name: multi_layer
+
+hardware:
+  num_clusters: 4
+  num_pes: 64
+  num_bus: 4
+  spm_banks_per_group: 3
+  spm_bank_depth: 4096
+  dram_base: 0x80000000
+
+tensors:
+  input:
+    shape: [1, 14, 14, 48]
+    dtype: fp16
+    layout: NHWC
+  weight_3x3:
+    shape: [48, 3, 3, 48]
+    dtype: fp16
+    layout: OIHW
+  mid:
+    shape: [1, 12, 12, 48]
+    dtype: fp16
+    layout: NHWC
+  weight_1x1:
+    shape: [48, 1, 1, 48]
+    dtype: fp16
+    layout: OIHW
+  output:
+    shape: [1, 12, 12, 48]
+    dtype: fp16
+    layout: NHWC
+
+ops:
+  - name: conv3x3
+    type: conv2d_3x3
+    inputs: [input, weight_3x3]
+    outputs: [mid]
+    attrs:
+      stride: 1
+      padding: 0
+
+  - name: conv1x1
+    type: conv2d_1x1
+    inputs: [mid, weight_1x1]
+    outputs: [output]
+    attrs:
+      stride: 1
+      padding: 0

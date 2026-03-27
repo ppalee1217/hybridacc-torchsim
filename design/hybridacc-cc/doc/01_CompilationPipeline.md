@@ -286,28 +286,37 @@ def lower_op(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
 
 | 檔案 | 內容 |
 |------|------|
-| `firmware_main.c` | `_start` 入口、layer 呼叫序列、trap handler |
-| `firmware_layers.c` | 每個 layer 的配置函數實作 |
-| `firmware_hw.h` | MMIO 位址常數、helper macro/inline function |
-| `firmware_payload.h` | PE program binary 的 `#include`（由 Stage 3 生成） |
+| `firmware_main.c` | `_start` 入口、layer 迴圈呼叫、trap handler |
+| `firmware_data.c` | Per-layer config struct table（`.rodata`）：AGU, HDDU, TilingParams compile-time 常數（O(1) per layer） |
+| `firmware_ops.c` | 共用 runtime 函式：`run_layer()`, `run_loop_tiling()`, `cfg_agu_bank()`, DMA 控制 |
+| `firmware_hw.h` | MMIO 位址常數、helper inline function（含 DMA MMIO） |
+| `firmware_payload.h` | PE template binary（未 patch）、pre-encoded scan chain、patch 描述表 |
 
 ### 4.3 MMIO 指令序列概要
 
-每個 layer 的配置函數生成以下 MMIO 序列：
+`run_layer()` 執行以下兩級 MMIO 序列：
 
+**Layer 級別（一次性設定）**：
 ```
 1. 設定 CLUSTER_MASK_LO/HI
-2. Broadcast: SPM config (config_map + update)
-3. Broadcast: HDDU soft-reset
-4. Broadcast: 4 個 AGU bank 的完整 register 寫入
-5. Broadcast: HDDU PLANE_EN / PLANE_MODE
-6. Broadcast: NoC CMD_RESET
-7. Broadcast: NoC CMD_INIT
-8. Broadcast: NoC scan-chain (反序)
-9. Broadcast: NoC CMD_LOAD_PROGRAM × N_instructions
-10. Broadcast: NoC CMD_START_PE
-11. Broadcast: HDDU CTRL start_all
-12. Poll HDDU_STATUS 直到完成
+2. HDDU soft-reset
+3. AGU 4 bank iter/stride/tag 設定（data-driven loop，base_addr 由 wave 更新）
+4. HDDU PLANE_EN / PLANE_MODE
+5. NoC CMD_RESET + CMD_INIT
+6. NoC scan-chain（pre-encoded uint32_t array）
+7. Runtime PE patch + CMD_LOAD_PROGRAM
+```
+
+**Wave 級別（每個 wave 重複）**：
+```
+W1. 確認 DMA prefetch 完成（首 wave 同步載入，後續由前一輪 async 完成）
+W2. SPM_CONFIG_MAP 更新（PLI/PLO group 交換）
+W3. AGU BASE_ADDR 更新（ping/pong 切換）
+W4. NOC_CMD_START_PE + HDDU start_all
+W5. DMA prefetch 下一 wave（async，overlap with compute）
+W6. Poll HDDU_STATUS 直到完成
+W7. NOC_CMD_STOP_PE
+W8. DMA writeback（僅 IC/K 累加最後一筆 tile）
 ```
 
 詳細的 code generation 規則請參閱 [03_CodeGeneration.md](03_CodeGeneration.md)。
@@ -375,23 +384,21 @@ def patch_instruction(word: int, new_payload_value: int) -> int:
 ```
 有兩種策略可供選擇（實作時二擇一）：
 
-策略 A：直接嵌入 C array
-   → 在 firmware_payload.h 中生成 static const uint16_t pe_prog_XXX[] = { ... };
-   → firmware 在 runtime 逐 word 送出 CMD_LOAD_PROGRAM
-
-策略 B：使用 ha-package
-   → 呼叫 ha-package 將所有 patched templates 打包成 .pkg + .h
-   → firmware 引用 ha-package 生成的 C API
+compile-time patch + runtime apply 策略：
+   → firmware_payload.h 嵌入未 patch 的 PE template（同一 template 共用一份）
+   → firmware_payload.h 嵌入 per-layer 的 PePatchEntry[] 描述表
+   → firmware 在 runtime 呼叫 pe_patch_runtime() 套用 patch
+   → 再逐 word 送出 CMD_LOAD_PROGRAM
 ```
 
-本版建議使用 **策略 A**（直接嵌入 C array），因為：
-1. 不需要 runtime 解 package 格式
-2. 每個 layer 可能使用不同 patch 參數，package 無法直接支援
-3. 實作最簡單
+此策略的優勢：
+1. 同一 template 只嵌入一次，多 layer 共用
+2. Patch 描述表極小（每個 entry 僅 3 bytes）
+3. N-1 encoding 在 compile-time 完成，runtime 不需判斷指令類型
 
 ### 5.5 輸出
 
-`firmware_payload.h`，包含每個 layer 的 patched PE program array。
+`firmware_payload.h`，包含 PE template binary + patch 描述表 + pre-encoded scan chain。
 
 ---
 
@@ -415,14 +422,21 @@ riscv32-unknown-elf-gcc \
     -march=rv32i_zicsr -mabi=ilp32 \
     -O2 -nostdlib -ffreestanding \
     -I ${GEN_DIR} \
-    -c ${GEN_DIR}/firmware_layers.c -o ${BUILD_DIR}/firmware_layers.o
+    -c ${GEN_DIR}/firmware_data.c -o ${BUILD_DIR}/firmware_data.o
+
+riscv32-unknown-elf-gcc \
+    -march=rv32i_zicsr -mabi=ilp32 \
+    -O2 -nostdlib -ffreestanding \
+    -I ${GEN_DIR} \
+    -c ${GEN_DIR}/firmware_ops.c -o ${BUILD_DIR}/firmware_ops.o
 
 # 2. 連結
 riscv32-unknown-elf-ld \
     -T ${GEN_DIR}/linker.ld \
     -o ${BUILD_DIR}/output.elf \
     ${BUILD_DIR}/firmware_main.o \
-    ${BUILD_DIR}/firmware_layers.o
+    ${BUILD_DIR}/firmware_data.o \
+    ${BUILD_DIR}/firmware_ops.o
 ```
 
 ### 6.3 Linker Script 概要
