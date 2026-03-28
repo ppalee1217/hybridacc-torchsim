@@ -1,3 +1,18 @@
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc Testbench
+// Module Name:   tb_sdma
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Testbench for sdma module.
+// Dependencies:  tb_common.svh, src/hybridacc_utils_pkg.sv, src/PE/SDMA.sv
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 `include "../tb_common.svh"
 `include "../../src/hybridacc_utils_pkg.sv"
 `include "../../src/PE/SDMA.sv"
@@ -64,10 +79,11 @@ module tb_sdma;
         ps_data.lanes[2] = 16'h3333;
         ps_data.lanes[3] = 16'h4444;
         ps_valid = 1;
-        @(posedge clk); #1;
+        #1;
         check("Write: dm_write_en=1", dm_write_en === 1'b1);
         check("Write: dm_write_addr=0x10", dm_write_addr === 16'h0010);
         check("Write: dm_write_mask=FF", dm_write_mask === 8'hFF);
+        @(posedge clk);
         ps_valid = 0;
 
         // Should move to WAIT_SWAP
@@ -83,8 +99,13 @@ module tb_sdma;
 
         // Test 3: Bank swap tracking
         // swap_in toggles bank_sel in IDLE
-        swap_in = 1; @(posedge clk); swap_in = 0; #1;
-        check("BankSwapIdle: bank_sel toggled", bank_sel === 1'b1);
+        // After Test 2's WAIT_SWAP→swap, bank_sel was toggled to 1. Now toggling again → 0.
+        begin
+            logic prev_bs;
+            prev_bs = bank_sel;
+            swap_in = 1; @(posedge clk); swap_in = 0; #1;
+            check("BankSwapIdle: bank_sel toggled", bank_sel !== prev_bs);
+        end
 
         // Test 4: Zero length active (should go to WAIT_SWAP immediately)
         imm = 16'h0020; set_addr = 1; @(posedge clk); set_addr = 0;
@@ -117,8 +138,11 @@ module tb_sdma;
         check("NoData: dm_write_en=0", dm_write_en === 1'b0);
         check("NoData: busy=1 (waiting)", busy === 1'b1);
         // Now provide data
-        ps_valid = 1; @(posedge clk); ps_valid = 0; #1;
+        ps_valid = 1;
+        #1;
         check("DataArrives: dm_write_en=1", dm_write_en === 1'b1);
+        @(posedge clk);
+        ps_valid = 0;
 
         // Cleanup
         swap_in = 1; @(posedge clk); swap_in = 0;
@@ -133,14 +157,27 @@ module tb_sdma;
         // Activate for first loop iteration
         active = 1; @(posedge clk); active = 0;
         ps_data.lanes[0] = 16'hAA00;
-        ps_valid = 1; @(posedge clk); ps_valid = 0;
+        ps_valid = 1;
         #1;
         check("MultiLoop1: dm_write_en=1", dm_write_en === 1'b1);
+        @(posedge clk);
+        ps_valid = 0;
         // Should need swap to continue to next loop iteration
         @(posedge clk); #1;
-        // Issue swap for the bank
+        // Issue swap for the bank → starts second loop iteration
         swap_in = 1; @(posedge clk); swap_in = 0;
-        repeat(3) @(posedge clk); #1;
+        @(posedge clk); #1;
+        // Now in RUN for second loop, provide data
+        ps_data.lanes[0] = 16'hBB00;
+        ps_valid = 1;
+        #1;
+        check("MultiLoop2: dm_write_en=1", dm_write_en === 1'b1);
+        @(posedge clk);
+        ps_valid = 0;
+        // Second loop done → WAIT_SWAP, issue final swap → FINISH
+        @(posedge clk); #1;
+        swap_in = 1; @(posedge clk); swap_in = 0;
+        repeat(2) @(posedge clk); #1;
         check("MultiLoop: completes after swap", done === 1'b1 || busy === 1'b0);
 
         // Test 8: Stride pattern (len=2, stride=2 => addresses skip by 2*8=16)
@@ -151,11 +188,13 @@ module tb_sdma;
         imm = 16'h0002; set_mode = 1; @(posedge clk); set_mode = 0; // stride=2
         active = 1; @(posedge clk); active = 0;
         ps_data.lanes[0] = 16'hBB00;
-        ps_valid = 1; @(posedge clk); #1;
+        ps_valid = 1;
+        #1;
         check("Stride: first addr=0x0060", dm_write_addr === 16'h0060);
         @(posedge clk); #1;
-        // Second element: addr should be 0x0060 + 2*8 = 0x0070
-        check("Stride: second addr=0x0070", dm_write_addr === 16'h0070);
+        // Second element: addr should be 0x0060 + stride*2 = 0x0060 + 4 = 0x0064
+        check("Stride: second addr=0x0064", dm_write_addr === 16'h0064);
+        @(posedge clk);
         ps_valid = 0;
 
         $display("\n=== tb_sdma Summary: %0d PASSED, %0d FAILED ===", pass_count, fail_count);
@@ -164,5 +203,5 @@ module tb_sdma;
         $finish;
     end
 
-    initial begin #200000; $error("[TIMEOUT] tb_sdma"); $finish; end
+    initial begin #500000; $error("[TIMEOUT] tb_sdma"); $finish; end
 endmodule

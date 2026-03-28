@@ -1,3 +1,18 @@
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc Testbench
+// Module Name:   tb_psumregfile
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Testbench for psumregfile module.
+// Dependencies:  tb_common.svh, src/hybridacc_utils_pkg.sv, src/PE/PsumRegFile.sv
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 `include "../tb_common.svh"
 `include "../../src/hybridacc_utils_pkg.sv"
 `include "../../src/PE/PsumRegFile.sv"

@@ -1,5 +1,18 @@
-// Module: EXE_M_Stage
-// Function: Memory and multiply execute stage that consumes PS and PD inputs and produces VMUL operands.
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc
+// Module Name:   EXE_M_Stage
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Common utility package with type definitions, FP16 arithmetic, and shared constants.
+// Dependencies:  hybridacc_utils_pkg
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 import hybridacc_utils_pkg::*;
 
 module EXE_M_Stage (

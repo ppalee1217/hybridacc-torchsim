@@ -1,5 +1,18 @@
-// Module: ProcessElement
-// Function: PE top-level that integrates router control, instruction flow, and arithmetic execution stages.
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc
+// Module Name:   ProcessElement
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Common utility package with type definitions, FP16 arithmetic, and shared constants.
+// Dependencies:  hybridacc_utils_pkg
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 import hybridacc_utils_pkg::*;
 
 module ProcessElement #(

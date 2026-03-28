@@ -1,5 +1,18 @@
-// Module: asyncFIFO
-// Function: Width-converting FIFO wrapper used to bridge packed bus data into PE lane-sized elements.
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc
+// Module Name:   asyncFIFO
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Common utility package with type definitions, FP16 arithmetic, and shared constants.
+// Dependencies:  None
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 module asyncFIFO #(
     parameter type IN_T = logic [63:0],
     parameter type OUT_T = logic [15:0],

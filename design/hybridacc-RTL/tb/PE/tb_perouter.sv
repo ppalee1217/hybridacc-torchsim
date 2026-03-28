@@ -1,3 +1,18 @@
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc Testbench
+// Module Name:   tb_perouter
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Testbench for perouter module.
+// Dependencies:  tb_common.svh, src/hybridacc_utils_pkg.sv, src/FIFO.sv, src/asyncFIFO.sv, src/PE/PErouter.sv
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 `include "../tb_common.svh"
 `include "../../src/hybridacc_utils_pkg.sv"
 `include "../../src/FIFO.sv"
@@ -119,7 +134,7 @@ module tb_perouter;
         route_mode = PLI_FROM_LN_PLO_TO_LN;
         pe_pli_ready = 0; // Prevent immediate pop
         ln_pli_data = 64'hAAAA_BBBB_CCCC_DDDD;
-        ln_pli_valid = 1; @(posedge clk); ln_pli_valid = 0;
+        ln_pli_valid = 1; @(posedge clk); #1; ln_pli_valid = 0;
         @(posedge clk); #1;
         check("PLI LN: pe_pli_valid=1", pe_pli_valid === 1'b1);
         check("PLI LN: data correct", pe_pli_data === 64'hAAAA_BBBB_CCCC_DDDD);
