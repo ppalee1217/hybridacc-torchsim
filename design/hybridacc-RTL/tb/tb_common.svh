@@ -1,3 +1,18 @@
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc Testbench
+// Module Name:   tb_common
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Common testbench macros and utilities.
+// Dependencies:  None
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 `timescale 1ns/1ps
 
 `define TB_ASSERT(cond, msg) \

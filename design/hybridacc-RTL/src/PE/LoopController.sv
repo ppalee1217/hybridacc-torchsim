@@ -1,5 +1,18 @@
-// Module: LoopController
-// Function: Loop stack controller that issues jump-back control for counted PE loops.
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc
+// Module Name:   LoopController
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Common utility package with type definitions, FP16 arithmetic, and shared constants.
+// Dependencies:  None
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 module LoopController #(
     parameter int unsigned LOOP_STACK_DEPTH = 16
 ) (

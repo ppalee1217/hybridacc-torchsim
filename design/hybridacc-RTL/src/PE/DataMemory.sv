@@ -1,5 +1,18 @@
-// Module: DataMemory
-// Function: Local PE data memory with byte-mask write support for DMA and compute stages.
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc
+// Module Name:   DataMemory
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Common utility package with type definitions, FP16 arithmetic, and shared constants.
+// Dependencies:  None
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 module DataMemory #(
     parameter int unsigned DMEMORY_ADDRESS_WIDTH = 9,
     parameter int unsigned DMEMORY_DEFAULT_SIZE_BYTES = (1 << DMEMORY_ADDRESS_WIDTH)

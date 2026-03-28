@@ -1,5 +1,18 @@
-// Module: AddressGenerateUnit
-// Function: MMIO-configurable nested-loop address generator that emits address, tag, ultra, and mask descriptors.
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc
+// Module Name:   AddressGenerateUnit
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Common utility package with type definitions, FP16 arithmetic, and shared constants.
+// Dependencies:  None
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 module AddressGenerateUnit (
     input  logic        clk,
     input  logic        reset_n,

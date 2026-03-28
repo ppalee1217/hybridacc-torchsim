@@ -1,3 +1,18 @@
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc Testbench
+// Module Name:   tb_addressgenerateunit
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Testbench for addressgenerateunit module.
+// Dependencies:  tb_common.svh, src/Cluster/AddressGenerateUnit.sv
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 `include "../tb_common.svh"
 `include "../../src/Cluster/AddressGenerateUnit.sv"
 
@@ -72,6 +87,8 @@ module tb_addressgenerateunit;
         input logic [15:0] expected_mask,
         input logic expected_ultra
     );
+        // Ensure we wait for a fresh gen_valid assertion (not a stale one)
+        if (gen_valid === 1'b1) @(negedge gen_valid);
         wait (gen_valid === 1'b1);
         #1;
         check($sformatf("AGU addr=0x%08h", expected_addr), gen_addr == expected_addr);
@@ -161,6 +178,8 @@ module tb_addressgenerateunit;
         end
         gen_ready = 1'b1;
         @(posedge clk);
+        // Wait for the old valid to deassert, then the new one
+        if (gen_valid === 1'b1) @(negedge gen_valid);
         wait (gen_valid === 1'b1); #1;
         check("Backpressure: advanced after release", gen_addr == 32'h0000_0208);
         @(posedge clk);

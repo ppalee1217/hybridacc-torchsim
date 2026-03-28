@@ -1,3 +1,18 @@
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc Testbench
+// Module Name:   tb_decoder
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Testbench for decoder module.
+// Dependencies:  tb_common.svh, src/hybridacc_utils_pkg.sv, src/PE/Decoder.sv
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 `include "../tb_common.svh"
 `include "../../src/hybridacc_utils_pkg.sv"
 `include "../../src/PE/Decoder.sv"

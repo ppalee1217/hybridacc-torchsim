@@ -1,5 +1,18 @@
-// Module: PErouter
-// Function: Bridge between NoC commands, local network streams, and internal PE command/data ports.
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc
+// Module Name:   PErouter
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Common utility package with type definitions, FP16 arithmetic, and shared constants.
+// Dependencies:  hybridacc_utils_pkg
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 import hybridacc_utils_pkg::*;
 
 module PErouter #(
@@ -105,6 +118,8 @@ module PErouter #(
         noc_pli_req_ready = enable && !pli_full;
         noc_plo_req_ready = enable && !plo_empty;
 
+        ln_pli_ready = (route_mode == PLI_FROM_LN_PLO_TO_LN || route_mode == PLI_FROM_LN_PLO_TO_BUS) && !pli_full;
+
         ps_push = noc_ps_req_valid && noc_ps_req_ready && (noc_ps_req_data.addr != PE_CMD_ADDRESS);
         pd_push = noc_pd_req_valid && noc_pd_req_ready;
         pli_push = ((noc_pli_req_valid && noc_pli_req_ready) || (ln_pli_valid && ln_pli_ready));
@@ -139,8 +154,6 @@ module PErouter #(
         pe_pli_data = pli_fifo_dout;
         pe_pli_valid = !pli_empty;
         pli_pop = pe_pli_valid && pe_pli_ready;
-
-        ln_pli_ready = (route_mode == PLI_FROM_LN_PLO_TO_LN || route_mode == PLI_FROM_LN_PLO_TO_BUS) && !pli_full;
 
         pe_plo_ready = !plo_full;
         ln_plo_data = plo_fifo_dout;

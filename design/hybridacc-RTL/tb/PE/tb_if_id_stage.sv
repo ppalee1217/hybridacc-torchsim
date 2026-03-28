@@ -1,3 +1,18 @@
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc Testbench
+// Module Name:   tb_if_id_stage
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Testbench for if_id_stage module.
+// Dependencies:  tb_common.svh, src/hybridacc_utils_pkg.sv, src/PE/InstructionMemory.sv, src/PE/Decoder.sv, src/PE/LoopController.sv, src/PE/IF_ID_Stage.sv
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 `include "../tb_common.svh"
 `include "../../src/hybridacc_utils_pkg.sv"
 `include "../../src/PE/InstructionMemory.sv"

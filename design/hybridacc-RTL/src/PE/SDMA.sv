@@ -1,5 +1,18 @@
-// Module: SDMA
-// Function: Store DMA engine that writes PE output vectors back into DataMemory.
+//-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/03/28
+// Design Name:   HybridAcc
+// Module Name:   SDMA
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Common utility package with type definitions, FP16 arithmetic, and shared constants.
+// Dependencies:  hybridacc_utils_pkg
+// Revision:
+//   2026/03/28 - Initial version
+// Additional Comments:
+//   None
+//-----------------------------------------------------------------------------
 import hybridacc_utils_pkg::*;
 
 module SDMA (
@@ -27,56 +40,79 @@ module SDMA (
 );
     typedef enum logic [1:0] { IDLE, RUN, WAIT_SWAP, FINISH } SDMAState;
 
-    SDMAState state_reg, state_next;
+    SDMAState state_reg;
 
+    // Configuration registers
     logic [15:0] dma_base_static_reg, dma_len_static_reg, dma_stride_static_reg, dma_loop_static_reg;
+
+    // Runtime registers
     logic [15:0] dma_offset_active_reg, dma_len_active_rem_reg, dma_loops_active_rem_reg;
     logic bank_sel_active_reg;
     logic [1:0] bank_valid_active_reg;
+
+    // Next-state signals (combinational)
+    SDMAState state_next;
+    logic [15:0] dma_base_static_next, dma_len_static_next, dma_stride_static_next, dma_loop_static_next;
+    logic [15:0] dma_offset_active_next, dma_len_active_rem_next, dma_loops_active_rem_next;
+    logic bank_sel_active_next;
+    logic [1:0] bank_valid_active_next;
 
     function automatic logic [15:0] normalize_loop_count(input logic [15:0] v);
         return (v == 16'h0) ? 16'd1 : v;
     endfunction
 
-    // Using always @(*) instead of always_comb because config/state registers
-    // are conditionally latched here and also reset in always_ff.
-    always @(*) begin
-        logic fire;
+    // Next-state combinational logic
+    always_comb begin
         logic [1:0] mask;
 
+        // Default: hold current values
         state_next = state_reg;
-        fire = (state_reg == RUN) && ps_valid && (dma_len_active_rem_reg > 0);
+        dma_base_static_next = dma_base_static_reg;
+        dma_len_static_next = dma_len_static_reg;
+        dma_stride_static_next = dma_stride_static_reg;
+        dma_loop_static_next = dma_loop_static_reg;
+        dma_offset_active_next = dma_offset_active_reg;
+        dma_len_active_rem_next = dma_len_active_rem_reg;
+        dma_loops_active_rem_next = dma_loops_active_rem_reg;
+        bank_sel_active_next = bank_sel_active_reg;
+        bank_valid_active_next = bank_valid_active_reg;
+
         mask = bank_sel_active_reg ? 2'b10 : 2'b01;
 
+        // Reset active runtime registers
         if (reset_active) begin
             state_next = IDLE;
-            dma_offset_active_reg = 16'h0;
-            dma_len_active_rem_reg = 16'h0;
-            dma_loops_active_rem_reg = 16'h0;
-            bank_sel_active_reg = 1'b0;
-            bank_valid_active_reg = 2'b00;
+            dma_offset_active_next = 16'h0;
+            dma_len_active_rem_next = 16'h0;
+            dma_loops_active_rem_next = 16'h0;
+            bank_sel_active_next = 1'b0;
+            bank_valid_active_next = 2'b00;
         end
 
+        // FSM state transitions
         case (state_reg)
             IDLE: begin
-                if (set_addr) dma_base_static_reg = imm;
-                else if (set_len) dma_len_static_reg = imm + 16'd1;
-                else if (set_loop) dma_loop_static_reg = imm + 16'd1;
-                else if (set_mode) dma_stride_static_reg = imm;
+                // Configuration (only in IDLE)
+                if (set_addr) dma_base_static_next = imm;
+                else if (set_len) dma_len_static_next = imm + 16'd1;
+                else if (set_loop) dma_loop_static_next = imm + 16'd1;
+                else if (set_mode) dma_stride_static_next = imm;
 
-                if (swap_in) bank_sel_active_reg = ~bank_sel_active_reg;
+                // Allow swap even when idle
+                if (swap_in) bank_sel_active_next = ~bank_sel_active_reg;
 
+                // Start background store task
                 if (active) begin
-                    dma_offset_active_reg = 16'h0;
-                    dma_loops_active_rem_reg = normalize_loop_count(dma_loop_static_reg);
-                    dma_len_active_rem_reg = dma_len_static_reg;
-                    bank_valid_active_reg = bank_valid_active_reg & (~mask);
+                    dma_offset_active_next = 16'h0;
+                    dma_loops_active_rem_next = normalize_loop_count(dma_loop_static_reg);
+                    dma_len_active_rem_next = dma_len_static_reg;
+                    bank_valid_active_next = bank_valid_active_reg & (~mask);
 
                     if (dma_len_static_reg == 16'h0) begin
-                        if (dma_loops_active_rem_reg > 0)
-                            dma_loops_active_rem_reg = dma_loops_active_rem_reg - 16'd1;
+                        if (normalize_loop_count(dma_loop_static_reg) > 16'd0)
+                            dma_loops_active_rem_next = normalize_loop_count(dma_loop_static_reg) - 16'd1;
                         state_next = WAIT_SWAP;
-                        bank_valid_active_reg = bank_valid_active_reg | mask;
+                        bank_valid_active_next = (bank_valid_active_reg & (~mask)) | mask;
                     end else begin
                         state_next = RUN;
                     end
@@ -84,13 +120,13 @@ module SDMA (
             end
 
             RUN: begin
-                if (fire) begin
-                    dma_offset_active_reg = dma_offset_active_reg + dma_stride_static_reg * 16'd2;
-                    dma_len_active_rem_reg = dma_len_active_rem_reg - 16'd1;
+                if (ps_valid && (dma_len_active_rem_reg > 16'd0)) begin
+                    dma_offset_active_next = dma_offset_active_reg + dma_stride_static_reg * 16'd2;
+                    dma_len_active_rem_next = dma_len_active_rem_reg - 16'd1;
                     if (dma_len_active_rem_reg == 16'd1) begin
-                        if (dma_loops_active_rem_reg > 0)
-                            dma_loops_active_rem_reg = dma_loops_active_rem_reg - 16'd1;
-                        bank_valid_active_reg = bank_valid_active_reg | mask;
+                        if (dma_loops_active_rem_reg > 16'd0)
+                            dma_loops_active_rem_next = dma_loops_active_rem_reg - 16'd1;
+                        bank_valid_active_next = bank_valid_active_reg | mask;
                         state_next = WAIT_SWAP;
                     end
                 end
@@ -101,17 +137,17 @@ module SDMA (
                     logic new_bank;
                     logic [1:0] new_mask;
                     new_bank = ~bank_sel_active_reg;
-                    bank_sel_active_reg = new_bank;
+                    bank_sel_active_next = new_bank;
                     new_mask = new_bank ? 2'b10 : 2'b01;
 
-                    if (dma_loops_active_rem_reg > 0) begin
-                        dma_offset_active_reg = 16'h0;
-                        dma_len_active_rem_reg = dma_len_static_reg;
-                        bank_valid_active_reg = bank_valid_active_reg & (~new_mask);
+                    if (dma_loops_active_rem_reg > 16'd0) begin
+                        dma_offset_active_next = 16'h0;
+                        dma_len_active_rem_next = dma_len_static_reg;
+                        bank_valid_active_next = bank_valid_active_reg & (~new_mask);
 
                         if (dma_len_static_reg == 16'h0) begin
-                            dma_loops_active_rem_reg = dma_loops_active_rem_reg - 16'd1;
-                            bank_valid_active_reg = bank_valid_active_reg | new_mask;
+                            dma_loops_active_rem_next = dma_loops_active_rem_reg - 16'd1;
+                            bank_valid_active_next = (bank_valid_active_reg & (~new_mask)) | new_mask;
                             state_next = WAIT_SWAP;
                         end else begin
                             state_next = RUN;
@@ -127,7 +163,8 @@ module SDMA (
         endcase
     end
 
-    always @(posedge clk or negedge reset_n) begin
+    // Register update
+    always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
             state_reg <= IDLE;
             dma_base_static_reg <= 16'h0;
@@ -141,12 +178,22 @@ module SDMA (
             bank_valid_active_reg <= 2'b00;
         end else begin
             state_reg <= state_next;
+            dma_base_static_reg <= dma_base_static_next;
+            dma_len_static_reg <= dma_len_static_next;
+            dma_stride_static_reg <= dma_stride_static_next;
+            dma_loop_static_reg <= dma_loop_static_next;
+            dma_offset_active_reg <= dma_offset_active_next;
+            dma_len_active_rem_reg <= dma_len_active_rem_next;
+            dma_loops_active_rem_reg <= dma_loops_active_rem_next;
+            bank_sel_active_reg <= bank_sel_active_next;
+            bank_valid_active_reg <= bank_valid_active_next;
         end
     end
 
+    // Output combinational logic
     always_comb begin
         logic fire;
-        fire = (state_reg == RUN) && ps_valid && (dma_len_active_rem_reg > 0);
+        fire = (state_reg == RUN) && ps_valid && (dma_len_active_rem_reg > 16'd0);
 
         busy = 1'b0;
         done = 1'b0;
@@ -170,7 +217,7 @@ module SDMA (
             default: ;
         endcase
 
-        ps_ready = (state_reg == RUN) && (dma_len_active_rem_reg > 0);
+        ps_ready = (state_reg == RUN) && (dma_len_active_rem_reg > 16'd0);
         dl_stall_out = 1'b0;
     end
 endmodule
