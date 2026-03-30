@@ -37,8 +37,8 @@ module PsumRegFile (
     logic write_toggle;
 
     task automatic clear_all();
-        for (int i = 0; i < 32; i++) p_regs[i] = 16'h0000;
-        for (int i = 0; i < 24; i++) vp64_regs[i] = '0;
+        for (int i = 0; i < 32; i++) p_regs[i] <= 16'h0000;
+        for (int i = 0; i < 24; i++) vp64_regs[i] <= '0;
     endtask
 
     always_ff @(posedge clk or negedge reset_n) begin

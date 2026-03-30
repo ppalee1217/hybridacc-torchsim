@@ -89,7 +89,7 @@ module PErouter #(
     logic [63:0] pd_mask;
 
     FIFO #(.T(logic [63:0]), .DEPTH(PE_FIFO_DEPTH)) ps_fifo (
-        .clk(clk), .reset_n(reset_n), .data_in(noc_ps_req_data.data), .push(ps_push), .data_out(ps_fifo_dout), .pop(ps_pop), .empty(ps_empty), .full(ps_full)
+        .clk(clk), .reset_n(reset_n), .data_in(noc_ps_req_data.data), .push(ps_push), .data_out(ps_fifo_dout), .pop(ps_pop), .empty(ps_empty), .full(ps_full), .clear(1'b0)
     );
 
     asyncFIFO #(.IN_T(logic [63:0]), .OUT_T(logic [15:0]), .DEPTH(PE_FIFO_DEPTH)) pd_fifo (
@@ -98,11 +98,11 @@ module PErouter #(
     );
 
     FIFO #(.T(logic [63:0]), .DEPTH(PE_FIFO_DEPTH)) pli_fifo (
-        .clk(clk), .reset_n(reset_n), .data_in((ln_pli_valid ? ln_pli_data : noc_pli_req_data.data)), .push(pli_push), .data_out(pli_fifo_dout), .pop(pli_pop), .empty(pli_empty), .full(pli_full)
+        .clk(clk), .reset_n(reset_n), .data_in((ln_pli_valid ? ln_pli_data : noc_pli_req_data.data)), .push(pli_push), .data_out(pli_fifo_dout), .pop(pli_pop), .empty(pli_empty), .full(pli_full), .clear(1'b0)
     );
 
     FIFO #(.T(logic [63:0]), .DEPTH(PE_FIFO_DEPTH)) plo_fifo (
-        .clk(clk), .reset_n(reset_n), .data_in(pe_plo_data), .push(plo_push), .data_out(plo_fifo_dout), .pop(plo_pop), .empty(plo_empty), .full(plo_full)
+        .clk(clk), .reset_n(reset_n), .data_in(pe_plo_data), .push(plo_push), .data_out(plo_fifo_dout), .pop(plo_pop), .empty(plo_empty), .full(plo_full), .clear(1'b0)
     );
 
     always_comb begin

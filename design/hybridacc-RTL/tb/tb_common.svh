@@ -13,6 +13,9 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
+`ifndef TB_COMMON_SVH
+`define TB_COMMON_SVH
+
 `timescale 1ns/1ps
 
 `define TB_ASSERT(cond, msg) \
@@ -39,3 +42,5 @@ module tb_clock_reset #(
         reset_n = 1'b1;
     end
 endmodule
+
+`endif // TB_COMMON_SVH

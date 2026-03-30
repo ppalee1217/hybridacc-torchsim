@@ -244,7 +244,7 @@ module LDMA (
         done = 1'b0;
         dm_read_addr = dma_base_reg + dma_offset_reg;
         dmrv_out = dmrv_reg;
-        dl_stall_out = (state_reg != IDLE) && (state_reg != DONE) && (!next);
+        dl_stall_out = 1'b0;
 
         case (state_reg)
             IDLE: begin

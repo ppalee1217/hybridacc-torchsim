@@ -46,7 +46,7 @@ module TransformRegFile (
 
     task automatic clear_all();
         for (int i = 0; i < 12; i++) begin
-            reg_file[i] = 16'h0000;
+            reg_file[i] <= 16'h0000;
         end
     endtask
 

@@ -57,7 +57,7 @@ module tb_exe_a_stage;
         check("Reset: stall_pli=0", stall_port_pli === 1'b0);
         check("Reset: stall_plo=0", stall_port_plo === 1'b0);
 
-        // Test 2: Pipeline pass-through (NOP)
+        // Test 2: Pipeline pass-through (NOP) — state: S_IDLE → S_IDLE
         pe_running = 1;
         EXE_M_decode_signals_in = pe_decode_signals_zero();
         valid_in = 1;
@@ -65,21 +65,27 @@ module tb_exe_a_stage;
         check("NOP: ready_out=1", ready_out === 1'b1);
         check("NOP: no stalls", stall_port_pli === 1'b0 && stall_port_plo === 1'b0);
 
-        // Test 3: VADDU + PR write
+        // Test 3: VADDU + PR write (vector mode, vaddu_mode=1)
+        // State: S_IDLE → S_NORMAL_MODE
         EXE_M_decode_signals_in = pe_decode_signals_zero();
         EXE_M_decode_signals_in.vaddu_en = 1;
+        EXE_M_decode_signals_in.vaddu_mode = 32'd1; // vector mode (not VMAC)
         EXE_M_decode_signals_in.pr_write = 1;
-        EXE_M_decode_signals_in.pr_mode = 1; // vector mode
+        EXE_M_decode_signals_in.pr_mode = 1;
         EXE_M_decode_signals_in.rid5 = 0;
-        vmul_out_in.lanes[0] = 16'h3C00; // 1.0
-        vmul_out_in.lanes[1] = 16'h4000; // 2.0
-        vmul_out_in.lanes[2] = 16'h4200; // 3.0
-        vmul_out_in.lanes[3] = 16'h4400; // 4.0
+        vmul_out_in.lanes[0] = 16'h3C00;
+        vmul_out_in.lanes[1] = 16'h4000;
+        vmul_out_in.lanes[2] = 16'h4200;
+        vmul_out_in.lanes[3] = 16'h4400;
         valid_in = 1;
         @(posedge clk); #1;
         check("VADDU_PR: ready_out=1", ready_out === 1'b1);
 
-        // Test 4: PLI/PLO operation stall when pli_valid=0
+        // Reset FSM cleanly before Test 4
+        stage_reset = 1; @(posedge clk); stage_reset = 0; @(posedge clk); #1;
+
+        // Test 4: PLI stall — pli_plo_operation with pli_valid=0
+        // State: S_IDLE → S_WAIT_PLI (stall_port_pli=1)
         EXE_M_decode_signals_in = pe_decode_signals_zero();
         EXE_M_decode_signals_in.pli_plo_operation = 1;
         valid_in = 1;
@@ -87,44 +93,63 @@ module tb_exe_a_stage;
         @(posedge clk); #1;
         check("PLI_stall: stall_port_pli=1", stall_port_pli === 1'b1);
         check("PLI_stall: ready_out=0", ready_out === 1'b0);
-        // Unstall
-        pli_valid = 1; #1;
+
+        // Unstall: provide pli_valid, wait for FSM to leave S_WAIT_PLI
+        pli_valid = 1; valid_in = 0;
+        @(posedge clk); #1;  // S_WAIT_PLI → S_EXEC_PLI_VADDU
         check("PLI_unstall: stall=0", stall_port_pli === 1'b0);
 
-        // Test 5: PLO backpressure stall
+        // Reset FSM and drain PLO buffer before Test 5
+        pli_valid = 0;
+        stage_reset = 1; @(posedge clk); stage_reset = 0; @(posedge clk); #1;
+
+        // Test 5: PLO backpressure — need to fill PLO buffer then test stall
+        // Step 1: Start PLI/PLO op to fill PLO buffer
         EXE_M_decode_signals_in = pe_decode_signals_zero();
         EXE_M_decode_signals_in.pli_plo_operation = 1;
-        valid_in = 1;
-        pli_valid = 1; plo_ready = 0;
-        @(posedge clk); #1;
+        valid_in = 1; pli_valid = 1; plo_ready = 1;
+        @(posedge clk); #1;  // S_IDLE → S_EXEC_PLI_VADDU (cycle A)
+        // Step 2: Keep another PLI/PLO op flowing to stay in S_EXEC_PLI_VADDU
+        @(posedge clk); #1;  // S_EXEC_PLI_VADDU: plo_buf fills; accepts next → S_EXEC_PLI_VADDU (cycle B)
+        // Step 3: Now plo_buf_valid_reg=1; set plo_ready=0 to block drain
+        plo_ready = 0;
+        @(posedge clk); #1;  // S_EXEC_PLI_VADDU: buffer full + !plo_ready → S_WAIT_PLO
         check("PLO_stall: stall_port_plo=1", stall_port_plo === 1'b1);
-        plo_ready = 1; #1;
-        check("PLO_unstall: stall=0", stall_port_plo === 1'b0);
-        pli_valid = 0;
 
-        // Test 6: PLO output data
+        // Unstall: allow PLO drain
+        plo_ready = 1; valid_in = 0; pli_valid = 0;
+        @(posedge clk); #1;  // S_WAIT_PLO → drains buffer → S_IDLE
+        check("PLO_unstall: stall=0", stall_port_plo === 1'b0);
+
+        // Reset FSM before Test 6
+        stage_reset = 1; @(posedge clk); stage_reset = 0; @(posedge clk); #1;
+
+        // Test 6: PLO output data — verify plo_valid after PLI/PLO operation
         EXE_M_decode_signals_in = pe_decode_signals_zero();
         EXE_M_decode_signals_in.pli_plo_operation = 1;
         vmul_out_in = '0;
         pli_data = 64'h0;
         pli_valid = 1; plo_ready = 1;
         valid_in = 1;
-        @(posedge clk); #1;
+        @(posedge clk); #1;  // S_IDLE → S_EXEC_PLI_VADDU (PLO buf valid_next=1)
+        // Need one more cycle for PLO buffer register update
+        valid_in = 0;
+        @(posedge clk); #1;  // plo_buf_valid_reg now 1
         check("PLO_out: plo_valid=1", plo_valid === 1'b1);
         pli_valid = 0;
 
+        // Reset before Test 7
+        stage_reset = 1; @(posedge clk); stage_reset = 0; @(posedge clk); #1;
+
         // Test 7: Halt propagation
-        // Clear any stall from previous test first
-        pli_valid = 1; plo_ready = 1;
         EXE_M_decode_signals_in = pe_decode_signals_zero();
         EXE_M_decode_signals_in.halt = 1;
         valid_in = 1;
-        @(posedge clk); #1;
-        // Need two cycles: first clears stall and latches halt, second applies halt
-        @(posedge clk); #1;
+        pli_valid = 0; plo_ready = 1;
+        @(posedge clk); #1;  // S_IDLE: halt → halted_reg=1
         check("Halt: halted_out=1", halted_out === 1'b1);
 
-        // Test 8: Stage reset
+        // Test 8: Stage reset clears halt
         stage_reset = 1; @(posedge clk); stage_reset = 0; #1;
         check("StageReset: halted=0", halted_out === 1'b0);
 

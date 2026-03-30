@@ -96,11 +96,11 @@
 | VMULU | simulator/include/PE/VMULU.hpp | src/PE/VMULU.sv | tb/PE/tb_vmulu.sv | 可直接匯入目標目錄 |
 | PErouter | simulator/include/PE/PErouter.hpp | src/PE/PErouter.sv | tb/PE/tb_perouter.sv | 可直接匯入目標目錄 |
 | ProcessElement | simulator/include/ProcessElement.hpp | src/PE/ProcessElement.sv | tb/PE/tb_processelement.sv | 可直接匯入目標目錄 |
-| AddressGenerateUnit | simulator/include/Cluster/AddressGenerateUnit.hpp | 無 | 無 | 必須新寫 RTL 與單元測試 |
-| HybridDataDeliverUnit | simulator/include/Cluster/HybridDataDeliverUnit.hpp | 無 | 無 | 必須新寫 RTL 與單元測試 |
-| SRAM | simulator/include/Cluster/SRAM.hpp | 無 | 無 | 必須新寫 RTL 與單元測試 |
-| ScratchpadMemory | simulator/include/Cluster/ScratchpadMemory.hpp | 無 | 無 | 必須新寫 RTL 與單元測試 |
-| ComputeCluster | simulator/include/ComputeCluster.hpp | 無 | 無 | 必須新寫 RTL 與系統級 testbench |
+| AddressGenerateUnit | simulator/include/Cluster/AddressGenerateUnit.hpp | src/Cluster/AddressGenerateUnit.sv | tb/Cluster/tb_addressgenerateunit.sv | ✅ 已完成 RTL 與單元測試 |
+| HybridDataDeliverUnit | simulator/include/Cluster/HybridDataDeliverUnit.hpp | src/Cluster/HybridDataDeliverUnit.sv | tb/Cluster/tb_hddu.sv | ✅ 已完成 RTL 與單元測試 |
+| SRAM | simulator/include/Cluster/SRAM.hpp | src/Cluster/SRAM.sv | tb/Cluster/tb_sram.sv | ✅ 已完成 RTL 與單元測試 |
+| ScratchpadMemory | simulator/include/Cluster/ScratchpadMemory.hpp | src/Cluster/ScratchpadMemory.sv | tb/Cluster/tb_scratchpadmemory.sv | ✅ 已完成 RTL 與單元測試 |
+| ComputeCluster | simulator/include/ComputeCluster.hpp | src/Cluster/ComputeCluster.sv | tb/Cluster/tb_computecluster.sv | ✅ 已完成 RTL 與整合測試 |
 | BootHostIf | simulator/include/Core/BootHostIf.hpp | 無 | 無 | 必須新寫 RTL 與單元測試 |
 | CmdFabric | simulator/include/Core/CmdFabric.hpp | 無 | 無 | 必須新寫 RTL 與單元測試 |
 | ClusterDataFabric | simulator/include/Core/ClusterDataFabric.hpp | 無 | 無 | 必須新寫 RTL 與單元測試 |
@@ -243,14 +243,14 @@ SV 轉寫需求:
 - 目標目錄不再為空。
 - 既有 20 個 RTL 模組與 23 個 TB 可從 design/hybridacc-RTL 獨立編譯。
 
-### Phase 1: 補齊 Cluster 基礎模組
+### Phase 1: 補齊 Cluster 基礎模組 ✅ 已完成
 
 優先順序:
 
-1. AddressGenerateUnit
-2. SRAM
-3. ScratchpadMemory
-4. HybridDataDeliverUnit
+1. AddressGenerateUnit ✅
+2. SRAM ✅
+3. ScratchpadMemory ✅
+4. HybridDataDeliverUnit ✅
 
 原因:
 
@@ -284,13 +284,14 @@ SV 轉寫需求:
 - 可支援 ComputeCluster 的 bus-level 控制與資料搬移。
 - 能被 cluster-level testbench 直接驅動。
 
-### Phase 3: 建立 ComputeCluster RTL
+### Phase 3: 建立 ComputeCluster RTL ✅ 已完成
 
 內容:
 
 - 完成 SPM、HDDU、NoC、AHB-lite、AXI4-lite glue logic。
 - 對齊 ESL 的可設定參數與外部 I/O。
 - 建立 cluster 級 smoke test 與功能測試。
+- ComputeCluster.sv 已通過 VCS 編譯與 10 項 assertion 測試。
 
 完成標準:
 
