@@ -89,8 +89,8 @@ module EXE_M_Stage (
     );
 
     VMULU vmul (
-        .op1(ps_data_vec),
-        .op2(tr_vtid_out),
+        .op1(tr_vtid_out),
+        .op2(ldma_dmrv_out),
         .result(vmul_result)
     );
 
@@ -117,8 +117,11 @@ module EXE_M_Stage (
         .dm_read_addr(dm_read_addr), .dm_read_data(dm_read_data)
     );
 
+    logic swap_stall;
+
     always_comb begin
-        stall_DL = ldma_stall | sdma_stall;
+        swap_stall = valid_reg && decode_reg.is_swap && sdma_busy;
+        stall_DL = ldma_stall | sdma_stall | swap_stall;
         stall_PS = valid_reg && decode_reg.sys_sdma_act && !ps_valid;
         stall_PD = valid_reg && ((decode_reg.pd_load && !pd_valid) || (decode_reg.pd_load_v && !pd_set_valid));
 
@@ -147,7 +150,7 @@ module EXE_M_Stage (
         ldma_set_len = decode_reg.DMA_setlen && !decode_reg.DMA_is_sdma && valid_reg && ready_in;
         ldma_set_loop = decode_reg.DMA_setloop && !decode_reg.DMA_is_sdma && valid_reg && ready_in;
         ldma_set_mode = decode_reg.DMA_setmode && !decode_reg.DMA_is_sdma && valid_reg && ready_in;
-        ldma_mode = decode_reg.imm;
+        ldma_mode = decode_reg.func3[15:0];
         ldma_active = decode_reg.sys_ldma_act && valid_reg && ready_in;
         ldma_next = decode_reg.LDMA_next && valid_reg && ready_in;
         ldma_reset_active = decode_reg.sys_ldma_rst && valid_reg && ready_in;
@@ -157,7 +160,7 @@ module EXE_M_Stage (
         sdma_set_len = decode_reg.DMA_setlen && decode_reg.DMA_is_sdma && valid_reg && ready_in;
         sdma_set_loop = decode_reg.DMA_setloop && decode_reg.DMA_is_sdma && valid_reg && ready_in;
         sdma_set_mode = decode_reg.DMA_setmode && decode_reg.DMA_is_sdma && valid_reg && ready_in;
-        sdma_swap = decode_reg.is_swap && valid_reg && ready_in;
+        sdma_swap = decode_reg.is_swap && valid_reg && ready_out;
         sdma_active = decode_reg.sys_sdma_act && valid_reg && ready_in;
         sdma_reset_active = decode_reg.sys_sdma_rst && valid_reg && ready_in;
 
@@ -176,11 +179,11 @@ module EXE_M_Stage (
             valid_reg <= 1'b0;
             halted_reg <= 1'b0;
         end else begin
-            if (ready_in) begin
+            if (ready_out) begin
                 decode_reg <= ID_decode_signals_in;
                 valid_reg <= valid_in;
             end
-            if (valid_in && ready_in && ID_decode_signals_in.halt) halted_reg <= 1'b1;
+            if (valid_in && ready_out && ID_decode_signals_in.halt) halted_reg <= 1'b1;
         end
     end
 endmodule

@@ -20,13 +20,21 @@ module VMULU (
     input  v_fp16_t op2,
     output v_fp16_t result
 );
-    v_fp16_t res;
 
-    always_comb begin
-        for (int i = 0; i < 4; i++) begin
-            res.lanes[i] = fp16_mul(op1.lanes[i], op2.lanes[i]);
+    genvar i;
+    generate
+        for (i = 0; i < 4; i++) begin : fp_mul_lane
+            DW_fp_mult #(
+                .sig_width       (10),
+                .exp_width       (5),
+                .ieee_compliance (1)
+            ) u_fp_mult (
+                .a      (op1.lanes[i]),
+                .b      (op2.lanes[i]),
+                .rnd    (3'b000),       // Round to nearest even
+                .z      (result.lanes[i]),
+                .status ()
+            );
         end
-    end
-
-    assign result = res;
+    endgenerate
 endmodule

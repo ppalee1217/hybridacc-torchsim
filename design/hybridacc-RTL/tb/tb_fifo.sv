@@ -28,7 +28,7 @@ module tb_fifo;
 
     FIFO #(.T(logic [63:0]), .DEPTH(4)) dut (
         .clk(clk), .reset_n(reset_n), .data_in(data_in), .push(push),
-        .data_out(data_out), .pop(pop), .empty(empty), .full(full)
+        .data_out(data_out), .pop(pop), .empty(empty), .full(full), .clear(1'b0)
     );
 
     int pass_count = 0;

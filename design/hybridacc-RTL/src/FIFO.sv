@@ -24,7 +24,8 @@ module FIFO #(
     output T     data_out,
     input  logic pop,
     output logic empty,
-    output logic full
+    output logic full,
+    input  logic clear
 );
     localparam int PTR_W = (DEPTH <= 1) ? 1 : $clog2(DEPTH);
 
@@ -40,7 +41,7 @@ module FIFO #(
         logic [PTR_W:0] cnt_n;
         logic is_empty, is_full;
 
-        if (!reset_n) begin
+        if (!reset_n || clear) begin
             wr_ptr_reg <= '0;
             rd_ptr_reg <= '0;
             cnt_reg <= '0;

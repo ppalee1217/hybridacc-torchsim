@@ -101,6 +101,45 @@ package hybridacc_utils_pkg;
         logic [15:0] addr;
     } noc_addr_req_t;
 
+    // -------------------------------------------------------------------------
+    // SPM (Scratchpad Memory) types — matching ESL utils.hpp
+    // -------------------------------------------------------------------------
+    typedef enum logic [0:0] {
+        SPM_OK    = 1'b0,
+        SPM_ERROR = 1'b1
+    } SPM_RESPONSE_CODE;
+
+    typedef enum logic [1:0] {
+        PLANE_PS  = 2'd0,
+        PLANE_PD  = 2'd1,
+        PLANE_PLI = 2'd2,
+        PLANE_PLO = 2'd3
+    } PlaneId;
+
+    // -------------------------------------------------------------------------
+    // HDDU (HybridDataDeliverUnit) enumerations
+    // -------------------------------------------------------------------------
+    typedef enum logic [2:0] {
+        HDDU_STATUS_IDLE  = 3'd0,
+        HDDU_STATUS_BUSY  = 3'd1,
+        HDDU_STATUS_DONE  = 3'd2,
+        HDDU_STATUS_STALL = 3'd3,
+        HDDU_STATUS_ERROR = 3'd4
+    } HdduStatusBit;
+
+    typedef enum logic [1:0] {
+        HDDU_CTRL_RESET = 2'd0,
+        HDDU_CTRL_START = 2'd1,
+        HDDU_CTRL_STOP  = 2'd2
+    } HdduCtrlBit;
+
+    typedef enum logic [1:0] {
+        HDDU_ERR_NONE      = 2'd0,
+        HDDU_ERR_AGU_ERROR = 2'd1,
+        HDDU_ERR_NOC_ERROR = 2'd2,
+        HDDU_ERR_SPM_ERROR = 2'd3
+    } HdduErrorCode;
+
     typedef enum logic [1:0] {
         NOC_CHANNEL_PS  = 2'd0,
         NOC_CHANNEL_PD  = 2'd1,

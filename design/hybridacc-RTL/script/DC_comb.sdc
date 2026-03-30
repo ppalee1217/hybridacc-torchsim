@@ -1,42 +1,35 @@
+#=====================================================================
+# SDC for Purely Combinational Modules (Decoder, VMULU, VADDU)
+#
+# These modules have NO clock port. A virtual clock is created as a
+# timing reference so that input-to-output propagation delay is
+# constrained to fit within one clock period of the target system.
+#=====================================================================
 
 #=====================================================================
 # Setting Clock freq & some parameter
 #=====================================================================
 
 set clk_period 1.0
-set input_max   [expr {double(round(1000*$clk_period * 0.5))/1000}]
+set input_max   [expr {double(round(1000*$clk_period * 0.3))/1000}]
 set input_min   [expr {double(round(1000*$clk_period * 0.1))/1000}]
-set output_max  [expr {double(round(1000*$clk_period * 0.1))/1000}]
+set output_max  [expr {double(round(1000*$clk_period * 0.3))/1000}]
 set output_min  [expr {double(round(1000*$clk_period * 0.0))/1000}]
 
-
 #=====================================================================
-# 2. Setting Clock Constraints
+# Virtual Clock (not bound to any physical port)
 #=====================================================================
-create_clock -name clk -period $clk_period [get_ports clk]
+create_clock -name vclk -period $clk_period
 
-# 在 16nm，Uncertainty 是關鍵 (包含 Jitter 與 OCV 預估)
-set_clock_uncertainty 0.02 [get_clocks clk]
-set_clock_latency -source 0.05 -network [get_clocks clk]
+# NOTE: No set_dont_touch_network / set_fix_hold / set_ideal_network
+#       because virtual clock has no physical network to protect.
+# NOTE: No clock uncertainty / latency — the virtual clock is ideal.
 
-# 合成階段建議設定為 Ideal，Latency 留給後端 CTS 實際計算
-set_ideal_network      [get_ports clk]
-set_dont_touch_network [get_clocks clk]
-
-# 16nm 的訊號轉換速度非常快
 set_input_transition 0.05 [all_inputs]
-set_clock_transition 0.05 [get_clocks clk]
-
-# 模擬輸出負載，0.005pF 是 16nm 常見的典型負載
-set_load 0.005 [all_outputs]
-
-# 讓工具在合成階段就稍微修正 Hold，但主要大修留給後端
-set_fix_hold [get_clocks clk]
 
 #=====================================================================
 # Setting Design Environment
 #=====================================================================
-
 # 1. 修正 Operating Conditions
 set_operating_conditions -min_library N16ADFP_StdCellff0p88v125c -min ff0p88v125c \
                          -max_library N16ADFP_StdCellss0p72vm40c -max ss0p72vm40c
@@ -48,16 +41,14 @@ set_driving_cell -library N16ADFP_StdCellss0p72vm40c -lib_cell DFQD1BWP16P90LVT 
 # 3. 輸出負載設定 (強烈建議開啟，模擬真實電路負載)
 set_load [load_of "N16ADFP_StdCellss0p72vm40c/DFQD1BWP16P90LVT/D"] [all_outputs]
 
-# 4. 時序約束 (延續之前討論的 0.4 比例)
-set_input_delay  -clock clk -max $input_max  [remove_from_collection [all_inputs] [get_ports clk]]
-set_input_delay  -clock clk -min $input_min  [remove_from_collection [all_inputs] [get_ports clk]]
-set_output_delay -clock clk -max $output_max [all_outputs]
-set_output_delay -clock clk -min $output_min [all_outputs]
+set_input_delay  -clock vclk  -max $input_max   [all_inputs]
+set_input_delay  -clock vclk  -min $input_min   [all_inputs]
+
+set_output_delay -clock vclk  -max $output_max  [all_outputs]
+set_output_delay -clock vclk  -min $output_min  [all_outputs]
 
 # set_wire_load_model -name ZeroWireload -library N16ADFP_StdCellss0p72vm40c
 set_wire_load_mode segmented
-
-#set_timing_derate -late 1.10 -cell_delay [get_cells -hier *]
 
 #=====================================================================
 # Setting DRC Constraints

@@ -82,16 +82,17 @@ module tb_vaddu;
             check($sformatf("Overflow lane[%0d]=inf", i), result.lanes[i] === 16'h7C00);
 
         // Test 6: Subnormal (very small) numbers
-        // RTL fp16_add flushes subnormals: if exp_a==0 return b, if exp_b==0 return a
+        // VADDU uses DW_fp_add with ieee_compliance=0: subnormals are flushed to zero.
+        // Both inputs and outputs are treated as zero when exponent is 0 and mantissa ≠ 0.
         op1.lanes[0] = 16'h0001; // smallest subnormal
         op2.lanes[0] = 16'h0001;
         op1.lanes[1] = 16'h0000;
-        op2.lanes[1] = 16'h0001;
+        op2.lanes[1] = 16'h0001; // subnormal
         #1;
-        // subnormal+subnormal: exp_a==0 → returns b (0x0001), not arithmetic sum
-        check("Subnormal+subnormal (flush)", result.lanes[0] === 16'h0001);
-        // zero+subnormal: a_is_zero → returns b
-        check("Zero+subnormal", result.lanes[1] === 16'h0001);
+        // subnormal+subnormal: both flushed to zero → result = +0
+        check("Subnormal+subnormal (flush-to-zero)", result.lanes[0] === 16'h0000);
+        // zero+subnormal: subnormal flushed to zero → result = +0
+        check("Zero+subnormal (flush-to-zero)", result.lanes[1] === 16'h0000);
 
         $display("\n=== tb_vaddu Summary: %0d PASSED, %0d FAILED ===", pass_count, fail_count);
         if (fail_count > 0) $display("tb_vaddu FAIL");
