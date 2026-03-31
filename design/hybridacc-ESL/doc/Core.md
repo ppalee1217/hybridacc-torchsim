@@ -2,7 +2,7 @@
 
 本文件定義 HACC Core Controller 在第二版架構下的正式 micro architecture。本文不是概念提案，而是供 RTL 切模、韌體開發、compiler handoff、驗證規劃與 reviewer 審查使用的工程規格。
 
-本版最重要的設計變更是：runtime control 從舊的 descriptor execution complex 改成由 `cc_core_mcu` 直接掌控，且 `cc_core_mcu` 正式具體化為一個 32-bit 5-stage pipelined RV32I_zicsr core（machine-mode only）。`cc_section_loader` 只做 local section copy；對 cluster、DMA、NLU、PLIC 的 runtime side effect 都由 core 透過標準 load/store MMIO 顯式觸發。
+本版最重要的設計變更是：runtime control 從舊的 descriptor execution complex 改成由 `cc_core_mcu` 直接掌控，且 `cc_core_mcu` 正式具體化為一個 32-bit 5-stage pipelined RV32I_Zmmul_Zicsr core（machine-mode only）。`cc_section_loader` 只做 local section copy；對 cluster、DMA、NLU、PLIC 的 runtime side effect 都由 core 透過標準 load/store MMIO 顯式觸發。
 
 ---
 
@@ -12,7 +12,7 @@
 
 本版 controller 採用以下主結構：
 
-1. 一個 32-bit 5-stage pipelined `cc_core_mcu`（RV32I_zicsr, machine-mode only）作為唯一 runtime orchestrator。
+1. 一個 32-bit 5-stage pipelined `cc_core_mcu`（RV32I_Zmmul_Zicsr, machine-mode only）作為唯一 runtime orchestrator。
 2. 一個 `cc_section_loader`，只負責將 host/boot firmware 提供的 manifest section 複製到 local memories。
 3. 一個 `cc_cmd_fabric`，承接 core LSU 發出的 MMIO access，並路由到 local CSR / DMA / per-cluster AHB / per-NLU AHB / PLIC。
 4. 一個 `cc_dma_engine`，作為由 MCU 透過 MMIO 與 stream 方式控制的 data mover。
@@ -128,7 +128,7 @@ controller 對 NLU 的最小要求：
 本版 core 採以下正式約束：
 
 1. privilege level 僅實作 machine mode。
-2. architected CSR 以 RV32I_zicsr 標準 machine CSR 為主：`mstatus/misa/mie/mtvec/mscratch/mepc/mcause/mtval/mip/mcycle/minstret`。
+2. architected CSR 以 RV32I_Zmmul_Zicsr 標準 machine CSR 為主：`mstatus/misa/mie/mtvec/mscratch/mepc/mcause/mtval/mip/mcycle/minstret`。
 3. cluster、DMA、NLU、PLIC、loader、host coordination 一律使用 MMIO，不以 custom CSR opcode 暴露。
 4. custom CSR range `0x7C0 ~ 0x7FF` 保留給未來 debug/perf 擴充，本版不放 runtime control 定址。
 
@@ -167,7 +167,7 @@ controller 對 NLU 的最小要求：
                                      v
                          +-----------------------+
                         | cc_core_mcu           |
-                        | - RV32I_zicsr 5-stage |
+                        | - RV32I_Zmmul_Zicsr  |
                         | - IF/ID/EX/MEM/WB     |
                         | - hazard/bypass/irq   |
                         | - local load/store    |
@@ -218,7 +218,7 @@ controller 對 NLU 的最小要求：
 | `CORE_XLEN` | 32 | MCU 資料寬度 |
 | `CORE_GPR_NUM` | 32 | RV32I GPR 數量 |
 | `CORE_PIPE_STAGES` | 5 | IF/ID/EX/MEM/WB |
-| `CORE_ISA` | RV32I_zicsr | 不含 M/A/F/D/C |
+| `CORE_ISA` | RV32I_Zmmul_Zicsr | 含 Zmmul（MUL 系列），不含 DIV/A/F/D/C |
 | `CORE_PRIV_MODES` | M only | 不實作 S/U mode |
 | `CORE_ISRAM_BYTES` | 8192 或 16384 | MCU instruction SRAM |
 | `DATA_SRAM_BYTES` | 65536 或以上 | unified local data SRAM |
@@ -238,7 +238,7 @@ controller 對 NLU 的最小要求：
 1. pipeline stage 固定為 IF / ID / EX / MEM / WB。
 2. 至少需支援 EX/MEM 與 MEM/WB bypass。
 3. load-use hazard 允許 interlock 1 cycle 或更多，但語意必須正確。
-4. CSR read-modify-write 需維持 RV32I_zicsr 單指令原子語意。
+4. CSR read-modify-write 需維持 RV32I_Zmmul_Zicsr 單指令原子語意。
 5. MMIO load/store 不得被亂序執行；對同一 hart 必須維持 program order。
 
 ---
@@ -456,7 +456,7 @@ controller 對每個 NLU 暴露一組 AHB-Lite command master port，供 `cc_cmd
 
 | Offset | Name | RW | 說明 |
 |---:|---|---|---|
-| `0x0000` | `HOST_CAP0` | R | capability bitmap：RV32I_zicsr、DMA、PLIC、broadcast support |
+| `0x0000` | `HOST_CAP0` | R | capability bitmap：RV32I_Zmmul_Zicsr、DMA、PLIC、broadcast support |
 | `0x0004` | `HOST_CAP1` | R | `NUM_CLUSTERS`、`NUM_NLU`、memory size encode |
 | `0x0008` | `HOST_CTRL` | R/W | bit0=`core_en`, bit1=`core_haltreq`, bit2=`core_resume`, bit3=`sw_reset` |
 | `0x000C` | `HOST_STATUS` | R | bit0=`loader_busy`, bit1=`core_halted`, bit2=`core_running`, bit3=`faulted` |
@@ -547,7 +547,7 @@ controller 對每個 NLU 暴露一組 AHB-Lite command master port，供 `cc_cmd
 
 #### 功能
 
-1. 執行 RV32I_zicsr machine-mode firmware。
+1. 執行 RV32I_Zmmul_Zicsr machine-mode firmware。
 2. 讀取 local descriptor 與 payload tables。
 3. 以標準 load/store 對 local memory 與 MMIO fabric 進行存取。
 4. 接收 `cc_plic` 的 machine external interrupt 與 local timer interrupt。
@@ -586,11 +586,11 @@ controller 對每個 NLU 暴露一組 AHB-Lite command master port，供 `cc_cmd
 6. hazard detect + bypass network
 7. interrupt/trap entry-return control
 
-#### RV32I_zicsr architected CSR 規劃
+#### RV32I_Zmmul_Zicsr architected CSR 規劃
 
 | CSR Addr | Name | RW | 說明 |
 |---:|---|---|---|
-| `0x301` | `misa` | R | 固定回報 RV32I + Zicsr capability |
+| `0x301` | `misa` | R | 固定回報 RV32I + Zmmul + Zicsr capability |
 | `0x300` | `mstatus` | R/W | machine interrupt enable 等控制 |
 | `0x304` | `mie` | R/W | `MEIE/MTIE/MSIE` enable |
 | `0x305` | `mtvec` | R/W | trap vector base |
@@ -607,7 +607,7 @@ controller 對每個 NLU 暴露一組 AHB-Lite command master port，供 `cc_cmd
 1. MCU 是 architecturally visible 的唯一 runtime control master。
 2. 所有外部 side effect 都必須經由 MMIO store 或 local memory store 產生。
 3. cluster config、HDDU config、NoC sideband、DMA config、NLU config 都必須由 firmware 顯式發出 store sequence。
-4. 本版不增加自訂 runtime control 指令；firmware 只依賴 RV32I_zicsr + MMIO。
+4. 本版不增加自訂 runtime control 指令；firmware 只依賴 RV32I_Zmmul_Zicsr + MMIO。
 
 ### 8.5 `cc_cmd_fabric`
 
@@ -838,7 +838,7 @@ controller 對每個 NLU 暴露一組 AHB-Lite command master port，供 `cc_cmd
 3. broadcast all-target completion semantics。
 4. DMA stream 由 MCU 下發，而非 DMA 自取 descriptor。
 5. PLIC claim/complete 與 level reassert semantics。
-6. RV32I_zicsr 5-stage pipeline 的 branch/load-use/CSR hazard correctness。
+6. RV32I_Zmmul_Zicsr 5-stage pipeline 的 branch/load-use/CSR hazard correctness。
 7. cluster config 完全經由 firmware MMIO sequence 完成，無隱式硬體 side effect。
 
 ---
@@ -849,7 +849,7 @@ controller 對每個 NLU 暴露一組 AHB-Lite command master port，供 `cc_cmd
 2. 舊版 `cc_section_loader` 直接發 NoC command 的模式已移除。
 3. 舊版由硬體 block expander 展開 wave 的假設已移除。
 4. DMA engine 的 descriptor ownership 改由 MCU 掌控。
-5. 本版改以 RV32I_zicsr 5-stage pipeline + MMIO software control 為正式控制模型。
+5. 本版改以 RV32I_Zmmul_Zicsr 5-stage pipeline + MMIO software control 為正式控制模型。
 
 這些差異是本版規格的核心，不是實作選項。
 
@@ -860,7 +860,7 @@ controller 對每個 NLU 暴露一組 AHB-Lite command master port，供 `cc_cmd
 本版 HACC Core Controller 的正式定義是：
 
 1. Loader 負責把東西載進 local memory。
-2. RV32I_zicsr 5-stage core 負責 runtime control。
+2. RV32I_Zmmul_Zicsr 5-stage core 負責 runtime control。
 3. MMIO fabric 負責 deterministic MMIO/masked-broadcast/stream routing。
 4. DMA 只執行 MCU 已經明確下發的搬運命令。
 5. IRQ 以 PLIC claim/complete + level reassert 模型收斂。
