@@ -29,6 +29,7 @@ public:
 
 	sc_out<bool> if_req_valid_o{"if_req_valid_o"};
 	sc_out<sc_uint<32>> if_addr_o{"if_addr_o"};
+	sc_in<bool> if_resp_valid_i{"if_resp_valid_i"};
 	sc_in<sc_uint<32>> if_rdata_i{"if_rdata_i"};
 
 	sc_out<bool> ls_req_valid_o{"ls_req_valid_o"};
@@ -84,6 +85,9 @@ private:
 	ExMemLatch exmem_{};
 	MemWbLatch memwb_{};
 	MemoryTransaction mem_txn_{};
+	uint32_t if_inflight_addr_ = kIsramBase;
+	bool if_req_was_sent_ = false;
+	bool drop_next_if_resp_ = false;
 
 	void reset_state() {
 		gpr_.fill(0u);
@@ -110,6 +114,9 @@ private:
 		exmem_ = {};
 		memwb_ = {};
 		mem_txn_ = {};
+		if_inflight_addr_ = boot_addr_i.read().to_uint();
+		if_req_was_sent_ = false;
+		drop_next_if_resp_ = false;
 	}
 
 	uint32_t read_csr(uint32_t csr_id) const {
@@ -214,10 +221,13 @@ private:
 		exmem_ = {};
 		memwb_ = {};
 		mem_txn_ = {};
+		if (if_req_was_sent_) {
+			drop_next_if_resp_ = true;
+		}
 	}
 
 	void drive_idle_outputs() {
-		if_req_valid_o.write(enable_i.read() && !halted_);
+		if_req_valid_o.write(false);
 		if_addr_o.write(fetch_addr_reg_);
 		ls_req_valid_o.write(false);
 		ls_req_write_o.write(false);
@@ -294,7 +304,22 @@ private:
 			bool hold_fetch = false;
 			bool flush_decode = false;
 			bool flush_fetch = false;
-			uint32_t next_fetch_addr = fetch_addr_reg_ + 4u;
+			uint32_t next_fetch_addr = fetch_addr_reg_;
+
+			// === Consume IF response (from previous cycle's request) ===
+			const bool if_resp_valid = if_resp_valid_i.read();
+			bool if_resp_accepted = false;
+			IfIdLatch fetched_ifid{};
+			if (if_resp_valid) {
+				if (drop_next_if_resp_) {
+					// Stale response from before redirect — discard
+					drop_next_if_resp_ = false;
+				} else {
+					fetched_ifid = FetchStage::latch(if_inflight_addr_, if_rdata_i.read().to_uint());
+					if_resp_accepted = true;
+				}
+				if_req_was_sent_ = false;
+			}
 
 			if (mem_txn_.active) {
 				if (!mem_txn_.request_issued) {
@@ -383,6 +408,9 @@ private:
 						next_fetch_addr = produced.branch_target;
 						flush_decode = true;
 						flush_fetch = true;
+						if (if_req_was_sent_) {
+							drop_next_if_resp_ = true;
+						}
 					}
 				} else {
 					next_exmem = {};
@@ -392,7 +420,6 @@ private:
 					if (has_load_use_hazard()) {
 						next_idex = {};
 						next_ifid = ifid_;
-						next_fetch_addr = fetch_addr_reg_;
 						hold_fetch = true;
 					} else if (ifid_.valid) {
 						const auto decoded = DecodeStage::decode(ifid_);
@@ -407,16 +434,34 @@ private:
 					next_idex = {};
 				}
 
-				if (!flush_fetch && !hold_fetch && !halted_) {
-					next_ifid = FetchStage::latch(fetch_addr_reg_, if_rdata_i.read().to_uint());
-					pc_reg_ = fetch_addr_reg_;
-				} else if (flush_fetch) {
+				// === IF stage: accept response or hold ===
+				if (flush_fetch) {
+					next_ifid = {};
+				} else if (hold_fetch) {
+					// Keep current ifid; do not advance fetch
+				} else if (if_resp_accepted) {
+					next_ifid = fetched_ifid;
+					pc_reg_ = if_inflight_addr_;
+					next_fetch_addr = if_inflight_addr_ + 4u;
+				} else {
+					// No response yet — insert bubble
 					next_ifid = {};
 				}
 			} else {
+				// Pipeline stalled: absorb the response if it arrived, but don't advance
+				// (fetched_ifid is discarded; we'll re-request when stall clears)
 				next_idex = idex_;
 				next_ifid = ifid_;
 				next_fetch_addr = fetch_addr_reg_;
+			}
+
+			// === Drive IF request for next cycle ===
+			const bool send_if_req = !halted_ && !stall_pipeline && !hold_fetch && enable_i.read() && !if_req_was_sent_;
+			if_req_valid_o.write(send_if_req);
+			if_addr_o.write(next_fetch_addr);
+			if (send_if_req) {
+				if_inflight_addr_ = next_fetch_addr;
+				if_req_was_sent_ = true;
 			}
 
 			memwb_ = next_memwb;

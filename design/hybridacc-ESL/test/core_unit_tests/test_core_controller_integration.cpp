@@ -73,15 +73,13 @@ int sc_main(int, char**) {
 	dut.load_instruction(0x00000004u, encode_addi(4, 0, 1));
 	dut.load_instruction(0x00000008u, encode_lui(2, 0x20000u));
 	dut.load_instruction(0x0000000Cu, encode_sw(1, 2, 8));
-	dut.load_instruction(0x00000010u, kNop);
-	dut.load_instruction(0x00000014u, encode_lui(3, 0x50001u));
-	dut.load_instruction(0x00000018u, kNop);
-	dut.load_instruction(0x0000001Cu, encode_sw(4, 3, 0));
-	dut.load_instruction(0x00000020u, kEbreak);
+	dut.load_instruction(0x00000010u, encode_lui(3, 0x50001u));
+	dut.load_instruction(0x00000014u, encode_sw(4, 3, 0));
+	dut.load_instruction(0x00000018u, kEbreak);
 
 	sc_start(2, SC_NS);
 	reset_n.write(true);
-	sc_start(60, SC_NS);
+	sc_start(120, SC_NS);
 
 	if (!dut.debug_is_halted()) {
 		std::cerr << "integration core did not halt" << std::endl;

@@ -83,6 +83,7 @@ private:
 
 	sc_signal<bool> if_req_valid_sig_{"if_req_valid_sig"};
 	sc_signal<sc_uint<32>> if_addr_sig_{"if_addr_sig"};
+	sc_signal<bool> if_resp_valid_sig_{"if_resp_valid_sig"};
 	sc_signal<sc_uint<32>> if_rdata_sig_{"if_rdata_sig"};
 	sc_signal<bool> ls_req_valid_sig_{"ls_req_valid_sig"};
 	sc_signal<bool> ls_req_write_sig_{"ls_req_write_sig"};
@@ -178,6 +179,7 @@ private:
 		isram.reset_n(reset_n);
 		isram.core_if_req_valid_i(if_req_valid_sig_);
 		isram.core_if_addr_i(if_addr_sig_);
+		isram.core_if_resp_valid_o(if_resp_valid_sig_);
 		isram.core_if_rdata_o(if_rdata_sig_);
 		isram.loader_wr_valid_i(isram_loader_wr_valid_sig_);
 		isram.loader_wr_addr_i(isram_loader_wr_addr_sig_);
@@ -205,6 +207,7 @@ private:
 		core_mcu.trap_vector_i(core_trap_vector_sig_);
 		core_mcu.if_req_valid_o(if_req_valid_sig_);
 		core_mcu.if_addr_o(if_addr_sig_);
+		core_mcu.if_resp_valid_i(if_resp_valid_sig_);
 		core_mcu.if_rdata_i(if_rdata_sig_);
 		core_mcu.ls_req_valid_o(ls_req_valid_sig_);
 		core_mcu.ls_req_write_o(ls_req_write_sig_);
