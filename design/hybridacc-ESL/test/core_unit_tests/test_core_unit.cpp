@@ -4,6 +4,7 @@
 #include <iostream>
 
 #include "Core/CoreController.hpp"
+#include "Core/DecodeStage.hpp"
 
 using namespace sc_core;
 
@@ -24,6 +25,30 @@ uint32_t encode_sw(uint32_t rs2, uint32_t rs1, int32_t imm) {
 
 uint32_t encode_lw(uint32_t rd, uint32_t rs1, int32_t imm) {
 	return ((static_cast<uint32_t>(imm) & 0xFFFu) << 20) | (rs1 << 15) | (0x2u << 12) | (rd << 7) | 0x03u;
+}
+
+uint32_t encode_r_type(uint32_t rd, uint32_t rs1, uint32_t rs2, uint32_t funct3, uint32_t funct7) {
+	return (funct7 << 25) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | 0x33u;
+}
+
+uint32_t encode_mul(uint32_t rd, uint32_t rs1, uint32_t rs2) {
+	return encode_r_type(rd, rs1, rs2, 0x0u, 0x01u);
+}
+
+uint32_t encode_mulh(uint32_t rd, uint32_t rs1, uint32_t rs2) {
+	return encode_r_type(rd, rs1, rs2, 0x1u, 0x01u);
+}
+
+uint32_t encode_mulhsu(uint32_t rd, uint32_t rs1, uint32_t rs2) {
+	return encode_r_type(rd, rs1, rs2, 0x2u, 0x01u);
+}
+
+uint32_t encode_mulhu(uint32_t rd, uint32_t rs1, uint32_t rs2) {
+	return encode_r_type(rd, rs1, rs2, 0x3u, 0x01u);
+}
+
+uint32_t encode_div(uint32_t rd, uint32_t rs1, uint32_t rs2) {
+	return encode_r_type(rd, rs1, rs2, 0x4u, 0x01u);
 }
 
 constexpr uint32_t kEbreak = 0x00100073u;
@@ -77,11 +102,19 @@ int sc_main(int, char**) {
 	dut.load_instruction(0x00000008u, encode_sw(2, 1, 0));
 	dut.load_instruction(0x0000000Cu, encode_lw(3, 1, 0));
 	dut.load_instruction(0x00000010u, encode_addi(4, 3, 1));
-	dut.load_instruction(0x00000014u, kEbreak);
+	// Zmmul tests
+	dut.load_instruction(0x00000014u, encode_addi(5, 0, 7));       // x5 = 7
+	dut.load_instruction(0x00000018u, encode_addi(6, 0, 8));       // x6 = 8
+	dut.load_instruction(0x0000001Cu, encode_mul(7, 5, 6));        // x7 = 7*8 = 56
+	dut.load_instruction(0x00000020u, encode_addi(8, 0, -1));      // x8 = 0xFFFFFFFF
+	dut.load_instruction(0x00000024u, encode_mulhu(9, 8, 8));      // x9 = upper(0xFFFFFFFF * 0xFFFFFFFF) = 0xFFFFFFFE
+	dut.load_instruction(0x00000028u, encode_mulh(10, 8, 8));      // x10 = upper((-1)*(-1) signed) = 0
+	dut.load_instruction(0x0000002Cu, encode_mulhsu(11, 8, 8));    // x11 = upper(signed(-1)*unsigned(0xFFFFFFFF)) = 0xFFFFFFFF
+	dut.load_instruction(0x00000030u, kEbreak);
 
 	sc_start(2, SC_NS);
 	reset_n.write(true);
-	sc_start(40, SC_NS);
+	sc_start(120, SC_NS);
 
 	if (!dut.debug_is_halted()) {
 		std::cerr << "core did not halt" << std::endl;
@@ -98,6 +131,36 @@ int sc_main(int, char**) {
 	if (dut.debug_read_gpr(4) != 43u) {
 		std::cerr << "addi after lw mismatch: " << dut.debug_read_gpr(4) << std::endl;
 		return 4;
+	}
+	// Zmmul result checks
+	if (dut.debug_read_gpr(7) != 56u) {
+		std::cerr << "MUL 7*8 mismatch: " << dut.debug_read_gpr(7) << std::endl;
+		return 5;
+	}
+	if (dut.debug_read_gpr(9) != 0xFFFFFFFEu) {
+		std::cerr << "MULHU mismatch: 0x" << std::hex << dut.debug_read_gpr(9) << std::endl;
+		return 6;
+	}
+	if (dut.debug_read_gpr(10) != 0x00000000u) {
+		std::cerr << "MULH mismatch: 0x" << std::hex << dut.debug_read_gpr(10) << std::endl;
+		return 7;
+	}
+	if (dut.debug_read_gpr(11) != 0xFFFFFFFFu) {
+		std::cerr << "MULHSU mismatch: 0x" << std::hex << dut.debug_read_gpr(11) << std::endl;
+		return 8;
+	}
+	// DIV/DIVU/REM/REMU trap test (decode-level: funct7=0x01, funct3=4..7 must trap)
+	{
+		using namespace hybridacc::core;
+		const uint32_t div_funct3[] = {0x4u, 0x5u, 0x6u, 0x7u}; // DIV, DIVU, REM, REMU
+		for (uint32_t f3 : div_funct3) {
+			IfIdLatch ifid{true, 0u, encode_r_type(7, 5, 6, f3, 0x01u)};
+			auto decoded = DecodeStage::decode(ifid);
+			if (!decoded.trap) {
+				std::cerr << "funct3=0x" << std::hex << f3 << " with funct7=0x01 should trap" << std::endl;
+				return 9;
+			}
+		}
 	}
 
 	return 0;
