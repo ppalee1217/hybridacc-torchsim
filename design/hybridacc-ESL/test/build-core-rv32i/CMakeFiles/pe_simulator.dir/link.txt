@@ -1,2 +1,0 @@
-/usr/bin/ar qc libpe_simulator.a CMakeFiles/pe_simulator.dir/home/yoyo/work/MasterResearch/HybridAcc/design/hybridacc-ESL/simulator/src/utils.cpp.o
-/usr/bin/ranlib libpe_simulator.a
