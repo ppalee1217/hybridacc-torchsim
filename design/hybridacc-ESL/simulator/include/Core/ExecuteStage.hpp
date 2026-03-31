@@ -20,6 +20,15 @@ struct ExecuteStage {
 		case AluOp::SRL: return lhs >> (rhs & 0x1Fu);
 		case AluOp::SRA: return static_cast<uint32_t>(static_cast<int32_t>(lhs) >> (rhs & 0x1Fu));
 		case AluOp::COPY_B: return rhs;
+		case AluOp::MUL:    return lhs * rhs;
+		case AluOp::MULH:   return static_cast<uint32_t>(static_cast<uint64_t>(
+		    static_cast<int64_t>(static_cast<int32_t>(lhs)) *
+		    static_cast<int64_t>(static_cast<int32_t>(rhs))) >> 32);
+		case AluOp::MULHSU: return static_cast<uint32_t>(static_cast<uint64_t>(
+		    static_cast<int64_t>(static_cast<int32_t>(lhs)) *
+		    static_cast<int64_t>(static_cast<uint64_t>(rhs))) >> 32);
+		case AluOp::MULHU:  return static_cast<uint32_t>(
+		    (static_cast<uint64_t>(lhs) * static_cast<uint64_t>(rhs)) >> 32);
 		default: return 0u;
 		}
 	}

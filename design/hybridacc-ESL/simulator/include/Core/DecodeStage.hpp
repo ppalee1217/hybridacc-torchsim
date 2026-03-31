@@ -68,14 +68,29 @@ struct DecodeStage {
 			decoded.use_rs2 = true;
 			decoded.reg_write = true;
 			switch (funct3) {
-			case 0x0u: decoded.alu_op = (funct7 == 0x20u) ? AluOp::SUB : AluOp::ADD; break;
-			case 0x1u: decoded.alu_op = AluOp::SLL; break;
-			case 0x2u: decoded.alu_op = AluOp::SLT; break;
-			case 0x3u: decoded.alu_op = AluOp::SLTU; break;
-			case 0x4u: decoded.alu_op = AluOp::XOR; break;
-			case 0x5u: decoded.alu_op = (funct7 == 0x20u) ? AluOp::SRA : AluOp::SRL; break;
-			case 0x6u: decoded.alu_op = AluOp::OR; break;
-			case 0x7u: decoded.alu_op = AluOp::AND; break;
+		case 0x0u:
+			decoded.alu_op = (funct7 == 0x01u) ? AluOp::MUL
+			               : (funct7 == 0x20u) ? AluOp::SUB : AluOp::ADD;
+			break;
+		case 0x1u: decoded.alu_op = (funct7 == 0x01u) ? AluOp::MULH   : AluOp::SLL;  break;
+		case 0x2u: decoded.alu_op = (funct7 == 0x01u) ? AluOp::MULHSU : AluOp::SLT;  break;
+		case 0x3u: decoded.alu_op = (funct7 == 0x01u) ? AluOp::MULHU  : AluOp::SLTU; break;
+		case 0x4u:
+			if (funct7 == 0x01u) decoded.trap = true;
+			else decoded.alu_op = AluOp::XOR;
+			break;
+		case 0x5u:
+			if (funct7 == 0x01u) decoded.trap = true;
+			else decoded.alu_op = (funct7 == 0x20u) ? AluOp::SRA : AluOp::SRL;
+			break;
+		case 0x6u:
+			if (funct7 == 0x01u) decoded.trap = true;
+			else decoded.alu_op = AluOp::OR;
+			break;
+		case 0x7u:
+			if (funct7 == 0x01u) decoded.trap = true;
+			else decoded.alu_op = AluOp::AND;
+			break;
 			default: decoded.trap = true; break;
 			}
 			break;

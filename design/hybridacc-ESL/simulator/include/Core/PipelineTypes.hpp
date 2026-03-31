@@ -17,6 +17,10 @@ enum class AluOp : uint8_t {
 	SRL,
 	SRA,
 	COPY_B,
+	MUL,     // Zmmul: rd = (rs1 × rs2)[31:0]
+	MULH,    // Zmmul: rd = (signed(rs1) × signed(rs2))[63:32]
+	MULHSU,  // Zmmul: rd = (signed(rs1) × unsigned(rs2))[63:32]
+	MULHU,   // Zmmul: rd = (unsigned(rs1) × unsigned(rs2))[63:32]
 };
 
 enum class BranchOp : uint8_t {

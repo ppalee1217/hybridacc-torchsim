@@ -64,7 +64,7 @@ private:
 	uint32_t pc_reg_ = kIsramBase;
 	uint32_t fetch_addr_reg_ = kIsramBase;
 	uint32_t mstatus_reg_ = 0u;
-	uint32_t misa_reg_ = 0x40000100u;
+	uint32_t misa_reg_ = 0x40001100u;  // RV32I + Zmmul (bit 12 = M) + Zicsr
 	uint32_t mie_reg_ = 0u;
 	uint32_t mtvec_reg_ = kIsramBase;
 	uint32_t mscratch_reg_ = 0u;
@@ -94,7 +94,7 @@ private:
 		pc_reg_ = boot_addr_i.read().to_uint();
 		fetch_addr_reg_ = boot_addr_i.read().to_uint();
 		mstatus_reg_ = 0u;
-		misa_reg_ = 0x40000100u;
+		misa_reg_ = 0x40001100u;
 		mie_reg_ = 0u;
 		mtvec_reg_ = trap_vector_i.read().to_uint();
 		mscratch_reg_ = 0u;
