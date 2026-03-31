@@ -15,6 +15,17 @@ from .pe_payload import collect_payload_context
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
 
+def _has_hw_multiply(march: str) -> bool:
+    """Check if the march string includes hardware multiply support."""
+    march_l = march.lower()
+    if 'zmmul' in march_l:
+        return True
+    # Full M extension: 'm' in base ISA chars (e.g. rv32im)
+    base = march_l.split('_')[0]
+    isa_chars = base.replace('rv32', '').replace('rv64', '')
+    return 'm' in isa_chars
+
+
 def _pack_agu_regs(agu) -> List[int]:
     """Convert an AguBankConfig to a 15-element uint32 register array."""
     return agu.to_regs()
@@ -26,7 +37,9 @@ def _format_hex(val: int, width: int = 8) -> str:
 
 
 def prepare_template_context(hw_ir: HardwareIR,
-                             kernel_json_dir: Path | None = None) -> Dict[str, Any]:
+                             kernel_json_dir: Path | None = None,
+                             stack_size: int = 4096,
+                             march: str = "rv32i_zmmul_zicsr") -> Dict[str, Any]:
     """Build the complete Jinja2 template context from HardwareIR."""
 
     payload = collect_payload_context(hw_ir.layers, kernel_json_dir)
@@ -92,7 +105,8 @@ def prepare_template_context(hw_ir: HardwareIR,
         "workload_name": hw_ir.workload_name,
         "isram_size": "16K",
         "dsram_size": "64K",
-        "stack_size": 4096,
+        "stack_size": stack_size,
+        "has_hw_mul": _has_hw_multiply(march),
         "num_layers": len(hw_ir.layers),
         "templates": payload["templates"],
         "scan_chains": payload["scan_chains"],
@@ -104,7 +118,9 @@ def prepare_template_context(hw_ir: HardwareIR,
 def generate_firmware(hw_ir: HardwareIR,
                       output_dir: Path,
                       kernel_json_dir: Path | None = None,
-                      template_dir: Path | None = None) -> List[Path]:
+                      template_dir: Path | None = None,
+                      stack_size: int = 4096,
+                      march: str = "rv32i_zmmul_zicsr") -> List[Path]:
     """Render all firmware source files to output_dir.
 
     Returns list of generated file paths.
@@ -119,7 +135,7 @@ def generate_firmware(hw_ir: HardwareIR,
     )
     env.filters["hex"] = _format_hex
 
-    ctx = prepare_template_context(hw_ir, kernel_json_dir)
+    ctx = prepare_template_context(hw_ir, kernel_json_dir, stack_size=stack_size, march=march)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     generated: List[Path] = []

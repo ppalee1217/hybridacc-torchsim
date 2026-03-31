@@ -13,7 +13,7 @@
 | OS | Linux x86_64（Ubuntu 20.04+ 或同等） |
 | Python | 3.12+（由 uv 自動管理） |
 | uv | 0.4+（[安裝指南](https://docs.astral.sh/uv/getting-started/installation/)） |
-| RISC-V GCC | `riscv32-unknown-elf-gcc` 12.x+（含 `rv32i_zicsr` support） |
+| RISC-V GCC | `riscv32-unknown-elf-gcc` 12.x+（含 `rv32i_zmmul_zicsr` support） |
 | PE ISA Toolchain | `ha-asm`, `ha-objdump`, `ha-package`（來自 `hybridacc_tools`） |
 
 ### 1.2 安裝 hybridacc-cc
@@ -48,8 +48,8 @@ riscv32-unknown-elf-gcc --version
 # riscv32-unknown-elf-gcc (GCC) 12.2.0
 # ...
 
-# 確認支援 rv32i_zicsr
-riscv32-unknown-elf-gcc -march=rv32i_zicsr -mabi=ilp32 -E -x c /dev/null
+# 確認支援 rv32i_zmmul_zicsr
+riscv32-unknown-elf-gcc -march=rv32i_zmmul_zicsr -mabi=ilp32 -E -x c /dev/null
 # 無錯誤即為支援
 ```
 
@@ -213,12 +213,16 @@ uv run hacc-compile [OPTIONS] WORKLOAD_YAML
 
 選項:
   -o, --output DIR       輸出目錄（預設: ./build/）
+  --kernel-dir DIR       指定 kernel JSON 目錄（預設: design/hybridacc-cc/kernel/json/）
+  --template-dir DIR     指定 Jinja2 模板目錄（預設: 內建模板）
   --dump-ir              Dump 中間 IR（WorkloadIR, HardwareIR）為 JSON
-  --dump-c               保留生成的 .c/.h 原始碼（預設: 保留）
   --no-compile           僅生成 C 原始碼，不執行 GCC 編譯
+  --dry-run              印出 GCC 指令但不執行
   --gcc PATH             指定 riscv32-unknown-elf-gcc 路徑
   --stack-size BYTES     Stack 保留大小（預設: 4096）
   --opt-level {0,1,2,s}  GCC 最佳化等級（預設: 2）
+  --march MARCH          RISC-V march string（預設: rv32i_zmmul_zicsr）
+  --validate             ELF 連結後大小驗證
   --verbose, -v          顯示詳細 log
   --version              顯示版本號
   -h, --help             顯示幫助訊息
@@ -292,7 +296,7 @@ uv run hacc-compile simple_conv.yaml -o build/ --dump-ir -v
 [INFO] Stage 3: Preparing PE payloads ...
 [INFO]   conv1: 36 instructions, 5 patches applied
 [INFO] Stage 4: Compiling ELF ...
-[INFO]   riscv32-unknown-elf-gcc -march=rv32i_zicsr -mabi=ilp32 ...
+[INFO]   riscv32-unknown-elf-gcc -march=rv32i_zmmul_zicsr -mabi=ilp32 ...
 [INFO] ELF Size Report:
 [INFO]   .text   =   1852 / 16384 B (11.3%)
 [INFO]   .data   =     72 B
@@ -670,7 +674,7 @@ vim build/firmware_data.c
 # 手動編譯
 cd build/
 riscv32-unknown-elf-gcc \
-    -march=rv32i_zicsr -mabi=ilp32 \
+    -march=rv32i_zmmul_zicsr -mabi=ilp32 \
     -nostdlib -ffreestanding -O2 \
     -Wl,--gc-sections \
     -ffunction-sections -fdata-sections \

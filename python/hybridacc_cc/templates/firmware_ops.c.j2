@@ -5,35 +5,22 @@
  * ═══════════════════════════════════════════════════════ */
 #include "firmware_hw.h"
 #include "firmware_payload.h"
+{% if not has_hw_mul %}
 
-/* Forward declaration of types from firmware_data.c */
-typedef struct { uint32_t regs[AGU_NUM_REGS]; } AguRegs;
-
-typedef struct {
-    uint16_t num_oc_tiles; uint16_t num_h_tiles;
-    uint16_t num_w_tiles;  uint16_t num_ic_tiles;
-    uint32_t spm_ping[4];  uint32_t spm_pong[4];
-    uint32_t agu_ping[4];  uint32_t agu_pong[4];
-    uint8_t spm_map_even;  uint8_t spm_map_odd;
-    uint32_t dram_weight_base; uint32_t dram_input_base; uint32_t dram_output_base;
-    uint32_t dram_ps_oc_stride; uint32_t dram_ps_ic_stride;
-    uint32_t dram_pd_h_stride;  uint32_t dram_pd_w_stride; uint32_t dram_pd_ic_stride;
-    uint32_t dram_out_oc_stride; uint32_t dram_out_h_stride; uint32_t dram_out_w_stride;
-    uint32_t dma_ps_words; uint32_t dma_pd_words; uint32_t dma_plo_words;
-    uint8_t ps_reuse_across_spatial;
-    uint32_t bank_depth_bytes; uint8_t parallel_groups;
-    uint32_t dma_ps_words_per_bank; uint32_t dma_plo_words_per_bank;
-} TilingParams;
-
-typedef struct {
-    uint32_t cluster_mask_lo; uint32_t cluster_mask_hi; uint32_t num_clusters;
-    uint32_t hddu_plane_en; uint32_t hddu_plane_mode;
-    AguRegs agu_ps; AguRegs agu_pd; AguRegs agu_pli; AguRegs agu_plo;
-    const uint32_t* scan_chain; uint16_t scan_chain_len;
-    const uint16_t* pe_template; uint16_t pe_template_len;
-    const PePatchEntry* patches; uint8_t patch_count;
-    TilingParams tiling;
-} LayerConfig;
+/* ═══════════════════════════════════════════════════════
+ * Software multiply for RV32I (no M/Zmmul extension)
+ * GCC emits __mulsi3 calls when -march lacks multiply.
+ * ═══════════════════════════════════════════════════════ */
+unsigned int __mulsi3(unsigned int a, unsigned int b) {
+    unsigned int r = 0;
+    while (a) {
+        if (a & 1) r += b;
+        a >>= 1;
+        b <<= 1;
+    }
+    return r;
+}
+{% endif %}
 
 /* ── AGU register offset LUT ── */
 static const uint32_t agu_reg_offsets[AGU_NUM_REGS] = {
@@ -100,7 +87,8 @@ static inline void dma_xfer_sync(uint32_t dram_addr, uint32_t spm_addr,
     dma_wait_done();
 }
 
-static void dma_xfer_parallel(uint32_t dram_addr, uint32_t spm_base,
+static __attribute__((unused))
+void dma_xfer_parallel(uint32_t dram_addr, uint32_t spm_base,
                                uint32_t words_per_bank,
                                uint32_t bank_depth_bytes) {
     for (uint32_t b = 0; b < 3; b++) {

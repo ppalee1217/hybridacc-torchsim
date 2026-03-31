@@ -7,12 +7,7 @@
 #define FIRMWARE_PAYLOAD_H
 
 #include <stdint.h>
-
-/* ── Patch Descriptor ── */
-typedef struct {
-    uint8_t  offset;
-    uint16_t encoded_val;
-} PePatchEntry;
+#include "firmware_hw.h"
 
 /* ═══════════════════════════════════════════════════════
  * Pre-encoded Scan Chains

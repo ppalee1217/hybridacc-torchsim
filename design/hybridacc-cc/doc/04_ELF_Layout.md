@@ -216,7 +216,7 @@ Linker 會在連結階段驗證以下條件：
 
 ```bash
 riscv32-unknown-elf-gcc \
-    -march=rv32i_zicsr \
+    -march=rv32i_zmmul_zicsr \
     -mabi=ilp32 \
     -nostdlib \
     -ffreestanding \
@@ -234,7 +234,7 @@ riscv32-unknown-elf-gcc \
 
 | 參數 | 用途 |
 |------|------|
-| `-march=rv32i_zicsr` | 目標指令集：RV32I + Zicsr 擴展（CSR instructions） |
+| `-march=rv32i_zmmul_zicsr` | 目標指令集：RV32I + Zmmul（硬體乘法）+ Zicsr（CSR instructions） |
 | `-mabi=ilp32` | ABI：32-bit int/long/pointer，soft-float |
 | `-nostdlib` | 不連結 C standard library（no libc, no crt0） |
 | `-ffreestanding` | Freestanding environment（不假設 OS 存在） |
@@ -253,21 +253,21 @@ riscv32-unknown-elf-gcc \
 ```bash
 # Step 1: Compile .c → .o
 riscv32-unknown-elf-gcc \
-    -march=rv32i_zicsr -mabi=ilp32 \
+    -march=rv32i_zmmul_zicsr -mabi=ilp32 \
     -nostdlib -ffreestanding -O2 \
     -ffunction-sections -fdata-sections \
     -I . \
     -c firmware_main.c -o firmware_main.o
 
 riscv32-unknown-elf-gcc \
-    -march=rv32i_zicsr -mabi=ilp32 \
+    -march=rv32i_zmmul_zicsr -mabi=ilp32 \
     -nostdlib -ffreestanding -O2 \
     -ffunction-sections -fdata-sections \
     -I . \
     -c firmware_data.c -o firmware_data.o
 
 riscv32-unknown-elf-gcc \
-    -march=rv32i_zicsr -mabi=ilp32 \
+    -march=rv32i_zmmul_zicsr -mabi=ilp32 \
     -nostdlib -ffreestanding -O2 \
     -ffunction-sections -fdata-sections \
     -I . \
@@ -275,7 +275,7 @@ riscv32-unknown-elf-gcc \
 
 # Step 2: Link .o → .elf
 riscv32-unknown-elf-gcc \
-    -march=rv32i_zicsr -mabi=ilp32 \
+    -march=rv32i_zmmul_zicsr -mabi=ilp32 \
     -nostdlib -ffreestanding \
     -Wl,--gc-sections \
     -T linker.ld \

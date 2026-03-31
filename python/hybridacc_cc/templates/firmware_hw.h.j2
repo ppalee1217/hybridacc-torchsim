@@ -8,6 +8,12 @@
 
 #include <stdint.h>
 
+/* Forward declaration for firmware_payload.h types */
+typedef struct {
+    uint8_t  offset;
+    uint16_t encoded_val;
+} PePatchEntry;
+
 /* ── Core Address Map ── */
 
 #define ISRAM_BASE          0x00000000u
@@ -173,5 +179,74 @@ static inline void wait_all_clusters_done(uint32_t num_clusters) {
         }
     }
 }
+
+/* ── Shared Data Types ── */
+
+typedef struct {
+    uint32_t regs[AGU_NUM_REGS];
+} AguRegs;
+
+typedef struct {
+    uint16_t num_oc_tiles;
+    uint16_t num_h_tiles;
+    uint16_t num_w_tiles;
+    uint16_t num_ic_tiles;
+
+    uint32_t spm_ping[4];
+    uint32_t spm_pong[4];
+    uint32_t agu_ping[4];
+    uint32_t agu_pong[4];
+
+    uint8_t spm_map_even;
+    uint8_t spm_map_odd;
+
+    uint32_t dram_weight_base;
+    uint32_t dram_input_base;
+    uint32_t dram_output_base;
+
+    uint32_t dram_ps_oc_stride;
+    uint32_t dram_ps_ic_stride;
+    uint32_t dram_pd_h_stride;
+    uint32_t dram_pd_w_stride;
+    uint32_t dram_pd_ic_stride;
+    uint32_t dram_out_oc_stride;
+    uint32_t dram_out_h_stride;
+    uint32_t dram_out_w_stride;
+
+    uint32_t dma_ps_words;
+    uint32_t dma_pd_words;
+    uint32_t dma_plo_words;
+
+    uint8_t ps_reuse_across_spatial;
+
+    uint32_t bank_depth_bytes;
+    uint8_t  parallel_groups;
+    uint32_t dma_ps_words_per_bank;
+    uint32_t dma_plo_words_per_bank;
+} TilingParams;
+
+typedef struct {
+    uint32_t cluster_mask_lo;
+    uint32_t cluster_mask_hi;
+    uint32_t num_clusters;
+
+    uint32_t hddu_plane_en;
+    uint32_t hddu_plane_mode;
+
+    AguRegs agu_ps;
+    AguRegs agu_pd;
+    AguRegs agu_pli;
+    AguRegs agu_plo;
+
+    const uint32_t* scan_chain;
+    uint16_t scan_chain_len;
+
+    const uint16_t* pe_template;
+    uint16_t pe_template_len;
+    const PePatchEntry* patches;
+    uint8_t patch_count;
+
+    TilingParams tiling;
+} LayerConfig;
 
 #endif /* FIRMWARE_HW_H */

@@ -16,11 +16,15 @@ from typing import List, Optional
 DEFAULT_GCC = "riscv32-unknown-elf-gcc"
 
 
+# Default ISA: RV32I + Zmmul (multiply-only, no DIV) + Zicsr
+DEFAULT_MARCH = "rv32i_zmmul_zicsr"
+
+
 def build_gcc_command(
     output_dir: Path,
     elf_name: str = "firmware.elf",
     gcc: str = DEFAULT_GCC,
-    march: str = "rv32i_zicsr",
+    march: str = DEFAULT_MARCH,
     mabi: str = "ilp32",
     opt_level: str = "-O2",
 ) -> List[str]:
@@ -55,6 +59,8 @@ def compile_firmware(
     output_dir: Path,
     elf_name: str = "firmware.elf",
     gcc: str = DEFAULT_GCC,
+    march: str = DEFAULT_MARCH,
+    opt_level: str = "-O2",
     dry_run: bool = False,
 ) -> Path:
     """Compile firmware C sources into an ELF binary.
@@ -68,7 +74,7 @@ def compile_firmware(
     Returns:
         Path to the generated ELF file.
     """
-    cmd = build_gcc_command(output_dir, elf_name, gcc)
+    cmd = build_gcc_command(output_dir, elf_name, gcc, march=march, opt_level=opt_level)
     elf_path = output_dir / elf_name
 
     if dry_run:
