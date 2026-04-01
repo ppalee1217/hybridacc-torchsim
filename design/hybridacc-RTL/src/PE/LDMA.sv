@@ -34,7 +34,8 @@ module LDMA (
     input  logic [63:0] dm_read_data,
     output v_fp16_t    dmrv_out
 );
-    typedef enum logic [1:0] { LOAD_BYTE, LOAD_HALF, LOAD_WORD, LOAD_DWORD } LDMARequestType;
+    // LOAD_DWORD=0 so async reset (to 0) maps to standard DFFR cells (no FFGEN)
+    typedef enum logic [1:0] { LOAD_DWORD=2'b00, LOAD_BYTE=2'b01, LOAD_HALF=2'b10, LOAD_WORD=2'b11 } LDMARequestType;
     typedef enum logic [2:0] { IDLE, LOAD_PRE, LOAD_WAIT, LOAD_PIPELINE, DONE } LDMAState;
 
     // State registers

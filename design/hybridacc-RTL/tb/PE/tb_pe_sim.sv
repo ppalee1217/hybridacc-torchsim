@@ -17,6 +17,7 @@
 //-----------------------------------------------------------------------------
 `include "../tb_common.svh"
 `include "../../src/hybridacc_utils_pkg.sv"
+`ifndef GATE_SIM
 `include "../../src/FIFO.sv"
 `include "../../src/asyncFIFO.sv"
 `include "../../src/PE/InstructionMemory.sv"
@@ -35,6 +36,7 @@
 `include "../../src/PE/EXE_A_Stage.sv"
 `include "../../src/PE/PErouter.sv"
 `include "../../src/PE/ProcessElement.sv"
+`endif
 
 module tb_pe_sim;
     import hybridacc_utils_pkg::*;
@@ -69,7 +71,7 @@ module tb_pe_sim;
     // =====================================================================
     // Configuration (from +plusargs)
     // =====================================================================
-    string data_dir        = "output/pe-sim/conv_k3c4";
+    string data_dir        = "../../output/pe-sim/conv_k3c4";
     real   verify_tolerance = 0.01;
     int    clock_period_ns  = DEFAULT_CLOCK_PERIOD_NS;
 
@@ -174,6 +176,13 @@ module tb_pe_sim;
         .ln_plo_valid     (ln_plo_valid),
         .ln_plo_ready     (ln_plo_ready)
     );
+
+`ifdef GATE_SIM
+initial begin
+    $sdf_annotate("syn/ProcessElement/ProcessElement.sdf", dut);
+end
+`endif
+
 
     // =====================================================================
     // Helper functions (pure computation, no signal driving)
@@ -792,6 +801,7 @@ module tb_pe_sim;
             pe_active_cycles <= pe_active_cycles + 1;
     end
 
+`ifndef GATE_SIM
     // =====================================================================
     // Debug: monitor internal PErouter FIFO push/pop and PE pipeline signals
     // =====================================================================
@@ -993,5 +1003,6 @@ module tb_pe_sim;
             end
         end
     end
+`endif
 
 endmodule

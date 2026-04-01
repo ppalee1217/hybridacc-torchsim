@@ -106,7 +106,7 @@ module tb_noc_unit_rtl;
     initial begin
         clear_inputs();
         @(posedge reset_n);
-        #1;
+        #(`TB_SETTLE);
 
         check("Ready: PS", noc_ps_in_ready === 1'b1);
         check("Ready: PD", noc_pd_in_ready === 1'b1);
@@ -115,15 +115,15 @@ module tb_noc_unit_rtl;
 
         command_mode = 1'b1;
         command_data = {28'h0, CMD_NOC_SCAN_CHAIN};
-        #1;
+        #(`TB_SETTLE);
         check("ScanChain: enable asserts", scan_chain_enable === 1'b1);
         command_mode = 1'b0;
-        #1;
+        #(`TB_SETTLE);
         check("ScanChain: enable deasserts", scan_chain_enable === 1'b0);
 
         noc_ps_in_data = 192'h0000_0000_0000_1111_0000_0000_0000_2222_0000_0000_0000_3333;
         noc_ps_in_valid = 1'b1;
-        #1;
+        #(`TB_SETTLE);
         for (int i = 0; i < NP; i++) begin
             check($sformatf("PS fanout port%0d valid", i), noc_ps_to_bus_req_valid[i] === 1'b1);
         end
@@ -132,7 +132,7 @@ module tb_noc_unit_rtl;
         bus_to_noc_plo_resp_data[1].data = 64'hDEAD_BEEF_0123_4567;
         bus_to_noc_plo_resp_data[1].status = NOC_ERROR;
         bus_to_noc_plo_resp_valid[1] = 1'b1;
-        #1;
+        #(`TB_SETTLE);
         check("PLO resp: valid", noc_plo_out_valid === 1'b1);
         check("PLO resp: error status", noc_plo_out_status === NOC_ERROR);
         check("PLO resp: data lane", noc_plo_out_data[1*PW +: PW] === 64'hDEAD_BEEF_0123_4567);

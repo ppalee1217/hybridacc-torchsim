@@ -15,7 +15,9 @@
 //-----------------------------------------------------------------------------
 `include "../tb_common.svh"
 `include "../../src/hybridacc_utils_pkg.sv"
+`ifndef GATE_SIM
 `include "../../src/PE/PsumRegFile.sv"
+`endif
 
 module tb_psumregfile;
     import hybridacc_utils_pkg::*;
@@ -34,40 +36,39 @@ module tb_psumregfile;
         .clear_regs(clear_regs), .use_pcounter(use_pcounter), .clear_pcounter(clear_pcounter), .incr_pcounter(incr_pcounter)
     );
 
+`ifdef GATE_SIM
+initial begin
+    $sdf_annotate("syn/PsumRegFile/PsumRegFile.sdf", dut);
+end
+`endif
+
+
     int pass_count = 0;
     int fail_count = 0;
+    int x_fail_count = 0;
 
-    task automatic check(input string test_name, input logic cond);
-        if (!cond) begin
-            $error("[FAIL] %s", test_name);
-            fail_count++;
-        end else begin
-            $display("[PASS] %s", test_name);
-            pass_count++;
-        end
-    endtask
 
     initial begin
         enable=1; vpid_write_en=0; clear_regs=0; use_pcounter=0; clear_pcounter=0; incr_pcounter=0;
         pid=0; mode=0; p_in=0; vp_in='0;
         @(posedge reset_n);
-        @(posedge clk); #1;
+        @(posedge clk); @(negedge clk);
 
         // Test 1: Reset state - all zeros
-        pid = 0; mode = 0; #1;
-        check("Reset: p_out=0", p_out === 16'h0000);
+        pid = 0; mode = 0; @(negedge clk);
+        `CHECK_VAL("Reset: p_out=0", p_out, 16'h0000)
 
         // Test 2: Scalar write and read (mode=0)
         pid = 3; mode = 0; p_in = 16'h2222;
-        vpid_write_en = 1; @(posedge clk); vpid_write_en = 0; #1;
-        check("ScalarWrite: p_out=0x2222", p_out === 16'h2222);
+        vpid_write_en = 1; @(posedge clk); vpid_write_en = 0; @(negedge clk);
+        `CHECK_VAL("ScalarWrite: p_out=0x2222", p_out, 16'h2222)
 
         // Test 3: Different register doesn't corrupt
         pid = 5; mode = 0; p_in = 16'hBBBB;
-        vpid_write_en = 1; @(posedge clk); vpid_write_en = 0; #1;
-        check("ScalarWrite2: pid5=0xBBBB", p_out === 16'hBBBB);
-        pid = 3; #1;
-        check("NoCorrupt: pid3 still 0x2222", p_out === 16'h2222);
+        vpid_write_en = 1; @(posedge clk); vpid_write_en = 0; @(negedge clk);
+        `CHECK_VAL("ScalarWrite2: pid5=0xBBBB", p_out, 16'hBBBB)
+        pid = 3; @(negedge clk);
+        `CHECK_VAL("NoCorrupt: pid3 still 0x2222", p_out, 16'h2222)
 
         // Test 4: Vector write (mode=1, pid<8 maps to p_regs[pid*4..pid*4+3])
         pid = 0; mode = 1;
@@ -75,11 +76,11 @@ module tb_psumregfile;
         vp_in.lanes[1] = 16'hAA11;
         vp_in.lanes[2] = 16'hAA22;
         vp_in.lanes[3] = 16'hAA33;
-        vpid_write_en = 1; @(posedge clk); vpid_write_en = 0; #1;
-        check("VecWrite: vp_out[0]=0xAA00", vp_out.lanes[0] === 16'hAA00);
-        check("VecWrite: vp_out[1]=0xAA11", vp_out.lanes[1] === 16'hAA11);
-        check("VecWrite: vp_out[2]=0xAA22", vp_out.lanes[2] === 16'hAA22);
-        check("VecWrite: vp_out[3]=0xAA33", vp_out.lanes[3] === 16'hAA33);
+        vpid_write_en = 1; @(posedge clk); vpid_write_en = 0; @(negedge clk);
+        `CHECK_VAL("VecWrite: vp_out[0]=0xAA00", vp_out.lanes[0], 16'hAA00)
+        `CHECK_VAL("VecWrite: vp_out[1]=0xAA11", vp_out.lanes[1], 16'hAA11)
+        `CHECK_VAL("VecWrite: vp_out[2]=0xAA22", vp_out.lanes[2], 16'hAA22)
+        `CHECK_VAL("VecWrite: vp_out[3]=0xAA33", vp_out.lanes[3], 16'hAA33)
 
         // Test 5: Vector write to vp64 region (pid>=8)
         pid = 10; mode = 1;
@@ -87,16 +88,16 @@ module tb_psumregfile;
         vp_in.lanes[1] = 16'h2222;
         vp_in.lanes[2] = 16'h3333;
         vp_in.lanes[3] = 16'h4444;
-        vpid_write_en = 1; @(posedge clk); vpid_write_en = 0; #1;
-        check("VecVP64: vp_out[0]=0x1111", vp_out.lanes[0] === 16'h1111);
-        check("VecVP64: vp_out[3]=0x4444", vp_out.lanes[3] === 16'h4444);
+        vpid_write_en = 1; @(posedge clk); vpid_write_en = 0; @(negedge clk);
+        `CHECK_VAL("VecVP64: vp_out[0]=0x1111", vp_out.lanes[0], 16'h1111)
+        `CHECK_VAL("VecVP64: vp_out[3]=0x4444", vp_out.lanes[3], 16'h4444)
 
         // Test 6: Clear all registers
         clear_regs = 1; @(posedge clk); clear_regs = 0;
-        pid = 3; mode = 0; #1;
-        check("Clear: pid3=0", p_out === 16'h0000);
-        pid = 10; mode = 1; #1;
-        check("Clear: vp64=0", vp_out === '0);
+        pid = 3; mode = 0; @(negedge clk);
+        `CHECK_VAL("Clear: pid3=0", p_out, 16'h0000)
+        pid = 10; mode = 1; @(negedge clk);
+        `CHECK_VAL("Clear: vp64=0", vp_out, '0)
 
         // Test 7: Pcounter auto-increment
         clear_pcounter = 1; @(posedge clk); clear_pcounter = 0;
@@ -109,22 +110,22 @@ module tb_psumregfile;
         p_in = 16'hCC01;
         vpid_write_en = 1; @(posedge clk); vpid_write_en = 0;
         use_pcounter = 0;
-        pid = 0; #1;
-        check("Pcounter: pid0=0xCC00", p_out === 16'hCC00);
-        pid = 1; #1;
-        check("Pcounter: pid1=0xCC01", p_out === 16'hCC01);
+        pid = 0; @(negedge clk);
+        `CHECK_VAL("Pcounter: pid0=0xCC00", p_out, 16'hCC00)
+        pid = 1; @(negedge clk);
+        `CHECK_VAL("Pcounter: pid1=0xCC01", p_out, 16'hCC01)
 
         // Test 8: Boundary pid=31 (max scalar)
         use_pcounter = 0;
         pid = 31; mode = 0; p_in = 16'hFFFF;
-        vpid_write_en = 1; @(posedge clk); vpid_write_en = 0; #1;
-        check("Boundary: pid31=0xFFFF", p_out === 16'hFFFF);
+        vpid_write_en = 1; @(posedge clk); vpid_write_en = 0; @(negedge clk);
+        `CHECK_VAL("Boundary: pid31=0xFFFF", p_out, 16'hFFFF)
 
         // Test 9: Enable gating
-        enable = 0; pid = 31; mode = 0; #1;
-        check("EnableOff: p_out=0", p_out === 16'h0000);
-        enable = 1; #1;
-        check("EnableOn: p_out=0xFFFF", p_out === 16'hFFFF);
+        enable = 0; pid = 31; mode = 0; @(negedge clk);
+        `CHECK_VAL("EnableOff: p_out=0", p_out, 16'h0000)
+        enable = 1; @(negedge clk);
+        `CHECK_VAL("EnableOn: p_out=0xFFFF", p_out, 16'hFFFF)
 
         // Test 10: Hybrid mode hazard - vector write aliases scalar regs
         // Write vector to pid=1 (mode=1): writes p_regs[4..7]
@@ -137,14 +138,14 @@ module tb_psumregfile;
         vpid_write_en = 1; @(posedge clk); vpid_write_en = 0;
         // Read back scalar at pid=4,5,6,7 (mode=0) to verify aliasing
         mode = 0;
-        pid = 4; #1;
-        check("HybridAlias: p_regs[4]=0xDD00", p_out === 16'hDD00);
-        pid = 5; #1;
-        check("HybridAlias: p_regs[5]=0xDD11", p_out === 16'hDD11);
-        pid = 6; #1;
-        check("HybridAlias: p_regs[6]=0xDD22", p_out === 16'hDD22);
-        pid = 7; #1;
-        check("HybridAlias: p_regs[7]=0xDD33", p_out === 16'hDD33);
+        pid = 4; @(negedge clk);
+        `CHECK_VAL("HybridAlias: p_regs[4]=0xDD00", p_out, 16'hDD00)
+        pid = 5; @(negedge clk);
+        `CHECK_VAL("HybridAlias: p_regs[5]=0xDD11", p_out, 16'hDD11)
+        pid = 6; @(negedge clk);
+        `CHECK_VAL("HybridAlias: p_regs[6]=0xDD22", p_out, 16'hDD22)
+        pid = 7; @(negedge clk);
+        `CHECK_VAL("HybridAlias: p_regs[7]=0xDD33", p_out, 16'hDD33)
 
         // Test 11: Pcounter overflow/wrap behavior
         clear_pcounter = 1; @(posedge clk); clear_pcounter = 0;
@@ -154,12 +155,10 @@ module tb_psumregfile;
         mode = 0; p_in = 16'hEE00;
         vpid_write_en = 1; @(posedge clk); vpid_write_en = 0;
         // Write goes to pcounter index (31)
-        use_pcounter = 0; pid = 31; #1;
-        check("PcounterLarge: pid31=0xEE00", p_out === 16'hEE00);
+        use_pcounter = 0; pid = 31; @(negedge clk);
+        `CHECK_VAL("PcounterLarge: pid31=0xEE00", p_out, 16'hEE00)
 
-        $display("\n=== tb_psumregfile Summary: %0d PASSED, %0d FAILED ===", pass_count, fail_count);
-        if (fail_count > 0) $display("tb_psumregfile FAIL");
-        else $display("tb_psumregfile PASS");
+        `TB_SUMMARY("tb_psumregfile")
         $finish;
     end
 

@@ -44,6 +44,15 @@ set MOD_NEEDS_PKG {Decoder EXE_A_Stage EXE_M_Stage IF_ID_Stage LDMA SDMA PEroute
 # All other modules are sequential → use physical-clock SDC (DC.sdc)
 set MOD_COMBINATIONAL {Decoder VMULU VADDU}
 
+# SRAM-wrapper / macro-boundary modules
+set MOD_MACRO_WRAPPER {DataMemory}
+
+# Setup-critical modules that still benefit from aggressive optimization
+set MOD_SETUP_CRITICAL {VADDU EXE_A_Stage}
+
+# Hold-critical sequential modules: avoid over-aggressive ungroup
+set MOD_HOLD_FIRST {EXE_M_Stage ProcessElement}
+
 # ============================================================================
 # Validate module name
 # ============================================================================
@@ -92,26 +101,76 @@ if {[lsearch -exact $MOD_COMBINATIONAL $MOD_NAME] >= 0} {
     source ../script/DC.sdc
 }
 
+# Exclude async reset from data-path timing closure to avoid reset-driven false critical paths
+if {[lsearch -exact $MOD_COMBINATIONAL $MOD_NAME] < 0} {
+    if {[sizeof_collection [get_ports reset_n]] > 0} {
+        puts "INFO: Applying false path from reset_n"
+        set_false_path -from [get_ports reset_n]
+    }
+}
+
 check_design
 uniquify
 set_fix_multiple_port_nets -feedthroughs
 set_fix_multiple_port_nets -all -buffer_constants [get_designs *]
 set_max_area 0
 
-# Protect SRAM hard macro instances from optimization
-if {[lsearch -exact $MOD_HAS_SRAM $MOD_NAME] >= 0} {
-    puts "INFO: $MOD_NAME contains SRAM macros — applying set_dont_touch"
-    set_dont_touch [get_cells -hierarchical -filter "ref_name =~ TS1N16ADFP*"]
-}
+# # Protect SRAM hard macro instances from optimization
+# if {[lsearch -exact $MOD_HAS_SRAM $MOD_NAME] >= 0} {
+#     puts "INFO: $MOD_NAME contains SRAM macros — applying set_dont_touch"
+#     set_dont_touch [get_cells -hierarchical -filter "ref_name =~ TS1N16ADFP*"]
+# }
 
-set compile_implementation_selection true
-set compile_seqmap_propagate_constants false
+# # Select compile strategy based on module timing characteristics
+# if {[lsearch -exact $MOD_COMBINATIONAL $MOD_NAME] >= 0} {
+#     # Combinational blocks: prioritize setup closure without unnecessary structural changes.
+#     set compile_implementation_selection true
+#     compile -map_effort high -area_effort high
+#     compile_ultra -timing_high_effort_script -no_autoungroup
+#     compile_ultra -incremental
+# } elseif {[lsearch -exact $MOD_MACRO_WRAPPER $MOD_NAME] >= 0} {
+#     # Macro wrappers: keep hierarchy stable and avoid over-optimizing short SRAM boundary paths.
+#     set compile_implementation_selection true
+#     set compile_seqmap_propagate_constants false
+#     compile -map_effort high -area_effort high
+#     compile_ultra -no_autoungroup -no_boundary_optimization
+#     if {[sizeof_collection [get_clocks clk]] > 0} {
+#         puts "INFO: $MOD_NAME is macro-boundary sensitive — enabling set_fix_hold"
+#         set_fix_hold [get_clocks clk]
+#     }
+#     compile_ultra -incremental
+# } elseif {[lsearch -exact $MOD_HOLD_FIRST $MOD_NAME] >= 0} {
+#     # Hold-critical sequential blocks: avoid flattening that may create shorter min paths.
+#     set compile_implementation_selection true
+#     set compile_seqmap_propagate_constants false
+#     set compile_ultra_ungroup_dw false
+#     set compile_ultra_ungroup_small_hierarchies false
+#     compile -map_effort high -area_effort high
+#     compile_ultra -timing_high_effort_script -no_autoungroup
+#     if {[sizeof_collection [get_clocks clk]] > 0} {
+#         puts "INFO: $MOD_NAME is HOLD-first — enabling set_fix_hold"
+#         set_fix_hold [get_clocks clk]
+#     }
+#     compile_ultra -incremental -timing_high_effort_script
+# } elseif {[lsearch -exact $MOD_SETUP_CRITICAL $MOD_NAME] >= 0} {
+#     # Setup-critical sequential blocks: allow and high-effort timing optimization.
+#     set compile_implementation_selection true
+#     set compile_seqmap_propagate_constants true
+#     compile -map_effort high -area_effort high
+#     compile_ultra -timing_high_effort_script
+#     compile_ultra -incremental -timing_high_effort_script
+# } else {
+#     # Stable sequential blocks: preserve hierarchy and run efficient incremental closure.
+#     set compile_implementation_selection true
+#     set compile_seqmap_propagate_constants false
+#     compile -map_effort high -area_effort high
+#     compile_ultra -no_seq_output_inversion -no_autoungroup
+#     compile_ultra -incremental
+# }
 
-compile_ultra -retime -no_seq_output_inversion -no_autoungroup -exact_map
-compile_ultra -inc
-
-# compile_ultra -timing_high_effort_script
-# compile_ultra -timing_high_effort_script -inc
+# Stable sequential blocks: preserve hierarchy and run efficient incremental closure.
+compile -map_effort high -area_effort high
+# compile -map_effort high -area_effort high -inc
 
 # ============================================================================
 # Reports

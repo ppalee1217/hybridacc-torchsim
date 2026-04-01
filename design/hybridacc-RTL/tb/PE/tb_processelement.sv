@@ -15,6 +15,7 @@
 //-----------------------------------------------------------------------------
 `include "../tb_common.svh"
 `include "../../src/hybridacc_utils_pkg.sv"
+`ifndef GATE_SIM
 `include "../../src/FIFO.sv"
 `include "../../src/asyncFIFO.sv"
 `include "../../src/PE/InstructionMemory.sv"
@@ -32,6 +33,7 @@
 `include "../../src/PE/EXE_A_Stage.sv"
 `include "../../src/PE/PErouter.sv"
 `include "../../src/PE/ProcessElement.sv"
+`endif
 
 module tb_processelement;
     import hybridacc_utils_pkg::*;
@@ -58,6 +60,13 @@ module tb_processelement;
         .pe_busy(pe_busy), .ln_pli_data(ln_pli_data), .ln_pli_valid(ln_pli_valid), .ln_pli_ready(ln_pli_ready),
         .ln_plo_data(ln_plo_data), .ln_plo_valid(ln_plo_valid), .ln_plo_ready(ln_plo_ready)
     );
+
+`ifdef GATE_SIM
+initial begin
+    $sdf_annotate("syn/ProcessElement/ProcessElement.sdf", dut);
+end
+`endif
+
 
     initial begin
         router_enable=1; router_mode=PLI_FROM_BUS_PLO_TO_BUS;

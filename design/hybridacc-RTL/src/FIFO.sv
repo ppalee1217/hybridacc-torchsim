@@ -41,7 +41,12 @@ module FIFO #(
         logic [PTR_W:0] cnt_n;
         logic is_empty, is_full;
 
-        if (!reset_n || clear) begin
+        if (!reset_n) begin
+            wr_ptr_reg <= '0;
+            rd_ptr_reg <= '0;
+            cnt_reg <= '0;
+            for (int i = 0; i < DEPTH; i++) mem[i] <= '0;
+        end else if (clear) begin
             wr_ptr_reg <= '0;
             rd_ptr_reg <= '0;
             cnt_reg <= '0;

@@ -19,6 +19,6 @@
 module tb_noc_system;
     initial begin
         $display("tb_noc_system delegates to tb_networkonchip");
-        #1;
+        #(`TB_SETTLE);
     end
 endmodule

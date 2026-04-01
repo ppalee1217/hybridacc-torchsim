@@ -122,10 +122,10 @@ module tb_sram;
         req_valid <= 1'b0;
 
         resp_ready <= 1'b1;
-        wait (resp_valid === 1'b1); #1;
+        wait (resp_valid === 1'b1); #(`TB_SETTLE);
         check("T3 first", resp_data == 64'hAAAA);
         @(posedge clk);
-        if (!resp_valid) wait (resp_valid === 1'b1); #1;
+        if (!resp_valid) wait (resp_valid === 1'b1); #(`TB_SETTLE);
         check("T3 second", resp_data == 64'hBBBB);
         @(posedge clk);
         resp_ready <= 1'b0;
@@ -135,10 +135,10 @@ module tb_sram;
         do_write(32'h0028, 64'h9999, 8'hFF);
         start_read(32'h0028);
         resp_ready <= 1'b0;
-        wait (resp_valid === 1'b1); #1;
+        wait (resp_valid === 1'b1); #(`TB_SETTLE);
         check("T4 data held", resp_data == 64'h9999);
         repeat (3) begin
-            @(posedge clk); #1;
+            @(posedge clk); #(`TB_SETTLE);
             check("T4 still valid", resp_valid == 1'b1);
         end
         @(posedge clk);
@@ -166,7 +166,7 @@ module tb_sram;
         req_addr <= 32'h0018;
         @(posedge clk);
         req_valid <= 1'b0;
-        @(posedge clk); #1;
+        @(posedge clk); #(`TB_SETTLE);
         check("T5 req_ready=0 when full", req_ready == 1'b0);
         // Drain
         resp_ready <= 1'b1;

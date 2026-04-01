@@ -72,7 +72,7 @@ module tb_nocrouter;
             bus_to_noc_plo_resp_data[i]='0; bus_to_noc_plo_resp_valid[i]=0; scan_chain_in[i]='0;
         end
         @(posedge reset_n);
-        #1;
+        #(`TB_SETTLE);
 
         // Test 1: All ingress channels ready after reset
         check("Ready: PS", noc_ps_in_ready === 1'b1);
@@ -82,21 +82,21 @@ module tb_nocrouter;
 
         // Test 2: PS fanout to all ports
         noc_ps_in_data = {64'h1111, 64'h2222};
-        noc_ps_in_valid = 1; #1;
+        noc_ps_in_valid = 1; #(`TB_SETTLE);
         check("PS fanout: port0 valid", noc_ps_to_bus_req_valid[0] === 1'b1);
         check("PS fanout: port1 valid", noc_ps_to_bus_req_valid[1] === 1'b1);
         noc_ps_in_valid = 0;
 
         // Test 3: PD fanout
         noc_pd_in_data = {64'hAAAA, 64'hBBBB};
-        noc_pd_in_valid = 1; #1;
+        noc_pd_in_valid = 1; #(`TB_SETTLE);
         check("PD fanout: port0 valid", noc_pd_to_bus_req_valid[0] === 1'b1);
         check("PD fanout: port1 valid", noc_pd_to_bus_req_valid[1] === 1'b1);
         noc_pd_in_valid = 0;
 
         // Test 4: PLO fanout
         noc_plo_in_data.addr = 16'h1234;
-        noc_plo_in_valid = 1; #1;
+        noc_plo_in_valid = 1; #(`TB_SETTLE);
         check("PLO fanout: port0 valid", noc_plo_to_bus_req_valid[0] === 1'b1);
         check("PLO fanout: port0 addr", noc_plo_to_bus_req_data[0].addr === 16'h1234);
         noc_plo_in_valid = 0;
@@ -108,7 +108,7 @@ module tb_nocrouter;
         bus_to_noc_plo_resp_data[1].data = 64'hBEEF_0000;
         bus_to_noc_plo_resp_data[1].status = NOC_OK;
         bus_to_noc_plo_resp_valid[1] = 1;
-        #1;
+        #(`TB_SETTLE);
         check("PLO resp: valid", noc_plo_out_valid === 1'b1);
         check("PLO resp: status OK", noc_plo_out_status === NOC_OK);
         check("PLO resp: port0 data", noc_plo_out_data[0*PW +: PW] === 64'hDEAD_0000);
@@ -118,21 +118,21 @@ module tb_nocrouter;
         // Test 6: PLO response with error status
         bus_to_noc_plo_resp_data[1].status = NOC_ERROR;
         bus_to_noc_plo_resp_valid[1] = 1;
-        #1;
+        #(`TB_SETTLE);
         check("PLO err: status=ERROR", noc_plo_out_status === NOC_ERROR);
         bus_to_noc_plo_resp_valid[1] = 0;
 
         // Test 7: Scan chain enable via command
         command_mode = 1;
         command_data = {28'h0, CMD_NOC_SCAN_CHAIN};
-        #1;
+        #(`TB_SETTLE);
         check("ScanChain: enable=1", scan_chain_enable === 1'b1);
-        command_mode = 0; #1;
+        command_mode = 0; #(`TB_SETTLE);
         check("ScanChain: enable=0", scan_chain_enable === 1'b0);
 
         // Test 8: No response => plo_out_valid=0
         for (int i=0;i<NP;i++) bus_to_noc_plo_resp_valid[i] = 0;
-        #1;
+        #(`TB_SETTLE);
         check("NoResp: plo_out_valid=0", noc_plo_out_valid === 1'b0);
 
         $display("\n=== tb_nocrouter Summary: %0d PASSED, %0d FAILED ===", pass_count, fail_count);

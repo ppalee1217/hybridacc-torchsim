@@ -267,3 +267,65 @@
   - tb_noc_unit_rtl: 12 PASS / 0 FAIL
   - tb_pe_sim: 編譯通過，驗證失敗（Conv2D 輸出不符）
 - **唯一殘留問題**：tb_pe_sim 的 Conv2D end-to-end 驗證失敗，PE pipeline 整體行為仍需偵錯
+
+## Batch-010：PE 合成 / Gate-Level 模擬環境完成與報告更新
+
+- 範圍：PE synthesis flow、report 生成、gate-level simulation flow、SDF 路徑修正
+- 開始日期：2026/03/31
+- 狀態：完成
+
+### 本批新增 / 更新項目
+1. **合成腳本與報告工具完成**
+	 - 新增 `script/synthesis_noc_units.tcl`
+	 - 新增 `script/synthesis_cluster_units.tcl`
+	 - 新增 `script/syn_report.py`
+	 - 新增 `script/sim_report.py`
+	 - Makefile 新增 `syn_pe_all`、`syn_report`、`gate_sim_pe`、`gate_sim_report` 等 target
+
+2. **合成錯誤修正**
+	 - `src/FIFO.sv`：拆開 `if (!reset_n || clear)`，避免 DC `ELAB-303`
+	 - `src/PE/EXE_M_Stage.sv`：`tr_enable` 由 1-bit 改為 32-bit，修正 `TransformRegFile.enable` port width mismatch
+	 - `script/DC.sdc`：`set_dont_touch_network` 改為 `set_dont_touch`
+	 - `script/DC_comb.sdc`：移除 combinational module 不存在的 `clk` port 參照
+	 - `src/PE/LDMA.sv`：重新編碼 `LDMARequestType`，令 reset default `LOAD_DWORD=2'b00`，避免合成出未映射 `FFGEN`
+
+3. **Gate-level simulation 基礎設施修正**
+	 - 18 個 testbench 加入 `` `ifdef GATE_SIM `` 切換
+	 - `Makefile` 加入 standard-cell / SRAM Verilog model 與 gate build / log 目錄
+	 - 新增 `src/gate_models/FFGEN_stub.v`，提供舊 `ProcessElement` netlist 中 `\**FFGEN**` cell 的 simulation stub
+	 - `FFGEN_stub.v` 補上 `QN` output，讓 SDF `IOPATH ... QN` 可正確綁定
+	 - 修正 PE testbench 的 `$sdf_annotate(...)` 路徑：`../../syn/...` → `syn/...`，避免 VCS compile/elab 階段找不到 SDF
+
+### 合成結果（15 個 PE modules）
+- 全部 15 個 PE modules 均完成 synthesis 並產生 netlist / SDF
+- 更新後 synthesis report：`report/pe_synthesis_report.md`
+- **Total Cell Area**：88946.10
+- **Total Dynamic Power**：91.0280 mW
+- **主要變化**：
+	- `LDMA`：重編碼後無 `FFGEN`，setup/hold 皆過
+	- `EXE_M_Stage`：重新合成後 area / power 略變，但仍有 setup / hold violation
+	- `ProcessElement`：單獨重新合成在 DC WLM backend 階段卡住，故最終 top-level post-sim 以 `FFGEN` gate stub 完成驗證
+
+### Pre-sim 結果
+- 報告：`report/pre_sim_report.md`
+- 29 個 testbench 中，**25 PASS / 3 FAIL / 1 UNKNOWN**
+- 已確認既有失敗：
+	- `tb_exe_m_stage`：`PS_stall`、`Halt`
+	- `tb_ldma`：`Stall`
+	- `tb_vaddu`：subnormal flush-to-zero 相關 2 項
+	- `tb_pe_sim`：缺測試資料，無法完成 end-to-end 驗證
+
+### Post-sim 結果（含 SDF）
+- 報告：`report/post_sim_report.md`
+- 15 個 PE gate-level testbench 中，**11 PASS / 4 FAIL**
+- PASS：`tb_datamemory`、`tb_decoder`、`tb_exe_a_stage`、`tb_if_id_stage`、`tb_instructionmemory`、`tb_loopcontroller`、`tb_perouter`、`tb_processelement`、`tb_psumregfile`、`tb_transformregfile`、`tb_vmulu`
+- FAIL：
+	- `tb_exe_m_stage`：`PS_stall`、`Halt`
+	- `tb_ldma`：stall / broadcast / multiloop 相關共 6 項
+	- `tb_sdma`：multiloop 相關 3 項（gate-level 新暴露）
+	- `tb_vaddu`：subnormal flush-to-zero 相關 2 項
+
+### 本批結論
+- PE synthesis / report / gate-sim flow 已可完整執行
+- SDF annotation 路徑已修正，post-sim report 現在反映真實 gate-level + SDF 結果
+- `ProcessElement` 因舊 top-level netlist 仍含 `FFGEN`，以 simulation stub 完成 gate-level 驗證；若要徹底移除此 workaround，需再追 DC 為何在 top-level resynthesis 的 WLM backend 階段停滯
