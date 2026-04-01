@@ -11,9 +11,9 @@
 #=====================================================================
 
 set clk_period 1.0
-set input_max   [expr {double(round(1000*$clk_period * 0.3))/1000}]
-set input_min   [expr {double(round(1000*$clk_period * 0.1))/1000}]
-set output_max  [expr {double(round(1000*$clk_period * 0.3))/1000}]
+set input_max   [expr {double(round(1000*$clk_period * 0.6))/1000}]
+set input_min   [expr {double(round(1000*$clk_period * 0.0))/1000}]
+set output_max  [expr {double(round(1000*$clk_period * 0.1))/1000}]
 set output_min  [expr {double(round(1000*$clk_period * 0.0))/1000}]
 
 #=====================================================================
@@ -34,9 +34,9 @@ set_input_transition 0.05 [all_inputs]
 set_operating_conditions -min_library N16ADFP_StdCellff0p88v125c -min ff0p88v125c \
                          -max_library N16ADFP_StdCellss0p72vm40c -max ss0p72vm40c
 
-# 2. 驅動能力設定 (建議對 Data Input 設定即可)
+# 2. 驅動能力設定 — combinational modules have no clk port
 set_driving_cell -library N16ADFP_StdCellss0p72vm40c -lib_cell DFQD1BWP16P90LVT -pin {Q} \
-                 [remove_from_collection [all_inputs] [get_ports clk]]
+                 [all_inputs]
 
 # 3. 輸出負載設定 (強烈建議開啟，模擬真實電路負載)
 set_load [load_of "N16ADFP_StdCellss0p72vm40c/DFQD1BWP16P90LVT/D"] [all_outputs]

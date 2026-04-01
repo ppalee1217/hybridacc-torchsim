@@ -155,7 +155,7 @@ module tb_computecluster;
         // Wait for hready_out
         repeat (3) @(posedge clk);
         if (!hready_out) @(posedge hready_out);
-        #1;
+        #(`TB_SETTLE);
         data = hrdata;
     endtask
 

@@ -210,14 +210,14 @@ module tb_hddu;
 
         // Wait for NoC PS output
         wait (noc_ps_valid === 1'b1);
-        #1;
+        #(`TB_SETTLE);
         check("T3 PS data[63:0]", noc_ps_data[63:0] == 64'd101);
         check("T3 PS valid", noc_ps_valid == 1'b1);
         // Consume first packet by waiting for deassert then re-assert
         @(posedge clk);
         if (noc_ps_valid) @(negedge noc_ps_valid);
         wait (noc_ps_valid === 1'b1);
-        #1;
+        #(`TB_SETTLE);
         check("T3 PS data2[63:0]", noc_ps_data[63:0] == 64'd102);
         @(posedge clk);
         repeat (5) @(posedge clk);
@@ -240,7 +240,7 @@ module tb_hddu;
 
         // Wait for PLO request
         wait (noc_plo_req_valid === 1'b1);
-        #1;
+        #(`TB_SETTLE);
         check("T4 PLO req valid", noc_plo_req_valid == 1'b1);
         @(posedge clk);
 

@@ -50,7 +50,8 @@ module EXE_M_Stage (
     v_fp16_t ps_data_vec;
     v_fp16_t vmul_result;
 
-    logic tr_enable, tr_shift_en, tr_tid_write_en, tr_vtid_write_en;
+    logic [31:0] tr_enable;
+    logic tr_shift_en, tr_tid_write_en, tr_vtid_write_en;
     logic [31:0] tr_shift_mode, tr_tid;
     fp16_t tr_tid_in;
     v_fp16_t tr_vtid_in;
@@ -132,7 +133,7 @@ module EXE_M_Stage (
         EXE_A_decode_signals_out = decode_reg;
         vmul_out_out = vmul_result;
 
-        tr_enable = pe_running;
+        tr_enable = {31'b0, pe_running};
         tr_shift_en = decode_reg.tr_shift && valid_reg && ready_in;
         tr_shift_mode = {29'h0, decode_reg.imm[2:0]};
         tr_tid = decode_reg.rid3;

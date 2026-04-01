@@ -90,7 +90,7 @@ module tb_addressgenerateunit;
         // Ensure we wait for a fresh gen_valid assertion (not a stale one)
         if (gen_valid === 1'b1) @(negedge gen_valid);
         wait (gen_valid === 1'b1);
-        #1;
+        #(`TB_SETTLE);
         check($sformatf("AGU addr=0x%08h", expected_addr), gen_addr == expected_addr);
         check($sformatf("AGU tag=0x%04h", expected_tag), gen_tag == expected_tag);
         check($sformatf("AGU mask=0x%04h", expected_mask), gen_mask == expected_mask);
@@ -141,7 +141,7 @@ module tb_addressgenerateunit;
         mmio_write(REG_MASK_CFG, 32'h0000_00AF);
         mmio_write(REG_CTRL, 32'h0000_0009);
         expect_descriptor(32'h0000_0100, 16'h0005, 16'h00AF, 1'b1);
-        @(posedge clk); #1;
+        @(posedge clk); #(`TB_SETTLE);
         check("Test1: single descriptor done", done === 1'b1 || busy === 1'b0);
 
         // Test 2: nested address and tag sequence.
@@ -172,7 +172,7 @@ module tb_addressgenerateunit;
         wait (gen_valid === 1'b1);
         gen_ready = 1'b0;
         repeat (3) begin
-            @(posedge clk); #1;
+            @(posedge clk); #(`TB_SETTLE);
             check("Backpressure: addr held", gen_addr == 32'h0000_0200);
             check("Backpressure: valid held", gen_valid == 1'b1);
         end
@@ -180,7 +180,7 @@ module tb_addressgenerateunit;
         @(posedge clk);
         // Wait for the old valid to deassert, then the new one
         if (gen_valid === 1'b1) @(negedge gen_valid);
-        wait (gen_valid === 1'b1); #1;
+        wait (gen_valid === 1'b1); #(`TB_SETTLE);
         check("Backpressure: advanced after release", gen_addr == 32'h0000_0208);
         @(posedge clk);
         wait (busy == 1'b0);
@@ -194,7 +194,7 @@ module tb_addressgenerateunit;
         stop <= 1'b1;
         @(posedge clk);
         stop <= 1'b0;
-        @(posedge clk); #1;
+        @(posedge clk); #(`TB_SETTLE);
         check("Stop: busy=0", busy == 1'b0);
         check("Stop: valid=0", gen_valid == 1'b0);
 

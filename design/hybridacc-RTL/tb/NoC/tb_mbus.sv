@@ -78,7 +78,7 @@ module tb_mbus;
         bus_to_noc_plo_resp_ready=1;
         scan_chain_enable=0; scan_chain_in='0;
         @(posedge reset_n);
-        @(posedge clk); #1;
+        @(posedge clk); #(`TB_SETTLE);
 
         // Test 1: Scan chain configuration - enable PE0 with ps_id=1
         scan_chain_in.enable = 1;
@@ -96,14 +96,14 @@ module tb_mbus;
         scan_chain_in.plo_id = 6'd2;
         @(posedge clk);
         scan_chain_enable = 0;
-        #1;
+        #(`TB_SETTLE);
         check("ScanChain: router_enable[0]=1", router_enable[0] === 1'b1);
         check("ScanChain: router_enable[1]=1", router_enable[1] === 1'b1);
 
         // Test 2: Command broadcast (addr bit[6]=1) reaches all enabled PEs
         noc_ps_to_bus_req_data.addr = 16'h0041; // bit[6]=1 => command
         noc_ps_to_bus_req_data.data = 64'hAAAA;
-        noc_ps_to_bus_req_valid = 1; #1;
+        noc_ps_to_bus_req_valid = 1; #(`TB_SETTLE);
         check("CmdBroadcast: PE0 valid", bus_to_pe_ps_req_valid[0] === 1'b1);
         check("CmdBroadcast: PE1 valid", bus_to_pe_ps_req_valid[1] === 1'b1);
         check("CmdBroadcast: ready=1", noc_ps_to_bus_req_ready === 1'b1);
@@ -112,7 +112,7 @@ module tb_mbus;
         // Test 3: Tag-based PS routing (ps_id match)
         noc_ps_to_bus_req_data.addr = 16'h0001; // tag=1, not command
         noc_ps_to_bus_req_data.data = 64'hBBBB;
-        noc_ps_to_bus_req_valid = 1; #1;
+        noc_ps_to_bus_req_valid = 1; #(`TB_SETTLE);
         // PE1 has ps_id=1 (it was shifted to pe_cfg_reg[1] after PE0), PE0 has ps_id=2
         // Actually: scan chain shifts: first in -> pe_cfg_reg[0], then second shifts pe_cfg_reg[0]->pe_cfg_reg[1]
         // So pe_cfg_reg[0] has ps_id=2, pe_cfg_reg[1] has ps_id=1
@@ -124,11 +124,11 @@ module tb_mbus;
         noc_plo_to_bus_req_valid = 1;
         @(posedge clk); noc_plo_to_bus_req_valid = 0;
         // Now rx_mask_reg is set
-        @(posedge clk); #1;
+        @(posedge clk); #(`TB_SETTLE);
         pe_to_bus_plo_resp_data[0].data = 64'hDEAD;
         pe_to_bus_plo_resp_data[0].status = NOC_OK;
         pe_to_bus_plo_resp_valid[0] = 1;
-        #1;
+        #(`TB_SETTLE);
         check("PLO_resp: valid forwarded", bus_to_noc_plo_resp_valid === 1'b1);
         check("PLO_resp: data correct", bus_to_noc_plo_resp_data.data === 64'hDEAD);
         pe_to_bus_plo_resp_valid[0] = 0;
@@ -136,11 +136,11 @@ module tb_mbus;
         // Test 5: Backpressure when PE not ready
         bus_to_pe_ps_req_ready[0] = 0;
         noc_ps_to_bus_req_data.addr = 16'h0042; // tag=2, command
-        noc_ps_to_bus_req_valid = 1; #1;
+        noc_ps_to_bus_req_valid = 1; #(`TB_SETTLE);
         // If PE0 is targeted and not ready, noc_ps_to_bus_req_ready should be 0
         // With command addr, both PEs are targeted. PE0 not ready => all_ready=0
         check("Backpressure: ready=0", noc_ps_to_bus_req_ready === 1'b0);
-        bus_to_pe_ps_req_ready[0] = 1; #1;
+        bus_to_pe_ps_req_ready[0] = 1; #(`TB_SETTLE);
         check("Backpressure: ready=1 after restore", noc_ps_to_bus_req_ready === 1'b1);
         noc_ps_to_bus_req_valid = 0;
 
@@ -149,9 +149,9 @@ module tb_mbus;
         scan_chain_in = '0;
         scan_chain_enable = 1;
         @(posedge clk); @(posedge clk);
-        scan_chain_enable = 0; #1;
+        scan_chain_enable = 0; #(`TB_SETTLE);
         noc_ps_to_bus_req_data.addr = 16'h0001;
-        noc_ps_to_bus_req_valid = 1; #1;
+        noc_ps_to_bus_req_valid = 1; #(`TB_SETTLE);
         check("NoEnabled: PE0 not valid", bus_to_pe_ps_req_valid[0] === 1'b0);
         check("NoEnabled: PE1 not valid", bus_to_pe_ps_req_valid[1] === 1'b0);
         noc_ps_to_bus_req_valid = 0;

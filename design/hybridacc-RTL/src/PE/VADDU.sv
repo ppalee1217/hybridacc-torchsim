@@ -27,7 +27,7 @@ module VADDU (
             DW_fp_add #(
                 .sig_width       (10),
                 .exp_width       (5),
-                .ieee_compliance (1)
+                .ieee_compliance (0)
             ) u_fp_add (
                 .a      (op1.lanes[i]),
                 .b      (op2.lanes[i]),
