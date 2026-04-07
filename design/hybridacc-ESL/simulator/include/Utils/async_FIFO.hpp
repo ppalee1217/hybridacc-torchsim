@@ -6,7 +6,7 @@
 #include <cstring>
 #include <type_traits>
 #include <vector>
-#include "utils.hpp"
+#include "Utils/utils.hpp"
 #include <cassert>
 
 using namespace sc_core;  // Add this to use SystemC types without prefix

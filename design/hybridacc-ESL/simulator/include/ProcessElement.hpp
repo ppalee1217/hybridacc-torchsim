@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <vector>
 #include <systemc>
-#include "utils.hpp"
+#include "Utils/utils.hpp"
 #include "PE/PErouter.hpp"
 #include "PE/IF_ID_stage.hpp"
 #include "PE/EXE_M_stage.hpp"

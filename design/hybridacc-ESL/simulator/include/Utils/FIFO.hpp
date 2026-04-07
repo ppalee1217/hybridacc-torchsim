@@ -3,7 +3,7 @@
 #include <systemc>
 #include <vector>
 #include <string>
-#include "utils.hpp"
+#include "Utils/utils.hpp"
 
 using namespace sc_core;  // Add this to use SystemC types without prefix
 

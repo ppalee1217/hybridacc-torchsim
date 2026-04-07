@@ -1,6 +1,6 @@
 #pragma once
 
-#include "utils.hpp"
+#include "Utils/utils.hpp"
 #include <systemc>
 
 using namespace sc_core;  // Add this to use SystemC types without prefix

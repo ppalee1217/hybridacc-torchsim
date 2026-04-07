@@ -1,6 +1,6 @@
 #pragma once
 
-#include "utils.hpp"
+#include "Utils/utils.hpp"
 #include <systemc>
 #include "VADDU.hpp"
 #include "PsumRegFile.hpp"

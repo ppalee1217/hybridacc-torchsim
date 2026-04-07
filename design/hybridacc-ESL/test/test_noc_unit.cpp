@@ -4,7 +4,7 @@
 #include <vector>
 #include "NetworkOnChip.hpp"
 #include "NoC/NoCRouter.hpp"
-#include "utils.hpp"
+#include "Utils/utils.hpp"
 
 using namespace hybridacc;
 using namespace sc_core;

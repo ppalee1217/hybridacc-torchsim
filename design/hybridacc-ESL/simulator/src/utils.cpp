@@ -1,4 +1,4 @@
-#include "utils.hpp"
+#include "Utils/utils.hpp"
 
 fp16_t fp16_mul(fp16_t a, fp16_t b) {
     // IEEE754 half precision 乘法 (round to nearest even)，支援 NaN/Inf/Zero，subnormal 產生或輸入時最終仍可被 flush (測試會 FTZ)

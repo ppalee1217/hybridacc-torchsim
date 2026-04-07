@@ -9,10 +9,10 @@
 #include <string>
 #include <cassert>
 
-#include "Cluster/SRAM.hpp"
+#include "Utils/SRAM.hpp"
 #include "AXI4_lite/axi4-lite.hpp"
-#include "FIFO.hpp"
-#include "utils.hpp"
+#include "Utils/FIFO.hpp"
+#include "Utils/utils.hpp"
 
 using namespace sc_core;
 using namespace sc_dt;

@@ -1,7 +1,7 @@
 #include <systemc>
 #include <iostream>
 #include <cassert>
-#include "Cluster/SRAM.hpp"
+#include "Utils/SRAM.hpp"
 
 using namespace sc_core;
 using namespace sc_dt;

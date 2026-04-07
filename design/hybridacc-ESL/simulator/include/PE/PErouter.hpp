@@ -1,10 +1,10 @@
 #pragma once
 
-#include "utils.hpp"
+#include "Utils/utils.hpp"
 #include <systemc>
 #include <cassert>
-#include "FIFO.hpp"
-#include "async_FIFO.hpp"
+#include "Utils/FIFO.hpp"
+#include "Utils/async_FIFO.hpp"
 
 using namespace sc_core;
 

@@ -2,7 +2,7 @@
 
 #include <cstdint>
 #include <systemc>
-#include "utils.hpp"
+#include "Utils/utils.hpp"
 #include <vector>
 
 using namespace sc_core;

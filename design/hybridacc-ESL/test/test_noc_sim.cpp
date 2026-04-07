@@ -11,7 +11,7 @@
 #include <functional>
 #include "NetworkOnChip.hpp"
 #include "NoC/NoCRouter.hpp"
-#include "utils.hpp"
+#include "Utils/utils.hpp"
 #include "tb_utils.hpp"
 
 using namespace hybridacc;

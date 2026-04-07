@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <utility>
 #include <systemc>
-#include "utils.hpp"
+#include "Utils/utils.hpp"
 #include "NoC/MBUS.hpp"
 #include "NoC/NoCRouter.hpp"
 #include "ProcessElement.hpp"

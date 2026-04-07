@@ -2,8 +2,8 @@
 
 #include <cstdint>
 #include <systemc>
-#include "utils.hpp"
-#include "FIFO.hpp" // Include FIFO
+#include "Utils/utils.hpp"
+#include "Utils/FIFO.hpp" // Include FIFO
 
 using namespace sc_core;
 using namespace sc_dt;
