@@ -407,3 +407,31 @@ add_test(NAME ComputeCluster_Simulation COMMAND test_cluster_sim)
 add_test(NAME ComputeCluster_Simulation_Advanced COMMAND test_cluster_sim_advanced)
 add_test(NAME HACC_Core_Unit_Tests COMMAND test_core_unit)
 add_test(NAME HACC_Core_Controller_Integration COMMAND test_core_controller_integration)
+
+# Core MCU Simulation (ELF loader + EBREAK halt)
+add_executable(test_core_mcu_sim
+    test_core_mcu_sim.cpp
+)
+
+if(ENABLE_DEBUG_UTILS)
+    target_compile_definitions(test_core_mcu_sim PRIVATE DEBUG_UTILS)
+    target_compile_definitions(test_core_mcu_sim PRIVATE DEBUG_LEVEL_MIN=${DEBUG_LEVEL_MIN})
+    target_compile_definitions(test_core_mcu_sim PRIVATE DEBUG_LEVEL_MAX=${DEBUG_LEVEL_MAX})
+endif()
+
+target_link_libraries(test_core_mcu_sim
+    pe_simulator
+    systemc
+    pthread
+    tb_utils
+    stdc++fs
+)
+
+add_custom_target(run_core_mcu_sim
+    COMMAND ./test_core_mcu_sim
+    DEPENDS test_core_mcu_sim
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running Core MCU ELF simulation"
+)
+
+add_test(NAME HACC_Core_MCU_Simulation COMMAND test_core_mcu_sim)

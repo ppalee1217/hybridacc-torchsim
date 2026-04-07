@@ -1,189 +1,497 @@
 #pragma once
 
+/**
+ * @file CmdFabric.hpp
+ * @brief cc_cmd_fabric — MMIO address decoder and router for cc_core_mcu.
+ *
+ * Decodes core MMIO requests and routes to:
+ *   - Core local control register bank
+ *   - DMA MMIO
+ *   - PLIC MMIO
+ *   - Core local timer/MSIP MMIO
+ *   - Cluster unicast / masked-broadcast AHB
+ *   - NLU AHB
+ *
+ * Provides deterministic blocking completion and cluster broadcast sequencing.
+ *
+ * @par Spec reference
+ *   Core.md §8.5  cc_cmd_fabric
+ */
+
 #include <systemc>
-
 #include <cstdint>
-
+#include "Utils/utils.hpp"
 #include "Core/Types.hpp"
+
+namespace hybridacc {
+namespace core {
 
 using namespace sc_core;
 using namespace sc_dt;
 
-namespace hybridacc::core {
-
+template <unsigned NUM_CLUSTERS = 1, unsigned NUM_NLU = 0>
 SC_MODULE(CmdFabric) {
-public:
-	sc_in<bool> clk{"clk"};
-	sc_in<bool> reset_n{"reset_n"};
 
-	sc_in<bool> core_mmio_req_valid_i{"core_mmio_req_valid_i"};
-	sc_in<MmioRequest> core_mmio_req_i{"core_mmio_req_i"};
-	sc_out<bool> core_mmio_resp_valid_o{"core_mmio_resp_valid_o"};
-	sc_out<MmioResponse> core_mmio_resp_o{"core_mmio_resp_o"};
+    // ========================================================================
+    // Ports
+    // ========================================================================
 
-	sc_out<bool> dma_mmio_req_valid_o{"dma_mmio_req_valid_o"};
-	sc_out<DmaMmioRequest> dma_mmio_req_o{"dma_mmio_req_o"};
-	sc_in<bool> dma_mmio_resp_valid_i{"dma_mmio_resp_valid_i"};
-	sc_in<MmioResponse> dma_mmio_resp_i{"dma_mmio_resp_i"};
+    sc_in<bool>  clk;
+    sc_in<bool>  reset_n;
 
-	sc_out<bool> dma_stream_valid_o{"dma_stream_valid_o"};
-	sc_out<sc_uint<32>> dma_stream_data_o{"dma_stream_data_o"};
+    // --- Core MMIO request (from MEM stage) ---
+    sc_in<bool>          core_mmio_req_valid_i;
+    sc_in<bool>          core_mmio_req_write_i;
+    sc_in<sc_uint<32>>   core_mmio_req_addr_i;
+    sc_in<sc_uint<32>>   core_mmio_req_wdata_i;
+    sc_in<sc_uint<4>>    core_mmio_req_wstrb_i;
+    sc_out<bool>         core_mmio_resp_valid_o;
+    sc_out<sc_uint<32>>  core_mmio_resp_rdata_o;
 
-	sc_out<bool> cluster_req_valid_o{"cluster_req_valid_o"};
-	sc_out<ClusterMmioRequest> cluster_req_o{"cluster_req_o"};
-	sc_in<bool> cluster_req_ready_i{"cluster_req_ready_i"};
+    // --- DMA MMIO route ---
+    sc_out<bool>         dma_mmio_req_valid_o;
+    sc_out<bool>         dma_mmio_req_write_o;
+    sc_out<sc_uint<32>>  dma_mmio_req_addr_o;
+    sc_out<sc_uint<32>>  dma_mmio_req_wdata_o;
+    sc_in<bool>          dma_mmio_resp_valid_i;
+    sc_in<sc_uint<32>>   dma_mmio_resp_rdata_i;
 
-	sc_out<bool> nlu_req_valid_o{"nlu_req_valid_o"};
-	sc_out<NluMmioRequest> nlu_req_o{"nlu_req_o"};
-	sc_in<bool> nlu_req_ready_i{"nlu_req_ready_i"};
+    // --- PLIC MMIO route ---
+    sc_out<bool>         plic_mmio_req_valid_o;
+    sc_out<bool>         plic_mmio_req_write_o;
+    sc_out<sc_uint<32>>  plic_mmio_req_addr_o;
+    sc_out<sc_uint<32>>  plic_mmio_req_wdata_o;
+    sc_in<bool>          plic_mmio_resp_valid_i;
+    sc_in<sc_uint<32>>   plic_mmio_resp_rdata_i;
 
-	sc_out<bool> plic_mmio_req_valid_o{"plic_mmio_req_valid_o"};
-	sc_out<MmioRequest> plic_mmio_req_o{"plic_mmio_req_o"};
-	sc_in<bool> plic_mmio_resp_valid_i{"plic_mmio_resp_valid_i"};
-	sc_in<MmioResponse> plic_mmio_resp_i{"plic_mmio_resp_i"};
+    // --- Core local timer route ---
+    sc_out<bool>         timer_mmio_req_valid_o;
+    sc_out<bool>         timer_mmio_req_write_o;
+    sc_out<sc_uint<32>>  timer_mmio_req_addr_o;
+    sc_out<sc_uint<32>>  timer_mmio_req_wdata_o;
+    sc_in<bool>          timer_mmio_resp_valid_i;
+    sc_in<sc_uint<32>>   timer_mmio_resp_rdata_i;
 
-	SC_CTOR(CmdFabric) {
-		SC_CTHREAD(seq_process, clk.pos());
-		reset_signal_is(reset_n, false);
-	}
+    // --- Cluster AHB command route (unicast, one per cluster) ---
+    // For ESL, simplified to valid/ready + data interface per cluster
+    sc_out<bool>         cl_cmd_req_valid_o[NUM_CLUSTERS];
+    sc_out<bool>         cl_cmd_req_write_o[NUM_CLUSTERS];
+    sc_out<sc_uint<32>>  cl_cmd_req_addr_o[NUM_CLUSTERS];
+    sc_out<sc_uint<32>>  cl_cmd_req_wdata_o[NUM_CLUSTERS];
+    sc_in<bool>          cl_cmd_resp_valid_i[NUM_CLUSTERS];
+    sc_in<sc_uint<32>>   cl_cmd_resp_rdata_i[NUM_CLUSTERS];
 
-	uint32_t cluster_mask_lo() const { return cluster_mask_lo_reg_; }
-	uint32_t cluster_mask_hi() const { return cluster_mask_hi_reg_; }
-	ClusterMmioRequest last_cluster_request() const { return last_cluster_request_; }
-	uint32_t last_fault_addr() const { return last_fault_addr_reg_; }
-	uint32_t last_target_id() const { return last_target_id_reg_; }
+    // --- NLU AHB route ---
+    sc_out<bool>         nlu_cmd_req_valid_o[NUM_NLU > 0 ? NUM_NLU : 1];
+    sc_out<bool>         nlu_cmd_req_write_o[NUM_NLU > 0 ? NUM_NLU : 1];
+    sc_out<sc_uint<32>>  nlu_cmd_req_addr_o[NUM_NLU > 0 ? NUM_NLU : 1];
+    sc_out<sc_uint<32>>  nlu_cmd_req_wdata_o[NUM_NLU > 0 ? NUM_NLU : 1];
+    sc_in<bool>          nlu_cmd_resp_valid_i[NUM_NLU > 0 ? NUM_NLU : 1];
+    sc_in<sc_uint<32>>   nlu_cmd_resp_rdata_i[NUM_NLU > 0 ? NUM_NLU : 1];
+
+    // ========================================================================
+    // Constructor
+    // ========================================================================
+
+    SC_HAS_PROCESS(CmdFabric);
+
+    CmdFabric(sc_module_name name)
+        : sc_module(name),
+          clk("clk"), reset_n("reset_n"),
+          core_mmio_req_valid_i("core_mmio_req_valid_i"),
+          core_mmio_req_write_i("core_mmio_req_write_i"),
+          core_mmio_req_addr_i("core_mmio_req_addr_i"),
+          core_mmio_req_wdata_i("core_mmio_req_wdata_i"),
+          core_mmio_req_wstrb_i("core_mmio_req_wstrb_i"),
+          core_mmio_resp_valid_o("core_mmio_resp_valid_o"),
+          core_mmio_resp_rdata_o("core_mmio_resp_rdata_o"),
+          dma_mmio_req_valid_o("dma_mmio_req_valid_o"),
+          dma_mmio_req_write_o("dma_mmio_req_write_o"),
+          dma_mmio_req_addr_o("dma_mmio_req_addr_o"),
+          dma_mmio_req_wdata_o("dma_mmio_req_wdata_o"),
+          dma_mmio_resp_valid_i("dma_mmio_resp_valid_i"),
+          dma_mmio_resp_rdata_i("dma_mmio_resp_rdata_i"),
+          plic_mmio_req_valid_o("plic_mmio_req_valid_o"),
+          plic_mmio_req_write_o("plic_mmio_req_write_o"),
+          plic_mmio_req_addr_o("plic_mmio_req_addr_o"),
+          plic_mmio_req_wdata_o("plic_mmio_req_wdata_o"),
+          plic_mmio_resp_valid_i("plic_mmio_resp_valid_i"),
+          plic_mmio_resp_rdata_i("plic_mmio_resp_rdata_i"),
+          timer_mmio_req_valid_o("timer_mmio_req_valid_o"),
+          timer_mmio_req_write_o("timer_mmio_req_write_o"),
+          timer_mmio_req_addr_o("timer_mmio_req_addr_o"),
+          timer_mmio_req_wdata_o("timer_mmio_req_wdata_o"),
+          timer_mmio_resp_valid_i("timer_mmio_resp_valid_i"),
+          timer_mmio_resp_rdata_i("timer_mmio_resp_rdata_i")
+    {
+        SC_CTHREAD(seq_process, clk.pos());
+        reset_signal_is(reset_n, false);
+    }
 
 private:
-	uint32_t cluster_mask_lo_reg_ = 0u;
-	uint32_t cluster_mask_hi_reg_ = 0u;
-	uint32_t mmio_err_status_reg_ = 0u;
-	uint32_t last_target_id_reg_ = 0u;
-	uint32_t last_fault_addr_reg_ = 0u;
-	uint32_t last_fault_info_reg_ = 0u;
-	uint32_t dma_status_mirror_reg_ = 0u;
-	uint32_t dma_err_code_mirror_reg_ = 0u;
-	uint32_t boot_reason_reg_ = 0u;
-	ClusterMmioRequest last_cluster_request_{};
+    // ========================================================================
+    // Target identification
+    // ========================================================================
 
-	void respond_local(const MmioRequest& request, MmioResponse& response) {
-		const uint32_t offset = request.addr - kLocalMmioBase;
-		if (request.write) {
-			switch (offset) {
-			case kLocalClusterMaskLoOffset: cluster_mask_lo_reg_ = request.wdata; break;
-			case kLocalClusterMaskHiOffset: cluster_mask_hi_reg_ = request.wdata; break;
-			case kLocalMmioErrStatusOffset: mmio_err_status_reg_ &= ~request.wdata; break;
-			case kLocalDmaErrCodeOffset: dma_err_code_mirror_reg_ &= ~request.wdata; break;
-			case kLocalSwIrqSetOffset: boot_reason_reg_ = request.wdata; break;
-			case kLocalSwIrqClrOffset: boot_reason_reg_ &= ~request.wdata; break;
-			default: break;
-			}
-		} else {
-			switch (offset) {
-			case kLocalCoreStatusOffset: response.rdata = 0u; break;
-			case kLocalClusterMaskLoOffset: response.rdata = cluster_mask_lo_reg_; break;
-			case kLocalClusterMaskHiOffset: response.rdata = cluster_mask_hi_reg_; break;
-			case kLocalMmioErrStatusOffset: response.rdata = mmio_err_status_reg_; break;
-			case kLocalLastTargetIdOffset: response.rdata = last_target_id_reg_; break;
-			case kLocalLastFaultAddrOffset: response.rdata = last_fault_addr_reg_; break;
-			case kLocalLastFaultInfoOffset: response.rdata = last_fault_info_reg_; break;
-			case kLocalDmaStatusOffset: response.rdata = dma_status_mirror_reg_; break;
-			case kLocalDmaErrCodeOffset: response.rdata = dma_err_code_mirror_reg_; break;
-			case kLocalBootReasonOffset: response.rdata = boot_reason_reg_; break;
-			default: break;
-			}
-		}
-	}
+    enum class Target : uint8_t {
+        LOCAL_CTRL, DMA, PLIC, TIMER, CLUSTER, CLUSTER_BCAST, NLU, DECODE_FAULT
+    };
 
-	void seq_process() {
-		core_mmio_resp_valid_o.write(false);
-		core_mmio_resp_o.write(MmioResponse{});
-		dma_mmio_req_valid_o.write(false);
-		dma_mmio_req_o.write(DmaMmioRequest{});
-		dma_stream_valid_o.write(false);
-		dma_stream_data_o.write(0u);
-		cluster_req_valid_o.write(false);
-		cluster_req_o.write(ClusterMmioRequest{});
-		nlu_req_valid_o.write(false);
-		nlu_req_o.write(NluMmioRequest{});
-		plic_mmio_req_valid_o.write(false);
-		plic_mmio_req_o.write(MmioRequest{});
-		wait();
+    // ========================================================================
+    // Local control register bank
+    // ========================================================================
 
-		while (true) {
-			core_mmio_resp_valid_o.write(false);
-			dma_mmio_req_valid_o.write(false);
-			dma_stream_valid_o.write(false);
-			cluster_req_valid_o.write(false);
-			nlu_req_valid_o.write(false);
-			plic_mmio_req_valid_o.write(false);
+    uint32_t cluster_mask_lo_reg = 0;
+    uint32_t cluster_mask_hi_reg = 0;
+    uint32_t mmio_err_status_reg = 0;
+    uint32_t last_target_id_reg  = 0;
+    uint32_t last_fault_addr_reg = 0;
+    uint32_t last_fault_info_reg = 0;
+    uint32_t boot_reason_reg     = 0;
 
-			if (dma_mmio_resp_valid_i.read()) {
-				dma_status_mirror_reg_ = dma_mmio_resp_i.read().rdata;
-			}
+    // ========================================================================
+    // Address decode
+    // ========================================================================
 
-			if (core_mmio_req_valid_i.read()) {
-				const auto request = core_mmio_req_i.read();
-				MmioResponse response{};
-				if (is_local_mmio(request.addr)) {
-					respond_local(request, response);
-					core_mmio_resp_o.write(response);
-					core_mmio_resp_valid_o.write(true);
-				} else if (is_dma_stream_window(request.addr) && request.write) {
-					dma_stream_valid_o.write(true);
-					dma_stream_data_o.write(request.wdata);
-					core_mmio_resp_o.write(response);
-					core_mmio_resp_valid_o.write(true);
-				} else if (is_dma_mmio(request.addr)) {
-					dma_mmio_req_valid_o.write(true);
-					dma_mmio_req_o.write(DmaMmioRequest{request.write, request.addr, request.wdata, request.wstrb});
-					core_mmio_resp_o.write(dma_mmio_resp_valid_i.read() ? dma_mmio_resp_i.read() : MmioResponse{});
-					core_mmio_resp_valid_o.write(true);
-				} else if (is_plic_mmio(request.addr)) {
-					plic_mmio_req_valid_o.write(true);
-					plic_mmio_req_o.write(request);
-					core_mmio_resp_o.write(plic_mmio_resp_valid_i.read() ? plic_mmio_resp_i.read() : MmioResponse{});
-					core_mmio_resp_valid_o.write(true);
-				} else if (is_cluster_unicast_mmio(request.addr) || is_cluster_broadcast_mmio(request.addr)) {
-					ClusterMmioRequest cluster_request{};
-					cluster_request.write = request.write;
-					cluster_request.is_broadcast = is_cluster_broadcast_mmio(request.addr);
-					cluster_request.target_mask = cluster_request.is_broadcast ? cluster_mask_lo_reg_ : (1u << ((request.addr - kClusterMmioBase) / kClusterStride));
-					cluster_request.target_id = cluster_request.is_broadcast ? 0u : ((request.addr - kClusterMmioBase) / kClusterStride);
-					cluster_request.addr = cluster_request.is_broadcast ? (request.addr - kClusterBroadcastBase) : ((request.addr - kClusterMmioBase) % kClusterStride);
-					cluster_request.wdata = request.wdata;
-					cluster_request.wstrb = request.wstrb;
-					last_cluster_request_ = cluster_request;
-					last_target_id_reg_ = cluster_request.target_id;
-					last_fault_addr_reg_ = request.addr;
-					cluster_req_valid_o.write(true);
-					cluster_req_o.write(cluster_request);
-					core_mmio_resp_o.write(response);
-					core_mmio_resp_valid_o.write(true);
-				} else if (is_nlu_mmio(request.addr)) {
-					NluMmioRequest nlu_request{};
-					nlu_request.write = request.write;
-					nlu_request.target_id = (request.addr - kNluMmioBase) / kNluStride;
-					nlu_request.target_mask = 1u << nlu_request.target_id;
-					nlu_request.addr = (request.addr - kNluMmioBase) % kNluStride;
-					nlu_request.wdata = request.wdata;
-					nlu_request.wstrb = request.wstrb;
-					nlu_req_valid_o.write(true);
-					nlu_req_o.write(nlu_request);
-					core_mmio_resp_o.write(response);
-					core_mmio_resp_valid_o.write(true);
-				} else {
-					response.error = true;
-					response.error_code = 1u;
-					mmio_err_status_reg_ |= 1u;
-					last_fault_addr_reg_ = request.addr;
-					core_mmio_resp_o.write(response);
-					core_mmio_resp_valid_o.write(true);
-				}
-			}
+    struct DecodeResult {
+        Target   target;
+        uint32_t local_offset;  ///< offset within target window
+        unsigned target_id;     ///< cluster/NLU index
+    };
 
-			wait();
-		}
-	}
+    static DecodeResult decode_addr(uint32_t addr) {
+        DecodeResult r;
+        r.target_id = 0;
+        r.local_offset = 0;
+
+        if (addr >= kBaseLocalCtrl && addr <= kEndLocalCtrl) {
+            r.target = Target::LOCAL_CTRL;
+            r.local_offset = addr - kBaseLocalCtrl;
+        } else if (addr >= kBaseDmaMmio && addr <= kEndDmaMmio) {
+            r.target = Target::DMA;
+            r.local_offset = addr - kBaseDmaMmio;
+        } else if (addr >= kBaseLocalTimer && addr <= kEndLocalTimer) {
+            r.target = Target::TIMER;
+            r.local_offset = addr - kBaseLocalTimer;
+        } else if (addr >= kBasePlic && addr <= kEndPlic) {
+            r.target = Target::PLIC;
+            r.local_offset = addr - kBasePlic;
+        } else if (addr >= kBaseClusterUnicast && addr <= kEndClusterUnicast) {
+            r.target = Target::CLUSTER;
+            r.target_id    = (addr - kBaseClusterUnicast) / kClusterStride;
+            r.local_offset = (addr - kBaseClusterUnicast) % kClusterStride;
+        } else if (addr >= kBaseClusterBcast && addr <= kEndClusterBcast) {
+            r.target = Target::CLUSTER_BCAST;
+            r.local_offset = addr - kBaseClusterBcast;
+        } else if (addr >= kBaseNlu && addr <= kEndNlu) {
+            r.target = Target::NLU;
+            r.target_id    = (addr - kBaseNlu) / kNluStride;
+            r.local_offset = (addr - kBaseNlu) % kNluStride;
+        } else {
+            r.target = Target::DECODE_FAULT;
+        }
+        return r;
+    }
+
+    // ========================================================================
+    // FSM
+    // ========================================================================
+
+    enum class FabricState : uint8_t {
+        IDLE,
+        WAIT_DMA,
+        WAIT_PLIC,
+        WAIT_TIMER,
+        WAIT_CLUSTER,
+        WAIT_NLU,
+        BCAST_SEQ,   ///< broadcasting to multiple clusters sequentially
+    };
+
+    FabricState state_reg        = FabricState::IDLE;
+    unsigned    bcast_idx_reg    = 0;    ///< current broadcast cluster index
+    uint32_t    bcast_addr_reg   = 0;
+    uint32_t    bcast_wdata_reg  = 0;
+    bool        bcast_write_reg  = false;
+    bool        bcast_any_error  = false;
+
+    // ========================================================================
+    // Processes
+    // ========================================================================
+
+    /**
+     * @brief Sequential — decode MMIO address, route to target, collect response.
+     *
+     * Implements blocking MMIO semantics: one outstanding transaction at a time.
+     * Cluster broadcast is serialised across all mask-hit clusters.
+     */
+    void seq_process() {
+        // Reset all outputs
+        core_mmio_resp_valid_o.write(false);
+        core_mmio_resp_rdata_o.write(0);
+        dma_mmio_req_valid_o.write(false);
+        plic_mmio_req_valid_o.write(false);
+        timer_mmio_req_valid_o.write(false);
+        for (unsigned i = 0; i < NUM_CLUSTERS; ++i) {
+            cl_cmd_req_valid_o[i].write(false);
+        }
+        for (unsigned i = 0; i < (NUM_NLU > 0 ? NUM_NLU : 1u); ++i) {
+            nlu_cmd_req_valid_o[i].write(false);
+        }
+        cluster_mask_lo_reg = 0;
+        cluster_mask_hi_reg = 0;
+        mmio_err_status_reg = 0;
+        state_reg = FabricState::IDLE;
+        wait();
+
+        while (true) {
+            // Default de-assert
+            core_mmio_resp_valid_o.write(false);
+            dma_mmio_req_valid_o.write(false);
+            plic_mmio_req_valid_o.write(false);
+            timer_mmio_req_valid_o.write(false);
+            for (unsigned i = 0; i < NUM_CLUSTERS; ++i)
+                cl_cmd_req_valid_o[i].write(false);
+            for (unsigned i = 0; i < (NUM_NLU > 0 ? NUM_NLU : 1u); ++i)
+                nlu_cmd_req_valid_o[i].write(false);
+
+            switch (state_reg) {
+
+            // ----------------------------------------------------------
+            case FabricState::IDLE: {
+                if (core_mmio_req_valid_i.read()) {
+                    const uint32_t addr  = core_mmio_req_addr_i.read().to_uint();
+                    const uint32_t wdata = core_mmio_req_wdata_i.read().to_uint();
+                    const bool     wr    = core_mmio_req_write_i.read();
+                    const auto     dec   = decode_addr(addr);
+
+                    switch (dec.target) {
+
+                    case Target::LOCAL_CTRL: {
+                        // Handled locally in 1 cycle
+                        uint32_t rdata = 0;
+                        if (wr) {
+                            switch (dec.local_offset) {
+                                case kLocalClusterMaskLo: cluster_mask_lo_reg = wdata; break;
+                                case kLocalClusterMaskHi: cluster_mask_hi_reg = wdata; break;
+                                case kLocalMmioErrStatus:
+                                    mmio_err_status_reg &= ~wdata; // W1C
+                                    break;
+                                default: break;
+                            }
+                        } else {
+                            switch (dec.local_offset) {
+                                case kLocalClusterMaskLo: rdata = cluster_mask_lo_reg; break;
+                                case kLocalClusterMaskHi: rdata = cluster_mask_hi_reg; break;
+                                case kLocalMmioErrStatus: rdata = mmio_err_status_reg; break;
+                                case kLocalLastTargetId:  rdata = last_target_id_reg;  break;
+                                case kLocalLastFaultAddr: rdata = last_fault_addr_reg; break;
+                                case kLocalLastFaultInfo: rdata = last_fault_info_reg; break;
+                                case kLocalBootReason:    rdata = boot_reason_reg;     break;
+                                case kLocalFabricCap0:
+                                    rdata = 0x1; // broadcast capable
+                                    break;
+                                default: break;
+                            }
+                        }
+                        core_mmio_resp_valid_o.write(true);
+                        core_mmio_resp_rdata_o.write(rdata);
+                        break;
+                    }
+
+                    case Target::DMA:
+                        dma_mmio_req_valid_o.write(true);
+                        dma_mmio_req_write_o.write(wr);
+                        dma_mmio_req_addr_o.write(dec.local_offset);
+                        dma_mmio_req_wdata_o.write(wdata);
+                        state_reg = FabricState::WAIT_DMA;
+                        break;
+
+                    case Target::PLIC:
+                        plic_mmio_req_valid_o.write(true);
+                        plic_mmio_req_write_o.write(wr);
+                        plic_mmio_req_addr_o.write(dec.local_offset);
+                        plic_mmio_req_wdata_o.write(wdata);
+                        state_reg = FabricState::WAIT_PLIC;
+                        break;
+
+                    case Target::TIMER:
+                        timer_mmio_req_valid_o.write(true);
+                        timer_mmio_req_write_o.write(wr);
+                        timer_mmio_req_addr_o.write(dec.local_offset);
+                        timer_mmio_req_wdata_o.write(wdata);
+                        state_reg = FabricState::WAIT_TIMER;
+                        break;
+
+                    case Target::CLUSTER:
+                        if (dec.target_id < NUM_CLUSTERS) {
+                            cl_cmd_req_valid_o[dec.target_id].write(true);
+                            cl_cmd_req_write_o[dec.target_id].write(wr);
+                            cl_cmd_req_addr_o[dec.target_id].write(dec.local_offset);
+                            cl_cmd_req_wdata_o[dec.target_id].write(wdata);
+                            state_reg = FabricState::WAIT_CLUSTER;
+                            last_target_id_reg = dec.target_id;
+                        } else {
+                            // Out of range
+                            mmio_err_status_reg |= 0x3; // pending + decode_fault
+                            last_fault_addr_reg = addr;
+                            core_mmio_resp_valid_o.write(true);
+                            core_mmio_resp_rdata_o.write(0);
+                        }
+                        break;
+
+                    case Target::CLUSTER_BCAST: {
+                        const uint64_t mask = (static_cast<uint64_t>(cluster_mask_hi_reg) << 32)
+                                            | cluster_mask_lo_reg;
+                        if (mask == 0) {
+                            // mask=0: no op, immediate completion
+                            core_mmio_resp_valid_o.write(true);
+                            core_mmio_resp_rdata_o.write(0);
+                        } else if (!wr) {
+                            // Broadcast read with popcount(mask)!=1 is a fault
+                            unsigned popcnt = 0;
+                            for (unsigned i = 0; i < NUM_CLUSTERS; ++i)
+                                if (mask & (1ull << i)) popcnt++;
+                            if (popcnt != 1) {
+                                mmio_err_status_reg |= 0x5; // pending + broadcast_read_fault
+                                last_fault_addr_reg = addr;
+                                core_mmio_resp_valid_o.write(true);
+                                core_mmio_resp_rdata_o.write(0);
+                            } else {
+                                // Single cluster read via broadcast alias
+                                for (unsigned i = 0; i < NUM_CLUSTERS; ++i) {
+                                    if (mask & (1ull << i)) {
+                                        cl_cmd_req_valid_o[i].write(true);
+                                        cl_cmd_req_write_o[i].write(false);
+                                        cl_cmd_req_addr_o[i].write(dec.local_offset);
+                                        cl_cmd_req_wdata_o[i].write(0);
+                                        last_target_id_reg = i;
+                                        break;
+                                    }
+                                }
+                                state_reg = FabricState::WAIT_CLUSTER;
+                            }
+                        } else {
+                            // Broadcast write: serialise
+                            bcast_addr_reg  = dec.local_offset;
+                            bcast_wdata_reg = wdata;
+                            bcast_write_reg = true;
+                            bcast_any_error = false;
+                            bcast_idx_reg   = 0;
+                            state_reg = FabricState::BCAST_SEQ;
+                        }
+                        break;
+                    }
+
+                    case Target::NLU:
+                        if (NUM_NLU > 0 && dec.target_id < NUM_NLU) {
+                            nlu_cmd_req_valid_o[dec.target_id].write(true);
+                            nlu_cmd_req_write_o[dec.target_id].write(wr);
+                            nlu_cmd_req_addr_o[dec.target_id].write(dec.local_offset);
+                            nlu_cmd_req_wdata_o[dec.target_id].write(wdata);
+                            state_reg = FabricState::WAIT_NLU;
+                            last_target_id_reg = dec.target_id;
+                        } else {
+                            mmio_err_status_reg |= 0x3;
+                            last_fault_addr_reg = addr;
+                            core_mmio_resp_valid_o.write(true);
+                            core_mmio_resp_rdata_o.write(0);
+                        }
+                        break;
+
+                    case Target::DECODE_FAULT:
+                        mmio_err_status_reg |= 0x3; // pending + decode_fault
+                        last_fault_addr_reg = addr;
+                        core_mmio_resp_valid_o.write(true);
+                        core_mmio_resp_rdata_o.write(0);
+                        SC_REPORT_WARNING("CmdFabric", "MMIO decode fault");
+                        break;
+                    }
+                }
+                break;
+            }
+
+            // ----------------------------------------------------------
+            case FabricState::WAIT_DMA:
+                if (dma_mmio_resp_valid_i.read()) {
+                    core_mmio_resp_valid_o.write(true);
+                    core_mmio_resp_rdata_o.write(dma_mmio_resp_rdata_i.read());
+                    state_reg = FabricState::IDLE;
+                }
+                break;
+
+            case FabricState::WAIT_PLIC:
+                if (plic_mmio_resp_valid_i.read()) {
+                    core_mmio_resp_valid_o.write(true);
+                    core_mmio_resp_rdata_o.write(plic_mmio_resp_rdata_i.read());
+                    state_reg = FabricState::IDLE;
+                }
+                break;
+
+            case FabricState::WAIT_TIMER:
+                if (timer_mmio_resp_valid_i.read()) {
+                    core_mmio_resp_valid_o.write(true);
+                    core_mmio_resp_rdata_o.write(timer_mmio_resp_rdata_i.read());
+                    state_reg = FabricState::IDLE;
+                }
+                break;
+
+            case FabricState::WAIT_CLUSTER: {
+                const unsigned tid = last_target_id_reg;
+                if (tid < NUM_CLUSTERS && cl_cmd_resp_valid_i[tid].read()) {
+                    core_mmio_resp_valid_o.write(true);
+                    core_mmio_resp_rdata_o.write(cl_cmd_resp_rdata_i[tid].read());
+                    state_reg = FabricState::IDLE;
+                }
+                break;
+            }
+
+            case FabricState::WAIT_NLU: {
+                const unsigned tid = last_target_id_reg;
+                if (NUM_NLU > 0 && tid < NUM_NLU && nlu_cmd_resp_valid_i[tid].read()) {
+                    core_mmio_resp_valid_o.write(true);
+                    core_mmio_resp_rdata_o.write(nlu_cmd_resp_rdata_i[tid].read());
+                    state_reg = FabricState::IDLE;
+                }
+                break;
+            }
+
+            // ----------------------------------------------------------
+            case FabricState::BCAST_SEQ: {
+                // Find next cluster in mask starting from bcast_idx_reg
+                const uint64_t mask = (static_cast<uint64_t>(cluster_mask_hi_reg) << 32)
+                                    | cluster_mask_lo_reg;
+                bool found = false;
+                for (unsigned i = bcast_idx_reg; i < NUM_CLUSTERS; ++i) {
+                    if (mask & (1ull << i)) {
+                        cl_cmd_req_valid_o[i].write(true);
+                        cl_cmd_req_write_o[i].write(bcast_write_reg);
+                        cl_cmd_req_addr_o[i].write(bcast_addr_reg);
+                        cl_cmd_req_wdata_o[i].write(bcast_wdata_reg);
+                        last_target_id_reg = i;
+                        bcast_idx_reg = i;
+                        found = true;
+                        // Wait for response next cycle
+                        state_reg = FabricState::WAIT_CLUSTER;
+                        break;
+                    }
+                }
+                if (!found) {
+                    // All clusters done
+                    core_mmio_resp_valid_o.write(true);
+                    core_mmio_resp_rdata_o.write(0);
+                    if (bcast_any_error)
+                        mmio_err_status_reg |= 0x9; // pending + target_bus_fault
+                    state_reg = FabricState::IDLE;
+                }
+                break;
+            }
+
+            } // switch
+
+            wait();
+        }
+    }
 };
 
-} // namespace hybridacc::core
+} // namespace core
+} // namespace hybridacc

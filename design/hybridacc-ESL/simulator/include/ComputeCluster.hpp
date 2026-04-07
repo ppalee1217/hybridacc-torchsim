@@ -6,7 +6,7 @@
 #include <string>
 #include <utility>
 
-#include "utils.hpp"
+#include "Utils/utils.hpp"
 #include "AXI4_lite/axi4-lite.hpp"
 #include "Cluster/ScratchpadMemory.hpp"
 #include "Cluster/HybridDataDeliverUnit.hpp"
@@ -477,6 +477,7 @@ private:
 	sc_signal<sc_uint<32>> ahb_rdata_reg;
 
 	sc_uint<32> noc_last_cmd_reg{};
+	bool hddu_start_pending_ = false;  // AHB pipeline race fix: set on CTRL_START write, cleared when STATUS shows BUSY
 
 	static bool in_range(uint32_t addr, uint32_t base, uint32_t size) {
 		return addr >= base && addr < (base + size);
@@ -610,6 +611,9 @@ private:
 						hddu_mmio_addr_sig.write(static_cast<sc_uint<32>>(addr - kCmdHdduBase));
 						hddu_mmio_wdata_sig.write(static_cast<sc_uint<32>>(wdata));
 						hddu_mmio_write_sig.write(true);
+						// Detect CTRL_START: HDDU CTRL offset = 0x800, START bit = bit 1
+						if ((addr - kCmdHdduBase) == 0x800 && (wdata & 0x2))
+							hddu_start_pending_ = true;
 					}
 				} else {
 					if (in_range(addr, kCmdSpmBase, kCmdSpmSize)) {
@@ -646,6 +650,16 @@ private:
 					} else if (in_range(addr, kCmdHdduBase, kCmdHdduSize)) {
 						hddu_mmio_addr_sig.write(static_cast<sc_uint<32>>(addr - kCmdHdduBase));
 						read_value = hddu_mmio_rdata_sig.read();
+						// HDDU STATUS offset = 0x804
+						if ((addr - kCmdHdduBase) == 0x804) {
+							if (hddu_start_pending_) {
+								read_value |= (1u << 1);  // force BUSY
+								read_value &= ~(1u << 0); // clear IDLE
+							}
+							// Clear pending once real status shows BUSY or DONE
+							if (read_value & ((1u << 1) | (1u << 4)))
+								hddu_start_pending_ = false;
+						}
 					} else if (in_range(addr, kCmdNocBase, kCmdNocSize)) {
 						const uint32_t off = addr - kCmdNocBase;
 						if (off == kNocCmdDataOffset) {

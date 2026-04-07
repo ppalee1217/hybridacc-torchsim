@@ -76,7 +76,7 @@ generate_testbench() {
 
     echo "Processing $TB_NAME..."
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    ASSEMBLER="$SCRIPT_DIR/../design/hybridacc-pe-isa/tools/bin/ha-asm"
+    ASSEMBLER="$SCRIPT_DIR/../../design/hybridacc-pe-isa/tools/bin/ha-asm"
     if command -v uv >/dev/null 2>&1; then
         uv run python -m hybridacc_verify.main gen-cluster --config "$TB_DIR/config.json" --assembler "$ASSEMBLER"
     else

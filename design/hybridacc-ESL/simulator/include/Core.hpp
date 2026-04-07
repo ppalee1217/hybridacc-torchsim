@@ -1,11 +1,13 @@
 #pragma once
 
 #include "Core/BootHostIf.hpp"
-#include "Core/CoreController.hpp"
-#include "Core/CoreMcu.hpp"
+#include "Core/ClusterDataFabric.hpp"
 #include "Core/CmdFabric.hpp"
-#include "Core/DecodeStage.hpp"
+#include "Core/CoreController.hpp"
+#include "Core/CoreLocalIrq.hpp"
+#include "Core/CoreMcu.hpp"
 #include "Core/DataSram.hpp"
+#include "Core/DecodeStage.hpp"
 #include "Core/DmaEngine.hpp"
 #include "Core/ExecuteStage.hpp"
 #include "Core/FetchStage.hpp"

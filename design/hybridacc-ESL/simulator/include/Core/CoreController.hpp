@@ -1,279 +1,825 @@
 #pragma once
 
+/**
+ * @file CoreController.hpp
+ * @brief cc_core_controller — Top-level module instantiating and wiring all
+ *        Core Controller submodules.
+ *
+ * @par Hierarchy
+ *   CoreController
+ *   ├── BootHostIf           (host AXI4-Lite slave control plane)
+ *   ├── SectionLoader        (manifest consumer, DRAM → local SRAM)
+ *   ├── Isram                (instruction SRAM)
+ *   ├── DataSram             (data SRAM)
+ *   ├── CoreMcu              (5-stage RV32I_Zmmul_Zicsr pipeline)
+ *   ├── CmdFabric            (MMIO decoder / router / broadcast)
+ *   ├── CoreLocalIrq         (MSIP / MTIP timer)
+ *   ├── Plic                 (platform-level interrupt controller)
+ *   ├── DmaEngine            (MMIO staging + command FIFO + transfer FSM)
+ *   └── ClusterDataFabric    (DMA/NLU → per-cluster AXI4-Lite data arb)
+ *
+ * @par Spec reference
+ *   Core.md §4.1  top-level block diagram
+ *   Core.md §7    external interface summary
+ */
+
 #include <systemc>
-
 #include <cstdint>
-
+#include "Utils/utils.hpp"
+#include "Core/Types.hpp"
 #include "Core/BootHostIf.hpp"
-#include "Core/CmdFabric.hpp"
-#include "Core/CoreMcu.hpp"
-#include "Core/DataSram.hpp"
-#include "Core/DmaEngine.hpp"
-#include "Core/Isram.hpp"
-#include "Core/Plic.hpp"
 #include "Core/SectionLoader.hpp"
+#include "Core/Isram.hpp"
+#include "Core/DataSram.hpp"
+#include "Core/CoreMcu.hpp"
+#include "Core/CmdFabric.hpp"
+#include "Core/CoreLocalIrq.hpp"
+#include "Core/Plic.hpp"
+#include "Core/DmaEngine.hpp"
+#include "Core/ClusterDataFabric.hpp"
+
+namespace hybridacc {
+namespace core {
 
 using namespace sc_core;
 using namespace sc_dt;
 
-namespace hybridacc {
-
-template <unsigned NUM_CLUSTERS = 4, unsigned NUM_NLU = 1, unsigned ISRAM_BYTES = 16384, unsigned DATA_SRAM_BYTES = 65536>
+template <unsigned NUM_CLUSTERS = 1, unsigned NUM_NLU = 0>
 SC_MODULE(CoreController) {
-public:
-	sc_in<bool> clk{"clk"};
-	sc_in<bool> reset_n{"reset_n"};
-	sc_in<sc_uint<NUM_CLUSTERS>> cluster_irq_i{"cluster_irq_i"};
-	sc_in<sc_uint<NUM_NLU>> nlu_irq_i{"nlu_irq_i"};
 
-	sc_out<bool> dma_req_valid_o{"dma_req_valid_o"};
-	sc_out<core::DmaRequest> dma_req_o{"dma_req_o"};
-	sc_in<bool> dma_req_ready_i{"dma_req_ready_i"};
-	sc_out<bool> cluster_req_valid_o{"cluster_req_valid_o"};
-	sc_out<core::ClusterMmioRequest> cluster_req_o{"cluster_req_o"};
-	sc_in<bool> cluster_req_ready_i{"cluster_req_ready_i"};
-	sc_out<bool> nlu_req_valid_o{"nlu_req_valid_o"};
-	sc_out<core::NluMmioRequest> nlu_req_o{"nlu_req_o"};
-	sc_in<bool> nlu_req_ready_i{"nlu_req_ready_i"};
-	sc_out<bool> controller_irq_o{"controller_irq_o"};
+    // ========================================================================
+    // External Ports — §7
+    // ========================================================================
 
-	core::BootHostIf boot_host_if{"boot_host_if"};
-	core::SectionLoader section_loader{"section_loader"};
-	core::Isram<ISRAM_BYTES> isram{"isram"};
-	core::DataSram<DATA_SRAM_BYTES> data_sram{"data_sram"};
-	core::CoreMcu<DATA_SRAM_BYTES> core_mcu{"core_mcu"};
-	core::CmdFabric cmd_fabric{"cmd_fabric"};
-	core::Plic<NUM_CLUSTERS, NUM_NLU> plic{"plic"};
-	core::DmaEngine dma_engine{"dma_engine"};
+    sc_in<bool>  clk;
+    sc_in<bool>  reset_n;
 
-	SC_CTOR(CoreController) {
-		bind_submodules();
+    // --- §7.2 Host control AXI4-Lite slave ---
+    sc_in<bool>          s_ctrl_aw_valid_i;
+    sc_out<bool>         s_ctrl_aw_ready_o;
+    sc_in<sc_uint<32>>   s_ctrl_aw_addr_i;
+    sc_in<bool>          s_ctrl_w_valid_i;
+    sc_out<bool>         s_ctrl_w_ready_o;
+    sc_in<sc_uint<32>>   s_ctrl_w_data_i;
+    sc_in<sc_uint<4>>    s_ctrl_w_strb_i;
+    sc_out<bool>         s_ctrl_b_valid_o;
+    sc_in<bool>          s_ctrl_b_ready_i;
+    sc_out<sc_uint<2>>   s_ctrl_b_resp_o;
+    sc_in<bool>          s_ctrl_ar_valid_i;
+    sc_out<bool>         s_ctrl_ar_ready_o;
+    sc_in<sc_uint<32>>   s_ctrl_ar_addr_i;
+    sc_out<bool>         s_ctrl_r_valid_o;
+    sc_in<bool>          s_ctrl_r_ready_i;
+    sc_out<sc_uint<32>>  s_ctrl_r_data_o;
+    sc_out<sc_uint<2>>   s_ctrl_r_resp_o;
 
-		SC_METHOD(comb_output_process);
-		sensitive << dma_req_valid_sig_ << dma_req_sig_ << cluster_req_valid_sig_ << cluster_req_sig_ << nlu_req_valid_sig_ << nlu_req_sig_;
-	}
+    // --- §7.3 DRAM AXI4 master (DMA engine) ---
+    sc_out<bool>         m_dma_mem_axi_aw_valid_o;
+    sc_in<bool>          m_dma_mem_axi_aw_ready_i;
+    sc_out<sc_uint<32>>  m_dma_mem_axi_aw_addr_o;
+    sc_out<sc_uint<8>>   m_dma_mem_axi_aw_len_o;
+    sc_out<bool>         m_dma_mem_axi_w_valid_o;
+    sc_in<bool>          m_dma_mem_axi_w_ready_i;
+    sc_out<sc_biguint<kMemAxiDataWidth>> m_dma_mem_axi_w_data_o;
+    sc_out<sc_uint<kMemAxiDataWidth / 8>> m_dma_mem_axi_w_strb_o;
+    sc_out<bool>         m_dma_mem_axi_w_last_o;
+    sc_in<bool>          m_dma_mem_axi_b_valid_i;
+    sc_out<bool>         m_dma_mem_axi_b_ready_o;
+    sc_in<sc_uint<2>>    m_dma_mem_axi_b_resp_i;
+    sc_out<bool>         m_dma_mem_axi_ar_valid_o;
+    sc_in<bool>          m_dma_mem_axi_ar_ready_i;
+    sc_out<sc_uint<32>>  m_dma_mem_axi_ar_addr_o;
+    sc_out<sc_uint<8>>   m_dma_mem_axi_ar_len_o;
+    sc_in<bool>          m_dma_mem_axi_r_valid_i;
+    sc_out<bool>         m_dma_mem_axi_r_ready_o;
+    sc_in<sc_biguint<kMemAxiDataWidth>> m_dma_mem_axi_r_data_i;
+    sc_in<sc_uint<2>>    m_dma_mem_axi_r_resp_i;
+    sc_in<bool>          m_dma_mem_axi_r_last_i;
 
-	void load_instruction(uint32_t byte_addr, uint32_t value) { isram.load_instruction(byte_addr, value); }
-	void load_data_word(uint32_t byte_addr, uint32_t value) { data_sram.load_word(byte_addr, value); }
-	uint32_t read_data_word(uint32_t byte_addr) const { return data_sram.read_word(byte_addr); }
-	void host_push_manifest(const core::ManifestPacket& packet) { boot_host_if.host_push_manifest(packet); }
-	void host_set_boot_addr(uint32_t addr) { boot_host_if.set_core_boot_addr(addr); }
-	void host_set_trap_vector(uint32_t addr) { boot_host_if.set_core_trap_vector(addr); }
-	void host_set_core_enable(bool enable) { boot_host_if.set_core_enable(enable); }
-	uint32_t debug_read_pc() const { return core_mcu.debug_read_pc(); }
-	uint32_t debug_read_gpr(uint32_t index) const { return core_mcu.debug_read_gpr(index); }
-	bool debug_is_halted() const { return core_mcu.debug_is_halted(); }
-	core::MmioRequest debug_last_mmio_request() const { return core_mcu.debug_last_mmio_request(); }
-	core::ClusterMmioRequest debug_last_cluster_request() const { return cmd_fabric.last_cluster_request(); }
-	uint32_t debug_cluster_mask_lo() const { return cmd_fabric.cluster_mask_lo(); }
+    // --- §7.3 DRAM AXI4 read-only master (section loader) ---
+    sc_out<bool>         m_ldr_mem_axi_ar_valid_o;
+    sc_in<bool>          m_ldr_mem_axi_ar_ready_i;
+    sc_out<sc_uint<32>>  m_ldr_mem_axi_ar_addr_o;
+    sc_out<sc_uint<8>>   m_ldr_mem_axi_ar_len_o;
+    sc_in<bool>          m_ldr_mem_axi_r_valid_i;
+    sc_out<bool>         m_ldr_mem_axi_r_ready_o;
+    sc_in<sc_biguint<kMemAxiDataWidth>> m_ldr_mem_axi_r_data_i;
+    sc_in<sc_uint<2>>    m_ldr_mem_axi_r_resp_i;
+    sc_in<bool>          m_ldr_mem_axi_r_last_i;
+
+    // --- §7.4 Per-cluster AXI4-Lite data masters ---
+    sc_out<bool>         m_cl_data_aw_valid_o[NUM_CLUSTERS];
+    sc_in<bool>          m_cl_data_aw_ready_i[NUM_CLUSTERS];
+    sc_out<sc_uint<32>>  m_cl_data_aw_addr_o[NUM_CLUSTERS];
+    sc_out<bool>         m_cl_data_w_valid_o[NUM_CLUSTERS];
+    sc_in<bool>          m_cl_data_w_ready_i[NUM_CLUSTERS];
+    sc_out<sc_biguint<kClAxiDataWidth>>         m_cl_data_w_data_o[NUM_CLUSTERS];
+    sc_out<sc_uint<kClAxiDataWidth / 8>>        m_cl_data_w_strb_o[NUM_CLUSTERS];
+    sc_in<bool>          m_cl_data_b_valid_i[NUM_CLUSTERS];
+    sc_out<bool>         m_cl_data_b_ready_o[NUM_CLUSTERS];
+    sc_in<sc_uint<2>>    m_cl_data_b_resp_i[NUM_CLUSTERS];
+    sc_out<bool>         m_cl_data_ar_valid_o[NUM_CLUSTERS];
+    sc_in<bool>          m_cl_data_ar_ready_i[NUM_CLUSTERS];
+    sc_out<sc_uint<32>>  m_cl_data_ar_addr_o[NUM_CLUSTERS];
+    sc_in<bool>          m_cl_data_r_valid_i[NUM_CLUSTERS];
+    sc_out<bool>         m_cl_data_r_ready_o[NUM_CLUSTERS];
+    sc_in<sc_biguint<kClAxiDataWidth>>          m_cl_data_r_data_i[NUM_CLUSTERS];
+    sc_in<sc_uint<2>>    m_cl_data_r_resp_i[NUM_CLUSTERS];
+
+    // --- §7.5 Per-cluster AHB-Lite command masters ---
+    sc_out<bool>         cl_cmd_req_valid_o[NUM_CLUSTERS];
+    sc_out<bool>         cl_cmd_req_write_o[NUM_CLUSTERS];
+    sc_out<sc_uint<32>>  cl_cmd_req_addr_o[NUM_CLUSTERS];
+    sc_out<sc_uint<32>>  cl_cmd_req_wdata_o[NUM_CLUSTERS];
+    sc_in<bool>          cl_cmd_resp_valid_i[NUM_CLUSTERS];
+    sc_in<sc_uint<32>>   cl_cmd_resp_rdata_i[NUM_CLUSTERS];
+
+    // --- §7.6 Per-NLU AHB-Lite command masters ---
+    static constexpr unsigned kNluPorts = NUM_NLU > 0 ? NUM_NLU : 1;
+    sc_out<bool>         nlu_cmd_req_valid_o[kNluPorts];
+    sc_out<bool>         nlu_cmd_req_write_o[kNluPorts];
+    sc_out<sc_uint<32>>  nlu_cmd_req_addr_o[kNluPorts];
+    sc_out<sc_uint<32>>  nlu_cmd_req_wdata_o[kNluPorts];
+    sc_in<bool>          nlu_cmd_resp_valid_i[kNluPorts];
+    sc_in<sc_uint<32>>   nlu_cmd_resp_rdata_i[kNluPorts];
+
+    // --- §7.7 Interrupt inputs ---
+    sc_in<bool>          cluster_irq_i[NUM_CLUSTERS];
+    sc_in<bool>          nlu_irq_i[kNluPorts];
+
+    // --- §7.7 IRQ output to host ---
+    sc_out<bool>         controller_irq_o;
+
+    // --- Runtime debug flag (set before sc_start) ---
+    bool core_debug = false;
+
+    // --- NLU data requester interface (into ClusterDataFabric) ---
+    sc_in<bool>          nlu_data_req_valid_i;
+    sc_in<bool>          nlu_data_req_write_i;
+    sc_in<sc_uint<32>>   nlu_data_req_cluster_id_i;
+    sc_in<sc_uint<32>>   nlu_data_req_addr_i;
+    sc_in<sc_biguint<kClAxiDataWidth>>          nlu_data_req_wdata_i;
+    sc_in<sc_uint<kClAxiDataWidth / 8>>         nlu_data_req_wstrb_i;
+    sc_out<bool>         nlu_data_req_ready_o;
+    sc_out<bool>         nlu_data_resp_valid_o;
+    sc_out<sc_biguint<kClAxiDataWidth>>         nlu_data_resp_rdata_o;
+    sc_out<bool>         nlu_data_resp_error_o;
+
+    // ========================================================================
+    // Constructor
+    // ========================================================================
+
+    SC_HAS_PROCESS(CoreController);
+
+    CoreController(sc_module_name name)
+        : sc_module(name),
+          clk("clk"), reset_n("reset_n"),
+          // Host AXI
+          s_ctrl_aw_valid_i("s_ctrl_aw_valid_i"),
+          s_ctrl_aw_ready_o("s_ctrl_aw_ready_o"),
+          s_ctrl_aw_addr_i("s_ctrl_aw_addr_i"),
+          s_ctrl_w_valid_i("s_ctrl_w_valid_i"),
+          s_ctrl_w_ready_o("s_ctrl_w_ready_o"),
+          s_ctrl_w_data_i("s_ctrl_w_data_i"),
+          s_ctrl_w_strb_i("s_ctrl_w_strb_i"),
+          s_ctrl_b_valid_o("s_ctrl_b_valid_o"),
+          s_ctrl_b_ready_i("s_ctrl_b_ready_i"),
+          s_ctrl_b_resp_o("s_ctrl_b_resp_o"),
+          s_ctrl_ar_valid_i("s_ctrl_ar_valid_i"),
+          s_ctrl_ar_ready_o("s_ctrl_ar_ready_o"),
+          s_ctrl_ar_addr_i("s_ctrl_ar_addr_i"),
+          s_ctrl_r_valid_o("s_ctrl_r_valid_o"),
+          s_ctrl_r_ready_i("s_ctrl_r_ready_i"),
+          s_ctrl_r_data_o("s_ctrl_r_data_o"),
+          s_ctrl_r_resp_o("s_ctrl_r_resp_o"),
+          // DMA DRAM AXI
+          m_dma_mem_axi_aw_valid_o("m_dma_mem_axi_aw_valid_o"),
+          m_dma_mem_axi_aw_ready_i("m_dma_mem_axi_aw_ready_i"),
+          m_dma_mem_axi_aw_addr_o("m_dma_mem_axi_aw_addr_o"),
+          m_dma_mem_axi_aw_len_o("m_dma_mem_axi_aw_len_o"),
+          m_dma_mem_axi_w_valid_o("m_dma_mem_axi_w_valid_o"),
+          m_dma_mem_axi_w_ready_i("m_dma_mem_axi_w_ready_i"),
+          m_dma_mem_axi_w_data_o("m_dma_mem_axi_w_data_o"),
+          m_dma_mem_axi_w_strb_o("m_dma_mem_axi_w_strb_o"),
+          m_dma_mem_axi_w_last_o("m_dma_mem_axi_w_last_o"),
+          m_dma_mem_axi_b_valid_i("m_dma_mem_axi_b_valid_i"),
+          m_dma_mem_axi_b_ready_o("m_dma_mem_axi_b_ready_o"),
+          m_dma_mem_axi_b_resp_i("m_dma_mem_axi_b_resp_i"),
+          m_dma_mem_axi_ar_valid_o("m_dma_mem_axi_ar_valid_o"),
+          m_dma_mem_axi_ar_ready_i("m_dma_mem_axi_ar_ready_i"),
+          m_dma_mem_axi_ar_addr_o("m_dma_mem_axi_ar_addr_o"),
+          m_dma_mem_axi_ar_len_o("m_dma_mem_axi_ar_len_o"),
+          m_dma_mem_axi_r_valid_i("m_dma_mem_axi_r_valid_i"),
+          m_dma_mem_axi_r_ready_o("m_dma_mem_axi_r_ready_o"),
+          m_dma_mem_axi_r_data_i("m_dma_mem_axi_r_data_i"),
+          m_dma_mem_axi_r_resp_i("m_dma_mem_axi_r_resp_i"),
+          m_dma_mem_axi_r_last_i("m_dma_mem_axi_r_last_i"),
+          // Loader DRAM AXI (read only)
+          m_ldr_mem_axi_ar_valid_o("m_ldr_mem_axi_ar_valid_o"),
+          m_ldr_mem_axi_ar_ready_i("m_ldr_mem_axi_ar_ready_i"),
+          m_ldr_mem_axi_ar_addr_o("m_ldr_mem_axi_ar_addr_o"),
+          m_ldr_mem_axi_ar_len_o("m_ldr_mem_axi_ar_len_o"),
+          m_ldr_mem_axi_r_valid_i("m_ldr_mem_axi_r_valid_i"),
+          m_ldr_mem_axi_r_ready_o("m_ldr_mem_axi_r_ready_o"),
+          m_ldr_mem_axi_r_data_i("m_ldr_mem_axi_r_data_i"),
+          m_ldr_mem_axi_r_resp_i("m_ldr_mem_axi_r_resp_i"),
+          m_ldr_mem_axi_r_last_i("m_ldr_mem_axi_r_last_i"),
+          // NLU data requester
+          nlu_data_req_valid_i("nlu_data_req_valid_i"),
+          nlu_data_req_write_i("nlu_data_req_write_i"),
+          nlu_data_req_cluster_id_i("nlu_data_req_cluster_id_i"),
+          nlu_data_req_addr_i("nlu_data_req_addr_i"),
+          nlu_data_req_wdata_i("nlu_data_req_wdata_i"),
+          nlu_data_req_wstrb_i("nlu_data_req_wstrb_i"),
+          nlu_data_req_ready_o("nlu_data_req_ready_o"),
+          nlu_data_resp_valid_o("nlu_data_resp_valid_o"),
+          nlu_data_resp_rdata_o("nlu_data_resp_rdata_o"),
+          nlu_data_resp_error_o("nlu_data_resp_error_o"),
+          controller_irq_o("controller_irq_o"),
+          // Submodule instances
+          u_boot_host_if("u_boot_host_if"),
+          u_section_loader("u_section_loader"),
+          u_isram("u_isram"),
+          u_dsram("u_dsram"),
+          u_core_mcu("u_core_mcu"),
+          u_cmd_fabric("u_cmd_fabric"),
+          u_core_local_irq("u_core_local_irq"),
+          u_plic("u_plic"),
+          u_dma_engine("u_dma_engine"),
+          u_cluster_data_fabric("u_cluster_data_fabric")
+    {
+        // ====================================================================
+        // BootHostIf ↔ external host AXI
+        // ====================================================================
+        u_boot_host_if.clk(clk);
+        u_boot_host_if.reset_n(reset_n);
+        u_boot_host_if.s_ctrl_aw_valid_i(s_ctrl_aw_valid_i);
+        u_boot_host_if.s_ctrl_aw_ready_o(s_ctrl_aw_ready_o);
+        u_boot_host_if.s_ctrl_aw_addr_i(s_ctrl_aw_addr_i);
+        u_boot_host_if.s_ctrl_w_valid_i(s_ctrl_w_valid_i);
+        u_boot_host_if.s_ctrl_w_ready_o(s_ctrl_w_ready_o);
+        u_boot_host_if.s_ctrl_w_data_i(s_ctrl_w_data_i);
+        u_boot_host_if.s_ctrl_w_strb_i(s_ctrl_w_strb_i);
+        u_boot_host_if.s_ctrl_b_valid_o(s_ctrl_b_valid_o);
+        u_boot_host_if.s_ctrl_b_ready_i(s_ctrl_b_ready_i);
+        u_boot_host_if.s_ctrl_b_resp_o(s_ctrl_b_resp_o);
+        u_boot_host_if.s_ctrl_ar_valid_i(s_ctrl_ar_valid_i);
+        u_boot_host_if.s_ctrl_ar_ready_o(s_ctrl_ar_ready_o);
+        u_boot_host_if.s_ctrl_ar_addr_i(s_ctrl_ar_addr_i);
+        u_boot_host_if.s_ctrl_r_valid_o(s_ctrl_r_valid_o);
+        u_boot_host_if.s_ctrl_r_ready_i(s_ctrl_r_ready_i);
+        u_boot_host_if.s_ctrl_r_data_o(s_ctrl_r_data_o);
+        u_boot_host_if.s_ctrl_r_resp_o(s_ctrl_r_resp_o);
+
+        // BootHostIf control outputs → internal signals
+        u_boot_host_if.core_enable_o(sig_core_enable);
+        u_boot_host_if.core_haltreq_o(sig_core_haltreq);
+        u_boot_host_if.boot_addr_o(sig_boot_addr);
+        u_boot_host_if.load_phase_o(sig_boot_load_phase);
+        u_boot_host_if.loader_kick_o(sig_loader_kick);
+        u_boot_host_if.manifest_addr_lo_o(sig_manifest_addr_lo);
+        u_boot_host_if.manifest_addr_hi_o(sig_manifest_addr_hi);
+        u_boot_host_if.manifest_size_o(sig_manifest_size);
+        u_boot_host_if.cluster_mask_lo_o(sig_cluster_mask_lo);
+        u_boot_host_if.cluster_mask_hi_o(sig_cluster_mask_hi);
+
+        // BootHostIf status inputs
+        u_boot_host_if.loader_busy_i(sig_loader_busy);
+        u_boot_host_if.loader_done_i(sig_loader_done);
+        u_boot_host_if.loader_status_i(sig_loader_status);
+        u_boot_host_if.loader_err_code_i(sig_loader_err_code);
+        u_boot_host_if.loader_err_info_i(sig_loader_err_info);
+        u_boot_host_if.core_halted_i(sig_core_halted);
+        u_boot_host_if.core_running_i(sig_core_running);
+        u_boot_host_if.core_pc_snapshot_i(sig_retire_pc);
+        u_boot_host_if.core_cause_snapshot_i(sig_core_cause);
+        u_boot_host_if.plic_pending_any_i(sig_plic_pending_any);
+        u_boot_host_if.fabric_last_target_i(sig_fabric_last_target);
+        u_boot_host_if.fabric_last_addr_i(sig_fabric_last_addr);
+        u_boot_host_if.controller_irq_o(controller_irq_o);
+
+        // ====================================================================
+        // SectionLoader ↔ BootHostIf + external DRAM + local SRAMs
+        // ====================================================================
+        u_section_loader.clk(clk);
+        u_section_loader.reset_n(reset_n);
+        u_section_loader.kick_i(sig_loader_kick);
+        u_section_loader.manifest_addr_lo_i(sig_manifest_addr_lo);
+        u_section_loader.manifest_addr_hi_i(sig_manifest_addr_hi);
+        u_section_loader.manifest_size_i(sig_manifest_size);
+
+        // Loader DRAM AXI read master → external
+        u_section_loader.m_mem_axi_ar_valid_o(m_ldr_mem_axi_ar_valid_o);
+        u_section_loader.m_mem_axi_ar_ready_i(m_ldr_mem_axi_ar_ready_i);
+        u_section_loader.m_mem_axi_ar_addr_o(m_ldr_mem_axi_ar_addr_o);
+        u_section_loader.m_mem_axi_ar_len_o(m_ldr_mem_axi_ar_len_o);
+        u_section_loader.m_mem_axi_r_valid_i(m_ldr_mem_axi_r_valid_i);
+        u_section_loader.m_mem_axi_r_ready_o(m_ldr_mem_axi_r_ready_o);
+        u_section_loader.m_mem_axi_r_data_i(m_ldr_mem_axi_r_data_i);
+        u_section_loader.m_mem_axi_r_resp_i(m_ldr_mem_axi_r_resp_i);
+        u_section_loader.m_mem_axi_r_last_i(m_ldr_mem_axi_r_last_i);
+
+        // Loader → Isram write port
+        u_section_loader.isram_wr_en_o(sig_ldr_isram_wr_en);
+        u_section_loader.isram_wr_addr_o(sig_ldr_isram_wr_addr);
+        u_section_loader.isram_wr_data_o(sig_ldr_isram_wr_data);
+        u_section_loader.isram_wr_strb_o(sig_ldr_isram_wr_strb);
+
+        // Loader → DataSram write port
+        u_section_loader.dsram_wr_en_o(sig_ldr_dsram_wr_en);
+        u_section_loader.dsram_wr_addr_o(sig_ldr_dsram_wr_addr);
+        u_section_loader.dsram_wr_data_o(sig_ldr_dsram_wr_data);
+        u_section_loader.dsram_wr_strb_o(sig_ldr_dsram_wr_strb);
+
+        u_section_loader.load_phase_o(sig_load_phase);
+        u_section_loader.busy_o(sig_loader_busy);
+        u_section_loader.done_o(sig_loader_done);
+        u_section_loader.status_o(sig_loader_status);
+        u_section_loader.err_code_o(sig_loader_err_code);
+        u_section_loader.err_info_o(sig_loader_err_info);
+
+        // ====================================================================
+        // Isram
+        // ====================================================================
+        u_isram.clk(clk);
+        u_isram.reset_n(reset_n);
+        u_isram.mcu_im_valid_i(sig_mcu_if_req_valid);
+        u_isram.mcu_im_addr_i(sig_mcu_if_addr);
+        u_isram.mcu_im_rdata_o(sig_mcu_if_rdata);
+        u_isram.loader_wr_valid_i(sig_ldr_isram_wr_en);
+        u_isram.loader_wr_addr_i(sig_ldr_isram_wr_addr);
+        u_isram.loader_wr_data_i(sig_ldr_isram_wr_data);
+        u_isram.loader_wr_strb_i(sig_ldr_isram_wr_strb);
+        u_isram.loader_wr_ready_o(sig_isram_ldr_ready);
+        u_isram.load_phase_i(sig_load_phase);
+
+        // ====================================================================
+        // DataSram
+        // ====================================================================
+        u_dsram.clk(clk);
+        u_dsram.reset_n(reset_n);
+        u_dsram.mcu_dm_valid_i(sig_mcu_ls_req_valid);
+        u_dsram.mcu_dm_write_i(sig_mcu_ls_req_write);
+        u_dsram.mcu_dm_addr_i(sig_mcu_ls_req_addr);
+        u_dsram.mcu_dm_wdata_i(sig_mcu_ls_req_wdata);
+        u_dsram.mcu_dm_wstrb_i(sig_mcu_ls_req_wstrb);
+        u_dsram.mcu_dm_rdata_o(sig_mcu_ls_resp_rdata);
+        u_dsram.loader_wr_valid_i(sig_ldr_dsram_wr_en);
+        u_dsram.loader_wr_addr_i(sig_ldr_dsram_wr_addr);
+        u_dsram.loader_wr_data_i(sig_ldr_dsram_wr_data);
+        u_dsram.loader_wr_strb_i(sig_ldr_dsram_wr_strb);
+        u_dsram.loader_wr_ready_o(sig_dsram_ldr_ready);
+        u_dsram.load_phase_i(sig_load_phase);
+
+        // ====================================================================
+        // CoreMcu ↔ SRAMs + CmdFabric + IRQs
+        // ====================================================================
+        u_core_mcu.clk(clk);
+        u_core_mcu.reset_n(reset_n);
+        // Fetch ↔ Isram
+        u_core_mcu.if_req_valid_o(sig_mcu_if_req_valid);
+        u_core_mcu.if_addr_o(sig_mcu_if_addr);
+        u_core_mcu.if_rdata_i(sig_mcu_if_rdata);
+        // Load/Store ↔ DataSram
+        u_core_mcu.ls_req_valid_o(sig_mcu_ls_req_valid);
+        u_core_mcu.ls_req_write_o(sig_mcu_ls_req_write);
+        u_core_mcu.ls_req_addr_o(sig_mcu_ls_req_addr);
+        u_core_mcu.ls_req_wdata_o(sig_mcu_ls_req_wdata);
+        u_core_mcu.ls_req_wstrb_o(sig_mcu_ls_req_wstrb);
+        u_core_mcu.ls_resp_rdata_i(sig_mcu_ls_resp_rdata);
+        // MMIO ↔ CmdFabric
+        u_core_mcu.mmio_req_valid_o(sig_mcu_mmio_req_valid);
+        u_core_mcu.mmio_req_write_o(sig_mcu_mmio_req_write);
+        u_core_mcu.mmio_req_addr_o(sig_mcu_mmio_req_addr);
+        u_core_mcu.mmio_req_wdata_o(sig_mcu_mmio_req_wdata);
+        u_core_mcu.mmio_req_wstrb_o(sig_mcu_mmio_req_wstrb);
+        u_core_mcu.mmio_resp_valid_i(sig_mcu_mmio_resp_valid);
+        u_core_mcu.mmio_resp_rdata_i(sig_mcu_mmio_resp_rdata);
+        // IRQ inputs
+        u_core_mcu.irq_meip_i(sig_meip);
+        u_core_mcu.irq_msip_i(sig_msip);
+        u_core_mcu.irq_mtip_i(sig_mtip);
+        // Boot / control
+        u_core_mcu.boot_addr_i(sig_boot_addr);
+        u_core_mcu.core_enable_i(sig_core_enable);
+        // Trace
+        u_core_mcu.retire_valid_o(sig_retire_valid);
+        u_core_mcu.retire_pc_o(sig_retire_pc);
+        u_core_mcu.halted_o(sig_core_halted);
+
+        // ====================================================================
+        // CmdFabric ↔ CoreMcu + DMA + PLIC + Timer + Clusters + NLUs
+        // ====================================================================
+        u_cmd_fabric.clk(clk);
+        u_cmd_fabric.reset_n(reset_n);
+        // Core MMIO
+        u_cmd_fabric.core_mmio_req_valid_i(sig_mcu_mmio_req_valid);
+        u_cmd_fabric.core_mmio_req_write_i(sig_mcu_mmio_req_write);
+        u_cmd_fabric.core_mmio_req_addr_i(sig_mcu_mmio_req_addr);
+        u_cmd_fabric.core_mmio_req_wdata_i(sig_mcu_mmio_req_wdata);
+        u_cmd_fabric.core_mmio_req_wstrb_i(sig_mcu_mmio_req_wstrb);
+        u_cmd_fabric.core_mmio_resp_valid_o(sig_mcu_mmio_resp_valid);
+        u_cmd_fabric.core_mmio_resp_rdata_o(sig_mcu_mmio_resp_rdata);
+        // DMA MMIO route
+        u_cmd_fabric.dma_mmio_req_valid_o(sig_dma_mmio_req_valid);
+        u_cmd_fabric.dma_mmio_req_write_o(sig_dma_mmio_req_write);
+        u_cmd_fabric.dma_mmio_req_addr_o(sig_dma_mmio_req_addr);
+        u_cmd_fabric.dma_mmio_req_wdata_o(sig_dma_mmio_req_wdata);
+        u_cmd_fabric.dma_mmio_resp_valid_i(sig_dma_mmio_resp_valid);
+        u_cmd_fabric.dma_mmio_resp_rdata_i(sig_dma_mmio_resp_rdata);
+        // PLIC MMIO route
+        u_cmd_fabric.plic_mmio_req_valid_o(sig_plic_mmio_req_valid);
+        u_cmd_fabric.plic_mmio_req_write_o(sig_plic_mmio_req_write);
+        u_cmd_fabric.plic_mmio_req_addr_o(sig_plic_mmio_req_addr);
+        u_cmd_fabric.plic_mmio_req_wdata_o(sig_plic_mmio_req_wdata);
+        u_cmd_fabric.plic_mmio_resp_valid_i(sig_plic_mmio_resp_valid);
+        u_cmd_fabric.plic_mmio_resp_rdata_i(sig_plic_mmio_resp_rdata);
+        // Timer MMIO route
+        u_cmd_fabric.timer_mmio_req_valid_o(sig_timer_mmio_req_valid);
+        u_cmd_fabric.timer_mmio_req_write_o(sig_timer_mmio_req_write);
+        u_cmd_fabric.timer_mmio_req_addr_o(sig_timer_mmio_req_addr);
+        u_cmd_fabric.timer_mmio_req_wdata_o(sig_timer_mmio_req_wdata);
+        u_cmd_fabric.timer_mmio_resp_valid_i(sig_timer_mmio_resp_valid);
+        u_cmd_fabric.timer_mmio_resp_rdata_i(sig_timer_mmio_resp_rdata);
+        // Per-cluster command → external
+        for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
+            u_cmd_fabric.cl_cmd_req_valid_o[c](cl_cmd_req_valid_o[c]);
+            u_cmd_fabric.cl_cmd_req_write_o[c](cl_cmd_req_write_o[c]);
+            u_cmd_fabric.cl_cmd_req_addr_o[c](cl_cmd_req_addr_o[c]);
+            u_cmd_fabric.cl_cmd_req_wdata_o[c](cl_cmd_req_wdata_o[c]);
+            u_cmd_fabric.cl_cmd_resp_valid_i[c](cl_cmd_resp_valid_i[c]);
+            u_cmd_fabric.cl_cmd_resp_rdata_i[c](cl_cmd_resp_rdata_i[c]);
+        }
+        // Per-NLU command → external
+        for (unsigned n = 0; n < kNluPorts; ++n) {
+            u_cmd_fabric.nlu_cmd_req_valid_o[n](nlu_cmd_req_valid_o[n]);
+            u_cmd_fabric.nlu_cmd_req_write_o[n](nlu_cmd_req_write_o[n]);
+            u_cmd_fabric.nlu_cmd_req_addr_o[n](nlu_cmd_req_addr_o[n]);
+            u_cmd_fabric.nlu_cmd_req_wdata_o[n](nlu_cmd_req_wdata_o[n]);
+            u_cmd_fabric.nlu_cmd_resp_valid_i[n](nlu_cmd_resp_valid_i[n]);
+            u_cmd_fabric.nlu_cmd_resp_rdata_i[n](nlu_cmd_resp_rdata_i[n]);
+        }
+
+        // ====================================================================
+        // CoreLocalIrq ↔ CmdFabric + CoreMcu
+        // ====================================================================
+        u_core_local_irq.clk(clk);
+        u_core_local_irq.reset_n(reset_n);
+        u_core_local_irq.mmio_req_valid_i(sig_timer_mmio_req_valid);
+        u_core_local_irq.mmio_req_write_i(sig_timer_mmio_req_write);
+        u_core_local_irq.mmio_req_addr_i(sig_timer_mmio_req_addr);
+        u_core_local_irq.mmio_req_wdata_i(sig_timer_mmio_req_wdata);
+        u_core_local_irq.mmio_resp_valid_o(sig_timer_mmio_resp_valid);
+        u_core_local_irq.mmio_resp_rdata_o(sig_timer_mmio_resp_rdata);
+        u_core_local_irq.irq_msip_o(sig_msip);
+        u_core_local_irq.irq_mtip_o(sig_mtip);
+
+        // ====================================================================
+        // Plic ↔ CmdFabric + IRQ sources + CoreMcu
+        // ====================================================================
+        u_plic.clk(clk);
+        u_plic.reset_n(reset_n);
+        for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
+            u_plic.cluster_irq_i[c](cluster_irq_i[c]);
+        }
+        for (unsigned n = 0; n < kNluPorts; ++n) {
+            u_plic.nlu_irq_i[n](nlu_irq_i[n]);
+        }
+        u_plic.dma_irq_i(sig_dma_irq);
+        u_plic.loader_fault_i(sig_loader_fault);
+        u_plic.fabric_fault_i(sig_fabric_fault);
+        u_plic.meip_o(sig_meip);
+        u_plic.mmio_req_valid_i(sig_plic_mmio_req_valid);
+        u_plic.mmio_req_write_i(sig_plic_mmio_req_write);
+        u_plic.mmio_req_addr_i(sig_plic_mmio_req_addr);
+        u_plic.mmio_req_wdata_i(sig_plic_mmio_req_wdata);
+        u_plic.mmio_resp_valid_o(sig_plic_mmio_resp_valid);
+        u_plic.mmio_resp_rdata_o(sig_plic_mmio_resp_rdata);
+        u_plic.pending_lo_o(sig_plic_pending_lo);
+        u_plic.pending_hi_o(sig_plic_pending_hi);
+
+        // ====================================================================
+        // DmaEngine ↔ CmdFabric + DRAM AXI + ClusterDataFabric
+        // ====================================================================
+        u_dma_engine.clk(clk);
+        u_dma_engine.reset_n(reset_n);
+        // DMA MMIO
+        u_dma_engine.mmio_req_valid_i(sig_dma_mmio_req_valid);
+        u_dma_engine.mmio_req_write_i(sig_dma_mmio_req_write);
+        u_dma_engine.mmio_req_addr_i(sig_dma_mmio_req_addr);
+        u_dma_engine.mmio_req_wdata_i(sig_dma_mmio_req_wdata);
+        u_dma_engine.mmio_resp_valid_o(sig_dma_mmio_resp_valid);
+        u_dma_engine.mmio_resp_rdata_o(sig_dma_mmio_resp_rdata);
+        // DMA DRAM AXI master → external
+        u_dma_engine.m_mem_axi_aw_valid_o(m_dma_mem_axi_aw_valid_o);
+        u_dma_engine.m_mem_axi_aw_ready_i(m_dma_mem_axi_aw_ready_i);
+        u_dma_engine.m_mem_axi_aw_addr_o(m_dma_mem_axi_aw_addr_o);
+        u_dma_engine.m_mem_axi_aw_len_o(m_dma_mem_axi_aw_len_o);
+        u_dma_engine.m_mem_axi_w_valid_o(m_dma_mem_axi_w_valid_o);
+        u_dma_engine.m_mem_axi_w_ready_i(m_dma_mem_axi_w_ready_i);
+        u_dma_engine.m_mem_axi_w_data_o(m_dma_mem_axi_w_data_o);
+        u_dma_engine.m_mem_axi_w_strb_o(m_dma_mem_axi_w_strb_o);
+        u_dma_engine.m_mem_axi_w_last_o(m_dma_mem_axi_w_last_o);
+        u_dma_engine.m_mem_axi_b_valid_i(m_dma_mem_axi_b_valid_i);
+        u_dma_engine.m_mem_axi_b_ready_o(m_dma_mem_axi_b_ready_o);
+        u_dma_engine.m_mem_axi_b_resp_i(m_dma_mem_axi_b_resp_i);
+        u_dma_engine.m_mem_axi_ar_valid_o(m_dma_mem_axi_ar_valid_o);
+        u_dma_engine.m_mem_axi_ar_ready_i(m_dma_mem_axi_ar_ready_i);
+        u_dma_engine.m_mem_axi_ar_addr_o(m_dma_mem_axi_ar_addr_o);
+        u_dma_engine.m_mem_axi_ar_len_o(m_dma_mem_axi_ar_len_o);
+        u_dma_engine.m_mem_axi_r_valid_i(m_dma_mem_axi_r_valid_i);
+        u_dma_engine.m_mem_axi_r_ready_o(m_dma_mem_axi_r_ready_o);
+        u_dma_engine.m_mem_axi_r_data_i(m_dma_mem_axi_r_data_i);
+        u_dma_engine.m_mem_axi_r_resp_i(m_dma_mem_axi_r_resp_i);
+        u_dma_engine.m_mem_axi_r_last_i(m_dma_mem_axi_r_last_i);
+        // DMA ↔ ClusterDataFabric
+        u_dma_engine.cl_data_req_valid_o(sig_dma_cl_req_valid);
+        u_dma_engine.cl_data_req_write_o(sig_dma_cl_req_write);
+        u_dma_engine.cl_data_req_cluster_id_o(sig_dma_cl_req_cluster_id);
+        u_dma_engine.cl_data_req_addr_o(sig_dma_cl_req_addr);
+        u_dma_engine.cl_data_req_wdata_o(sig_dma_cl_req_wdata);
+        u_dma_engine.cl_data_req_wstrb_o(sig_dma_cl_req_wstrb);
+        u_dma_engine.cl_data_req_ready_i(sig_dma_cl_req_ready);
+        u_dma_engine.cl_data_resp_valid_i(sig_dma_cl_resp_valid);
+        u_dma_engine.cl_data_resp_rdata_i(sig_dma_cl_resp_rdata);
+        u_dma_engine.cl_data_resp_error_i(sig_dma_cl_resp_error);
+        u_dma_engine.dma_irq_o(sig_dma_irq);
+
+        // ====================================================================
+        // ClusterDataFabric ↔ DmaEngine + NLU + external cluster data ports
+        // ====================================================================
+        u_cluster_data_fabric.clk(clk);
+        u_cluster_data_fabric.reset_n(reset_n);
+        // DMA requester
+        u_cluster_data_fabric.dma_req_valid_i(sig_dma_cl_req_valid);
+        u_cluster_data_fabric.dma_req_write_i(sig_dma_cl_req_write);
+        u_cluster_data_fabric.dma_req_cluster_id_i(sig_dma_cl_req_cluster_id);
+        u_cluster_data_fabric.dma_req_addr_i(sig_dma_cl_req_addr);
+        u_cluster_data_fabric.dma_req_wdata_i(sig_dma_cl_req_wdata);
+        u_cluster_data_fabric.dma_req_wstrb_i(sig_dma_cl_req_wstrb);
+        u_cluster_data_fabric.dma_req_ready_o(sig_dma_cl_req_ready);
+        u_cluster_data_fabric.dma_resp_valid_o(sig_dma_cl_resp_valid);
+        u_cluster_data_fabric.dma_resp_rdata_o(sig_dma_cl_resp_rdata);
+        u_cluster_data_fabric.dma_resp_error_o(sig_dma_cl_resp_error);
+        // NLU requester → external
+        u_cluster_data_fabric.nlu_req_valid_i(nlu_data_req_valid_i);
+        u_cluster_data_fabric.nlu_req_write_i(nlu_data_req_write_i);
+        u_cluster_data_fabric.nlu_req_cluster_id_i(nlu_data_req_cluster_id_i);
+        u_cluster_data_fabric.nlu_req_addr_i(nlu_data_req_addr_i);
+        u_cluster_data_fabric.nlu_req_wdata_i(nlu_data_req_wdata_i);
+        u_cluster_data_fabric.nlu_req_wstrb_i(nlu_data_req_wstrb_i);
+        u_cluster_data_fabric.nlu_req_ready_o(nlu_data_req_ready_o);
+        u_cluster_data_fabric.nlu_resp_valid_o(nlu_data_resp_valid_o);
+        u_cluster_data_fabric.nlu_resp_rdata_o(nlu_data_resp_rdata_o);
+        u_cluster_data_fabric.nlu_resp_error_o(nlu_data_resp_error_o);
+        // Per-cluster AXI4-Lite data → external
+        for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
+            u_cluster_data_fabric.m_cl_data_aw_valid_o[c](m_cl_data_aw_valid_o[c]);
+            u_cluster_data_fabric.m_cl_data_aw_ready_i[c](m_cl_data_aw_ready_i[c]);
+            u_cluster_data_fabric.m_cl_data_aw_addr_o[c](m_cl_data_aw_addr_o[c]);
+            u_cluster_data_fabric.m_cl_data_w_valid_o[c](m_cl_data_w_valid_o[c]);
+            u_cluster_data_fabric.m_cl_data_w_ready_i[c](m_cl_data_w_ready_i[c]);
+            u_cluster_data_fabric.m_cl_data_w_data_o[c](m_cl_data_w_data_o[c]);
+            u_cluster_data_fabric.m_cl_data_w_strb_o[c](m_cl_data_w_strb_o[c]);
+            u_cluster_data_fabric.m_cl_data_b_valid_i[c](m_cl_data_b_valid_i[c]);
+            u_cluster_data_fabric.m_cl_data_b_ready_o[c](m_cl_data_b_ready_o[c]);
+            u_cluster_data_fabric.m_cl_data_b_resp_i[c](m_cl_data_b_resp_i[c]);
+            u_cluster_data_fabric.m_cl_data_ar_valid_o[c](m_cl_data_ar_valid_o[c]);
+            u_cluster_data_fabric.m_cl_data_ar_ready_i[c](m_cl_data_ar_ready_i[c]);
+            u_cluster_data_fabric.m_cl_data_ar_addr_o[c](m_cl_data_ar_addr_o[c]);
+            u_cluster_data_fabric.m_cl_data_r_valid_i[c](m_cl_data_r_valid_i[c]);
+            u_cluster_data_fabric.m_cl_data_r_ready_o[c](m_cl_data_r_ready_o[c]);
+            u_cluster_data_fabric.m_cl_data_r_data_i[c](m_cl_data_r_data_i[c]);
+            u_cluster_data_fabric.m_cl_data_r_resp_i[c](m_cl_data_r_resp_i[c]);
+        }
+
+        // ====================================================================
+        // Derived signals via SC_METHOD
+        // ====================================================================
+        SC_METHOD(comb_derived);
+        sensitive << sig_loader_err_code << sig_plic_pending_lo << sig_plic_pending_hi
+                  << sig_core_enable << sig_retire_valid << sig_core_halted;
+    }
+
+    /// Propagate runtime config to sub-modules after elaboration.
+    void end_of_elaboration() override {
+        u_core_mcu.core_debug = core_debug;
+
+        // Install direct SRAM read callback into the pipeline MEM stage.
+        // This bypasses sc_signal delta-cycle ordering so that loads
+        // read the current mem[] content within the same posedge.
+        u_core_mcu.set_sram_read_cb([this](uint32_t addr) -> uint32_t {
+            const uint32_t base = addr & (kDataSramBytes - 1);
+            uint32_t val = 0;
+            for (unsigned b = 0; b < 4; ++b) {
+                if (base + b < kDataSramBytes)
+                    val |= static_cast<uint32_t>(u_dsram.read_byte(base + b))
+                           << (b * 8);
+            }
+            return val;
+        });
+
+        // Install ISRAM read callback for data-port reads from instruction RAM.
+        u_core_mcu.set_isram_read_cb([this](uint32_t addr) -> uint32_t {
+            const uint32_t base = addr & (kIsramBytes - 1);
+            uint32_t val = 0;
+            for (unsigned b = 0; b < 4; ++b) {
+                if (base + b < kIsramBytes)
+                    val |= static_cast<uint32_t>(u_isram.read_byte(base + b))
+                           << (b * 8);
+            }
+            return val;
+        });
+    }
+
+    /// Read a 32-bit word from Data SRAM (byte address, relative to DSRAM base).
+    uint32_t dsram_read_word(uint32_t byte_addr) const {
+        const uint32_t base = byte_addr & (kDataSramBytes - 1);
+        uint32_t val = 0;
+        for (unsigned b = 0; b < 4; ++b) {
+            if (base + b < kDataSramBytes)
+                val |= static_cast<uint32_t>(u_dsram.read_byte(base + b)) << (b * 8);
+        }
+        return val;
+    }
 
 private:
-	sc_signal<core::ManifestHeader> manifest_header_sig_{"manifest_header_sig"};
-	sc_signal<bool> manifest_header_valid_sig_{"manifest_header_valid_sig"};
-	sc_signal<bool> manifest_header_ready_sig_{"manifest_header_ready_sig"};
-	sc_signal<core::ManifestPayloadBeat> manifest_payload_sig_{"manifest_payload_sig"};
-	sc_signal<bool> manifest_payload_valid_sig_{"manifest_payload_valid_sig"};
-	sc_signal<bool> manifest_payload_ready_sig_{"manifest_payload_ready_sig"};
-	sc_signal<bool> loader_busy_sig_{"loader_busy_sig"};
-	sc_signal<bool> loader_done_sig_{"loader_done_sig"};
-	sc_signal<bool> loader_error_sig_{"loader_error_sig"};
-	sc_signal<bool> core_enable_sig_{"core_enable_sig"};
-	sc_signal<sc_uint<32>> core_boot_addr_sig_{"core_boot_addr_sig"};
-	sc_signal<sc_uint<32>> core_trap_vector_sig_{"core_trap_vector_sig"};
+    // ========================================================================
+    // Submodule instances
+    // ========================================================================
 
-	sc_signal<bool> if_req_valid_sig_{"if_req_valid_sig"};
-	sc_signal<sc_uint<32>> if_addr_sig_{"if_addr_sig"};
-	sc_signal<bool> if_resp_valid_sig_{"if_resp_valid_sig"};
-	sc_signal<sc_uint<32>> if_rdata_sig_{"if_rdata_sig"};
-	sc_signal<bool> ls_req_valid_sig_{"ls_req_valid_sig"};
-	sc_signal<bool> ls_req_write_sig_{"ls_req_write_sig"};
-	sc_signal<sc_uint<32>> ls_req_addr_sig_{"ls_req_addr_sig"};
-	sc_signal<sc_uint<32>> ls_req_wdata_sig_{"ls_req_wdata_sig"};
-	sc_signal<sc_uint<4>> ls_req_wstrb_sig_{"ls_req_wstrb_sig"};
-	sc_signal<bool> ls_resp_valid_sig_{"ls_resp_valid_sig"};
-	sc_signal<sc_uint<32>> ls_resp_rdata_sig_{"ls_resp_rdata_sig"};
-	sc_signal<bool> mmio_req_valid_sig_{"mmio_req_valid_sig"};
-	sc_signal<core::MmioRequest> mmio_req_sig_{"mmio_req_sig"};
-	sc_signal<bool> mmio_resp_valid_sig_{"mmio_resp_valid_sig"};
-	sc_signal<core::MmioResponse> mmio_resp_sig_{"mmio_resp_sig"};
+    BootHostIf<NUM_CLUSTERS, NUM_NLU>      u_boot_host_if;
+    SectionLoader<>                        u_section_loader;
+    Isram<>                                u_isram;
+    DataSram<>                             u_dsram;
+    CoreMcu                                u_core_mcu;
+    CmdFabric<NUM_CLUSTERS, NUM_NLU>       u_cmd_fabric;
+    CoreLocalIrq                           u_core_local_irq;
+    Plic<NUM_CLUSTERS, NUM_NLU>            u_plic;
+    DmaEngine                              u_dma_engine;
+    ClusterDataFabric<NUM_CLUSTERS>        u_cluster_data_fabric;
 
-	sc_signal<bool> plic_resp_valid_sig_{"plic_resp_valid_sig"};
-	sc_signal<core::MmioResponse> plic_resp_sig_{"plic_resp_sig"};
-	sc_signal<bool> plic_req_valid_sig_{"plic_req_valid_sig"};
-	sc_signal<core::MmioRequest> plic_req_sig_{"plic_req_sig"};
-	sc_signal<bool> dma_mmio_req_valid_sig_{"dma_mmio_req_valid_sig"};
-	sc_signal<core::DmaMmioRequest> dma_mmio_req_sig_{"dma_mmio_req_sig"};
-	sc_signal<bool> dma_mmio_resp_valid_sig_{"dma_mmio_resp_valid_sig"};
-	sc_signal<core::MmioResponse> dma_mmio_resp_sig_{"dma_mmio_resp_sig"};
-	sc_signal<bool> dma_stream_valid_sig_{"dma_stream_valid_sig"};
-	sc_signal<sc_uint<32>> dma_stream_data_sig_{"dma_stream_data_sig"};
-	sc_signal<bool> dma_stream_ready_sig_{"dma_stream_ready_sig"};
-	sc_signal<bool> dma_irq_sig_{"dma_irq_sig"};
-	sc_signal<bool> plic_meip_sig_{"plic_meip_sig"};
-	sc_signal<bool> mtip_sig_{"mtip_sig"};
-	sc_signal<sc_uint<32>> plic_pending_lo_sig_{"plic_pending_lo_sig"};
-	sc_signal<bool> dma_req_valid_sig_{"dma_req_valid_sig"};
-	sc_signal<core::DmaRequest> dma_req_sig_{"dma_req_sig"};
-	sc_signal<bool> cluster_req_valid_sig_{"cluster_req_valid_sig"};
-	sc_signal<core::ClusterMmioRequest> cluster_req_sig_{"cluster_req_sig"};
-	sc_signal<bool> nlu_req_valid_sig_{"nlu_req_valid_sig"};
-	sc_signal<core::NluMmioRequest> nlu_req_sig_{"nlu_req_sig"};
+    // ========================================================================
+    // Internal signals — BootHostIf ↔ SectionLoader
+    // ========================================================================
 
-	sc_signal<bool> isram_loader_wr_valid_sig_{"isram_loader_wr_valid_sig"};
-	sc_signal<sc_uint<32>> isram_loader_wr_addr_sig_{"isram_loader_wr_addr_sig"};
-	sc_signal<sc_uint<32>> isram_loader_wr_data_sig_{"isram_loader_wr_data_sig"};
-	sc_signal<sc_uint<4>> isram_loader_wr_strb_sig_{"isram_loader_wr_strb_sig"};
-	sc_signal<bool> data_loader_wr_valid_sig_{"data_loader_wr_valid_sig"};
-	sc_signal<sc_uint<32>> data_loader_wr_addr_sig_{"data_loader_wr_addr_sig"};
-	sc_signal<sc_uint<32>> data_loader_wr_data_sig_{"data_loader_wr_data_sig"};
-	sc_signal<sc_uint<4>> data_loader_wr_strb_sig_{"data_loader_wr_strb_sig"};
+    sc_signal<bool>         sig_loader_kick{"sig_loader_kick"};
+    sc_signal<sc_uint<32>>  sig_manifest_addr_lo{"sig_manifest_addr_lo"};
+    sc_signal<sc_uint<32>>  sig_manifest_addr_hi{"sig_manifest_addr_hi"};
+    sc_signal<sc_uint<32>>  sig_manifest_size{"sig_manifest_size"};
+    sc_signal<bool>         sig_loader_busy{"sig_loader_busy"};
+    sc_signal<bool>         sig_loader_done{"sig_loader_done"};
+    sc_signal<sc_uint<32>>  sig_loader_status{"sig_loader_status"};
+    sc_signal<sc_uint<32>>  sig_loader_err_code{"sig_loader_err_code"};
+    sc_signal<sc_uint<32>>  sig_loader_err_info{"sig_loader_err_info"};
+    sc_signal<bool>         sig_load_phase{"sig_load_phase"};
+    sc_signal<bool>         sig_boot_load_phase{"sig_boot_load_phase"};
 
-	void comb_output_process() {
-		dma_req_valid_o.write(dma_req_valid_sig_.read());
-		dma_req_o.write(dma_req_sig_.read());
-		cluster_req_valid_o.write(cluster_req_valid_sig_.read());
-		cluster_req_o.write(cluster_req_sig_.read());
-		nlu_req_valid_o.write(nlu_req_valid_sig_.read());
-		nlu_req_o.write(nlu_req_sig_.read());
-	}
+    // ========================================================================
+    // Internal signals — SectionLoader → SRAMs
+    // ========================================================================
 
-	void bind_submodules() {
-		boot_host_if.clk(clk);
-		boot_host_if.reset_n(reset_n);
-		boot_host_if.manifest_header_o(manifest_header_sig_);
-		boot_host_if.manifest_header_valid_o(manifest_header_valid_sig_);
-		boot_host_if.manifest_header_ready_i(manifest_header_ready_sig_);
-		boot_host_if.manifest_payload_o(manifest_payload_sig_);
-		boot_host_if.manifest_payload_valid_o(manifest_payload_valid_sig_);
-		boot_host_if.manifest_payload_ready_i(manifest_payload_ready_sig_);
-		boot_host_if.loader_busy_i(loader_busy_sig_);
-		boot_host_if.loader_done_i(loader_done_sig_);
-		boot_host_if.loader_error_i(loader_error_sig_);
-		boot_host_if.runtime_error_i(dma_irq_sig_);
-		boot_host_if.core_enable_o(core_enable_sig_);
-		boot_host_if.core_boot_addr_o(core_boot_addr_sig_);
-		boot_host_if.core_trap_vector_o(core_trap_vector_sig_);
-		boot_host_if.controller_irq_o(controller_irq_o);
+    sc_signal<bool>         sig_ldr_isram_wr_en{"sig_ldr_isram_wr_en"};
+    sc_signal<sc_uint<32>>  sig_ldr_isram_wr_addr{"sig_ldr_isram_wr_addr"};
+    sc_signal<sc_uint<32>>  sig_ldr_isram_wr_data{"sig_ldr_isram_wr_data"};
+    sc_signal<sc_uint<4>>   sig_ldr_isram_wr_strb{"sig_ldr_isram_wr_strb"};
+    sc_signal<bool>         sig_isram_ldr_ready{"sig_isram_ldr_ready"};
 
-		section_loader.clk(clk);
-		section_loader.reset_n(reset_n);
-		section_loader.manifest_header_i(manifest_header_sig_);
-		section_loader.manifest_header_valid_i(manifest_header_valid_sig_);
-		section_loader.manifest_header_ready_o(manifest_header_ready_sig_);
-		section_loader.manifest_payload_i(manifest_payload_sig_);
-		section_loader.manifest_payload_valid_i(manifest_payload_valid_sig_);
-		section_loader.manifest_payload_ready_o(manifest_payload_ready_sig_);
-		section_loader.isram_wr_valid_o(isram_loader_wr_valid_sig_);
-		section_loader.isram_wr_addr_o(isram_loader_wr_addr_sig_);
-		section_loader.isram_wr_data_o(isram_loader_wr_data_sig_);
-		section_loader.isram_wr_strb_o(isram_loader_wr_strb_sig_);
-		section_loader.data_wr_valid_o(data_loader_wr_valid_sig_);
-		section_loader.data_wr_addr_o(data_loader_wr_addr_sig_);
-		section_loader.data_wr_data_o(data_loader_wr_data_sig_);
-		section_loader.data_wr_strb_o(data_loader_wr_strb_sig_);
-		section_loader.loader_busy_o(loader_busy_sig_);
-		section_loader.loader_done_o(loader_done_sig_);
-		section_loader.loader_error_o(loader_error_sig_);
+    sc_signal<bool>         sig_ldr_dsram_wr_en{"sig_ldr_dsram_wr_en"};
+    sc_signal<sc_uint<32>>  sig_ldr_dsram_wr_addr{"sig_ldr_dsram_wr_addr"};
+    sc_signal<sc_uint<32>>  sig_ldr_dsram_wr_data{"sig_ldr_dsram_wr_data"};
+    sc_signal<sc_uint<4>>   sig_ldr_dsram_wr_strb{"sig_ldr_dsram_wr_strb"};
+    sc_signal<bool>         sig_dsram_ldr_ready{"sig_dsram_ldr_ready"};
 
-		isram.clk(clk);
-		isram.reset_n(reset_n);
-		isram.core_if_req_valid_i(if_req_valid_sig_);
-		isram.core_if_addr_i(if_addr_sig_);
-		isram.core_if_resp_valid_o(if_resp_valid_sig_);
-		isram.core_if_rdata_o(if_rdata_sig_);
-		isram.loader_wr_valid_i(isram_loader_wr_valid_sig_);
-		isram.loader_wr_addr_i(isram_loader_wr_addr_sig_);
-		isram.loader_wr_data_i(isram_loader_wr_data_sig_);
-		isram.loader_wr_strb_i(isram_loader_wr_strb_sig_);
+    // ========================================================================
+    // Internal signals — CoreMcu ↔ SRAMs
+    // ========================================================================
 
-		data_sram.clk(clk);
-		data_sram.reset_n(reset_n);
-		data_sram.loader_req_valid_i(data_loader_wr_valid_sig_);
-		data_sram.loader_req_addr_i(data_loader_wr_addr_sig_);
-		data_sram.loader_req_wdata_i(data_loader_wr_data_sig_);
-		data_sram.loader_req_wstrb_i(data_loader_wr_strb_sig_);
-		data_sram.mcu_req_valid_i(ls_req_valid_sig_);
-		data_sram.mcu_req_write_i(ls_req_write_sig_);
-		data_sram.mcu_req_addr_i(ls_req_addr_sig_);
-		data_sram.mcu_req_wdata_i(ls_req_wdata_sig_);
-		data_sram.mcu_req_wstrb_i(ls_req_wstrb_sig_);
-		data_sram.mcu_resp_valid_o(ls_resp_valid_sig_);
-		data_sram.mcu_resp_rdata_o(ls_resp_rdata_sig_);
+    sc_signal<bool>         sig_mcu_if_req_valid{"sig_mcu_if_req_valid"};
+    sc_signal<sc_uint<32>>  sig_mcu_if_addr{"sig_mcu_if_addr"};
+    sc_signal<sc_uint<32>>  sig_mcu_if_rdata{"sig_mcu_if_rdata"};
 
-		core_mcu.clk(clk);
-		core_mcu.reset_n(reset_n);
-		core_mcu.enable_i(core_enable_sig_);
-		core_mcu.boot_addr_i(core_boot_addr_sig_);
-		core_mcu.trap_vector_i(core_trap_vector_sig_);
-		core_mcu.if_req_valid_o(if_req_valid_sig_);
-		core_mcu.if_addr_o(if_addr_sig_);
-		core_mcu.if_resp_valid_i(if_resp_valid_sig_);
-		core_mcu.if_rdata_i(if_rdata_sig_);
-		core_mcu.ls_req_valid_o(ls_req_valid_sig_);
-		core_mcu.ls_req_write_o(ls_req_write_sig_);
-		core_mcu.ls_req_addr_o(ls_req_addr_sig_);
-		core_mcu.ls_req_wdata_o(ls_req_wdata_sig_);
-		core_mcu.ls_req_wstrb_o(ls_req_wstrb_sig_);
-		core_mcu.ls_resp_valid_i(ls_resp_valid_sig_);
-		core_mcu.ls_resp_rdata_i(ls_resp_rdata_sig_);
-		core_mcu.mmio_req_valid_o(mmio_req_valid_sig_);
-		core_mcu.mmio_req_o(mmio_req_sig_);
-		core_mcu.mmio_resp_valid_i(mmio_resp_valid_sig_);
-		core_mcu.mmio_resp_i(mmio_resp_sig_);
-		core_mcu.irq_meip_i(plic_meip_sig_);
-		core_mcu.irq_mtip_i(mtip_sig_);
+    sc_signal<bool>         sig_mcu_ls_req_valid{"sig_mcu_ls_req_valid"};
+    sc_signal<bool>         sig_mcu_ls_req_write{"sig_mcu_ls_req_write"};
+    sc_signal<sc_uint<32>>  sig_mcu_ls_req_addr{"sig_mcu_ls_req_addr"};
+    sc_signal<sc_uint<32>>  sig_mcu_ls_req_wdata{"sig_mcu_ls_req_wdata"};
+    sc_signal<sc_uint<4>>   sig_mcu_ls_req_wstrb{"sig_mcu_ls_req_wstrb"};
+    sc_signal<sc_uint<32>>  sig_mcu_ls_resp_rdata{"sig_mcu_ls_resp_rdata"};
 
-		cmd_fabric.clk(clk);
-		cmd_fabric.reset_n(reset_n);
-		cmd_fabric.core_mmio_req_valid_i(mmio_req_valid_sig_);
-		cmd_fabric.core_mmio_req_i(mmio_req_sig_);
-		cmd_fabric.core_mmio_resp_valid_o(mmio_resp_valid_sig_);
-		cmd_fabric.core_mmio_resp_o(mmio_resp_sig_);
-		cmd_fabric.dma_mmio_req_valid_o(dma_mmio_req_valid_sig_);
-		cmd_fabric.dma_mmio_req_o(dma_mmio_req_sig_);
-		cmd_fabric.dma_mmio_resp_valid_i(dma_mmio_resp_valid_sig_);
-		cmd_fabric.dma_mmio_resp_i(dma_mmio_resp_sig_);
-		cmd_fabric.dma_stream_valid_o(dma_stream_valid_sig_);
-		cmd_fabric.dma_stream_data_o(dma_stream_data_sig_);
-		cmd_fabric.cluster_req_valid_o(cluster_req_valid_sig_);
-		cmd_fabric.cluster_req_o(cluster_req_sig_);
-		cmd_fabric.cluster_req_ready_i(cluster_req_ready_i);
-		cmd_fabric.nlu_req_valid_o(nlu_req_valid_sig_);
-		cmd_fabric.nlu_req_o(nlu_req_sig_);
-		cmd_fabric.nlu_req_ready_i(nlu_req_ready_i);
-		cmd_fabric.plic_mmio_req_valid_o(plic_req_valid_sig_);
-		cmd_fabric.plic_mmio_req_o(plic_req_sig_);
-		cmd_fabric.plic_mmio_resp_valid_i(plic_resp_valid_sig_);
-		cmd_fabric.plic_mmio_resp_i(plic_resp_sig_);
+    // ========================================================================
+    // Internal signals — CoreMcu ↔ CmdFabric
+    // ========================================================================
 
-		plic.clk(clk);
-		plic.reset_n(reset_n);
-		plic.cluster_irq_i(cluster_irq_i);
-		plic.nlu_irq_i(nlu_irq_i);
-		plic.dma_irq_i(dma_irq_sig_);
-		plic.mmio_req_valid_i(plic_req_valid_sig_);
-		plic.mmio_req_i(plic_req_sig_);
-		plic.mmio_resp_valid_o(plic_resp_valid_sig_);
-		plic.mmio_resp_o(plic_resp_sig_);
-		plic.meip_o(plic_meip_sig_);
-		plic.pending_lo_o(plic_pending_lo_sig_);
+    sc_signal<bool>         sig_mcu_mmio_req_valid{"sig_mcu_mmio_req_valid"};
+    sc_signal<bool>         sig_mcu_mmio_req_write{"sig_mcu_mmio_req_write"};
+    sc_signal<sc_uint<32>>  sig_mcu_mmio_req_addr{"sig_mcu_mmio_req_addr"};
+    sc_signal<sc_uint<32>>  sig_mcu_mmio_req_wdata{"sig_mcu_mmio_req_wdata"};
+    sc_signal<sc_uint<4>>   sig_mcu_mmio_req_wstrb{"sig_mcu_mmio_req_wstrb"};
+    sc_signal<bool>         sig_mcu_mmio_resp_valid{"sig_mcu_mmio_resp_valid"};
+    sc_signal<sc_uint<32>>  sig_mcu_mmio_resp_rdata{"sig_mcu_mmio_resp_rdata"};
 
-		dma_engine.clk(clk);
-		dma_engine.reset_n(reset_n);
-		dma_engine.mmio_req_valid_i(dma_mmio_req_valid_sig_);
-		dma_engine.mmio_req_i(dma_mmio_req_sig_);
-		dma_engine.mmio_resp_valid_o(dma_mmio_resp_valid_sig_);
-		dma_engine.mmio_resp_o(dma_mmio_resp_sig_);
-		dma_engine.stream_valid_i(dma_stream_valid_sig_);
-		dma_engine.stream_data_i(dma_stream_data_sig_);
-		dma_engine.stream_ready_o(dma_stream_ready_sig_);
-		dma_engine.dma_req_valid_o(dma_req_valid_sig_);
-		dma_engine.dma_req_o(dma_req_sig_);
-		dma_engine.dma_req_ready_i(dma_req_ready_i);
-		dma_engine.dma_irq_o(dma_irq_sig_);
+    // ========================================================================
+    // Internal signals — CmdFabric ↔ DMA MMIO
+    // ========================================================================
 
-		mtip_sig_.write(false);
-	}
+    sc_signal<bool>         sig_dma_mmio_req_valid{"sig_dma_mmio_req_valid"};
+    sc_signal<bool>         sig_dma_mmio_req_write{"sig_dma_mmio_req_write"};
+    sc_signal<sc_uint<32>>  sig_dma_mmio_req_addr{"sig_dma_mmio_req_addr"};
+    sc_signal<sc_uint<32>>  sig_dma_mmio_req_wdata{"sig_dma_mmio_req_wdata"};
+    sc_signal<bool>         sig_dma_mmio_resp_valid{"sig_dma_mmio_resp_valid"};
+    sc_signal<sc_uint<32>>  sig_dma_mmio_resp_rdata{"sig_dma_mmio_resp_rdata"};
+
+    // ========================================================================
+    // Internal signals — CmdFabric ↔ PLIC MMIO
+    // ========================================================================
+
+    sc_signal<bool>         sig_plic_mmio_req_valid{"sig_plic_mmio_req_valid"};
+    sc_signal<bool>         sig_plic_mmio_req_write{"sig_plic_mmio_req_write"};
+    sc_signal<sc_uint<32>>  sig_plic_mmio_req_addr{"sig_plic_mmio_req_addr"};
+    sc_signal<sc_uint<32>>  sig_plic_mmio_req_wdata{"sig_plic_mmio_req_wdata"};
+    sc_signal<bool>         sig_plic_mmio_resp_valid{"sig_plic_mmio_resp_valid"};
+    sc_signal<sc_uint<32>>  sig_plic_mmio_resp_rdata{"sig_plic_mmio_resp_rdata"};
+
+    // ========================================================================
+    // Internal signals — CmdFabric ↔ Timer MMIO
+    // ========================================================================
+
+    sc_signal<bool>         sig_timer_mmio_req_valid{"sig_timer_mmio_req_valid"};
+    sc_signal<bool>         sig_timer_mmio_req_write{"sig_timer_mmio_req_write"};
+    sc_signal<sc_uint<32>>  sig_timer_mmio_req_addr{"sig_timer_mmio_req_addr"};
+    sc_signal<sc_uint<32>>  sig_timer_mmio_req_wdata{"sig_timer_mmio_req_wdata"};
+    sc_signal<bool>         sig_timer_mmio_resp_valid{"sig_timer_mmio_resp_valid"};
+    sc_signal<sc_uint<32>>  sig_timer_mmio_resp_rdata{"sig_timer_mmio_resp_rdata"};
+
+    // ========================================================================
+    // Internal signals — IRQs
+    // ========================================================================
+
+    sc_signal<bool>         sig_meip{"sig_meip"};
+    sc_signal<bool>         sig_msip{"sig_msip"};
+    sc_signal<bool>         sig_mtip{"sig_mtip"};
+    sc_signal<bool>         sig_dma_irq{"sig_dma_irq"};
+    sc_signal<bool>         sig_loader_fault{"sig_loader_fault"};
+    sc_signal<bool>         sig_fabric_fault{"sig_fabric_fault"};
+    sc_signal<sc_uint<32>>  sig_plic_pending_lo{"sig_plic_pending_lo"};
+    sc_signal<sc_uint<32>>  sig_plic_pending_hi{"sig_plic_pending_hi"};
+    sc_signal<bool>         sig_plic_pending_any{"sig_plic_pending_any"};
+
+    // ========================================================================
+    // Internal signals — DmaEngine ↔ ClusterDataFabric
+    // ========================================================================
+
+    sc_signal<bool>         sig_dma_cl_req_valid{"sig_dma_cl_req_valid"};
+    sc_signal<bool>         sig_dma_cl_req_write{"sig_dma_cl_req_write"};
+    sc_signal<sc_uint<32>>  sig_dma_cl_req_cluster_id{"sig_dma_cl_req_cluster_id"};
+    sc_signal<sc_uint<32>>  sig_dma_cl_req_addr{"sig_dma_cl_req_addr"};
+    sc_signal<sc_biguint<kClAxiDataWidth>>          sig_dma_cl_req_wdata{"sig_dma_cl_req_wdata"};
+    sc_signal<sc_uint<kClAxiDataWidth / 8>>         sig_dma_cl_req_wstrb{"sig_dma_cl_req_wstrb"};
+    sc_signal<bool>         sig_dma_cl_req_ready{"sig_dma_cl_req_ready"};
+    sc_signal<bool>         sig_dma_cl_resp_valid{"sig_dma_cl_resp_valid"};
+    sc_signal<sc_biguint<kClAxiDataWidth>>          sig_dma_cl_resp_rdata{"sig_dma_cl_resp_rdata"};
+    sc_signal<bool>         sig_dma_cl_resp_error{"sig_dma_cl_resp_error"};
+
+    // ========================================================================
+    // Internal signals — BootHostIf control / status
+    // ========================================================================
+
+    sc_signal<bool>         sig_core_enable{"sig_core_enable"};
+    sc_signal<bool>         sig_core_haltreq{"sig_core_haltreq"};
+    sc_signal<sc_uint<32>>  sig_boot_addr{"sig_boot_addr"};
+    sc_signal<sc_uint<32>>  sig_cluster_mask_lo{"sig_cluster_mask_lo"};
+    sc_signal<sc_uint<32>>  sig_cluster_mask_hi{"sig_cluster_mask_hi"};
+    sc_signal<bool>         sig_core_halted{"sig_core_halted"};
+    sc_signal<bool>         sig_core_running{"sig_core_running"};
+    sc_signal<bool>         sig_retire_valid{"sig_retire_valid"};
+    sc_signal<sc_uint<32>>  sig_retire_pc{"sig_retire_pc"};
+    sc_signal<sc_uint<32>>  sig_core_cause{"sig_core_cause"};
+    sc_signal<sc_uint<32>>  sig_fabric_last_target{"sig_fabric_last_target"};
+    sc_signal<sc_uint<32>>  sig_fabric_last_addr{"sig_fabric_last_addr"};
+
+    // ========================================================================
+    // Combinational derived signals
+    // ========================================================================
+
+    void comb_derived() {
+        // loader_fault = loader error code nonzero
+        sig_loader_fault.write(sig_loader_err_code.read().to_uint() != 0);
+        // plic_pending_any = any pending bit set
+        sig_plic_pending_any.write(
+            sig_plic_pending_lo.read().to_uint() != 0 ||
+            sig_plic_pending_hi.read().to_uint() != 0);
+        // core_running = core_enable active and not halted
+        sig_core_running.write(sig_core_enable.read() && !sig_core_halted.read());
+        // core_halted is now driven by u_core_mcu.halted_o binding (not placeholder)
+        // fabric_fault placeholder (would come from CmdFabric decode error)
+        sig_fabric_fault.write(false);
+        // core_cause: 3 = breakpoint when halted
+        sig_core_cause.write(sig_core_halted.read() ? 3u : 0u);
+        // fabric_last_target/addr placeholders
+        sig_fabric_last_target.write(0);
+        sig_fabric_last_addr.write(0);
+    }
 };
 
+} // namespace core
 } // namespace hybridacc

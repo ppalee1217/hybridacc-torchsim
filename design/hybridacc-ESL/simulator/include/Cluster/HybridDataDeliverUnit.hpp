@@ -7,8 +7,8 @@
 #include <utility>
 
 #include "Cluster/AddressGenerateUnit.hpp"
-#include "utils.hpp"
-#include "FIFO.hpp"
+#include "Utils/utils.hpp"
+#include "Utils/FIFO.hpp"
 
 using namespace sc_core;
 using namespace sc_dt;
@@ -707,6 +707,7 @@ private:
 	bool run_active_latched = false;
 	bool prev_any_busy_latched = false;
 	bool done_latched = false;
+	bool start_pending_ = false;  // plain C++ var for immediate BUSY visibility
 
 	// Internal FIFOs for each NoC channel
 	sc_vector<hybridacc::FIFO<noc_req_payload_t>> noc_req_fifo; // De-couple AGU request generation and NoC transmission for PS/PD/PLI planes
@@ -773,6 +774,7 @@ private:
 		run_active_latched = false;
 		prev_any_busy_latched = false;
 		done_latched = false;
+		start_pending_ = false;
 
 		for (int i = 0; i < NUM_SEND_PLANES; ++i) {
 			noc_req_fifo_clear_sig[i].write(false);
@@ -852,6 +854,13 @@ private:
 					for (int i = 0; i < NUM_AGU; ++i) {
 						agu_start_sig[i].write(true);
 					}
+					// Immediately reflect BUSY in status so firmware polling
+					// doesn't race with the 1-cycle AGU startup delay.
+					sc_uint<32> status = global_status_reg.read();
+					status[(int)HdduStatusBit::BUSY] = true;
+					status[(int)HdduStatusBit::IDLE] = false;
+					global_status_reg.write(status);
+					start_pending_ = true;  // visible to comb_mmio_read immediately
 				}
 				if (wdata[(int)HdduCtrllBit::CTRL_STOP]) { // Global stop bit
 					for (int i = 0; i < NUM_AGU; ++i) {
@@ -884,7 +893,15 @@ private:
 		} else if (is_global_mmio_addr(a)) {
 			switch (a) {
 				case MMIO_GLOBAL_CTRL: r = global_ctrl_reg.read(); break;
-				case MMIO_GLOBAL_STATUS: r = global_status_reg.read(); break;
+				case MMIO_GLOBAL_STATUS: {
+					r = global_status_reg.read();
+					// Use plain C++ flag for same-cycle BUSY visibility
+					if (start_pending_) {
+						r[(int)HdduStatusBit::BUSY] = true;
+						r[(int)HdduStatusBit::IDLE] = false;
+					}
+					break;
+				}
 				case MMIO_GLOBAL_PLANE_EN: r = plane_en_reg.read(); break;
 				case MMIO_GLOBAL_PLANE_MODE: r = plane_mode_reg.read(); break;
 				case MMIO_GLOBAL_NUM_PLANES: r = NUM_AGU; break;
@@ -1196,6 +1213,8 @@ private:
 			sc_uint<32> status = global_status_reg.read();
 			status[(int)HdduStatusBit::BUSY] = any_busy;
 			status[(int)HdduStatusBit::DONE] = done_latched;
+			// Clear start_pending_ once real AGU activity is reflected
+			if (any_busy || done_latched) start_pending_ = false;
 			status[(int)HdduStatusBit::ERROR] = (err_code_reg.read() != 0);
 			status[(int)HdduStatusBit::IDLE] = !run_active_latched && !any_busy && !done_latched && (err_code_reg.read() == 0);
 

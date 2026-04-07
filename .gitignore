@@ -25,6 +25,8 @@ node_modules/
 *.obj
 *.o
 *.exe
+*.elf
+*.dis
 
 # Backup files
 *.bak

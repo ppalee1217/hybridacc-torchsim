@@ -23,6 +23,8 @@ public:
 	sc_out<bool> cluster_req_valid_o{"cluster_req_valid_o"};
 	sc_out<core::ClusterMmioRequest> cluster_req_o{"cluster_req_o"};
 	sc_in<bool> cluster_req_ready_i{"cluster_req_ready_i"};
+	sc_in<bool> cluster_resp_valid_i{"cluster_resp_valid_i"};
+	sc_in<core::MmioResponse> cluster_resp_i{"cluster_resp_i"};
 	sc_out<bool> nlu_req_valid_o{"nlu_req_valid_o"};
 	sc_out<core::NluMmioRequest> nlu_req_o{"nlu_req_o"};
 	sc_in<bool> nlu_req_ready_i{"nlu_req_ready_i"};
@@ -41,6 +43,8 @@ public:
 		core.cluster_req_valid_o(cluster_req_valid_o);
 		core.cluster_req_o(cluster_req_o);
 		core.cluster_req_ready_i(cluster_req_ready_i);
+		core.cluster_resp_valid_i(cluster_resp_valid_i);
+		core.cluster_resp_i(cluster_resp_i);
 		core.nlu_req_valid_o(nlu_req_valid_o);
 		core.nlu_req_o(nlu_req_o);
 		core.nlu_req_ready_i(nlu_req_ready_i);
@@ -50,6 +54,7 @@ public:
 	void load_instruction(uint32_t byte_addr, uint32_t value) { core.load_instruction(byte_addr, value); }
 	void load_data_word(uint32_t byte_addr, uint32_t value) { core.load_data_word(byte_addr, value); }
 	uint32_t read_data_word(uint32_t byte_addr) const { return core.read_data_word(byte_addr); }
+	void host_push_manifest(const core::ManifestPacket& packet) { core.host_push_manifest(packet); }
 	void host_set_boot_addr(uint32_t addr) { core.host_set_boot_addr(addr); }
 	void host_set_trap_vector(uint32_t addr) { core.host_set_trap_vector(addr); }
 	void host_set_core_enable(bool enable) { core.host_set_core_enable(enable); }
@@ -59,6 +64,9 @@ public:
 	core::MmioRequest debug_last_mmio_request() const { return core.debug_last_mmio_request(); }
 	core::ClusterMmioRequest debug_last_cluster_request() const { return core.debug_last_cluster_request(); }
 	uint32_t debug_cluster_mask_lo() const { return core.debug_cluster_mask_lo(); }
+	uint32_t host_read_mhcr(unsigned index) const { return core.host_read_mhcr(index); }
+	uint32_t host_read_hwstat(unsigned index) const { return core.host_read_hwstat(index); }
+	void host_write_param(unsigned index, uint32_t value) { core.host_write_param(index, value); }
 };
 
 } // namespace hybridacc

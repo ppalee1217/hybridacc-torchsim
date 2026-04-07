@@ -1,375 +1,481 @@
 #pragma once
 
-#include <systemc>
+/**
+ * @file Types.hpp
+ * @brief Shared type definitions for the HACC Core Controller subsystem.
+ *
+ * Defines enumerations, struct payloads, and constants used across
+ * cc_core_mcu, cc_cmd_fabric, cc_dma_engine, cc_plic, cc_section_loader,
+ * cc_boot_host_if, and cc_cluster_data_fabric.
+ */
 
+#include <systemc>
 #include <cstdint>
-#include <iosfwd>
+#include <iostream>
 #include <string>
-#include <vector>
+
+namespace hybridacc {
+namespace core {
 
 using namespace sc_core;
 using namespace sc_dt;
 
-namespace hybridacc::core {
+// ============================================================================
+// Global core-controller parameters (compile-time defaults)
+// ============================================================================
 
-static constexpr unsigned kCoreXlen = 32;
-static constexpr unsigned kCoreGprCount = 32;
+static constexpr unsigned kCoreXlen           = 32;
+static constexpr unsigned kCoreGprNum         = 32;
+static constexpr unsigned kCorePipeStages     = 5;
 
-static constexpr uint32_t kIsramBase = 0x00000000u;
-static constexpr uint32_t kDataSramBase = 0x10000000u;
-static constexpr uint32_t kLocalMmioBase = 0x20000000u;
-static constexpr uint32_t kLocalMmioEnd = 0x20000FFFu;
-static constexpr uint32_t kDmaMmioBase = 0x20001000u;
-static constexpr uint32_t kDmaMmioEnd = 0x20001FFFu;
-static constexpr uint32_t kDmaStreamBase = 0x20001800u;
-static constexpr uint32_t kDmaStreamEnd = 0x200018FFu;
-static constexpr uint32_t kLocalTimerBase = 0x20002000u;
-static constexpr uint32_t kLocalTimerEnd = 0x20002FFFu;
-static constexpr uint32_t kPlicBase = 0x0C000000u;
-static constexpr uint32_t kPlicEnd = 0x0C00FFFFu;
-static constexpr uint32_t kClusterMmioBase = 0x40000000u;
-static constexpr uint32_t kClusterMmioEnd = 0x400FFFFFu;
-static constexpr uint32_t kClusterBroadcastBase = 0x50000000u;
-static constexpr uint32_t kClusterBroadcastEnd = 0x5000FFFFu;
-static constexpr uint32_t kNluMmioBase = 0x60000000u;
-static constexpr uint32_t kNluMmioEnd = 0x6000FFFFu;
+static constexpr unsigned kIsramBytes         = 16384; ///< 16 KB instruction SRAM
+static constexpr unsigned kDataSramBytes      = 65536; ///< 64 KB data SRAM
+static constexpr unsigned kBootRomBytes       = 4096;  ///< 4 KB optional boot ROM
 
-static constexpr uint32_t kClusterStride = 0x00010000u;
-static constexpr uint32_t kNluStride = 0x00001000u;
+static constexpr unsigned kClAxiDataWidth     = 64;    ///< cluster data port width
+static constexpr unsigned kClAhbDataWidth     = 32;    ///< cluster command port width
+static constexpr unsigned kMemAxiDataWidth    = 128;   ///< external DRAM AXI4 width
 
-static constexpr uint32_t kLocalCoreStatusOffset = 0x000u;
-static constexpr uint32_t kLocalCoreCtrlOffset = 0x004u;
-static constexpr uint32_t kLocalClusterMaskLoOffset = 0x008u;
-static constexpr uint32_t kLocalClusterMaskHiOffset = 0x00Cu;
-static constexpr uint32_t kLocalMmioErrStatusOffset = 0x010u;
-static constexpr uint32_t kLocalLastTargetIdOffset = 0x014u;
-static constexpr uint32_t kLocalLastFaultAddrOffset = 0x018u;
-static constexpr uint32_t kLocalLastFaultInfoOffset = 0x01Cu;
-static constexpr uint32_t kLocalDmaStatusOffset = 0x020u;
-static constexpr uint32_t kLocalDmaErrCodeOffset = 0x024u;
-static constexpr uint32_t kLocalTraceCtrlOffset = 0x028u;
-static constexpr uint32_t kLocalTraceWptrOffset = 0x02Cu;
-static constexpr uint32_t kLocalCycleCntLoOffset = 0x030u;
-static constexpr uint32_t kLocalCycleCntHiOffset = 0x034u;
-static constexpr uint32_t kLocalInstretLoOffset = 0x038u;
-static constexpr uint32_t kLocalInstretHiOffset = 0x03Cu;
-static constexpr uint32_t kLocalSwIrqSetOffset = 0x040u;
-static constexpr uint32_t kLocalSwIrqClrOffset = 0x044u;
-static constexpr uint32_t kLocalBootReasonOffset = 0x048u;
+static constexpr unsigned kDmaCmdFifoDepth    = 8;
 
-static constexpr uint32_t kCoreStatusRunningBit = 1u << 0;
-static constexpr uint32_t kCoreStatusInTrapBit = 1u << 1;
-static constexpr uint32_t kCoreStatusFaultBit = 1u << 2;
-static constexpr uint32_t kCoreStatusHaltedBit = 1u << 3;
+// ============================================================================
+// Address-space base addresses (core-visible flat address map)
+// ============================================================================
 
-static constexpr uint32_t kCoreCtrlHaltReqBit = 1u << 0;
-static constexpr uint32_t kCoreCtrlSingleStepBit = 1u << 1;
-static constexpr uint32_t kCoreCtrlResumeBit = 1u << 2;
+static constexpr uint32_t kBaseInstRam        = 0x0000'0000;
+static constexpr uint32_t kEndInstRam         = 0x0000'3FFF;
+static constexpr uint32_t kBaseBootRom        = 0x0001'0000;
+static constexpr uint32_t kEndBootRom         = 0x0001'0FFF;
+static constexpr uint32_t kBaseDataRam        = 0x1000'0000;
+static constexpr uint32_t kEndDataRam         = 0x1000'FFFF;
+static constexpr uint32_t kBaseLocalCtrl      = 0x2000'0000;
+static constexpr uint32_t kEndLocalCtrl       = 0x2000'0FFF;
+static constexpr uint32_t kBaseDmaMmio        = 0x2000'1000;
+static constexpr uint32_t kEndDmaMmio         = 0x2000'17FF;
+static constexpr uint32_t kBaseLocalTimer     = 0x2000'2000;
+static constexpr uint32_t kEndLocalTimer      = 0x2000'20FF;
+static constexpr uint32_t kBasePlic           = 0x0C00'0000;
+static constexpr uint32_t kEndPlic            = 0x0C00'FFFF;
+static constexpr uint32_t kBaseClusterUnicast = 0x4000'0000;
+static constexpr uint32_t kEndClusterUnicast  = 0x400F'FFFF;
+static constexpr uint32_t kBaseClusterBcast   = 0x5000'0000;
+static constexpr uint32_t kEndClusterBcast    = 0x5000'FFFF;
+static constexpr uint32_t kBaseNlu            = 0x6000'0000;
+static constexpr uint32_t kEndNlu             = 0x6000'FFFF;
 
-static constexpr uint32_t kDmaCtrlStartBit = 1u << 0;
-static constexpr uint32_t kDmaStatusBusyBit = 1u << 0;
-static constexpr uint32_t kDmaStatusDoneBit = 1u << 1;
-static constexpr uint32_t kDmaStatusErrorBit = 1u << 2;
+static constexpr uint32_t kClusterStride      = 0x0001'0000;
+static constexpr uint32_t kNluStride          = 0x0000'1000;
 
-static constexpr uint32_t kPlicPendingLoOffset = 0x000u;
-static constexpr uint32_t kPlicEnableLoOffset = 0x004u;
-static constexpr uint32_t kPlicClaimOffset = 0x008u;
-static constexpr uint32_t kPlicCompleteOffset = 0x00Cu;
+// ============================================================================
+// Section-kind encoding (manifest)
+// ============================================================================
 
-enum class SectionType : uint8_t {
-	CORE = 0,
-	JOB = 1,
-	BLOCK = 2,
-	PROFILE = 3,
-	DMA = 4,
-	AGU = 5,
-	NLU = 6,
-	PE = 7,
-	SCAN = 8,
-	PATCH = 9,
-	DEBUG = 10,
+enum class SectionKind : uint16_t {
+    CORE    = 0x0001,
+    JOB     = 0x0002,
+    BLOCK   = 0x0003,
+    PROFILE = 0x0004,
+    DMA     = 0x0005,
+    AGU     = 0x0006,
+    NLU     = 0x0007,
+    PE      = 0x0008,
+    SCAN    = 0x0009,
+    PATCH   = 0x000A,
+    DEBUG   = 0x000B,
 };
 
-enum class DestinationKind : uint8_t {
-	ISRAM = 0,
-	DATA_SRAM = 1,
-	EVENT_SRAM = 2,
+inline std::ostream& operator<<(std::ostream& os, SectionKind k) {
+    switch (k) {
+        case SectionKind::CORE:    return os << "CORE";
+        case SectionKind::JOB:     return os << "JOB";
+        case SectionKind::BLOCK:   return os << "BLOCK";
+        case SectionKind::PROFILE: return os << "PROFILE";
+        case SectionKind::DMA:     return os << "DMA";
+        case SectionKind::AGU:     return os << "AGU";
+        case SectionKind::NLU:     return os << "NLU";
+        case SectionKind::PE:      return os << "PE";
+        case SectionKind::SCAN:    return os << "SCAN";
+        case SectionKind::PATCH:   return os << "PATCH";
+        case SectionKind::DEBUG:   return os << "DEBUG";
+        default:                   return os << "UNKNOWN_SECTION";
+    }
+}
+
+inline void sc_trace(sc_trace_file* tf, const SectionKind& k, const std::string& name) {
+    sc_trace(tf, static_cast<uint16_t>(k), name);
+}
+
+// ============================================================================
+// Manifest entry (32 bytes = 8 words)
+// ============================================================================
+
+struct ManifestEntry {
+    uint16_t section_kind;
+    uint16_t flags;
+    uint32_t dram_addr_lo;
+    uint32_t dram_addr_hi;
+    uint32_t local_addr;
+    uint32_t size_bytes;
+    uint32_t crc32;
+    uint32_t attr0;
+    uint32_t reserved;
+
+    bool operator==(const ManifestEntry& o) const {
+        return section_kind == o.section_kind && flags == o.flags &&
+               dram_addr_lo == o.dram_addr_lo && dram_addr_hi == o.dram_addr_hi &&
+               local_addr == o.local_addr && size_bytes == o.size_bytes &&
+               crc32 == o.crc32 && attr0 == o.attr0;
+    }
+    friend std::ostream& operator<<(std::ostream& os, const ManifestEntry& e) {
+        os << "ManifestEntry{kind=0x" << std::hex << e.section_kind
+           << ", flags=0x" << e.flags
+           << ", dram=0x" << e.dram_addr_hi << e.dram_addr_lo
+           << ", local=0x" << e.local_addr
+           << ", size=" << std::dec << e.size_bytes << "}";
+        return os;
+    }
+    friend void sc_trace(sc_trace_file* tf, const ManifestEntry& e, const std::string& name) {
+        sc_trace(tf, e.section_kind, name + ".section_kind");
+        sc_trace(tf, e.local_addr,   name + ".local_addr");
+        sc_trace(tf, e.size_bytes,   name + ".size_bytes");
+    }
 };
 
-struct ManifestHeader {
-	SectionType section_type = SectionType::CORE;
-	DestinationKind dst_kind = DestinationKind::ISRAM;
-	uint32_t dram_base = 0;
-	uint32_t dst_base = 0;
-	uint32_t cluster_mask = 0;
-	uint32_t word_count = 0;
+// ============================================================================
+// Loader error codes
+// ============================================================================
 
-	bool operator==(const ManifestHeader& other) const {
-		return section_type == other.section_type && dst_kind == other.dst_kind && dram_base == other.dram_base &&
-			dst_base == other.dst_base && cluster_mask == other.cluster_mask && word_count == other.word_count;
-	}
+enum class LoaderError : uint32_t {
+    LD_OK                   = 0,
+    LD_ERR_MANIFEST_SIZE    = 1,
+    LD_ERR_BAD_SECTION_KIND = 2,
+    LD_ERR_LOCAL_ADDR_OOB   = 3,
+    LD_ERR_SIZE_OOB         = 4,
+    LD_ERR_CRC_MISMATCH     = 5,
+    LD_ERR_AXI              = 6,
+    LD_ERR_OVERLAP          = 7,
 };
 
-struct ManifestPayloadBeat {
-	uint32_t data = 0;
-	bool last = false;
+inline std::ostream& operator<<(std::ostream& os, LoaderError e) {
+    switch (e) {
+        case LoaderError::LD_OK:                   return os << "LD_OK";
+        case LoaderError::LD_ERR_MANIFEST_SIZE:    return os << "LD_ERR_MANIFEST_SIZE";
+        case LoaderError::LD_ERR_BAD_SECTION_KIND: return os << "LD_ERR_BAD_SECTION_KIND";
+        case LoaderError::LD_ERR_LOCAL_ADDR_OOB:   return os << "LD_ERR_LOCAL_ADDR_OOB";
+        case LoaderError::LD_ERR_SIZE_OOB:         return os << "LD_ERR_SIZE_OOB";
+        case LoaderError::LD_ERR_CRC_MISMATCH:     return os << "LD_ERR_CRC_MISMATCH";
+        case LoaderError::LD_ERR_AXI:              return os << "LD_ERR_AXI";
+        case LoaderError::LD_ERR_OVERLAP:          return os << "LD_ERR_OVERLAP";
+        default:                                   return os << "LD_ERR_UNKNOWN";
+    }
+}
 
-	bool operator==(const ManifestPayloadBeat& other) const {
-		return data == other.data && last == other.last;
-	}
+inline void sc_trace(sc_trace_file* tf, const LoaderError& e, const std::string& name) {
+    sc_trace(tf, static_cast<uint32_t>(e), name);
+}
+
+// ============================================================================
+// DMA error codes
+// ============================================================================
+
+enum class DmaError : uint32_t {
+    DMA_ERR_NONE            = 0,
+    DMA_ERR_SUBMIT_WHEN_FULL = 1,
+    DMA_ERR_BAD_OP_KIND     = 2,
+    DMA_ERR_BAD_ENDPOINT    = 3,
+    DMA_ERR_ADDR_ALIGN      = 4,
+    DMA_ERR_ZERO_LENGTH     = 5,
+    DMA_ERR_CLUSTER_RESP    = 6,
+    DMA_ERR_DRAM_AXI        = 7,
+    DMA_ERR_ABORTED         = 8,
 };
 
-struct ManifestPacket {
-	SectionType section_type = SectionType::CORE;
-	DestinationKind dst_kind = DestinationKind::ISRAM;
-	uint32_t dram_base = 0;
-	uint32_t dst_base = 0;
-	uint32_t cluster_mask = 0;
-	std::vector<uint32_t> payload_words;
+inline std::ostream& operator<<(std::ostream& os, DmaError e) {
+    switch (e) {
+        case DmaError::DMA_ERR_NONE:            return os << "DMA_ERR_NONE";
+        case DmaError::DMA_ERR_SUBMIT_WHEN_FULL:return os << "DMA_ERR_SUBMIT_WHEN_FULL";
+        case DmaError::DMA_ERR_BAD_OP_KIND:     return os << "DMA_ERR_BAD_OP_KIND";
+        case DmaError::DMA_ERR_BAD_ENDPOINT:    return os << "DMA_ERR_BAD_ENDPOINT";
+        case DmaError::DMA_ERR_ADDR_ALIGN:      return os << "DMA_ERR_ADDR_ALIGN";
+        case DmaError::DMA_ERR_ZERO_LENGTH:     return os << "DMA_ERR_ZERO_LENGTH";
+        case DmaError::DMA_ERR_CLUSTER_RESP:    return os << "DMA_ERR_CLUSTER_RESP";
+        case DmaError::DMA_ERR_DRAM_AXI:        return os << "DMA_ERR_DRAM_AXI";
+        case DmaError::DMA_ERR_ABORTED:         return os << "DMA_ERR_ABORTED";
+        default:                                return os << "DMA_ERR_UNKNOWN";
+    }
+}
 
-	ManifestHeader header() const {
-		return ManifestHeader{section_type, dst_kind, dram_base, dst_base, cluster_mask, static_cast<uint32_t>(payload_words.size())};
-	}
+inline void sc_trace(sc_trace_file* tf, const DmaError& e, const std::string& name) {
+    sc_trace(tf, static_cast<uint32_t>(e), name);
+}
+
+// ============================================================================
+// DMA operation / endpoint kind
+// ============================================================================
+
+enum class DmaOpKind : uint32_t {
+    LINEAR_COPY    = 0,
+    STRIDED_2D     = 1,
 };
+
+inline std::ostream& operator<<(std::ostream& os, DmaOpKind k) {
+    switch (k) {
+        case DmaOpKind::LINEAR_COPY: return os << "LINEAR_COPY";
+        case DmaOpKind::STRIDED_2D:  return os << "STRIDED_2D";
+        default:                     return os << "DMA_OP_UNKNOWN";
+    }
+}
+
+inline void sc_trace(sc_trace_file* tf, const DmaOpKind& k, const std::string& name) {
+    sc_trace(tf, static_cast<uint32_t>(k), name);
+}
+
+enum class DmaEndpoint : uint32_t {
+    DRAM        = 0,
+    CLUSTER_SPM = 1,
+};
+
+inline std::ostream& operator<<(std::ostream& os, DmaEndpoint k) {
+    switch (k) {
+        case DmaEndpoint::DRAM:        return os << "DRAM";
+        case DmaEndpoint::CLUSTER_SPM: return os << "CLUSTER_SPM";
+        default:                       return os << "DMA_EP_UNKNOWN";
+    }
+}
+
+inline void sc_trace(sc_trace_file* tf, const DmaEndpoint& k, const std::string& name) {
+    sc_trace(tf, static_cast<uint32_t>(k), name);
+}
+
+// ============================================================================
+// DMA command (snapshot into command FIFO)
+// ============================================================================
+
+struct DmaCommand {
+    DmaOpKind  op_kind;
+    DmaEndpoint src_kind;
+    DmaEndpoint dst_kind;
+    uint32_t src_addr_lo;
+    uint32_t src_addr_hi;
+    uint32_t dst_addr_lo;
+    uint32_t dst_addr_hi;
+    uint32_t src_cluster_id;
+    uint32_t dst_cluster_id;
+    uint32_t bytes;
+    uint32_t line_bytes;
+    uint32_t line_count;
+    uint32_t src_stride;
+    uint32_t dst_stride;
+    uint32_t cmd_tag;
+
+    bool operator==(const DmaCommand& o) const {
+        return op_kind == o.op_kind && src_kind == o.src_kind &&
+               dst_kind == o.dst_kind && src_addr_lo == o.src_addr_lo &&
+               dst_addr_lo == o.dst_addr_lo && bytes == o.bytes &&
+               cmd_tag == o.cmd_tag;
+    }
+    friend std::ostream& operator<<(std::ostream& os, const DmaCommand& c) {
+        os << "DmaCmd{op=" << c.op_kind << ", src=" << c.src_kind
+           << ", dst=" << c.dst_kind << ", bytes=" << c.bytes
+           << ", tag=" << c.cmd_tag << "}";
+        return os;
+    }
+    friend void sc_trace(sc_trace_file* tf, const DmaCommand& c, const std::string& name) {
+        sc_trace(tf, static_cast<uint32_t>(c.op_kind), name + ".op_kind");
+        sc_trace(tf, c.bytes,   name + ".bytes");
+        sc_trace(tf, c.cmd_tag, name + ".cmd_tag");
+    }
+};
+
+// ============================================================================
+// MMIO request / response (core <-> cmd_fabric)
+// ============================================================================
 
 struct MmioRequest {
-	bool write = false;
-	uint32_t addr = 0;
-	uint32_t wdata = 0;
-	uint8_t wstrb = 0;
+    bool     write;
+    uint32_t addr;
+    uint32_t wdata;
+    uint32_t wstrb;
 
-	bool operator==(const MmioRequest& other) const {
-		return write == other.write && addr == other.addr && wdata == other.wdata && wstrb == other.wstrb;
-	}
+    bool operator==(const MmioRequest& o) const {
+        return write == o.write && addr == o.addr &&
+               wdata == o.wdata && wstrb == o.wstrb;
+    }
+    friend std::ostream& operator<<(std::ostream& os, const MmioRequest& r) {
+        os << "MmioReq{" << (r.write ? "W" : "R")
+           << ", addr=0x" << std::hex << r.addr
+           << ", data=0x" << r.wdata << std::dec << "}";
+        return os;
+    }
+    friend void sc_trace(sc_trace_file* tf, const MmioRequest& r, const std::string& name) {
+        sc_trace(tf, r.write, name + ".write");
+        sc_trace(tf, r.addr,  name + ".addr");
+        sc_trace(tf, r.wdata, name + ".wdata");
+    }
 };
 
 struct MmioResponse {
-	bool error = false;
-	uint32_t rdata = 0;
-	uint32_t error_code = 0;
+    uint32_t rdata;
+    bool     error;
 
-	bool operator==(const MmioResponse& other) const {
-		return error == other.error && rdata == other.rdata && error_code == other.error_code;
-	}
+    bool operator==(const MmioResponse& o) const {
+        return rdata == o.rdata && error == o.error;
+    }
+    friend std::ostream& operator<<(std::ostream& os, const MmioResponse& r) {
+        os << "MmioResp{data=0x" << std::hex << r.rdata
+           << ", err=" << std::dec << r.error << "}";
+        return os;
+    }
+    friend void sc_trace(sc_trace_file* tf, const MmioResponse& r, const std::string& name) {
+        sc_trace(tf, r.rdata, name + ".rdata");
+        sc_trace(tf, r.error, name + ".error");
+    }
 };
 
-struct ClusterMmioRequest {
-	bool write = false;
-	bool is_broadcast = false;
-	uint32_t target_id = 0;
-	uint32_t target_mask = 0;
-	uint32_t addr = 0;
-	uint32_t wdata = 0;
-	uint8_t wstrb = 0;
+// ============================================================================
+// Cluster data fabric request / response
+// ============================================================================
 
-	bool operator==(const ClusterMmioRequest& other) const {
-		return write == other.write && is_broadcast == other.is_broadcast && target_id == other.target_id &&
-			target_mask == other.target_mask && addr == other.addr && wdata == other.wdata && wstrb == other.wstrb;
-	}
+struct ClusterDataRequest {
+    bool     write;
+    uint32_t cluster_id;
+    uint32_t addr;
+    uint64_t wdata;
+    uint8_t  wstrb;
+
+    bool operator==(const ClusterDataRequest& o) const {
+        return write == o.write && cluster_id == o.cluster_id &&
+               addr == o.addr && wdata == o.wdata && wstrb == o.wstrb;
+    }
+    friend std::ostream& operator<<(std::ostream& os, const ClusterDataRequest& r) {
+        os << "ClDataReq{" << (r.write ? "W" : "R")
+           << ", cl=" << r.cluster_id
+           << ", addr=0x" << std::hex << r.addr
+           << ", data=0x" << r.wdata << std::dec << "}";
+        return os;
+    }
+    friend void sc_trace(sc_trace_file* tf, const ClusterDataRequest& r, const std::string& name) {
+        sc_trace(tf, r.write,      name + ".write");
+        sc_trace(tf, r.cluster_id, name + ".cluster_id");
+        sc_trace(tf, r.addr,       name + ".addr");
+    }
 };
 
-struct NluMmioRequest {
-	bool write = false;
-	uint32_t target_id = 0;
-	uint32_t target_mask = 0;
-	uint32_t addr = 0;
-	uint32_t wdata = 0;
-	uint8_t wstrb = 0;
+struct ClusterDataResponse {
+    uint64_t rdata;
+    bool     error;
 
-	bool operator==(const NluMmioRequest& other) const {
-		return write == other.write && target_id == other.target_id && target_mask == other.target_mask && addr == other.addr &&
-			wdata == other.wdata && wstrb == other.wstrb;
-	}
+    bool operator==(const ClusterDataResponse& o) const {
+        return rdata == o.rdata && error == o.error;
+    }
+    friend std::ostream& operator<<(std::ostream& os, const ClusterDataResponse& r) {
+        os << "ClDataResp{data=0x" << std::hex << r.rdata
+           << ", err=" << std::dec << r.error << "}";
+        return os;
+    }
+    friend void sc_trace(sc_trace_file* tf, const ClusterDataResponse& r, const std::string& name) {
+        sc_trace(tf, r.rdata, name + ".rdata");
+        sc_trace(tf, r.error, name + ".error");
+    }
 };
 
-struct DmaMmioRequest {
-	bool write = false;
-	uint32_t addr = 0;
-	uint32_t wdata = 0;
-	uint8_t wstrb = 0;
+// ============================================================================
+// PLIC source id helpers
+// ============================================================================
 
-	bool operator==(const DmaMmioRequest& other) const {
-		return write == other.write && addr == other.addr && wdata == other.wdata && wstrb == other.wstrb;
-	}
-};
-
-struct DmaRequest {
-	bool write = true;
-	uint32_t cluster_mask = 0;
-	uint32_t addr = 0;
-	uint64_t data = 0;
-	uint32_t word_count = 0;
-
-	bool operator==(const DmaRequest& other) const {
-		return write == other.write && cluster_mask == other.cluster_mask && addr == other.addr && data == other.data &&
-			word_count == other.word_count;
-	}
-};
-
-inline std::ostream& operator<<(std::ostream& os, SectionType type) {
-	return os << static_cast<unsigned>(type);
+/**
+ * @brief Compute the total number of PLIC sources.
+ *
+ *   source 0           = reserved
+ *   1..NUM_CLUSTERS     = cluster_irq
+ *   NUM_CLUSTERS+1      = dma_irq
+ *   NUM_CLUSTERS+2..+NLU+1 = nlu_irq
+ *   +NLU+2              = loader_fault
+ *   +NLU+3              = fabric_fault
+ */
+static constexpr unsigned plic_num_sources(unsigned num_cl, unsigned num_nlu) {
+    return num_cl + num_nlu + 3;
 }
 
-inline std::ostream& operator<<(std::ostream& os, DestinationKind kind) {
-	return os << static_cast<unsigned>(kind);
-}
+// ============================================================================
+// RV32I CSR addresses used by the core
+// ============================================================================
 
-inline std::ostream& operator<<(std::ostream& os, const ManifestHeader& header) {
-	os << "ManifestHeader{section=" << header.section_type << ", dst=" << header.dst_kind << ", dst_base=0x" << std::hex
-	   << header.dst_base << ", words=" << std::dec << header.word_count << "}";
-	return os;
-}
+static constexpr uint32_t kCsrMstatus  = 0x300;
+static constexpr uint32_t kCsrMisa     = 0x301;
+static constexpr uint32_t kCsrMie      = 0x304;
+static constexpr uint32_t kCsrMtvec    = 0x305;
+static constexpr uint32_t kCsrMscratch = 0x340;
+static constexpr uint32_t kCsrMepc     = 0x341;
+static constexpr uint32_t kCsrMcause   = 0x342;
+static constexpr uint32_t kCsrMtval    = 0x343;
+static constexpr uint32_t kCsrMip      = 0x344;
+static constexpr uint32_t kCsrMcycle   = 0xB00;
+static constexpr uint32_t kCsrMinstret = 0xB02;
 
-inline std::ostream& operator<<(std::ostream& os, const ManifestPayloadBeat& beat) {
-	os << "ManifestPayloadBeat{data=0x" << std::hex << beat.data << ", last=" << std::dec << beat.last << "}";
-	return os;
-}
+// ============================================================================
+// Core local control MMIO offsets
+// ============================================================================
 
-inline std::ostream& operator<<(std::ostream& os, const MmioRequest& request) {
-	os << "MmioRequest{write=" << request.write << ", addr=0x" << std::hex << request.addr << ", data=0x" << request.wdata
-	   << std::dec << "}";
-	return os;
-}
+static constexpr uint32_t kLocalClusterMaskLo = 0x000;
+static constexpr uint32_t kLocalClusterMaskHi = 0x004;
+static constexpr uint32_t kLocalMmioErrStatus = 0x008;
+static constexpr uint32_t kLocalLastTargetId  = 0x00C;
+static constexpr uint32_t kLocalLastFaultAddr = 0x010;
+static constexpr uint32_t kLocalLastFaultInfo = 0x014;
+static constexpr uint32_t kLocalBootReason    = 0x018;
+static constexpr uint32_t kLocalFabricCap0    = 0x01C;
 
-inline std::ostream& operator<<(std::ostream& os, const MmioResponse& response) {
-	os << "MmioResponse{error=" << response.error << ", rdata=0x" << std::hex << response.rdata << ", code=" << std::dec
-	   << response.error_code << "}";
-	return os;
-}
+// ============================================================================
+// DMA MMIO offsets
+// ============================================================================
 
-inline std::ostream& operator<<(std::ostream& os, const ClusterMmioRequest& request) {
-	os << "ClusterMmioRequest{write=" << request.write << ", bcast=" << request.is_broadcast << ", id=" << request.target_id
-	   << ", mask=0x" << std::hex << request.target_mask << ", addr=0x" << request.addr << ", data=0x" << request.wdata
-	   << std::dec << "}";
-	return os;
-}
+static constexpr uint32_t kDmaCap0        = 0x000;
+static constexpr uint32_t kDmaStatus      = 0x004;
+static constexpr uint32_t kDmaCtrl        = 0x008;
+static constexpr uint32_t kDmaOpKind      = 0x00C;
+static constexpr uint32_t kDmaSrcKind     = 0x010;
+static constexpr uint32_t kDmaDstKind     = 0x014;
+static constexpr uint32_t kDmaSrcAddrLo   = 0x018;
+static constexpr uint32_t kDmaSrcAddrHi   = 0x01C;
+static constexpr uint32_t kDmaDstAddrLo   = 0x020;
+static constexpr uint32_t kDmaDstAddrHi   = 0x024;
+static constexpr uint32_t kDmaSrcClusterId= 0x028;
+static constexpr uint32_t kDmaDstClusterId= 0x02C;
+static constexpr uint32_t kDmaBytes       = 0x030;
+static constexpr uint32_t kDmaLineBytes   = 0x034;
+static constexpr uint32_t kDmaLineCount   = 0x038;
+static constexpr uint32_t kDmaSrcStride   = 0x03C;
+static constexpr uint32_t kDmaDstStride   = 0x040;
+static constexpr uint32_t kDmaCmdTag      = 0x044;
+static constexpr uint32_t kDmaDoneTag     = 0x048;
+static constexpr uint32_t kDmaErrCode     = 0x04C;
+static constexpr uint32_t kDmaErrInfo     = 0x050;
+static constexpr uint32_t kDmaDebugState  = 0x054;
 
-inline std::ostream& operator<<(std::ostream& os, const NluMmioRequest& request) {
-	os << "NluMmioRequest{id=" << request.target_id << ", mask=0x" << std::hex << request.target_mask << ", addr=0x"
-	   << request.addr << ", data=0x" << request.wdata << std::dec << "}";
-	return os;
-}
+// ============================================================================
+// PLIC MMIO offsets
+// ============================================================================
 
-inline std::ostream& operator<<(std::ostream& os, const DmaMmioRequest& request) {
-	os << "DmaMmioRequest{write=" << request.write << ", addr=0x" << std::hex << request.addr << ", data=0x"
-	   << request.wdata << std::dec << "}";
-	return os;
-}
+static constexpr uint32_t kPlicPriorityBase = 0x0000;
+static constexpr uint32_t kPlicPendingLo    = 0x0800;
+static constexpr uint32_t kPlicPendingHi    = 0x0804;
+static constexpr uint32_t kPlicEnableLo     = 0x1000;
+static constexpr uint32_t kPlicEnableHi     = 0x1004;
+static constexpr uint32_t kPlicThreshold    = 0x1800;
+static constexpr uint32_t kPlicClaimComplete= 0x1804;
+static constexpr uint32_t kPlicMaxSourceId  = 0x1808;
 
-inline std::ostream& operator<<(std::ostream& os, const DmaRequest& request) {
-	os << "DmaRequest{mask=0x" << std::hex << request.cluster_mask << ", addr=0x" << request.addr << ", data=0x"
-	   << request.data << ", words=" << std::dec << request.word_count << "}";
-	return os;
-}
+// ============================================================================
+// Core local timer MMIO offsets
+// ============================================================================
 
-inline void sc_trace(sc_trace_file* tf, const SectionType& type, const std::string& name) {
-	sc_core::sc_trace(tf, static_cast<uint32_t>(type), name);
-}
+static constexpr uint32_t kTimerMsip       = 0x000;
+static constexpr uint32_t kTimerMtimecmpLo = 0x004;
+static constexpr uint32_t kTimerMtimecmpHi = 0x008;
+static constexpr uint32_t kTimerMtimeLo    = 0x00C;
+static constexpr uint32_t kTimerMtimeHi    = 0x010;
+static constexpr uint32_t kTimerCtrl       = 0x014;
 
-inline void sc_trace(sc_trace_file* tf, const DestinationKind& kind, const std::string& name) {
-	sc_core::sc_trace(tf, static_cast<uint32_t>(kind), name);
-}
-
-inline void sc_trace(sc_trace_file* tf, const ManifestHeader& header, const std::string& name) {
-	using sc_core::sc_trace;
-	sc_trace(tf, header.section_type, name + ".section_type");
-	sc_trace(tf, header.dst_kind, name + ".dst_kind");
-	sc_trace(tf, header.dram_base, name + ".dram_base");
-	sc_trace(tf, header.dst_base, name + ".dst_base");
-	sc_trace(tf, header.cluster_mask, name + ".cluster_mask");
-	sc_trace(tf, header.word_count, name + ".word_count");
-}
-
-inline void sc_trace(sc_trace_file* tf, const ManifestPayloadBeat& beat, const std::string& name) {
-	using sc_core::sc_trace;
-	sc_trace(tf, beat.data, name + ".data");
-	sc_trace(tf, beat.last, name + ".last");
-}
-
-inline void sc_trace(sc_trace_file* tf, const MmioRequest& request, const std::string& name) {
-	using sc_core::sc_trace;
-	sc_trace(tf, request.write, name + ".write");
-	sc_trace(tf, request.addr, name + ".addr");
-	sc_trace(tf, request.wdata, name + ".wdata");
-	sc_trace(tf, static_cast<uint32_t>(request.wstrb), name + ".wstrb");
-}
-
-inline void sc_trace(sc_trace_file* tf, const MmioResponse& response, const std::string& name) {
-	using sc_core::sc_trace;
-	sc_trace(tf, response.error, name + ".error");
-	sc_trace(tf, response.rdata, name + ".rdata");
-	sc_trace(tf, response.error_code, name + ".error_code");
-}
-
-inline void sc_trace(sc_trace_file* tf, const ClusterMmioRequest& request, const std::string& name) {
-	using sc_core::sc_trace;
-	sc_trace(tf, request.write, name + ".write");
-	sc_trace(tf, request.is_broadcast, name + ".is_broadcast");
-	sc_trace(tf, request.target_id, name + ".target_id");
-	sc_trace(tf, request.target_mask, name + ".target_mask");
-	sc_trace(tf, request.addr, name + ".addr");
-	sc_trace(tf, request.wdata, name + ".wdata");
-	sc_trace(tf, static_cast<uint32_t>(request.wstrb), name + ".wstrb");
-}
-
-inline void sc_trace(sc_trace_file* tf, const NluMmioRequest& request, const std::string& name) {
-	using sc_core::sc_trace;
-	sc_trace(tf, request.write, name + ".write");
-	sc_trace(tf, request.target_id, name + ".target_id");
-	sc_trace(tf, request.target_mask, name + ".target_mask");
-	sc_trace(tf, request.addr, name + ".addr");
-	sc_trace(tf, request.wdata, name + ".wdata");
-	sc_trace(tf, static_cast<uint32_t>(request.wstrb), name + ".wstrb");
-}
-
-inline void sc_trace(sc_trace_file* tf, const DmaMmioRequest& request, const std::string& name) {
-	using sc_core::sc_trace;
-	sc_trace(tf, request.write, name + ".write");
-	sc_trace(tf, request.addr, name + ".addr");
-	sc_trace(tf, request.wdata, name + ".wdata");
-	sc_trace(tf, static_cast<uint32_t>(request.wstrb), name + ".wstrb");
-}
-
-inline void sc_trace(sc_trace_file* tf, const DmaRequest& request, const std::string& name) {
-	using sc_core::sc_trace;
-	sc_trace(tf, request.write, name + ".write");
-	sc_trace(tf, request.cluster_mask, name + ".cluster_mask");
-	sc_trace(tf, request.addr, name + ".addr");
-	sc_trace(tf, static_cast<uint32_t>(request.data & 0xFFFFFFFFu), name + ".data_lo");
-	sc_trace(tf, static_cast<uint32_t>(request.data >> 32), name + ".data_hi");
-	sc_trace(tf, request.word_count, name + ".word_count");
-}
-
-inline bool is_local_mmio(uint32_t addr) {
-	return addr >= kLocalMmioBase && addr <= kLocalMmioEnd;
-}
-
-inline bool is_dma_mmio(uint32_t addr) {
-	return addr >= kDmaMmioBase && addr <= kDmaMmioEnd;
-}
-
-inline bool is_dma_stream_window(uint32_t addr) {
-	return addr >= kDmaStreamBase && addr <= kDmaStreamEnd;
-}
-
-inline bool is_plic_mmio(uint32_t addr) {
-	return addr >= kPlicBase && addr <= kPlicEnd;
-}
-
-inline bool is_cluster_unicast_mmio(uint32_t addr) {
-	return addr >= kClusterMmioBase && addr <= kClusterMmioEnd;
-}
-
-inline bool is_cluster_broadcast_mmio(uint32_t addr) {
-	return addr >= kClusterBroadcastBase && addr <= kClusterBroadcastEnd;
-}
-
-inline bool is_nlu_mmio(uint32_t addr) {
-	return addr >= kNluMmioBase && addr <= kNluMmioEnd;
-}
-
-inline bool is_data_sram_addr(uint32_t addr, uint32_t data_sram_bytes) {
-	return addr >= kDataSramBase && addr < (kDataSramBase + data_sram_bytes);
-}
-
-} // namespace hybridacc::core
+} // namespace core
+} // namespace hybridacc

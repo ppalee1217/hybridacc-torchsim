@@ -11,7 +11,7 @@ fi
 
 # Resolve project root based on this script location (robust to caller CWD)
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-TOP_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+TOP_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 OUTPUT_DIR="$TOP_DIR/output"
 SIM_MODEL_DIR="$TOP_DIR/design/hybridacc-ESL"
 BUILD_DIR="$SIM_MODEL_DIR/build/cluster_sim"
