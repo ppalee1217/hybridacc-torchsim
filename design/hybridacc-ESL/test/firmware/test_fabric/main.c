@@ -71,7 +71,7 @@ void main(void)
     /* Reading broadcast addr with single cluster in mask should work */
     {
         uint32_t val = mmio_read(CLUSTER_BCAST_BASE + 0x0000);
-        TEST_EQ(8, val, 0xDEADBEEF);  /* Stub returns 0xDEADBEEF */
+        TEST_EQ(8, val, 0xAAAABBBB);  /* Should read back the value just written */
     }
 
     /* ---- Timer register access through fabric ---- */
@@ -111,8 +111,8 @@ void main(void)
     }
 
     /* T016: Write and read DMA staging registers */
-    mmio_write(DMA_OP_KIND, 0);
-    TEST_EQ(16, mmio_read(DMA_OP_KIND), 0);
+    mmio_write(DMA_SRC_KIND, 0);
+    TEST_EQ(16, mmio_read(DMA_SRC_KIND), 0);
 
     mmio_write(DMA_SRC_ADDR_LO, 0x80000000);
     TEST_EQ(17, mmio_read(DMA_SRC_ADDR_LO), 0x80000000);
@@ -120,8 +120,8 @@ void main(void)
     mmio_write(DMA_DST_ADDR_LO, 0x10000000);
     TEST_EQ(18, mmio_read(DMA_DST_ADDR_LO), 0x10000000);
 
-    mmio_write(DMA_BYTES, 64);
-    TEST_EQ(19, mmio_read(DMA_BYTES), 64);
+    mmio_write(DMA_COUNT_D0, 8);
+    TEST_EQ(19, mmio_read(DMA_COUNT_D0), 8);
 
     /* ---- Cleanup ---- */
     mmio_write(TIMER_CTRL, 0);

@@ -2,7 +2,7 @@
 
 TESTS := test_alu test_branch test_jump test_loadstore test_mul \
          test_csr test_stack test_trap test_plic test_fabric \
-         test_hazard test_compound
+         test_hazard test_compound test_dma
 
 .PHONY: all clean $(TESTS)
 

@@ -203,29 +203,35 @@ static inline uint32_t hacc_core_nlu_base(uint32_t nlu_id) {
 #define HACC_TIMER_CTRL_EN_SHIFT                0u
 #define HACC_TIMER_CTRL_EN_MASK                 HACC_BIT32(HACC_TIMER_CTRL_EN_SHIFT)
 
-/* DMA MMIO offsets */
+/* DMA MMIO offsets — unified 4D mode */
 #define HACC_DMA_REG_CAP0                       UINT32_C(0x000)
 #define HACC_DMA_REG_STATUS                     UINT32_C(0x004)
 #define HACC_DMA_REG_CTRL                       UINT32_C(0x008)
-#define HACC_DMA_REG_OP_KIND                    UINT32_C(0x00C)
-#define HACC_DMA_REG_SRC_KIND                   UINT32_C(0x010)
-#define HACC_DMA_REG_DST_KIND                   UINT32_C(0x014)
-#define HACC_DMA_REG_SRC_ADDR_LO                UINT32_C(0x018)
-#define HACC_DMA_REG_SRC_ADDR_HI                UINT32_C(0x01C)
-#define HACC_DMA_REG_DST_ADDR_LO                UINT32_C(0x020)
-#define HACC_DMA_REG_DST_ADDR_HI                UINT32_C(0x024)
-#define HACC_DMA_REG_SRC_CLUSTER_ID             UINT32_C(0x028)
-#define HACC_DMA_REG_DST_CLUSTER_ID             UINT32_C(0x02C)
-#define HACC_DMA_REG_BYTES                      UINT32_C(0x030)
-#define HACC_DMA_REG_LINE_BYTES                 UINT32_C(0x034)
-#define HACC_DMA_REG_LINE_COUNT                 UINT32_C(0x038)
-#define HACC_DMA_REG_SRC_STRIDE                 UINT32_C(0x03C)
-#define HACC_DMA_REG_DST_STRIDE                 UINT32_C(0x040)
-#define HACC_DMA_REG_CMD_TAG                    UINT32_C(0x044)
-#define HACC_DMA_REG_DONE_TAG                   UINT32_C(0x048)
-#define HACC_DMA_REG_ERR_CODE                   UINT32_C(0x04C)
-#define HACC_DMA_REG_ERR_INFO                   UINT32_C(0x050)
-#define HACC_DMA_REG_DEBUG_STATE                UINT32_C(0x054)
+#define HACC_DMA_REG_SRC_KIND                   UINT32_C(0x00C)
+#define HACC_DMA_REG_DST_KIND                   UINT32_C(0x010)
+#define HACC_DMA_REG_SRC_ADDR_LO                UINT32_C(0x014)
+#define HACC_DMA_REG_SRC_ADDR_HI                UINT32_C(0x018)
+#define HACC_DMA_REG_DST_ADDR_LO                UINT32_C(0x01C)
+#define HACC_DMA_REG_DST_ADDR_HI                UINT32_C(0x020)
+#define HACC_DMA_REG_SRC_CLUSTER_ID             UINT32_C(0x024)
+#define HACC_DMA_REG_DST_CLUSTER_ID             UINT32_C(0x028)
+#define HACC_DMA_REG_COUNT_D0                   UINT32_C(0x02C)
+#define HACC_DMA_REG_COUNT_D1                   UINT32_C(0x030)
+#define HACC_DMA_REG_COUNT_D2                   UINT32_C(0x034)
+#define HACC_DMA_REG_COUNT_D3                   UINT32_C(0x038)
+#define HACC_DMA_REG_SRC_STRIDE_D0              UINT32_C(0x03C)
+#define HACC_DMA_REG_SRC_STRIDE_D1              UINT32_C(0x040)
+#define HACC_DMA_REG_SRC_STRIDE_D2              UINT32_C(0x044)
+#define HACC_DMA_REG_SRC_STRIDE_D3              UINT32_C(0x048)
+#define HACC_DMA_REG_DST_STRIDE_D0              UINT32_C(0x04C)
+#define HACC_DMA_REG_DST_STRIDE_D1              UINT32_C(0x050)
+#define HACC_DMA_REG_DST_STRIDE_D2              UINT32_C(0x054)
+#define HACC_DMA_REG_DST_STRIDE_D3              UINT32_C(0x058)
+#define HACC_DMA_REG_CMD_TAG                    UINT32_C(0x05C)
+#define HACC_DMA_REG_DONE_TAG                   UINT32_C(0x060)
+#define HACC_DMA_REG_ERR_CODE                   UINT32_C(0x064)
+#define HACC_DMA_REG_ERR_INFO                   UINT32_C(0x068)
+#define HACC_DMA_REG_DEBUG_STATE                UINT32_C(0x06C)
 
 /* DMA_STATUS bits */
 #define HACC_DMA_STATUS_IDLE_SHIFT              0u
@@ -253,10 +259,6 @@ static inline uint32_t hacc_core_nlu_base(uint32_t nlu_id) {
 #define HACC_DMA_CTRL_SOFT_RESET_MASK           HACC_BIT32(HACC_DMA_CTRL_SOFT_RESET_SHIFT)
 #define HACC_DMA_CTRL_IRQ_EN_MASK               HACC_BIT32(HACC_DMA_CTRL_IRQ_EN_SHIFT)
 
-/* DMA operation kinds */
-#define HACC_DMA_OP_KIND_LINEAR_COPY            UINT32_C(0)
-#define HACC_DMA_OP_KIND_STRIDED_2D_COPY        UINT32_C(1)
-
 /* DMA endpoint kinds */
 #define HACC_DMA_ENDPOINT_DRAM                  UINT32_C(0)
 #define HACC_DMA_ENDPOINT_CLUSTER_SPM           UINT32_C(1)
@@ -264,13 +266,12 @@ static inline uint32_t hacc_core_nlu_base(uint32_t nlu_id) {
 /* DMA error codes */
 #define HACC_DMA_ERR_NONE                       UINT32_C(0)
 #define HACC_DMA_ERR_SUBMIT_WHEN_FULL           UINT32_C(1)
-#define HACC_DMA_ERR_BAD_OP_KIND                UINT32_C(2)
-#define HACC_DMA_ERR_BAD_ENDPOINT_KIND          UINT32_C(3)
-#define HACC_DMA_ERR_ADDR_ALIGN                 UINT32_C(4)
-#define HACC_DMA_ERR_ZERO_LENGTH                UINT32_C(5)
-#define HACC_DMA_ERR_CLUSTER_RESP               UINT32_C(6)
-#define HACC_DMA_ERR_DRAM_AXI                   UINT32_C(7)
-#define HACC_DMA_ERR_ABORTED                    UINT32_C(8)
+#define HACC_DMA_ERR_BAD_ENDPOINT_KIND          UINT32_C(2)
+#define HACC_DMA_ERR_ADDR_ALIGN                 UINT32_C(3)
+#define HACC_DMA_ERR_ZERO_LENGTH                UINT32_C(4)
+#define HACC_DMA_ERR_CLUSTER_RESP               UINT32_C(5)
+#define HACC_DMA_ERR_DRAM_AXI                   UINT32_C(6)
+#define HACC_DMA_ERR_ABORTED                    UINT32_C(7)
 
 /* PLIC MMIO offsets */
 #define HACC_PLIC_REG_PRIORITY_BASE             UINT32_C(0x0000)

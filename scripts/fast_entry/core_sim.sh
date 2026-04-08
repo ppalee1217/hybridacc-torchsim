@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# core_mcu_sim.sh [build|clean|run|run-all|rebuild-fw]
+# core_sim.sh [build|clean|run|run-all|rebuild-fw]
 #
-# Fast-entry script for building, running, and testing the Core MCU
-# simulation (ELF-based RISC-V firmware tests).
+# Fast-entry script for building, running, and testing the Core Controller
+# simulation with real cluster SPM storage (test_core_sim).
+#
+# Unlike core_mcu_sim.sh (BusStub-based), this testbench instantiates
+# FakeClusterSpm with actual byte-addressable storage and FakeDram,
+# making it suitable for DMA and data-path verification tests.
 #
 # Examples:
-#   core_mcu_sim.sh build
-#   core_mcu_sim.sh run test_alu
-#   core_mcu_sim.sh run test_alu --core-debug
-#   core_mcu_sim.sh run-all
-#   core_mcu_sim.sh run-all --dump-results
-#   core_mcu_sim.sh clean
+#   core_sim.sh build
+#   core_sim.sh run test_dma
+#   core_sim.sh run test_dma --core-debug
+#   core_sim.sh run-all
+#   core_sim.sh clean
 
 set -euo pipefail
 
@@ -22,12 +25,34 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TOP_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 OUTPUT_DIR="$TOP_DIR/output"
 SIM_MODEL_DIR="$TOP_DIR/design/hybridacc-ESL"
-BUILD_DIR="$OUTPUT_DIR/core-mcu-sim-build"
+BUILD_DIR="$OUTPUT_DIR/core-sim-build"   # shared build dir (same CMake project)
 CMAKEFILE_DIR="$SIM_MODEL_DIR/test"
 FW_DIR="$SIM_MODEL_DIR/test/firmware"
-LOG_DIR="$OUTPUT_DIR/core-mcu-logs"
+LOG_DIR="$OUTPUT_DIR/core-sim-logs"
 
-BINARY="$BUILD_DIR/test_core_mcu_sim"
+BINARY="$BUILD_DIR/test_core_sim"
+
+# ── Default test list for run-all ──────────────────────────────────────────
+# All firmware tests — core_sim uses real FakeClusterSpm + FakeDram storage.
+# Add new entries here as more tests are created.
+CORE_SIM_TESTS=(
+    empty
+    test_alu
+    test_branch
+    test_compound
+    test_csr
+    test_diag
+    test_dma
+    test_fabric
+    test_hazard
+    test_jump
+    test_loadstore
+    test_mul
+    test_plic
+    test_sram_timing
+    test_stack
+    test_trap
+)
 
 # ── Pretty print ──────────────────────────────────────────────────────────
 RED=$(printf '\033[0;31m')
@@ -47,39 +72,38 @@ mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 # ── Usage ──────────────────────────────────────────────────────────────────
 usage() {
     cat <<EOF
-${BOLD}Core MCU Simulation fast-entry${NC}
+${BOLD}Core Simulation (with real cluster SPM) fast-entry${NC}
 
 Usage:
-  ${BOLD}core_mcu_sim.sh build${NC}            Build the simulation executable
-  ${BOLD}core_mcu_sim.sh clean${NC}            Remove build directory
-  ${BOLD}core_mcu_sim.sh run <test>${NC}       Run a single firmware test
-  ${BOLD}core_mcu_sim.sh run-all${NC}          Run all firmware tests
-  ${BOLD}core_mcu_sim.sh rebuild-fw${NC}       Re-compile all firmware ELFs
+  ${BOLD}core_sim.sh build${NC}            Build the simulation executable
+  ${BOLD}core_sim.sh clean${NC}            Remove log directory
+  ${BOLD}core_sim.sh run <test>${NC}       Run a single firmware test
+  ${BOLD}core_sim.sh run-all${NC}          Run all core-sim tests
+  ${BOLD}core_sim.sh rebuild-fw${NC}       Re-compile firmware ELFs for core-sim tests
 
 Options (for run / run-all):
   --core-debug      Enable core pipeline debug trace
-  --dump-results    Dump DSRAM test results (first 64 bytes)
   --max-cycles N    Override max simulation cycles (default: 500000)
 
-Available tests:
+Core-sim tests (run-all):
 EOF
-    for d in "$FW_DIR"/*/; do
-        [ -d "$d" ] || continue
-        local name
-        name=$(basename "$d")
-        if [ -f "$d/${name}.elf" ]; then
-            printf "  %-20s %s\n" "$name" "$d${name}.elf"
+    for name in "${CORE_SIM_TESTS[@]}"; do
+        local elf="$FW_DIR/$name/${name}.elf"
+        if [ -f "$elf" ]; then
+            printf "  %-20s %s\n" "$name" "$elf"
+        else
+            printf "  %-20s ${YELLOW}(ELF not found)${NC}\n" "$name"
         fi
     done
 }
 
 # ── Build ──────────────────────────────────────────────────────────────────
 do_build() {
-    info "Building test_core_mcu_sim  →  $BUILD_DIR"
+    info "Building test_core_sim  →  $BUILD_DIR"
     mkdir -p "$BUILD_DIR"
     pushd "$BUILD_DIR" > /dev/null
     cmake "$CMAKEFILE_DIR" -DCMAKE_BUILD_TYPE=Release 2>&1 | tail -5
-    make test_core_mcu_sim -j"$(nproc)" 2>&1
+    make test_core_sim -j"$(nproc)" 2>&1
     popd > /dev/null
     if [ -x "$BINARY" ]; then
         succ "Build succeeded: $BINARY"
@@ -91,9 +115,9 @@ do_build() {
 
 # ── Clean ──────────────────────────────────────────────────────────────────
 do_clean() {
-    if [ -d "$BUILD_DIR" ]; then
-        rm -rf "$BUILD_DIR"
-        succ "Cleaned: $BUILD_DIR"
+    if [ -d "$LOG_DIR" ]; then
+        rm -rf "$LOG_DIR"
+        succ "Cleaned: $LOG_DIR"
     else
         info "Nothing to clean."
     fi
@@ -101,7 +125,7 @@ do_clean() {
 
 # ── Run single test ────────────────────────────────────────────────────────
 # run_one <test_name> [extra_args...]
-# Returns 0 if TB PASS and firmware PASS, 1 otherwise.
+# Returns 0 if ALL TESTS PASSED, 1 otherwise.
 run_one() {
     local name="$1"; shift
     local elf="$FW_DIR/$name/${name}.elf"
@@ -112,7 +136,7 @@ run_one() {
         return 1
     fi
     if [ ! -x "$BINARY" ]; then
-        err "Executable not found — run 'core_mcu_sim.sh build' first"
+        err "Executable not found — run 'core_sim.sh build' first"
         return 1
     fi
 
@@ -120,12 +144,10 @@ run_one() {
 
     # Capture extra args
     local max_cycles=""
-    local dump_results=0
     local extra=()
     while [ $# -gt 0 ]; do
         case "$1" in
             --max-cycles)   max_cycles="$2"; shift 2 ;;
-            --dump-results) dump_results=1; shift ;;
             *)              extra+=("$1"); shift ;;
         esac
     done
@@ -135,55 +157,35 @@ run_one() {
     fi
     cmd+=("${extra[@]+"${extra[@]}"}")
 
-    # Always dump DSRAM result area (first 16 words = 64 bytes)
-    cmd+=(--dump-dsram 0x0 0x40)
+    # Automatically enable DMA post-sim verification for test_dma
+    if [[ "$name" == "test_dma" ]]; then
+        cmd+=(--dma-check)
+    fi
 
     info "Running ${BOLD}$name${NC}  →  $log"
-    if ! "${cmd[@]}" > "$log" 2>&1; then
-        err "$name — simulator returned non-zero"
-        tail -5 "$log" | sed 's/^/    /'
-        return 1
-    fi
+    local rc=0
+    "${cmd[@]}" > "$log" 2>&1 || rc=$?
 
-    # Parse TB-level outcome
-    local tb_pass=0
-    if grep -q '\[TB\] PASS' "$log"; then
-        tb_pass=1
-    fi
-
-    # Parse firmware-level results from DSRAM dump
-    # Word layout: [0]=total [1]=pass [2]=fail [3]=first_fail_id
+    # Parse firmware test results from log
+    # Format: "[TB] Total: N  Pass: N  Fail: N  First-fail: N"
     local fw_total=0 fw_pass=0 fw_fail=0 fw_ff=0
-    local dsram_line
-    dsram_line=$(grep -m1 '0x10000000:' "$log" || true)
-    if [ -n "$dsram_line" ]; then
-        # Line format: "  0x10000000: AAAAAAAA BBBBBBBB CCCCCCCC DDDDDDDD  |....|"
-        local words
-        words=$(echo "$dsram_line" | sed 's/.*: //;s/ *|.*//')
-        fw_total=$((16#$(echo "$words" | awk '{print $1}')))
-        fw_pass=$((16#$(echo "$words" | awk '{print $2}')))
-        fw_fail=$((16#$(echo "$words" | awk '{print $3}')))
-        fw_ff=$((16#$(echo "$words" | awk '{print $4}')))
+    local result_line
+    result_line=$(grep -m1 '\[TB\] Total:' "$log" || true)
+    if [ -n "$result_line" ]; then
+        fw_total=$(echo "$result_line" | sed 's/.*Total: *\([0-9]*\).*/\1/')
+        fw_pass=$(echo "$result_line" | sed 's/.*Pass: *\([0-9]*\).*/\1/')
+        fw_fail=$(echo "$result_line" | sed 's/.*Fail: *\([0-9]*\).*/\1/')
+        fw_ff=$(echo "$result_line" | sed 's/.*First-fail: *\([0-9]*\).*/\1/')
     fi
 
-    # Treat uninitialized DSRAM (e.g. 0xCAFECAFE fill) as no firmware assertions
-    if [ "$fw_total" -gt 100000 ]; then
-        fw_total=0; fw_pass=0; fw_fail=0; fw_ff=0
-    fi
-
-    # Emit result line
-    if [ $tb_pass -eq 1 ] && [ $fw_fail -eq 0 ] && [ $fw_total -gt 0 ]; then
-        succ "$name  ${GREEN}PASS${NC}  ($fw_pass/$fw_total assertions)"
-        return 0
-    elif [ $tb_pass -eq 1 ] && [ $fw_total -eq 0 ]; then
-        # e.g. "empty" test — no assertions, just EBREAK
-        succ "$name  ${GREEN}PASS${NC}  (EBREAK, 0 assertions)"
+    # Check overall outcome
+    if grep -q '\[TB\] ALL TESTS PASSED' "$log"; then
+        succ "$name  ${GREEN}PASS${NC}  ($fw_pass/$fw_total assertions, rc=$rc)"
         return 0
     else
-        err "$name  ${RED}FAIL${NC}  (TB=$tb_pass, fw=$fw_pass/$fw_total, fail=$fw_fail, first_fail_id=$fw_ff)"
-        if [ $dump_results -eq 1 ] || [ $fw_fail -gt 0 ]; then
-            grep 'DSRAM\|0x1000' "$log" | head -20 | sed 's/^/    /'
-        fi
+        err "$name  ${RED}FAIL${NC}  (fw=$fw_pass/$fw_total, fail=$fw_fail, first_fail_id=$fw_ff, rc=$rc)"
+        # Show relevant failure lines
+        grep '\[TB\] FAIL\|SOME TESTS FAILED\|Error\|ERROR' "$log" | head -10 | sed 's/^/    /'
         return 1
     fi
 }
@@ -194,15 +196,10 @@ do_run_all() {
     local failed_tests=()
     local extra_args=("$@")
 
-    info "=== Run-all: firmware tests ==="
+    info "=== Run-all: core-sim tests (with real cluster SPM) ==="
     echo ""
 
-    for d in "$FW_DIR"/*/; do
-        [ -d "$d" ] || continue
-        local name
-        name=$(basename "$d")
-        [ -f "$d/${name}.elf" ] || continue
-
+    for name in "${CORE_SIM_TESTS[@]}"; do
         total=$((total + 1))
         if run_one "$name" "${extra_args[@]+"${extra_args[@]}"}"; then
             pass=$((pass + 1))
@@ -226,12 +223,13 @@ do_run_all() {
 
 # ── Rebuild firmware ───────────────────────────────────────────────────────
 do_rebuild_fw() {
-    info "Rebuilding firmware ELFs..."
-    for d in "$FW_DIR"/*/; do
-        [ -d "$d" ] || continue
-        [ -f "$d/Makefile" ] || continue
-        local name
-        name=$(basename "$d")
+    info "Rebuilding firmware ELFs for core-sim tests..."
+    for name in "${CORE_SIM_TESTS[@]}"; do
+        local d="$FW_DIR/$name"
+        if [ ! -d "$d" ] || [ ! -f "$d/Makefile" ]; then
+            warn "  $name — no Makefile, skipping"
+            continue
+        fi
         info "  make -C $d"
         make -C "$d" clean all 2>&1 | sed 's/^/    /'
         if [ -f "$d/${name}.elf" ]; then
@@ -248,7 +246,7 @@ case "$MODE" in
     clean)    do_clean ;;
     run)
         if [ $# -lt 1 ]; then
-            err "Missing test name.  Usage: core_mcu_sim.sh run <test>"
+            err "Missing test name.  Usage: core_sim.sh run <test>"
             usage
             exit 1
         fi

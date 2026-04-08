@@ -2,15 +2,19 @@
 
 /**
  * @file DmaEngine.hpp
- * @brief cc_dma_engine — DMA engine with MMIO staging registers, command
- *        FIFO, and linear/2D copy execution.
+ * @brief cc_dma_engine — DMA engine with unified 4D strided copy, dual
+ *        internal AGU (source + destination), transfer FIFO for read/write
+ *        pipelining, and MMIO staging registers + command FIFO.
  *
  * Firmware writes staging registers, then commits with @c DMA_CTRL.submit.
  * The engine snapshots the staging set into an internal FIFO and processes
  * commands sequentially, driving DRAM AXI + cluster data fabric as needed.
  *
+ * 4D address formula (per beat):
+ *   addr = base + d0*stride_d0 + d1*stride_d1 + d2*stride_d2 + d3*stride_d3
+ *
  * @par MMIO register map (base = 0x2000_1000)
- *   See Core.md §8.8 for the complete 22-register definition.
+ *   See Core.md §8.8 for the complete register definition.
  *
  * @par Spec reference
  *   Core.md §8.8  cc_dma_engine
@@ -21,6 +25,7 @@
 #include <array>
 #include <queue>
 #include "Utils/utils.hpp"
+#include "Utils/FIFO.hpp"
 #include "Core/Types.hpp"
 
 namespace hybridacc {
@@ -135,10 +140,23 @@ SC_MODULE(DmaEngine) {
           cl_data_resp_valid_i("cl_data_resp_valid_i"),
           cl_data_resp_rdata_i("cl_data_resp_rdata_i"),
           cl_data_resp_error_i("cl_data_resp_error_i"),
-          dma_irq_o("dma_irq_o")
+          dma_irq_o("dma_irq_o"),
+          // Transfer FIFO
+          u_xfer_fifo("u_xfer_fifo", kXferFifoDepth)
     {
         SC_CTHREAD(seq_process, clk.pos());
         reset_signal_is(reset_n, false);
+
+        // Wire transfer FIFO
+        u_xfer_fifo.clk(clk);
+        u_xfer_fifo.reset_n(reset_n);
+        u_xfer_fifo.data_in(sig_fifo_data_in);
+        u_xfer_fifo.push(sig_fifo_push);
+        u_xfer_fifo.data_out(sig_fifo_data_out);
+        u_xfer_fifo.pop(sig_fifo_pop);
+        u_xfer_fifo.empty(sig_fifo_empty);
+        u_xfer_fifo.full(sig_fifo_full);
+        u_xfer_fifo.clear(sig_fifo_clear);
     }
 
 private:
@@ -149,26 +167,92 @@ private:
     enum class DmaState : uint32_t {
         IDLE          = 0,
         VALIDATE      = 1,
-        DRAM_READ     = 2,   ///< read from DRAM, write to cluster SPM
-        DRAM_WRITE    = 3,   ///< read from cluster SPM, write to DRAM
-        CL_READ       = 4,   ///< cluster SPM read beat
-        CL_WRITE      = 5,   ///< cluster SPM write beat
-        DRAM_AR_WAIT  = 6,   ///< wait for AR handshake
-        DRAM_R_WAIT   = 7,   ///< wait for R channel data
-        DRAM_AW_WAIT  = 8,   ///< wait for AW handshake
-        DRAM_W_WAIT   = 9,   ///< wait for W handshake
-        DRAM_B_WAIT   = 10,  ///< wait for B response
-        CL_REQ_WAIT   = 11,  ///< wait for cluster fabric ready
-        CL_RESP_WAIT  = 12,  ///< wait for cluster fabric response
+        // Source read states
+        SRC_READ_ISSUE   = 2,   ///< issue read to source (DRAM AR or cluster)
+        DRAM_AR_WAIT     = 3,   ///< wait for AR handshake
+        DRAM_R_WAIT      = 4,   ///< wait for R channel data, push FIFO
+        CL_RD_REQ_WAIT   = 5,   ///< wait for cluster read ready
+        CL_RD_RESP_WAIT  = 6,   ///< wait for cluster read response
+        // Destination write states
+        DST_WRITE_ISSUE  = 7,   ///< pop FIFO, issue write to dest
+        DRAM_AW_WAIT     = 8,   ///< wait for AW handshake
+        DRAM_W_WAIT      = 9,   ///< wait for W handshake
+        DRAM_B_WAIT      = 10,  ///< wait for B response
+        CL_WR_REQ_WAIT   = 11,  ///< wait for cluster write ready
+        CL_WR_RESP_WAIT  = 12,  ///< wait for cluster write response
+        // Terminal
         DONE          = 13,
         ERROR         = 14,
     };
 
     // ========================================================================
+    // 4D AGU — internal address generator (inline logic)
+    // ========================================================================
+
+    struct Agu4D {
+        uint32_t base_addr;
+        uint32_t count[4];    ///< normalized counts (0→1)
+        uint32_t stride[4];
+        uint32_t idx[4];      ///< current loop indices
+        uint32_t current_addr;
+        bool     done;
+
+        void reset(uint32_t base, const uint32_t cnt[4], const uint32_t str[4]) {
+            base_addr = base;
+            for (int i = 0; i < 4; ++i) {
+                count[i]  = (cnt[i] == 0) ? 1 : cnt[i];
+                stride[i] = str[i];
+                idx[i]    = 0;
+            }
+            current_addr = base;
+            done = false;
+        }
+
+        uint32_t compute_addr() const {
+            uint32_t addr = base_addr;
+            for (int i = 0; i < 4; ++i)
+                addr += idx[i] * stride[i];
+            return addr;
+        }
+
+        /// Advance to next beat. Returns true if more beats remain.
+        bool advance() {
+            if (done) return false;
+            // Innermost d0 first
+            for (int d = 0; d < 4; ++d) {
+                idx[d]++;
+                if (idx[d] < count[d]) {
+                    current_addr = compute_addr();
+                    return true;
+                }
+                idx[d] = 0;
+            }
+            // All dimensions exhausted
+            done = true;
+            return false;
+        }
+    };
+
+    // ========================================================================
+    // Transfer FIFO: 256-beat deep, cluster-width data
+    // ========================================================================
+
+    static constexpr unsigned kXferFifoDepth = 256;
+
+    FIFO<sc_biguint<kClAxiDataWidth>> u_xfer_fifo;
+
+    sc_signal<sc_biguint<kClAxiDataWidth>> sig_fifo_data_in;
+    sc_signal<bool> sig_fifo_push;
+    sc_signal<sc_biguint<kClAxiDataWidth>> sig_fifo_data_out;
+    sc_signal<bool> sig_fifo_pop;
+    sc_signal<bool> sig_fifo_empty;
+    sc_signal<bool> sig_fifo_full;
+    sc_signal<bool> sig_fifo_clear;
+
+    // ========================================================================
     // Staging registers
     // ========================================================================
 
-    uint32_t stg_op_kind_      = 0;
     uint32_t stg_src_kind_     = 0;
     uint32_t stg_dst_kind_     = 0;
     uint32_t stg_src_addr_lo_  = 0;
@@ -177,11 +261,9 @@ private:
     uint32_t stg_dst_addr_hi_  = 0;
     uint32_t stg_src_cluster_  = 0;
     uint32_t stg_dst_cluster_  = 0;
-    uint32_t stg_bytes_        = 0;
-    uint32_t stg_line_bytes_   = 0;
-    uint32_t stg_line_count_   = 0;
-    uint32_t stg_src_stride_   = 0;
-    uint32_t stg_dst_stride_   = 0;
+    uint32_t stg_count_[4]     = {};
+    uint32_t stg_src_stride_[4]= {};
+    uint32_t stg_dst_stride_[4]= {};
     uint32_t stg_cmd_tag_      = 0;
 
     // ========================================================================
@@ -246,26 +328,31 @@ private:
         return s;
     }
 
-    /**
-     * @brief Validate a DMA command; return DmaError code.
-     */
     uint32_t validate_cmd(const DmaCommand& cmd) const {
-        if (static_cast<uint32_t>(cmd.op_kind) > 1)
-            return static_cast<uint32_t>(DmaError::DMA_ERR_BAD_OP_KIND);
         if (static_cast<uint32_t>(cmd.src_kind) > 1 ||
             static_cast<uint32_t>(cmd.dst_kind) > 1)
             return static_cast<uint32_t>(DmaError::DMA_ERR_BAD_ENDPOINT);
-
-        uint32_t total = (cmd.op_kind == DmaOpKind::LINEAR_COPY)
-                             ? cmd.bytes
-                             : cmd.line_bytes * cmd.line_count;
-        if (total == 0)
+        if (cmd.total_beats() == 0)
             return static_cast<uint32_t>(DmaError::DMA_ERR_ZERO_LENGTH);
-        // Simplified alignment check: low 2 bits must be 0
         if ((cmd.src_addr_lo & 0x3) || (cmd.dst_addr_lo & 0x3))
             return static_cast<uint32_t>(DmaError::DMA_ERR_ADDR_ALIGN);
-
         return static_cast<uint32_t>(DmaError::DMA_ERR_NONE);
+    }
+
+    /// Narrow DRAM-width data to cluster-width (low bytes)
+    static sc_biguint<kClAxiDataWidth> dram_to_cl(const sc_biguint<kMemAxiDataWidth>& d) {
+        sc_biguint<kClAxiDataWidth> cl = 0;
+        for (unsigned b = 0; b < kClBeatBytes; ++b)
+            cl.range(b*8+7, b*8) = d.range(b*8+7, b*8);
+        return cl;
+    }
+
+    /// Widen cluster-width data to DRAM-width (zero-extended)
+    static sc_biguint<kMemAxiDataWidth> cl_to_dram(const sc_biguint<kClAxiDataWidth>& c) {
+        sc_biguint<kMemAxiDataWidth> d = 0;
+        for (unsigned b = 0; b < kClBeatBytes; ++b)
+            d.range(b*8+7, b*8) = c.range(b*8+7, b*8);
+        return d;
     }
 
     // ========================================================================
@@ -279,34 +366,54 @@ private:
         dma_irq_o.write(false);
         reset_axi_outputs();
         reset_cl_outputs();
+        sig_fifo_push.write(false);
+        sig_fifo_pop.write(false);
+        sig_fifo_clear.write(true);
+        sig_fifo_data_in.write(0);
         status_reg_ = 0x01;
         ctrl_reg_ = 0;
         err_code_ = 0;
         err_info_ = 0;
         done_tag_ = 0;
         debug_state_ = 0;
-        stg_op_kind_ = 0; stg_src_kind_ = 0; stg_dst_kind_ = 0;
+        stg_src_kind_ = 0; stg_dst_kind_ = 0;
         stg_src_addr_lo_ = 0; stg_src_addr_hi_ = 0;
         stg_dst_addr_lo_ = 0; stg_dst_addr_hi_ = 0;
         stg_src_cluster_ = 0; stg_dst_cluster_ = 0;
-        stg_bytes_ = 0; stg_line_bytes_ = 0; stg_line_count_ = 0;
-        stg_src_stride_ = 0; stg_dst_stride_ = 0; stg_cmd_tag_ = 0;
+        for (int i = 0; i < 4; ++i) {
+            stg_count_[i] = 1;
+            stg_src_stride_[i] = 0;
+            stg_dst_stride_[i] = 0;
+        }
+        stg_cmd_tag_ = 0;
         while (!cmd_fifo_.empty()) cmd_fifo_.pop();
+        wait();
+
+        // Release FIFO clear after first cycle
+        sig_fifo_clear.write(false);
         wait();
 
         DmaState fsm_state = DmaState::IDLE;
         DmaCommand active_cmd{};
-        uint32_t bytes_remaining = 0;
-        uint32_t src_addr = 0;
-        uint32_t dst_addr = 0;
-        uint32_t line_idx = 0;
-        uint32_t line_byte_remaining = 0;
-        bool     irq_en = false;
+        Agu4D src_agu{};
+        Agu4D dst_agu{};
+        uint32_t beats_read = 0;
+        uint32_t beats_written = 0;
+        uint32_t total_beats = 0;
+        bool irq_en = false;
+
+        // Buffered DRAM write data (survive across reset_axi_outputs)
+        sc_biguint<kMemAxiDataWidth> dram_wr_data = 0;
+        uint32_t dram_wr_addr = 0;
+        uint32_t dram_wr_strb = 0;
 
         while (true) {
             mmio_resp_valid_o.write(false);
             reset_axi_outputs();
             reset_cl_outputs();
+            sig_fifo_push.write(false);
+            sig_fifo_pop.write(false);
+            sig_fifo_clear.write(false);
 
             // ================================================================
             // MMIO register access
@@ -324,28 +431,34 @@ private:
                 if (!wr) {
                     // ---------- READ ----------
                     switch (off) {
-                        case kDmaCap0:      rdata = 0x03; break; // linear + 2D
-                        case kDmaStatus:    rdata = make_status(fsm_state, cmd_fifo_.size() >= kDmaCmdFifoDepth); break;
-                        case kDmaCtrl:      rdata = ctrl_reg_; break;
-                        case kDmaOpKind:    rdata = stg_op_kind_; break;
-                        case kDmaSrcKind:   rdata = stg_src_kind_; break;
-                        case kDmaDstKind:   rdata = stg_dst_kind_; break;
-                        case kDmaSrcAddrLo: rdata = stg_src_addr_lo_; break;
-                        case kDmaSrcAddrHi: rdata = stg_src_addr_hi_; break;
-                        case kDmaDstAddrLo: rdata = stg_dst_addr_lo_; break;
-                        case kDmaDstAddrHi: rdata = stg_dst_addr_hi_; break;
+                        case kDmaCap0:         rdata = 0x04; break; // 4D copy
+                        case kDmaStatus:       rdata = make_status(fsm_state, cmd_fifo_.size() >= kDmaCmdFifoDepth); break;
+                        case kDmaCtrl:         rdata = ctrl_reg_; break;
+                        case kDmaSrcKind:      rdata = stg_src_kind_; break;
+                        case kDmaDstKind:      rdata = stg_dst_kind_; break;
+                        case kDmaSrcAddrLo:    rdata = stg_src_addr_lo_; break;
+                        case kDmaSrcAddrHi:    rdata = stg_src_addr_hi_; break;
+                        case kDmaDstAddrLo:    rdata = stg_dst_addr_lo_; break;
+                        case kDmaDstAddrHi:    rdata = stg_dst_addr_hi_; break;
                         case kDmaSrcClusterId: rdata = stg_src_cluster_; break;
                         case kDmaDstClusterId: rdata = stg_dst_cluster_; break;
-                        case kDmaBytes:     rdata = stg_bytes_; break;
-                        case kDmaLineBytes: rdata = stg_line_bytes_; break;
-                        case kDmaLineCount: rdata = stg_line_count_; break;
-                        case kDmaSrcStride: rdata = stg_src_stride_; break;
-                        case kDmaDstStride: rdata = stg_dst_stride_; break;
-                        case kDmaCmdTag:    rdata = stg_cmd_tag_; break;
-                        case kDmaDoneTag:   rdata = done_tag_; break;
-                        case kDmaErrCode:   rdata = err_code_; break;
-                        case kDmaErrInfo:   rdata = err_info_; break;
-                        case kDmaDebugState:rdata = static_cast<uint32_t>(fsm_state); break;
+                        case kDmaCountD0:      rdata = stg_count_[0]; break;
+                        case kDmaCountD1:      rdata = stg_count_[1]; break;
+                        case kDmaCountD2:      rdata = stg_count_[2]; break;
+                        case kDmaCountD3:      rdata = stg_count_[3]; break;
+                        case kDmaSrcStrideD0:  rdata = stg_src_stride_[0]; break;
+                        case kDmaSrcStrideD1:  rdata = stg_src_stride_[1]; break;
+                        case kDmaSrcStrideD2:  rdata = stg_src_stride_[2]; break;
+                        case kDmaSrcStrideD3:  rdata = stg_src_stride_[3]; break;
+                        case kDmaDstStrideD0:  rdata = stg_dst_stride_[0]; break;
+                        case kDmaDstStrideD1:  rdata = stg_dst_stride_[1]; break;
+                        case kDmaDstStrideD2:  rdata = stg_dst_stride_[2]; break;
+                        case kDmaDstStrideD3:  rdata = stg_dst_stride_[3]; break;
+                        case kDmaCmdTag:       rdata = stg_cmd_tag_; break;
+                        case kDmaDoneTag:      rdata = done_tag_; break;
+                        case kDmaErrCode:      rdata = err_code_; break;
+                        case kDmaErrInfo:      rdata = err_info_; break;
+                        case kDmaDebugState:   rdata = static_cast<uint32_t>(fsm_state); break;
                         default: break;
                     }
                 } else {
@@ -358,21 +471,27 @@ private:
                             irq_en = (wdata >> 3) & 1;
                             break;
                         }
-                        case kDmaOpKind:    stg_op_kind_     = wdata; break;
-                        case kDmaSrcKind:   stg_src_kind_    = wdata; break;
-                        case kDmaDstKind:   stg_dst_kind_    = wdata; break;
-                        case kDmaSrcAddrLo: stg_src_addr_lo_ = wdata; break;
-                        case kDmaSrcAddrHi: stg_src_addr_hi_ = wdata; break;
-                        case kDmaDstAddrLo: stg_dst_addr_lo_ = wdata; break;
-                        case kDmaDstAddrHi: stg_dst_addr_hi_ = wdata; break;
-                        case kDmaSrcClusterId: stg_src_cluster_ = wdata; break;
-                        case kDmaDstClusterId: stg_dst_cluster_ = wdata; break;
-                        case kDmaBytes:     stg_bytes_        = wdata; break;
-                        case kDmaLineBytes: stg_line_bytes_   = wdata; break;
-                        case kDmaLineCount: stg_line_count_   = wdata; break;
-                        case kDmaSrcStride: stg_src_stride_   = wdata; break;
-                        case kDmaDstStride: stg_dst_stride_   = wdata; break;
-                        case kDmaCmdTag:    stg_cmd_tag_      = wdata; break;
+                        case kDmaSrcKind:      stg_src_kind_       = wdata; break;
+                        case kDmaDstKind:      stg_dst_kind_       = wdata; break;
+                        case kDmaSrcAddrLo:    stg_src_addr_lo_    = wdata; break;
+                        case kDmaSrcAddrHi:    stg_src_addr_hi_    = wdata; break;
+                        case kDmaDstAddrLo:    stg_dst_addr_lo_    = wdata; break;
+                        case kDmaDstAddrHi:    stg_dst_addr_hi_    = wdata; break;
+                        case kDmaSrcClusterId: stg_src_cluster_    = wdata; break;
+                        case kDmaDstClusterId: stg_dst_cluster_    = wdata; break;
+                        case kDmaCountD0:      stg_count_[0]       = wdata; break;
+                        case kDmaCountD1:      stg_count_[1]       = wdata; break;
+                        case kDmaCountD2:      stg_count_[2]       = wdata; break;
+                        case kDmaCountD3:      stg_count_[3]       = wdata; break;
+                        case kDmaSrcStrideD0:  stg_src_stride_[0]  = wdata; break;
+                        case kDmaSrcStrideD1:  stg_src_stride_[1]  = wdata; break;
+                        case kDmaSrcStrideD2:  stg_src_stride_[2]  = wdata; break;
+                        case kDmaSrcStrideD3:  stg_src_stride_[3]  = wdata; break;
+                        case kDmaDstStrideD0:  stg_dst_stride_[0]  = wdata; break;
+                        case kDmaDstStrideD1:  stg_dst_stride_[1]  = wdata; break;
+                        case kDmaDstStrideD2:  stg_dst_stride_[2]  = wdata; break;
+                        case kDmaDstStrideD3:  stg_dst_stride_[3]  = wdata; break;
+                        case kDmaCmdTag:       stg_cmd_tag_        = wdata; break;
                         case kDmaErrCode:
                             err_code_ &= ~wdata; // W1C
                             break;
@@ -388,7 +507,6 @@ private:
                         if (irq_en) dma_irq_o.write(true);
                     } else {
                         DmaCommand cmd;
-                        cmd.op_kind       = static_cast<DmaOpKind>(stg_op_kind_);
                         cmd.src_kind      = static_cast<DmaEndpoint>(stg_src_kind_);
                         cmd.dst_kind      = static_cast<DmaEndpoint>(stg_dst_kind_);
                         cmd.src_addr_lo   = stg_src_addr_lo_;
@@ -397,14 +515,15 @@ private:
                         cmd.dst_addr_hi   = stg_dst_addr_hi_;
                         cmd.src_cluster_id= stg_src_cluster_;
                         cmd.dst_cluster_id= stg_dst_cluster_;
-                        cmd.bytes         = stg_bytes_;
-                        cmd.line_bytes    = stg_line_bytes_;
-                        cmd.line_count    = stg_line_count_;
-                        cmd.src_stride    = stg_src_stride_;
-                        cmd.dst_stride    = stg_dst_stride_;
+                        for (int i = 0; i < 4; ++i) {
+                            cmd.count[i]      = stg_count_[i];
+                            cmd.src_stride[i] = stg_src_stride_[i];
+                            cmd.dst_stride[i] = stg_dst_stride_[i];
+                        }
                         cmd.cmd_tag       = stg_cmd_tag_;
                         cmd_fifo_.push(cmd);
-                        DEBUG_MSG("DmaEngine: submit tag=" << cmd.cmd_tag,
+                        DEBUG_MSG("DmaEngine: submit tag=" << cmd.cmd_tag
+                                  << " beats=" << cmd.total_beats(),
                                   DEBUG_LEVEL_CLUSTER_COMPONENTS);
                     }
                 }
@@ -441,51 +560,55 @@ private:
                     err_info_ = active_cmd.cmd_tag;
                     fsm_state = DmaState::ERROR;
                 } else {
-                    // Set up transfer pointers
-                    src_addr = active_cmd.src_addr_lo;
-                    dst_addr = active_cmd.dst_addr_lo;
-                    if (active_cmd.op_kind == DmaOpKind::LINEAR_COPY) {
-                        bytes_remaining = active_cmd.bytes;
-                        line_idx = 0;
-                        line_byte_remaining = active_cmd.bytes;
-                    } else {
-                        bytes_remaining = active_cmd.line_bytes * active_cmd.line_count;
-                        line_idx = 0;
-                        line_byte_remaining = active_cmd.line_bytes;
-                    }
+                    // Initialize dual AGUs
+                    src_agu.reset(active_cmd.src_addr_lo,
+                                  active_cmd.count, active_cmd.src_stride);
+                    dst_agu.reset(active_cmd.dst_addr_lo,
+                                  active_cmd.count, active_cmd.dst_stride);
+                    total_beats = active_cmd.total_beats();
+                    beats_read = 0;
+                    beats_written = 0;
 
-                    // Determine transfer direction
-                    if (active_cmd.src_kind == DmaEndpoint::DRAM &&
-                        active_cmd.dst_kind == DmaEndpoint::CLUSTER_SPM) {
-                        fsm_state = DmaState::DRAM_READ;
-                    } else if (active_cmd.src_kind == DmaEndpoint::CLUSTER_SPM &&
-                               active_cmd.dst_kind == DmaEndpoint::DRAM) {
-                        fsm_state = DmaState::CL_READ;
-                    } else if (active_cmd.src_kind == DmaEndpoint::DRAM &&
-                               active_cmd.dst_kind == DmaEndpoint::DRAM) {
-                        fsm_state = DmaState::DRAM_READ;
+                    // Clear transfer FIFO
+                    sig_fifo_clear.write(true);
+
+                    // Start reading from source
+                    fsm_state = DmaState::SRC_READ_ISSUE;
+                }
+                break;
+            }
+            // ================================================================
+            // Source read phase: read one beat, push into FIFO
+            // ================================================================
+            case DmaState::SRC_READ_ISSUE: {
+                if (beats_read >= total_beats) {
+                    // All source beats read, switch to drain mode
+                    fsm_state = DmaState::DST_WRITE_ISSUE;
+                } else if (sig_fifo_full.read()) {
+                    // FIFO full: drain destination first
+                    fsm_state = DmaState::DST_WRITE_ISSUE;
+                } else {
+                    uint32_t addr = src_agu.current_addr;
+                    if (active_cmd.src_kind == DmaEndpoint::DRAM) {
+                        m_mem_axi_ar_valid_o.write(true);
+                        m_mem_axi_ar_addr_o.write(addr);
+                        m_mem_axi_ar_len_o.write(0); // single beat
+                        m_mem_axi_r_ready_o.write(true);
+                        fsm_state = DmaState::DRAM_AR_WAIT;
                     } else {
-                        // CLUSTER_SPM → CLUSTER_SPM: read from src cluster
-                        fsm_state = DmaState::CL_READ;
+                        // Cluster SPM read
+                        cl_data_req_valid_o.write(true);
+                        cl_data_req_write_o.write(false);
+                        cl_data_req_cluster_id_o.write(active_cmd.src_cluster_id);
+                        cl_data_req_addr_o.write(addr);
+                        fsm_state = DmaState::CL_RD_REQ_WAIT;
                     }
                 }
                 break;
             }
-            // ----------------------------------------------------------------
-            // DRAM → Cluster SPM  (or DRAM → DRAM read phase)
-            // ----------------------------------------------------------------
-            case DmaState::DRAM_READ: {
-                // Issue AR
-                m_mem_axi_ar_valid_o.write(true);
-                m_mem_axi_ar_addr_o.write(src_addr);
-                m_mem_axi_ar_len_o.write(0); // single beat
-                m_mem_axi_r_ready_o.write(true);
-                fsm_state = DmaState::DRAM_AR_WAIT;
-                break;
-            }
             case DmaState::DRAM_AR_WAIT: {
                 m_mem_axi_ar_valid_o.write(true);
-                m_mem_axi_ar_addr_o.write(src_addr);
+                m_mem_axi_ar_addr_o.write(src_agu.current_addr);
                 m_mem_axi_ar_len_o.write(0);
                 m_mem_axi_r_ready_o.write(true);
                 if (m_mem_axi_ar_ready_i.read()) {
@@ -498,114 +621,91 @@ private:
                 if (m_mem_axi_r_valid_i.read()) {
                     if (m_mem_axi_r_resp_i.read().to_uint() != 0) {
                         err_code_ = static_cast<uint32_t>(DmaError::DMA_ERR_DRAM_AXI);
-                        err_info_ = src_addr;
+                        err_info_ = src_agu.current_addr;
                         fsm_state = DmaState::ERROR;
                     } else {
-                        // Got data — route to destination
-                        if (active_cmd.dst_kind == DmaEndpoint::CLUSTER_SPM) {
-                            // Write to cluster SPM via fabric
-                            cl_data_req_valid_o.write(true);
-                            cl_data_req_write_o.write(true);
-                            cl_data_req_cluster_id_o.write(active_cmd.dst_cluster_id);
-                            cl_data_req_addr_o.write(dst_addr);
-                            // Narrow the DRAM-width data to cluster-width
-                            sc_biguint<kMemAxiDataWidth> dram_data = m_mem_axi_r_data_i.read();
-                            sc_biguint<kClAxiDataWidth> cl_wd = 0;
-                            for (unsigned b = 0; b < kClBeatBytes; ++b) {
-                                cl_wd.range(b*8+7, b*8) = dram_data.range(b*8+7, b*8);
-                            }
-                            cl_data_req_wdata_o.write(cl_wd);
-                            cl_data_req_wstrb_o.write((1u << kClBeatBytes) - 1);
-                            fsm_state = DmaState::CL_REQ_WAIT;
+                        // Push data into transfer FIFO
+                        sc_biguint<kClAxiDataWidth> cl_data = dram_to_cl(m_mem_axi_r_data_i.read());
+                        sig_fifo_data_in.write(cl_data);
+                        sig_fifo_push.write(true);
+                        src_agu.advance();
+                        beats_read++;
+                        // Continue reading or switch to write
+                        if (beats_read >= total_beats || sig_fifo_full.read()) {
+                            fsm_state = DmaState::DST_WRITE_ISSUE;
                         } else {
-                            // DRAM → DRAM: write phase
-                            // Buffer data for write
-                            m_mem_axi_aw_valid_o.write(true);
-                            m_mem_axi_aw_addr_o.write(dst_addr);
-                            m_mem_axi_aw_len_o.write(0);
-                            m_mem_axi_w_valid_o.write(true);
-                            m_mem_axi_w_data_o.write(m_mem_axi_r_data_i.read());
-                            m_mem_axi_w_strb_o.write((1u << kBeatBytes) - 1);
-                            m_mem_axi_w_last_o.write(true);
-                            fsm_state = DmaState::DRAM_AW_WAIT;
+                            fsm_state = DmaState::SRC_READ_ISSUE;
                         }
                     }
                 }
                 break;
             }
-            // ----------------------------------------------------------------
-            // Cluster SPM read → DRAM write  (or cluster → cluster)
-            // ----------------------------------------------------------------
-            case DmaState::CL_READ: {
-                cl_data_req_valid_o.write(true);
-                cl_data_req_write_o.write(false);
-                cl_data_req_cluster_id_o.write(active_cmd.src_cluster_id);
-                cl_data_req_addr_o.write(src_addr);
-                cl_data_req_wdata_o.write(0);
-                cl_data_req_wstrb_o.write(0);
-                fsm_state = DmaState::CL_REQ_WAIT;
-                break;
-            }
-            // ----------------------------------------------------------------
-            // Cluster fabric handshake
-            // ----------------------------------------------------------------
-            case DmaState::CL_REQ_WAIT: {
-                // Maintain request outputs until ready
+            case DmaState::CL_RD_REQ_WAIT: {
                 if (cl_data_req_ready_i.read()) {
-                    fsm_state = DmaState::CL_RESP_WAIT;
+                    fsm_state = DmaState::CL_RD_RESP_WAIT;
                 }
                 break;
             }
-            case DmaState::CL_RESP_WAIT: {
+            case DmaState::CL_RD_RESP_WAIT: {
                 if (cl_data_resp_valid_i.read()) {
                     if (cl_data_resp_error_i.read()) {
                         err_code_ = static_cast<uint32_t>(DmaError::DMA_ERR_CLUSTER_RESP);
-                        err_info_ = src_addr;
+                        err_info_ = src_agu.current_addr;
                         fsm_state = DmaState::ERROR;
                     } else {
-                        // Advance pointers
-                        uint32_t beat = kClBeatBytes;
-                        if (beat > bytes_remaining) beat = bytes_remaining;
-                        src_addr += beat;
-                        dst_addr += beat;
-                        bytes_remaining -= beat;
-                        line_byte_remaining -= beat;
-
-                        // 2D stride handling
-                        if (active_cmd.op_kind == DmaOpKind::STRIDED_2D &&
-                            line_byte_remaining == 0 && bytes_remaining > 0) {
-                            ++line_idx;
-                            src_addr = active_cmd.src_addr_lo + line_idx * active_cmd.src_stride;
-                            dst_addr = active_cmd.dst_addr_lo + line_idx * active_cmd.dst_stride;
-                            line_byte_remaining = active_cmd.line_bytes;
-                        }
-
-                        if (bytes_remaining == 0) {
-                            fsm_state = DmaState::DONE;
+                        // Push cluster data into FIFO
+                        sig_fifo_data_in.write(cl_data_resp_rdata_i.read());
+                        sig_fifo_push.write(true);
+                        src_agu.advance();
+                        beats_read++;
+                        if (beats_read >= total_beats || sig_fifo_full.read()) {
+                            fsm_state = DmaState::DST_WRITE_ISSUE;
                         } else {
-                            // Continue: determine next read source
-                            if (active_cmd.src_kind == DmaEndpoint::DRAM) {
-                                fsm_state = DmaState::DRAM_READ;
-                            } else if (active_cmd.dst_kind == DmaEndpoint::DRAM) {
-                                // cluster → DRAM: now do DRAM write with captured data
-                                sc_biguint<kMemAxiDataWidth> wd = 0;
-                                sc_biguint<kClAxiDataWidth> cl_rd = cl_data_resp_rdata_i.read();
-                                for (unsigned b = 0; b < kClBeatBytes; ++b) {
-                                    wd.range(b*8+7, b*8) = cl_rd.range(b*8+7, b*8);
-                                }
-                                m_mem_axi_aw_valid_o.write(true);
-                                m_mem_axi_aw_addr_o.write(dst_addr - beat);
-                                m_mem_axi_aw_len_o.write(0);
-                                m_mem_axi_w_valid_o.write(true);
-                                m_mem_axi_w_data_o.write(wd);
-                                m_mem_axi_w_strb_o.write((1u << kBeatBytes) - 1);
-                                m_mem_axi_w_last_o.write(true);
-                                fsm_state = DmaState::DRAM_AW_WAIT;
-                            } else {
-                                // cluster → cluster: next cluster read
-                                fsm_state = DmaState::CL_READ;
-                            }
+                            fsm_state = DmaState::SRC_READ_ISSUE;
                         }
+                    }
+                }
+                break;
+            }
+            // ================================================================
+            // Destination write phase: pop FIFO, write one beat
+            // ================================================================
+            case DmaState::DST_WRITE_ISSUE: {
+                if (beats_written >= total_beats) {
+                    fsm_state = DmaState::DONE;
+                } else if (sig_fifo_empty.read()) {
+                    // FIFO empty: go back to reading
+                    if (beats_read < total_beats) {
+                        fsm_state = DmaState::SRC_READ_ISSUE;
+                    }
+                    // else: wait for FIFO data (should not happen in correct flow)
+                } else {
+                    // Pop from FIFO
+                    sc_biguint<kClAxiDataWidth> data = sig_fifo_data_out.read();
+                    sig_fifo_pop.write(true);
+
+                    uint32_t addr = dst_agu.current_addr;
+                    if (active_cmd.dst_kind == DmaEndpoint::DRAM) {
+                        dram_wr_addr = addr;
+                        dram_wr_data = cl_to_dram(data);
+                        dram_wr_strb = (1u << kBeatBytes) - 1;
+                        m_mem_axi_aw_valid_o.write(true);
+                        m_mem_axi_aw_addr_o.write(dram_wr_addr);
+                        m_mem_axi_aw_len_o.write(0);
+                        m_mem_axi_w_valid_o.write(true);
+                        m_mem_axi_w_data_o.write(dram_wr_data);
+                        m_mem_axi_w_strb_o.write(dram_wr_strb);
+                        m_mem_axi_w_last_o.write(true);
+                        fsm_state = DmaState::DRAM_AW_WAIT;
+                    } else {
+                        // Cluster SPM write
+                        cl_data_req_valid_o.write(true);
+                        cl_data_req_write_o.write(true);
+                        cl_data_req_cluster_id_o.write(active_cmd.dst_cluster_id);
+                        cl_data_req_addr_o.write(addr);
+                        cl_data_req_wdata_o.write(data);
+                        cl_data_req_wstrb_o.write((1u << kClBeatBytes) - 1);
+                        fsm_state = DmaState::CL_WR_REQ_WAIT;
                     }
                 }
                 break;
@@ -615,7 +715,7 @@ private:
             // ----------------------------------------------------------------
             case DmaState::DRAM_AW_WAIT: {
                 m_mem_axi_aw_valid_o.write(true);
-                m_mem_axi_aw_addr_o.write(dst_addr);
+                m_mem_axi_aw_addr_o.write(dram_wr_addr);
                 m_mem_axi_aw_len_o.write(0);
                 if (m_mem_axi_aw_ready_i.read()) {
                     fsm_state = DmaState::DRAM_W_WAIT;
@@ -624,6 +724,8 @@ private:
             }
             case DmaState::DRAM_W_WAIT: {
                 m_mem_axi_w_valid_o.write(true);
+                m_mem_axi_w_data_o.write(dram_wr_data);
+                m_mem_axi_w_strb_o.write(dram_wr_strb);
                 m_mem_axi_w_last_o.write(true);
                 if (m_mem_axi_w_ready_i.read()) {
                     m_mem_axi_b_ready_o.write(true);
@@ -636,35 +738,50 @@ private:
                 if (m_mem_axi_b_valid_i.read()) {
                     if (m_mem_axi_b_resp_i.read().to_uint() != 0) {
                         err_code_ = static_cast<uint32_t>(DmaError::DMA_ERR_DRAM_AXI);
-                        err_info_ = dst_addr;
+                        err_info_ = dram_wr_addr;
                         fsm_state = DmaState::ERROR;
                     } else {
-                        // Advance pointers (if coming from DRAM→DRAM path)
-                        uint32_t beat = kBeatBytes;
-                        if (active_cmd.dst_kind == DmaEndpoint::DRAM &&
-                            active_cmd.src_kind == DmaEndpoint::DRAM) {
-                            if (beat > bytes_remaining) beat = bytes_remaining;
-                            src_addr += beat;
-                            dst_addr += beat;
-                            bytes_remaining -= beat;
-                            line_byte_remaining -= beat;
-                            if (active_cmd.op_kind == DmaOpKind::STRIDED_2D &&
-                                line_byte_remaining == 0 && bytes_remaining > 0) {
-                                ++line_idx;
-                                src_addr = active_cmd.src_addr_lo + line_idx * active_cmd.src_stride;
-                                dst_addr = active_cmd.dst_addr_lo + line_idx * active_cmd.dst_stride;
-                                line_byte_remaining = active_cmd.line_bytes;
-                            }
-                        }
-
-                        if (bytes_remaining == 0) {
+                        dst_agu.advance();
+                        beats_written++;
+                        if (beats_written >= total_beats) {
                             fsm_state = DmaState::DONE;
+                        } else if (!sig_fifo_empty.read()) {
+                            fsm_state = DmaState::DST_WRITE_ISSUE;
+                        } else if (beats_read < total_beats) {
+                            fsm_state = DmaState::SRC_READ_ISSUE;
                         } else {
-                            if (active_cmd.src_kind == DmaEndpoint::DRAM) {
-                                fsm_state = DmaState::DRAM_READ;
-                            } else {
-                                fsm_state = DmaState::CL_READ;
-                            }
+                            fsm_state = DmaState::DST_WRITE_ISSUE;
+                        }
+                    }
+                }
+                break;
+            }
+            // ----------------------------------------------------------------
+            // Cluster write path
+            // ----------------------------------------------------------------
+            case DmaState::CL_WR_REQ_WAIT: {
+                if (cl_data_req_ready_i.read()) {
+                    fsm_state = DmaState::CL_WR_RESP_WAIT;
+                }
+                break;
+            }
+            case DmaState::CL_WR_RESP_WAIT: {
+                if (cl_data_resp_valid_i.read()) {
+                    if (cl_data_resp_error_i.read()) {
+                        err_code_ = static_cast<uint32_t>(DmaError::DMA_ERR_CLUSTER_RESP);
+                        err_info_ = dst_agu.current_addr;
+                        fsm_state = DmaState::ERROR;
+                    } else {
+                        dst_agu.advance();
+                        beats_written++;
+                        if (beats_written >= total_beats) {
+                            fsm_state = DmaState::DONE;
+                        } else if (!sig_fifo_empty.read()) {
+                            fsm_state = DmaState::DST_WRITE_ISSUE;
+                        } else if (beats_read < total_beats) {
+                            fsm_state = DmaState::SRC_READ_ISSUE;
+                        } else {
+                            fsm_state = DmaState::DST_WRITE_ISSUE;
                         }
                     }
                 }
@@ -687,6 +804,7 @@ private:
                           DEBUG_LEVEL_CLUSTER_COMPONENTS);
                 if (irq_en) dma_irq_o.write(true);
                 // Drain FIFO on fatal
+                sig_fifo_clear.write(true);
                 while (!cmd_fifo_.empty()) cmd_fifo_.pop();
                 fsm_state = DmaState::IDLE;
                 break;

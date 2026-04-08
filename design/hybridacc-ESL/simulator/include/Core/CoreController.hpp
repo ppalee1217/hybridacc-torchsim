@@ -73,39 +73,28 @@ SC_MODULE(CoreController) {
     sc_out<sc_uint<32>>  s_ctrl_r_data_o;
     sc_out<sc_uint<2>>   s_ctrl_r_resp_o;
 
-    // --- §7.3 DRAM AXI4 master (DMA engine) ---
-    sc_out<bool>         m_dma_mem_axi_aw_valid_o;
-    sc_in<bool>          m_dma_mem_axi_aw_ready_i;
-    sc_out<sc_uint<32>>  m_dma_mem_axi_aw_addr_o;
-    sc_out<sc_uint<8>>   m_dma_mem_axi_aw_len_o;
-    sc_out<bool>         m_dma_mem_axi_w_valid_o;
-    sc_in<bool>          m_dma_mem_axi_w_ready_i;
-    sc_out<sc_biguint<kMemAxiDataWidth>> m_dma_mem_axi_w_data_o;
-    sc_out<sc_uint<kMemAxiDataWidth / 8>> m_dma_mem_axi_w_strb_o;
-    sc_out<bool>         m_dma_mem_axi_w_last_o;
-    sc_in<bool>          m_dma_mem_axi_b_valid_i;
-    sc_out<bool>         m_dma_mem_axi_b_ready_o;
-    sc_in<sc_uint<2>>    m_dma_mem_axi_b_resp_i;
-    sc_out<bool>         m_dma_mem_axi_ar_valid_o;
-    sc_in<bool>          m_dma_mem_axi_ar_ready_i;
-    sc_out<sc_uint<32>>  m_dma_mem_axi_ar_addr_o;
-    sc_out<sc_uint<8>>   m_dma_mem_axi_ar_len_o;
-    sc_in<bool>          m_dma_mem_axi_r_valid_i;
-    sc_out<bool>         m_dma_mem_axi_r_ready_o;
-    sc_in<sc_biguint<kMemAxiDataWidth>> m_dma_mem_axi_r_data_i;
-    sc_in<sc_uint<2>>    m_dma_mem_axi_r_resp_i;
-    sc_in<bool>          m_dma_mem_axi_r_last_i;
-
-    // --- §7.3 DRAM AXI4 read-only master (section loader) ---
-    sc_out<bool>         m_ldr_mem_axi_ar_valid_o;
-    sc_in<bool>          m_ldr_mem_axi_ar_ready_i;
-    sc_out<sc_uint<32>>  m_ldr_mem_axi_ar_addr_o;
-    sc_out<sc_uint<8>>   m_ldr_mem_axi_ar_len_o;
-    sc_in<bool>          m_ldr_mem_axi_r_valid_i;
-    sc_out<bool>         m_ldr_mem_axi_r_ready_o;
-    sc_in<sc_biguint<kMemAxiDataWidth>> m_ldr_mem_axi_r_data_i;
-    sc_in<sc_uint<2>>    m_ldr_mem_axi_r_resp_i;
-    sc_in<bool>          m_ldr_mem_axi_r_last_i;
+    // --- §7.3 Shared DRAM AXI4 master (loader / DMA, muxed by load_phase) ---
+    sc_out<bool>         m_mem_axi_aw_valid_o;
+    sc_in<bool>          m_mem_axi_aw_ready_i;
+    sc_out<sc_uint<32>>  m_mem_axi_aw_addr_o;
+    sc_out<sc_uint<8>>   m_mem_axi_aw_len_o;
+    sc_out<bool>         m_mem_axi_w_valid_o;
+    sc_in<bool>          m_mem_axi_w_ready_i;
+    sc_out<sc_biguint<kMemAxiDataWidth>> m_mem_axi_w_data_o;
+    sc_out<sc_uint<kMemAxiDataWidth / 8>> m_mem_axi_w_strb_o;
+    sc_out<bool>         m_mem_axi_w_last_o;
+    sc_in<bool>          m_mem_axi_b_valid_i;
+    sc_out<bool>         m_mem_axi_b_ready_o;
+    sc_in<sc_uint<2>>    m_mem_axi_b_resp_i;
+    sc_out<bool>         m_mem_axi_ar_valid_o;
+    sc_in<bool>          m_mem_axi_ar_ready_i;
+    sc_out<sc_uint<32>>  m_mem_axi_ar_addr_o;
+    sc_out<sc_uint<8>>   m_mem_axi_ar_len_o;
+    sc_in<bool>          m_mem_axi_r_valid_i;
+    sc_out<bool>         m_mem_axi_r_ready_o;
+    sc_in<sc_biguint<kMemAxiDataWidth>> m_mem_axi_r_data_i;
+    sc_in<sc_uint<2>>    m_mem_axi_r_resp_i;
+    sc_in<bool>          m_mem_axi_r_last_i;
 
     // --- §7.4 Per-cluster AXI4-Lite data masters ---
     sc_out<bool>         m_cl_data_aw_valid_o[NUM_CLUSTERS];
@@ -192,38 +181,28 @@ SC_MODULE(CoreController) {
           s_ctrl_r_ready_i("s_ctrl_r_ready_i"),
           s_ctrl_r_data_o("s_ctrl_r_data_o"),
           s_ctrl_r_resp_o("s_ctrl_r_resp_o"),
-          // DMA DRAM AXI
-          m_dma_mem_axi_aw_valid_o("m_dma_mem_axi_aw_valid_o"),
-          m_dma_mem_axi_aw_ready_i("m_dma_mem_axi_aw_ready_i"),
-          m_dma_mem_axi_aw_addr_o("m_dma_mem_axi_aw_addr_o"),
-          m_dma_mem_axi_aw_len_o("m_dma_mem_axi_aw_len_o"),
-          m_dma_mem_axi_w_valid_o("m_dma_mem_axi_w_valid_o"),
-          m_dma_mem_axi_w_ready_i("m_dma_mem_axi_w_ready_i"),
-          m_dma_mem_axi_w_data_o("m_dma_mem_axi_w_data_o"),
-          m_dma_mem_axi_w_strb_o("m_dma_mem_axi_w_strb_o"),
-          m_dma_mem_axi_w_last_o("m_dma_mem_axi_w_last_o"),
-          m_dma_mem_axi_b_valid_i("m_dma_mem_axi_b_valid_i"),
-          m_dma_mem_axi_b_ready_o("m_dma_mem_axi_b_ready_o"),
-          m_dma_mem_axi_b_resp_i("m_dma_mem_axi_b_resp_i"),
-          m_dma_mem_axi_ar_valid_o("m_dma_mem_axi_ar_valid_o"),
-          m_dma_mem_axi_ar_ready_i("m_dma_mem_axi_ar_ready_i"),
-          m_dma_mem_axi_ar_addr_o("m_dma_mem_axi_ar_addr_o"),
-          m_dma_mem_axi_ar_len_o("m_dma_mem_axi_ar_len_o"),
-          m_dma_mem_axi_r_valid_i("m_dma_mem_axi_r_valid_i"),
-          m_dma_mem_axi_r_ready_o("m_dma_mem_axi_r_ready_o"),
-          m_dma_mem_axi_r_data_i("m_dma_mem_axi_r_data_i"),
-          m_dma_mem_axi_r_resp_i("m_dma_mem_axi_r_resp_i"),
-          m_dma_mem_axi_r_last_i("m_dma_mem_axi_r_last_i"),
-          // Loader DRAM AXI (read only)
-          m_ldr_mem_axi_ar_valid_o("m_ldr_mem_axi_ar_valid_o"),
-          m_ldr_mem_axi_ar_ready_i("m_ldr_mem_axi_ar_ready_i"),
-          m_ldr_mem_axi_ar_addr_o("m_ldr_mem_axi_ar_addr_o"),
-          m_ldr_mem_axi_ar_len_o("m_ldr_mem_axi_ar_len_o"),
-          m_ldr_mem_axi_r_valid_i("m_ldr_mem_axi_r_valid_i"),
-          m_ldr_mem_axi_r_ready_o("m_ldr_mem_axi_r_ready_o"),
-          m_ldr_mem_axi_r_data_i("m_ldr_mem_axi_r_data_i"),
-          m_ldr_mem_axi_r_resp_i("m_ldr_mem_axi_r_resp_i"),
-          m_ldr_mem_axi_r_last_i("m_ldr_mem_axi_r_last_i"),
+          // Shared DRAM AXI
+          m_mem_axi_aw_valid_o("m_mem_axi_aw_valid_o"),
+          m_mem_axi_aw_ready_i("m_mem_axi_aw_ready_i"),
+          m_mem_axi_aw_addr_o("m_mem_axi_aw_addr_o"),
+          m_mem_axi_aw_len_o("m_mem_axi_aw_len_o"),
+          m_mem_axi_w_valid_o("m_mem_axi_w_valid_o"),
+          m_mem_axi_w_ready_i("m_mem_axi_w_ready_i"),
+          m_mem_axi_w_data_o("m_mem_axi_w_data_o"),
+          m_mem_axi_w_strb_o("m_mem_axi_w_strb_o"),
+          m_mem_axi_w_last_o("m_mem_axi_w_last_o"),
+          m_mem_axi_b_valid_i("m_mem_axi_b_valid_i"),
+          m_mem_axi_b_ready_o("m_mem_axi_b_ready_o"),
+          m_mem_axi_b_resp_i("m_mem_axi_b_resp_i"),
+          m_mem_axi_ar_valid_o("m_mem_axi_ar_valid_o"),
+          m_mem_axi_ar_ready_i("m_mem_axi_ar_ready_i"),
+          m_mem_axi_ar_addr_o("m_mem_axi_ar_addr_o"),
+          m_mem_axi_ar_len_o("m_mem_axi_ar_len_o"),
+          m_mem_axi_r_valid_i("m_mem_axi_r_valid_i"),
+          m_mem_axi_r_ready_o("m_mem_axi_r_ready_o"),
+          m_mem_axi_r_data_i("m_mem_axi_r_data_i"),
+          m_mem_axi_r_resp_i("m_mem_axi_r_resp_i"),
+          m_mem_axi_r_last_i("m_mem_axi_r_last_i"),
           // NLU data requester
           nlu_data_req_valid_i("nlu_data_req_valid_i"),
           nlu_data_req_write_i("nlu_data_req_write_i"),
@@ -308,16 +287,16 @@ SC_MODULE(CoreController) {
         u_section_loader.manifest_addr_hi_i(sig_manifest_addr_hi);
         u_section_loader.manifest_size_i(sig_manifest_size);
 
-        // Loader DRAM AXI read master → external
-        u_section_loader.m_mem_axi_ar_valid_o(m_ldr_mem_axi_ar_valid_o);
-        u_section_loader.m_mem_axi_ar_ready_i(m_ldr_mem_axi_ar_ready_i);
-        u_section_loader.m_mem_axi_ar_addr_o(m_ldr_mem_axi_ar_addr_o);
-        u_section_loader.m_mem_axi_ar_len_o(m_ldr_mem_axi_ar_len_o);
-        u_section_loader.m_mem_axi_r_valid_i(m_ldr_mem_axi_r_valid_i);
-        u_section_loader.m_mem_axi_r_ready_o(m_ldr_mem_axi_r_ready_o);
-        u_section_loader.m_mem_axi_r_data_i(m_ldr_mem_axi_r_data_i);
-        u_section_loader.m_mem_axi_r_resp_i(m_ldr_mem_axi_r_resp_i);
-        u_section_loader.m_mem_axi_r_last_i(m_ldr_mem_axi_r_last_i);
+        // Loader DRAM AXI read master → internal (muxed to external)
+        u_section_loader.m_mem_axi_ar_valid_o(sig_ldr_mem_ar_valid);
+        u_section_loader.m_mem_axi_ar_ready_i(sig_ldr_mem_ar_ready);
+        u_section_loader.m_mem_axi_ar_addr_o(sig_ldr_mem_ar_addr);
+        u_section_loader.m_mem_axi_ar_len_o(sig_ldr_mem_ar_len);
+        u_section_loader.m_mem_axi_r_valid_i(sig_ldr_mem_r_valid);
+        u_section_loader.m_mem_axi_r_ready_o(sig_ldr_mem_r_ready);
+        u_section_loader.m_mem_axi_r_data_i(sig_ldr_mem_r_data);
+        u_section_loader.m_mem_axi_r_resp_i(sig_ldr_mem_r_resp);
+        u_section_loader.m_mem_axi_r_last_i(sig_ldr_mem_r_last);
 
         // Loader → Isram write port
         u_section_loader.isram_wr_en_o(sig_ldr_isram_wr_en);
@@ -510,28 +489,28 @@ SC_MODULE(CoreController) {
         u_dma_engine.mmio_req_wdata_i(sig_dma_mmio_req_wdata);
         u_dma_engine.mmio_resp_valid_o(sig_dma_mmio_resp_valid);
         u_dma_engine.mmio_resp_rdata_o(sig_dma_mmio_resp_rdata);
-        // DMA DRAM AXI master → external
-        u_dma_engine.m_mem_axi_aw_valid_o(m_dma_mem_axi_aw_valid_o);
-        u_dma_engine.m_mem_axi_aw_ready_i(m_dma_mem_axi_aw_ready_i);
-        u_dma_engine.m_mem_axi_aw_addr_o(m_dma_mem_axi_aw_addr_o);
-        u_dma_engine.m_mem_axi_aw_len_o(m_dma_mem_axi_aw_len_o);
-        u_dma_engine.m_mem_axi_w_valid_o(m_dma_mem_axi_w_valid_o);
-        u_dma_engine.m_mem_axi_w_ready_i(m_dma_mem_axi_w_ready_i);
-        u_dma_engine.m_mem_axi_w_data_o(m_dma_mem_axi_w_data_o);
-        u_dma_engine.m_mem_axi_w_strb_o(m_dma_mem_axi_w_strb_o);
-        u_dma_engine.m_mem_axi_w_last_o(m_dma_mem_axi_w_last_o);
-        u_dma_engine.m_mem_axi_b_valid_i(m_dma_mem_axi_b_valid_i);
-        u_dma_engine.m_mem_axi_b_ready_o(m_dma_mem_axi_b_ready_o);
-        u_dma_engine.m_mem_axi_b_resp_i(m_dma_mem_axi_b_resp_i);
-        u_dma_engine.m_mem_axi_ar_valid_o(m_dma_mem_axi_ar_valid_o);
-        u_dma_engine.m_mem_axi_ar_ready_i(m_dma_mem_axi_ar_ready_i);
-        u_dma_engine.m_mem_axi_ar_addr_o(m_dma_mem_axi_ar_addr_o);
-        u_dma_engine.m_mem_axi_ar_len_o(m_dma_mem_axi_ar_len_o);
-        u_dma_engine.m_mem_axi_r_valid_i(m_dma_mem_axi_r_valid_i);
-        u_dma_engine.m_mem_axi_r_ready_o(m_dma_mem_axi_r_ready_o);
-        u_dma_engine.m_mem_axi_r_data_i(m_dma_mem_axi_r_data_i);
-        u_dma_engine.m_mem_axi_r_resp_i(m_dma_mem_axi_r_resp_i);
-        u_dma_engine.m_mem_axi_r_last_i(m_dma_mem_axi_r_last_i);
+        // DMA DRAM AXI master → internal (muxed to external)
+        u_dma_engine.m_mem_axi_aw_valid_o(sig_dma_mem_aw_valid);
+        u_dma_engine.m_mem_axi_aw_ready_i(sig_dma_mem_aw_ready);
+        u_dma_engine.m_mem_axi_aw_addr_o(sig_dma_mem_aw_addr);
+        u_dma_engine.m_mem_axi_aw_len_o(sig_dma_mem_aw_len);
+        u_dma_engine.m_mem_axi_w_valid_o(sig_dma_mem_w_valid);
+        u_dma_engine.m_mem_axi_w_ready_i(sig_dma_mem_w_ready);
+        u_dma_engine.m_mem_axi_w_data_o(sig_dma_mem_w_data);
+        u_dma_engine.m_mem_axi_w_strb_o(sig_dma_mem_w_strb);
+        u_dma_engine.m_mem_axi_w_last_o(sig_dma_mem_w_last);
+        u_dma_engine.m_mem_axi_b_valid_i(sig_dma_mem_b_valid);
+        u_dma_engine.m_mem_axi_b_ready_o(sig_dma_mem_b_ready);
+        u_dma_engine.m_mem_axi_b_resp_i(sig_dma_mem_b_resp);
+        u_dma_engine.m_mem_axi_ar_valid_o(sig_dma_mem_ar_valid);
+        u_dma_engine.m_mem_axi_ar_ready_i(sig_dma_mem_ar_ready);
+        u_dma_engine.m_mem_axi_ar_addr_o(sig_dma_mem_ar_addr);
+        u_dma_engine.m_mem_axi_ar_len_o(sig_dma_mem_ar_len);
+        u_dma_engine.m_mem_axi_r_valid_i(sig_dma_mem_r_valid);
+        u_dma_engine.m_mem_axi_r_ready_o(sig_dma_mem_r_ready);
+        u_dma_engine.m_mem_axi_r_data_i(sig_dma_mem_r_data);
+        u_dma_engine.m_mem_axi_r_resp_i(sig_dma_mem_r_resp);
+        u_dma_engine.m_mem_axi_r_last_i(sig_dma_mem_r_last);
         // DMA ↔ ClusterDataFabric
         u_dma_engine.cl_data_req_valid_o(sig_dma_cl_req_valid);
         u_dma_engine.cl_data_req_write_o(sig_dma_cl_req_write);
@@ -599,6 +578,28 @@ SC_MODULE(CoreController) {
         SC_METHOD(comb_derived);
         sensitive << sig_loader_err_code << sig_plic_pending_lo << sig_plic_pending_hi
                   << sig_core_enable << sig_retire_valid << sig_core_halted;
+
+        // ====================================================================
+        // DRAM AXI mux: load_phase → SectionLoader, else → DmaEngine
+        // ====================================================================
+        SC_METHOD(mux_mem_axi);
+        sensitive << sig_boot_load_phase
+                  // Loader outputs
+                  << sig_ldr_mem_ar_valid << sig_ldr_mem_ar_addr << sig_ldr_mem_ar_len
+                  << sig_ldr_mem_r_ready
+                  // DMA outputs
+                  << sig_dma_mem_aw_valid << sig_dma_mem_aw_addr << sig_dma_mem_aw_len
+                  << sig_dma_mem_w_valid << sig_dma_mem_w_data
+                  << sig_dma_mem_w_strb << sig_dma_mem_w_last
+                  << sig_dma_mem_b_ready
+                  << sig_dma_mem_ar_valid << sig_dma_mem_ar_addr << sig_dma_mem_ar_len
+                  << sig_dma_mem_r_ready
+                  // External responses
+                  << m_mem_axi_aw_ready_i << m_mem_axi_w_ready_i
+                  << m_mem_axi_b_valid_i << m_mem_axi_b_resp_i
+                  << m_mem_axi_ar_ready_i
+                  << m_mem_axi_r_valid_i << m_mem_axi_r_data_i
+                  << m_mem_axi_r_resp_i << m_mem_axi_r_last_i;
     }
 
     /// Propagate runtime config to sub-modules after elaboration.
@@ -658,6 +659,46 @@ private:
     Plic<NUM_CLUSTERS, NUM_NLU>            u_plic;
     DmaEngine                              u_dma_engine;
     ClusterDataFabric<NUM_CLUSTERS>        u_cluster_data_fabric;
+
+    // ========================================================================
+    // Internal signals — SectionLoader DRAM AXI (read-only, into mux)
+    // ========================================================================
+
+    sc_signal<bool>         sig_ldr_mem_ar_valid{"sig_ldr_mem_ar_valid"};
+    sc_signal<bool>         sig_ldr_mem_ar_ready{"sig_ldr_mem_ar_ready"};
+    sc_signal<sc_uint<32>>  sig_ldr_mem_ar_addr{"sig_ldr_mem_ar_addr"};
+    sc_signal<sc_uint<8>>   sig_ldr_mem_ar_len{"sig_ldr_mem_ar_len"};
+    sc_signal<bool>         sig_ldr_mem_r_valid{"sig_ldr_mem_r_valid"};
+    sc_signal<bool>         sig_ldr_mem_r_ready{"sig_ldr_mem_r_ready"};
+    sc_signal<sc_biguint<kMemAxiDataWidth>> sig_ldr_mem_r_data{"sig_ldr_mem_r_data"};
+    sc_signal<sc_uint<2>>   sig_ldr_mem_r_resp{"sig_ldr_mem_r_resp"};
+    sc_signal<bool>         sig_ldr_mem_r_last{"sig_ldr_mem_r_last"};
+
+    // ========================================================================
+    // Internal signals — DmaEngine DRAM AXI (full, into mux)
+    // ========================================================================
+
+    sc_signal<bool>         sig_dma_mem_aw_valid{"sig_dma_mem_aw_valid"};
+    sc_signal<bool>         sig_dma_mem_aw_ready{"sig_dma_mem_aw_ready"};
+    sc_signal<sc_uint<32>>  sig_dma_mem_aw_addr{"sig_dma_mem_aw_addr"};
+    sc_signal<sc_uint<8>>   sig_dma_mem_aw_len{"sig_dma_mem_aw_len"};
+    sc_signal<bool>         sig_dma_mem_w_valid{"sig_dma_mem_w_valid"};
+    sc_signal<bool>         sig_dma_mem_w_ready{"sig_dma_mem_w_ready"};
+    sc_signal<sc_biguint<kMemAxiDataWidth>> sig_dma_mem_w_data{"sig_dma_mem_w_data"};
+    sc_signal<sc_uint<kMemAxiDataWidth / 8>> sig_dma_mem_w_strb{"sig_dma_mem_w_strb"};
+    sc_signal<bool>         sig_dma_mem_w_last{"sig_dma_mem_w_last"};
+    sc_signal<bool>         sig_dma_mem_b_valid{"sig_dma_mem_b_valid"};
+    sc_signal<bool>         sig_dma_mem_b_ready{"sig_dma_mem_b_ready"};
+    sc_signal<sc_uint<2>>   sig_dma_mem_b_resp{"sig_dma_mem_b_resp"};
+    sc_signal<bool>         sig_dma_mem_ar_valid{"sig_dma_mem_ar_valid"};
+    sc_signal<bool>         sig_dma_mem_ar_ready{"sig_dma_mem_ar_ready"};
+    sc_signal<sc_uint<32>>  sig_dma_mem_ar_addr{"sig_dma_mem_ar_addr"};
+    sc_signal<sc_uint<8>>   sig_dma_mem_ar_len{"sig_dma_mem_ar_len"};
+    sc_signal<bool>         sig_dma_mem_r_valid{"sig_dma_mem_r_valid"};
+    sc_signal<bool>         sig_dma_mem_r_ready{"sig_dma_mem_r_ready"};
+    sc_signal<sc_biguint<kMemAxiDataWidth>> sig_dma_mem_r_data{"sig_dma_mem_r_data"};
+    sc_signal<sc_uint<2>>   sig_dma_mem_r_resp{"sig_dma_mem_r_resp"};
+    sc_signal<bool>         sig_dma_mem_r_last{"sig_dma_mem_r_last"};
 
     // ========================================================================
     // Internal signals — BootHostIf ↔ SectionLoader
@@ -818,6 +859,80 @@ private:
         // fabric_last_target/addr placeholders
         sig_fabric_last_target.write(0);
         sig_fabric_last_addr.write(0);
+    }
+
+    // ========================================================================
+    // DRAM AXI mux: load_phase selects SectionLoader, else DmaEngine
+    // ========================================================================
+
+    void mux_mem_axi() {
+        if (sig_boot_load_phase.read()) {
+            // === Load phase: SectionLoader owns read channels ===
+            // AR channel → loader
+            m_mem_axi_ar_valid_o.write(sig_ldr_mem_ar_valid.read());
+            m_mem_axi_ar_addr_o.write(sig_ldr_mem_ar_addr.read());
+            m_mem_axi_ar_len_o.write(sig_ldr_mem_ar_len.read());
+            sig_ldr_mem_ar_ready.write(m_mem_axi_ar_ready_i.read());
+            // R channel → loader
+            m_mem_axi_r_ready_o.write(sig_ldr_mem_r_ready.read());
+            sig_ldr_mem_r_valid.write(m_mem_axi_r_valid_i.read());
+            sig_ldr_mem_r_data.write(m_mem_axi_r_data_i.read());
+            sig_ldr_mem_r_resp.write(m_mem_axi_r_resp_i.read());
+            sig_ldr_mem_r_last.write(m_mem_axi_r_last_i.read());
+            // Write channels idle on external port
+            m_mem_axi_aw_valid_o.write(false);
+            m_mem_axi_aw_addr_o.write(0);
+            m_mem_axi_aw_len_o.write(0);
+            m_mem_axi_w_valid_o.write(false);
+            m_mem_axi_w_data_o.write(0);
+            m_mem_axi_w_strb_o.write(0);
+            m_mem_axi_w_last_o.write(false);
+            m_mem_axi_b_ready_o.write(false);
+            // DMA sees idle responses
+            sig_dma_mem_aw_ready.write(false);
+            sig_dma_mem_w_ready.write(false);
+            sig_dma_mem_b_valid.write(false);
+            sig_dma_mem_b_resp.write(0);
+            sig_dma_mem_ar_ready.write(false);
+            sig_dma_mem_r_valid.write(false);
+            sig_dma_mem_r_data.write(0);
+            sig_dma_mem_r_resp.write(0);
+            sig_dma_mem_r_last.write(false);
+        } else {
+            // === Run phase: DMA engine owns all channels ===
+            // AW channel
+            m_mem_axi_aw_valid_o.write(sig_dma_mem_aw_valid.read());
+            m_mem_axi_aw_addr_o.write(sig_dma_mem_aw_addr.read());
+            m_mem_axi_aw_len_o.write(sig_dma_mem_aw_len.read());
+            sig_dma_mem_aw_ready.write(m_mem_axi_aw_ready_i.read());
+            // W channel
+            m_mem_axi_w_valid_o.write(sig_dma_mem_w_valid.read());
+            m_mem_axi_w_data_o.write(sig_dma_mem_w_data.read());
+            m_mem_axi_w_strb_o.write(sig_dma_mem_w_strb.read());
+            m_mem_axi_w_last_o.write(sig_dma_mem_w_last.read());
+            sig_dma_mem_w_ready.write(m_mem_axi_w_ready_i.read());
+            // B channel
+            m_mem_axi_b_ready_o.write(sig_dma_mem_b_ready.read());
+            sig_dma_mem_b_valid.write(m_mem_axi_b_valid_i.read());
+            sig_dma_mem_b_resp.write(m_mem_axi_b_resp_i.read());
+            // AR channel
+            m_mem_axi_ar_valid_o.write(sig_dma_mem_ar_valid.read());
+            m_mem_axi_ar_addr_o.write(sig_dma_mem_ar_addr.read());
+            m_mem_axi_ar_len_o.write(sig_dma_mem_ar_len.read());
+            sig_dma_mem_ar_ready.write(m_mem_axi_ar_ready_i.read());
+            // R channel
+            m_mem_axi_r_ready_o.write(sig_dma_mem_r_ready.read());
+            sig_dma_mem_r_valid.write(m_mem_axi_r_valid_i.read());
+            sig_dma_mem_r_data.write(m_mem_axi_r_data_i.read());
+            sig_dma_mem_r_resp.write(m_mem_axi_r_resp_i.read());
+            sig_dma_mem_r_last.write(m_mem_axi_r_last_i.read());
+            // Loader sees idle
+            sig_ldr_mem_ar_ready.write(false);
+            sig_ldr_mem_r_valid.write(false);
+            sig_ldr_mem_r_data.write(0);
+            sig_ldr_mem_r_resp.write(0);
+            sig_ldr_mem_r_last.write(false);
+        }
     }
 };
 

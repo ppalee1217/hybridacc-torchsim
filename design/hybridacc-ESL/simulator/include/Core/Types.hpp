@@ -181,20 +181,18 @@ inline void sc_trace(sc_trace_file* tf, const LoaderError& e, const std::string&
 enum class DmaError : uint32_t {
     DMA_ERR_NONE            = 0,
     DMA_ERR_SUBMIT_WHEN_FULL = 1,
-    DMA_ERR_BAD_OP_KIND     = 2,
-    DMA_ERR_BAD_ENDPOINT    = 3,
-    DMA_ERR_ADDR_ALIGN      = 4,
-    DMA_ERR_ZERO_LENGTH     = 5,
-    DMA_ERR_CLUSTER_RESP    = 6,
-    DMA_ERR_DRAM_AXI        = 7,
-    DMA_ERR_ABORTED         = 8,
+    DMA_ERR_BAD_ENDPOINT    = 2,
+    DMA_ERR_ADDR_ALIGN      = 3,
+    DMA_ERR_ZERO_LENGTH     = 4,
+    DMA_ERR_CLUSTER_RESP    = 5,
+    DMA_ERR_DRAM_AXI        = 6,
+    DMA_ERR_ABORTED         = 7,
 };
 
 inline std::ostream& operator<<(std::ostream& os, DmaError e) {
     switch (e) {
         case DmaError::DMA_ERR_NONE:            return os << "DMA_ERR_NONE";
         case DmaError::DMA_ERR_SUBMIT_WHEN_FULL:return os << "DMA_ERR_SUBMIT_WHEN_FULL";
-        case DmaError::DMA_ERR_BAD_OP_KIND:     return os << "DMA_ERR_BAD_OP_KIND";
         case DmaError::DMA_ERR_BAD_ENDPOINT:    return os << "DMA_ERR_BAD_ENDPOINT";
         case DmaError::DMA_ERR_ADDR_ALIGN:      return os << "DMA_ERR_ADDR_ALIGN";
         case DmaError::DMA_ERR_ZERO_LENGTH:     return os << "DMA_ERR_ZERO_LENGTH";
@@ -212,23 +210,6 @@ inline void sc_trace(sc_trace_file* tf, const DmaError& e, const std::string& na
 // ============================================================================
 // DMA operation / endpoint kind
 // ============================================================================
-
-enum class DmaOpKind : uint32_t {
-    LINEAR_COPY    = 0,
-    STRIDED_2D     = 1,
-};
-
-inline std::ostream& operator<<(std::ostream& os, DmaOpKind k) {
-    switch (k) {
-        case DmaOpKind::LINEAR_COPY: return os << "LINEAR_COPY";
-        case DmaOpKind::STRIDED_2D:  return os << "STRIDED_2D";
-        default:                     return os << "DMA_OP_UNKNOWN";
-    }
-}
-
-inline void sc_trace(sc_trace_file* tf, const DmaOpKind& k, const std::string& name) {
-    sc_trace(tf, static_cast<uint32_t>(k), name);
-}
 
 enum class DmaEndpoint : uint32_t {
     DRAM        = 0,
@@ -252,7 +233,6 @@ inline void sc_trace(sc_trace_file* tf, const DmaEndpoint& k, const std::string&
 // ============================================================================
 
 struct DmaCommand {
-    DmaOpKind  op_kind;
     DmaEndpoint src_kind;
     DmaEndpoint dst_kind;
     uint32_t src_addr_lo;
@@ -261,29 +241,35 @@ struct DmaCommand {
     uint32_t dst_addr_hi;
     uint32_t src_cluster_id;
     uint32_t dst_cluster_id;
-    uint32_t bytes;
-    uint32_t line_bytes;
-    uint32_t line_count;
-    uint32_t src_stride;
-    uint32_t dst_stride;
+    uint32_t count[4];       ///< 4D iteration counts (d0=innermost)
+    uint32_t src_stride[4];  ///< source stride per dimension (bytes)
+    uint32_t dst_stride[4];  ///< destination stride per dimension (bytes)
     uint32_t cmd_tag;
 
+    /// Total number of beats = product of all counts (0 treated as 1).
+    uint32_t total_beats() const {
+        uint32_t n = 1;
+        for (int i = 0; i < 4; ++i)
+            n *= (count[i] == 0) ? 1 : count[i];
+        return n;
+    }
+
     bool operator==(const DmaCommand& o) const {
-        return op_kind == o.op_kind && src_kind == o.src_kind &&
-               dst_kind == o.dst_kind && src_addr_lo == o.src_addr_lo &&
-               dst_addr_lo == o.dst_addr_lo && bytes == o.bytes &&
-               cmd_tag == o.cmd_tag;
+        return src_kind == o.src_kind && dst_kind == o.dst_kind &&
+               src_addr_lo == o.src_addr_lo && dst_addr_lo == o.dst_addr_lo &&
+               total_beats() == o.total_beats() && cmd_tag == o.cmd_tag;
     }
     friend std::ostream& operator<<(std::ostream& os, const DmaCommand& c) {
-        os << "DmaCmd{op=" << c.op_kind << ", src=" << c.src_kind
-           << ", dst=" << c.dst_kind << ", bytes=" << c.bytes
+        os << "DmaCmd{src=" << c.src_kind
+           << ", dst=" << c.dst_kind
+           << ", beats=" << c.total_beats()
            << ", tag=" << c.cmd_tag << "}";
         return os;
     }
     friend void sc_trace(sc_trace_file* tf, const DmaCommand& c, const std::string& name) {
-        sc_trace(tf, static_cast<uint32_t>(c.op_kind), name + ".op_kind");
-        sc_trace(tf, c.bytes,   name + ".bytes");
-        sc_trace(tf, c.cmd_tag, name + ".cmd_tag");
+        sc_trace(tf, c.cmd_tag,     name + ".cmd_tag");
+        sc_trace(tf, c.count[0],    name + ".count_d0");
+        sc_trace(tf, c.src_addr_lo, name + ".src_addr_lo");
     }
 };
 
@@ -430,28 +416,34 @@ static constexpr uint32_t kLocalFabricCap0    = 0x01C;
 // DMA MMIO offsets
 // ============================================================================
 
-static constexpr uint32_t kDmaCap0        = 0x000;
-static constexpr uint32_t kDmaStatus      = 0x004;
-static constexpr uint32_t kDmaCtrl        = 0x008;
-static constexpr uint32_t kDmaOpKind      = 0x00C;
-static constexpr uint32_t kDmaSrcKind     = 0x010;
-static constexpr uint32_t kDmaDstKind     = 0x014;
-static constexpr uint32_t kDmaSrcAddrLo   = 0x018;
-static constexpr uint32_t kDmaSrcAddrHi   = 0x01C;
-static constexpr uint32_t kDmaDstAddrLo   = 0x020;
-static constexpr uint32_t kDmaDstAddrHi   = 0x024;
-static constexpr uint32_t kDmaSrcClusterId= 0x028;
-static constexpr uint32_t kDmaDstClusterId= 0x02C;
-static constexpr uint32_t kDmaBytes       = 0x030;
-static constexpr uint32_t kDmaLineBytes   = 0x034;
-static constexpr uint32_t kDmaLineCount   = 0x038;
-static constexpr uint32_t kDmaSrcStride   = 0x03C;
-static constexpr uint32_t kDmaDstStride   = 0x040;
-static constexpr uint32_t kDmaCmdTag      = 0x044;
-static constexpr uint32_t kDmaDoneTag     = 0x048;
-static constexpr uint32_t kDmaErrCode     = 0x04C;
-static constexpr uint32_t kDmaErrInfo     = 0x050;
-static constexpr uint32_t kDmaDebugState  = 0x054;
+static constexpr uint32_t kDmaCap0          = 0x000;
+static constexpr uint32_t kDmaStatus        = 0x004;
+static constexpr uint32_t kDmaCtrl          = 0x008;
+static constexpr uint32_t kDmaSrcKind       = 0x00C;
+static constexpr uint32_t kDmaDstKind       = 0x010;
+static constexpr uint32_t kDmaSrcAddrLo     = 0x014;
+static constexpr uint32_t kDmaSrcAddrHi     = 0x018;
+static constexpr uint32_t kDmaDstAddrLo     = 0x01C;
+static constexpr uint32_t kDmaDstAddrHi     = 0x020;
+static constexpr uint32_t kDmaSrcClusterId  = 0x024;
+static constexpr uint32_t kDmaDstClusterId  = 0x028;
+static constexpr uint32_t kDmaCountD0       = 0x02C;
+static constexpr uint32_t kDmaCountD1       = 0x030;
+static constexpr uint32_t kDmaCountD2       = 0x034;
+static constexpr uint32_t kDmaCountD3       = 0x038;
+static constexpr uint32_t kDmaSrcStrideD0   = 0x03C;
+static constexpr uint32_t kDmaSrcStrideD1   = 0x040;
+static constexpr uint32_t kDmaSrcStrideD2   = 0x044;
+static constexpr uint32_t kDmaSrcStrideD3   = 0x048;
+static constexpr uint32_t kDmaDstStrideD0   = 0x04C;
+static constexpr uint32_t kDmaDstStrideD1   = 0x050;
+static constexpr uint32_t kDmaDstStrideD2   = 0x054;
+static constexpr uint32_t kDmaDstStrideD3   = 0x058;
+static constexpr uint32_t kDmaCmdTag        = 0x05C;
+static constexpr uint32_t kDmaDoneTag       = 0x060;
+static constexpr uint32_t kDmaErrCode       = 0x064;
+static constexpr uint32_t kDmaErrInfo       = 0x068;
+static constexpr uint32_t kDmaDebugState    = 0x06C;
 
 // ============================================================================
 // PLIC MMIO offsets

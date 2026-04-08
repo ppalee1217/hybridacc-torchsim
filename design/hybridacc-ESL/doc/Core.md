@@ -928,6 +928,40 @@ controller 對每個 NLU 暴露一組 AHB-Lite command master port，供 `cc_cmd
 3. 透過 DRAM AXI 與 cluster data fabric 搬運 tensor data。
 4. 回報 done/error status 與 irq。
 
+#### 設計概要
+
+本版 DMA engine 採用統一 **4D strided copy** 模式，移除先前的 `LINEAR_COPY` 與 `STRIDED_2D` 分類。所有搬運都以 4 層巢狀迴圈描述，其中每層各有獨立的 source stride 與 destination stride。
+
+4D 地址公式：
+
+```
+for d3 in 0 .. count_d3-1:
+  for d2 in 0 .. count_d2-1:
+    for d1 in 0 .. count_d1-1:
+      for d0 in 0 .. count_d0-1:
+        src = src_addr_base + d0*src_stride_d0 + d1*src_stride_d1
+              + d2*src_stride_d2 + d3*src_stride_d3
+        dst = dst_addr_base + d0*dst_stride_d0 + d1*dst_stride_d1
+              + d2*dst_stride_d2 + d3*dst_stride_d3
+        copy one beat (kClBeatBytes) at (src → dst)
+```
+
+退化用法：
+
+- **1D copy**：設 `count_d1 = count_d2 = count_d3 = 1`，`count_d0 = N`，`src_stride_d0 = dst_stride_d0 = beat_bytes`。
+- **2D copy**：設 `count_d2 = count_d3 = 1`，`count_d0 = line_beats`，`count_d1 = line_count`，stride 與 2D stride 對應。
+
+#### 內部架構
+
+DMA engine 內含以下子元件：
+
+1. **Source AGU**：4-level nested loop 地址產生器，參考 `AddressGenerateUnit` 的 4-level loop 邏輯，輸出 source address 序列。
+2. **Destination AGU**：同構的 4-level nested loop 地址產生器，輸出 destination address 序列。
+3. **Transfer FIFO**（depth = 256 beats）：使用 `Utils/FIFO` 實現，暫存從 source 端讀取的資料。DMA engine 可同時透過 FIFO 進行 source read 與 destination write 的 pipelining，提升吞吐量。
+4. **Command FIFO**：接受 MMIO submit 快照，深度 `kDmaCmdFifoDepth`。
+
+Source AGU 與 Destination AGU 是 DmaEngine 內嵌的邏輯（非獨立 SC_MODULE），以 C++ class 或 inline function 實作 4-level loop 遞進。
+
 #### 主要 I/O
 
 | Port | Dir | Width | 說明 |
@@ -947,28 +981,34 @@ controller 對每個 NLU 暴露一組 AHB-Lite command master port，供 `cc_cmd
 
 | Offset | Name | RW | 說明 |
 |---:|---|---|---|
-| `0x000` | `DMA_CAP0` | R | capability bitmap：linear copy、2D copy、DRAM endpoint、cluster SPM endpoint |
+| `0x000` | `DMA_CAP0` | R | capability bitmap：4D copy、DRAM endpoint、cluster SPM endpoint |
 | `0x004` | `DMA_STATUS` | R | bit0=`idle`, bit1=`busy`, bit2=`cmd_fifo_full`, bit3=`done_pending`, bit4=`err_pending`, bit5=`fatal` |
 | `0x008` | `DMA_CTRL` | R/W | bit0=`submit`(W1P), bit1=`abort`(W1P), bit2=`soft_reset`(W1P), bit3=`irq_en` |
-| `0x00C` | `DMA_OP_KIND` | R/W | `0=linear_copy`, `1=strided_2d_copy` |
-| `0x010` | `DMA_SRC_KIND` | R/W | `0=DRAM`, `1=CLUSTER_SPM` |
-| `0x014` | `DMA_DST_KIND` | R/W | `0=DRAM`, `1=CLUSTER_SPM` |
-| `0x018` | `DMA_SRC_ADDR_LO` | R/W | source byte address low |
-| `0x01C` | `DMA_SRC_ADDR_HI` | R/W | source byte address high |
-| `0x020` | `DMA_DST_ADDR_LO` | R/W | destination byte address low |
-| `0x024` | `DMA_DST_ADDR_HI` | R/W | destination byte address high |
-| `0x028` | `DMA_SRC_CLUSTER_ID` | R/W | 當 `SRC_KIND=CLUSTER_SPM` 時有效 |
-| `0x02C` | `DMA_DST_CLUSTER_ID` | R/W | 當 `DST_KIND=CLUSTER_SPM` 時有效 |
-| `0x030` | `DMA_BYTES` | R/W | linear copy bytes |
-| `0x034` | `DMA_LINE_BYTES` | R/W | 2D copy 每列 bytes |
-| `0x038` | `DMA_LINE_COUNT` | R/W | 2D copy 列數 |
-| `0x03C` | `DMA_SRC_STRIDE` | R/W | source line stride bytes |
-| `0x040` | `DMA_DST_STRIDE` | R/W | destination line stride bytes |
-| `0x044` | `DMA_CMD_TAG` | R/W | firmware 指定 command tag |
-| `0x048` | `DMA_DONE_TAG` | R | 最近完成 command tag |
-| `0x04C` | `DMA_ERR_CODE` | R/W1C | DMA 錯誤碼 |
-| `0x050` | `DMA_ERR_INFO` | R | 補充錯誤資訊 |
-| `0x054` | `DMA_DEBUG_STATE` | R | internal FSM / outstanding state snapshot |
+| `0x00C` | `DMA_SRC_KIND` | R/W | `0=DRAM`, `1=CLUSTER_SPM` |
+| `0x010` | `DMA_DST_KIND` | R/W | `0=DRAM`, `1=CLUSTER_SPM` |
+| `0x014` | `DMA_SRC_ADDR_LO` | R/W | source base byte address low |
+| `0x018` | `DMA_SRC_ADDR_HI` | R/W | source base byte address high |
+| `0x01C` | `DMA_DST_ADDR_LO` | R/W | destination base byte address low |
+| `0x020` | `DMA_DST_ADDR_HI` | R/W | destination base byte address high |
+| `0x024` | `DMA_SRC_CLUSTER_ID` | R/W | 當 `SRC_KIND=CLUSTER_SPM` 時有效 |
+| `0x028` | `DMA_DST_CLUSTER_ID` | R/W | 當 `DST_KIND=CLUSTER_SPM` 時有效 |
+| `0x02C` | `DMA_COUNT_D0` | R/W | dimension 0（innermost）beat count |
+| `0x030` | `DMA_COUNT_D1` | R/W | dimension 1 iteration count |
+| `0x034` | `DMA_COUNT_D2` | R/W | dimension 2 iteration count |
+| `0x038` | `DMA_COUNT_D3` | R/W | dimension 3（outermost）iteration count |
+| `0x03C` | `DMA_SRC_STRIDE_D0` | R/W | source stride for d0 (bytes) |
+| `0x040` | `DMA_SRC_STRIDE_D1` | R/W | source stride for d1 (bytes) |
+| `0x044` | `DMA_SRC_STRIDE_D2` | R/W | source stride for d2 (bytes) |
+| `0x048` | `DMA_SRC_STRIDE_D3` | R/W | source stride for d3 (bytes) |
+| `0x04C` | `DMA_DST_STRIDE_D0` | R/W | destination stride for d0 (bytes) |
+| `0x050` | `DMA_DST_STRIDE_D1` | R/W | destination stride for d1 (bytes) |
+| `0x054` | `DMA_DST_STRIDE_D2` | R/W | destination stride for d2 (bytes) |
+| `0x058` | `DMA_DST_STRIDE_D3` | R/W | destination stride for d3 (bytes) |
+| `0x05C` | `DMA_CMD_TAG` | R/W | firmware 指定 command tag |
+| `0x060` | `DMA_DONE_TAG` | R | 最近完成 command tag |
+| `0x064` | `DMA_ERR_CODE` | R/W1C | DMA 錯誤碼 |
+| `0x068` | `DMA_ERR_INFO` | R | 補充錯誤資訊 |
+| `0x06C` | `DMA_DEBUG_STATE` | R | internal FSM / outstanding state snapshot |
 
 #### DMA 錯誤碼最小要求
 
@@ -976,13 +1016,12 @@ controller 對每個 NLU 暴露一組 AHB-Lite command master port，供 `cc_cmd
 |---:|---|---|
 | `0` | `DMA_ERR_NONE` | 無錯誤 |
 | `1` | `DMA_ERR_SUBMIT_WHEN_FULL` | submit 時 command FIFO 已滿 |
-| `2` | `DMA_ERR_BAD_OP_KIND` | 不支援的 `DMA_OP_KIND` |
-| `3` | `DMA_ERR_BAD_ENDPOINT_KIND` | 不支援的 source/destination kind |
-| `4` | `DMA_ERR_ADDR_ALIGN` | 地址或長度對齊錯誤 |
-| `5` | `DMA_ERR_ZERO_LENGTH` | 非法零長度搬移 |
-| `6` | `DMA_ERR_CLUSTER_RESP` | cluster data path 回 error |
-| `7` | `DMA_ERR_DRAM_AXI` | DRAM AXI 回應錯誤 |
-| `8` | `DMA_ERR_ABORTED` | 命令被 abort |
+| `2` | `DMA_ERR_BAD_ENDPOINT_KIND` | 不支援的 source/destination kind |
+| `3` | `DMA_ERR_ADDR_ALIGN` | 地址或長度對齊錯誤 |
+| `4` | `DMA_ERR_ZERO_LENGTH` | 所有 count 乘積為零 |
+| `5` | `DMA_ERR_CLUSTER_RESP` | cluster data path 回 error |
+| `6` | `DMA_ERR_DRAM_AXI` | DRAM AXI 回應錯誤 |
+| `7` | `DMA_ERR_ABORTED` | 命令被 abort |
 
 #### 正式語意
 
@@ -991,10 +1030,10 @@ controller 對每個 NLU 暴露一組 AHB-Lite command master port，供 `cc_cmd
 3. firmware 必須先完整寫入 command staging register，再寫 `DMA_CTRL.submit=1`。
 4. `submit` 成功時，DMA engine 必須把該組 staging register 原子快照進 internal command FIFO。
 5. 若 command FIFO 已滿，對 `submit` 的 MMIO store 必須回 fault，且不得部分接受該命令。
-6. `DMA_OP_KIND=linear_copy` 時，`DMA_BYTES` 有效，2D fields 忽略；`DMA_OP_KIND=strided_2d_copy` 時，總搬移量為 `DMA_LINE_BYTES * DMA_LINE_COUNT`。
+6. DMA 只有統一 4D 模式。總搬移 beat 數為 `count_d0 * count_d1 * count_d2 * count_d3`。任何 `count_dN=0` 視為 1（等同退化該維度）。
 7. 當 endpoint kind 是 `CLUSTER_SPM` 時，`ADDR_LO` 視為 cluster local byte address，對應的 `*_CLUSTER_ID` 必須有效。
 8. cluster 端因為是 AXI4-Lite slave，DMA 對 cluster SPM 的存取不得假設 burst。
-9. 本版不把 `dma_stream_*` 視為 architected 介面；若 implementation 內部仍用 write queue 或 wider push bus，必須完全隱藏在 DMA MMIO/doorbell 之後。
+9. 內部 Transfer FIFO 允許 source read 與 destination write pipelining；FIFO 深度為 256 beats（對應 AXI4 最大 burst length）。FIFO 的實作細節隱藏在 DMA MMIO/doorbell 之後。
 10. `DMA_DONE_TAG` 必須回報最近一筆進入 terminal state（done 或 error）的 command tag，方便 firmware 對應 completion source。
 
 ### 8.9 `cc_cluster_data_fabric`
