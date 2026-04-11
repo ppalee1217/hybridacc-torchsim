@@ -524,7 +524,7 @@ private:
                         cmd_fifo_.push(cmd);
                         DEBUG_MSG("DmaEngine: submit tag=" << cmd.cmd_tag
                                   << " beats=" << cmd.total_beats(),
-                                  DEBUG_LEVEL_CLUSTER_COMPONENTS);
+                                  DEBUG_LEVEL_CORE_COMPONENTS);
                     }
                 }
 
@@ -584,8 +584,8 @@ private:
                 if (beats_read >= total_beats) {
                     // All source beats read, switch to drain mode
                     fsm_state = DmaState::DST_WRITE_ISSUE;
-                } else if (sig_fifo_full.read()) {
-                    // FIFO full: drain destination first
+                } else if ((beats_read - beats_written) >= kXferFifoDepth) {
+                    // FIFO full (counter-based, no signal delay)
                     fsm_state = DmaState::DST_WRITE_ISSUE;
                 } else {
                     uint32_t addr = src_agu.current_addr;
@@ -631,7 +631,7 @@ private:
                         src_agu.advance();
                         beats_read++;
                         // Continue reading or switch to write
-                        if (beats_read >= total_beats || sig_fifo_full.read()) {
+                        if (beats_read >= total_beats || (beats_read - beats_written) >= kXferFifoDepth) {
                             fsm_state = DmaState::DST_WRITE_ISSUE;
                         } else {
                             fsm_state = DmaState::SRC_READ_ISSUE;
@@ -658,7 +658,7 @@ private:
                         sig_fifo_push.write(true);
                         src_agu.advance();
                         beats_read++;
-                        if (beats_read >= total_beats || sig_fifo_full.read()) {
+                        if (beats_read >= total_beats || (beats_read - beats_written) >= kXferFifoDepth) {
                             fsm_state = DmaState::DST_WRITE_ISSUE;
                         } else {
                             fsm_state = DmaState::SRC_READ_ISSUE;
@@ -793,7 +793,7 @@ private:
             case DmaState::DONE: {
                 done_tag_ = active_cmd.cmd_tag;
                 DEBUG_MSG("DmaEngine: done tag=" << active_cmd.cmd_tag,
-                          DEBUG_LEVEL_CLUSTER_COMPONENTS);
+                          DEBUG_LEVEL_CORE_COMPONENTS);
                 if (irq_en) dma_irq_o.write(true);
                 fsm_state = DmaState::IDLE;
                 break;
@@ -801,7 +801,7 @@ private:
             case DmaState::ERROR: {
                 done_tag_ = active_cmd.cmd_tag;
                 DEBUG_MSG("DmaEngine: error code=" << err_code_ << " tag=" << active_cmd.cmd_tag,
-                          DEBUG_LEVEL_CLUSTER_COMPONENTS);
+                          DEBUG_LEVEL_CORE_COMPONENTS);
                 if (irq_en) dma_irq_o.write(true);
                 // Drain FIFO on fatal
                 sig_fifo_clear.write(true);

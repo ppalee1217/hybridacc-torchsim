@@ -306,7 +306,7 @@ private:
                         busy_o.write(true);
                         ld_state = LdState::LD_FETCH;
                         DEBUG_MSG("SectionLoader: kick entries=" << total_entries,
-                                  DEBUG_LEVEL_CLUSTER_COMPONENTS);
+                                  DEBUG_LEVEL_CORE_COMPONENTS);
                     }
                 }
                 status_o.write(make_status(ld_state, entry_idx));
@@ -441,8 +441,8 @@ private:
                 busy_o.write(false);
                 done_o.write(true);
                 status_o.write(make_status(ld_state, entry_idx));
-                DEBUG_MSG("SectionLoader: all entries loaded (" << total_entries << ")",
-                          DEBUG_LEVEL_CLUSTER_COMPONENTS);
+                // DEBUG_MSG("SectionLoader: all entries loaded (" << total_entries << ")",
+                //           DEBUG_LEVEL_CORE_COMPONENTS);
                 // Stay in DONE until next kick resets
                 if (kick_i.read()) {
                     done_o.write(false);
@@ -458,7 +458,7 @@ private:
                 DEBUG_MSG("SectionLoader: error code="
                           << err_code_o.read().to_uint()
                           << " entry=" << entry_idx,
-                          DEBUG_LEVEL_CLUSTER_COMPONENTS);
+                          DEBUG_LEVEL_CORE_COMPONENTS);
                 // Stay in ERR until next kick
                 if (kick_i.read()) {
                     err_code_o.write(0);

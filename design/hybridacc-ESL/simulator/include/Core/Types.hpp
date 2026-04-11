@@ -34,7 +34,7 @@ static constexpr unsigned kBootRomBytes       = 4096;  ///< 4 KB optional boot R
 
 static constexpr unsigned kClAxiDataWidth     = 64;    ///< cluster data port width
 static constexpr unsigned kClAhbDataWidth     = 32;    ///< cluster command port width
-static constexpr unsigned kMemAxiDataWidth    = 128;   ///< external DRAM AXI4 width
+static constexpr unsigned kMemAxiDataWidth    = 64;   ///< external DRAM AXI4 width
 
 static constexpr unsigned kDmaCmdFifoDepth    = 8;
 

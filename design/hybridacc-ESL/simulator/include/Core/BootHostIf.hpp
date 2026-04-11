@@ -411,7 +411,7 @@ private:
             case kManifestSize:      manifest_size_ = val; break;
             case kManifestKick:
                 loader_kick_o.write(true);
-                DEBUG_MSG("BootHostIf: MANIFEST_KICK", DEBUG_LEVEL_CLUSTER_COMPONENTS);
+                DEBUG_MSG("BootHostIf: MANIFEST_KICK", DEBUG_LEVEL_CORE_COMPONENTS);
                 break;
             case kLoaderErrCode:
                 // W1C — clear bits written as 1

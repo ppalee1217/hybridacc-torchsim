@@ -266,7 +266,7 @@ private:
                     deliver_error_resp(txn);
                     state = FabState::IDLE;
                     DEBUG_MSG("ClusterDataFabric: cluster_id " << txn.cluster_id
-                              << " out of range", DEBUG_LEVEL_CLUSTER_COMPONENTS);
+                              << " out of range", DEBUG_LEVEL_CORE_COMPONENTS);
                     break;
                 }
                 state = FabState::ADDR_PHASE;
