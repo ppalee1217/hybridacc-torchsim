@@ -13,11 +13,10 @@ extern const LayerConfig layer_configs[];
 extern const uint32_t num_layers;
 
 /* ═══════════════════════════════════════════════════════
- * Trap Handler (minimal)
+ * Trap Handler (minimal — hang on trap)
  * ═══════════════════════════════════════════════════════ */
 void __attribute__((interrupt("machine"), aligned(4)))
 trap_handler(void) {
-    REG_CORE_STATUS = 0xDEAD0001u;
     while (1) { __asm__ volatile("wfi"); }
 }
 
@@ -35,12 +34,10 @@ _start(void) {
 }
 
 void main(void) {
-    REG_CORE_STATUS = 0x00000001u;  /* firmware running */
-
     for (uint32_t i = 0; i < num_layers; i++) {
         run_layer(&layer_configs[i]);
     }
 
-    REG_CORE_STATUS = 0x00000002u;  /* all done */
+    __asm__ volatile("ebreak");  /* signal completion to testbench */
     while (1) { __asm__ volatile("wfi"); }
 }

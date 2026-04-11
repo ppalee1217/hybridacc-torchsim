@@ -79,23 +79,28 @@ void pe_patch_runtime(const uint16_t* tmpl, uint32_t tmpl_len,
 }
 
 /* ═══════════════════════════════════════════════════════
- * DMA Helpers
+ * DMA Helpers — 4D DMA with linear (1D) transfers
  * ═══════════════════════════════════════════════════════ */
-static inline void dma_xfer_sync(uint32_t dram_addr, uint32_t spm_addr,
-                                 uint32_t word_count) {
-    dma_start(dram_addr, spm_addr, word_count);
+static inline void dma_load_sync(uint32_t dram_addr, uint32_t spm_offset,
+                                 uint32_t beat_count) {
+    dma_load(dram_addr, spm_offset, 0, beat_count);
+    dma_wait_done();
+}
+
+static inline void dma_store_sync(uint32_t spm_offset, uint32_t dram_addr,
+                                  uint32_t beat_count) {
+    dma_store(spm_offset, dram_addr, 0, beat_count);
     dma_wait_done();
 }
 
 static __attribute__((unused))
-void dma_xfer_parallel(uint32_t dram_addr, uint32_t spm_base,
-                               uint32_t words_per_bank,
-                               uint32_t bank_depth_bytes) {
+void dma_load_parallel(uint32_t dram_addr, uint32_t spm_base,
+                       uint32_t words_per_bank,
+                       uint32_t bank_depth_bytes) {
     for (uint32_t b = 0; b < 3; b++) {
-        dma_start(dram_addr + b * words_per_bank * 8,
-                  spm_base + b * bank_depth_bytes,
-                  words_per_bank);
-        dma_wait_done();
+        dma_load_sync(dram_addr + b * words_per_bank * BEAT_BYTES,
+                      spm_base + b * bank_depth_bytes,
+                      words_per_bank);
     }
 }
 
@@ -104,7 +109,7 @@ void dma_xfer_parallel(uint32_t dram_addr, uint32_t spm_base,
 typedef struct {
     uint32_t dram_addr;
     uint32_t spm_addr;
-    uint32_t word_count;
+    uint32_t beat_count;
     uint8_t  is_parallel;
 } PrefetchOp;
 
@@ -113,11 +118,11 @@ static uint32_t   prefetch_count;
 static uint32_t   prefetch_idx;
 
 static void prefetch_enqueue(uint32_t dram, uint32_t spm,
-                             uint32_t words, uint8_t is_parallel) {
+                             uint32_t beats, uint8_t is_parallel) {
     if (prefetch_count < MAX_PREFETCH_OPS) {
         prefetch_queue[prefetch_count].dram_addr  = dram;
         prefetch_queue[prefetch_count].spm_addr   = spm;
-        prefetch_queue[prefetch_count].word_count = words;
+        prefetch_queue[prefetch_count].beat_count = beats;
         prefetch_queue[prefetch_count].is_parallel = is_parallel;
         prefetch_count++;
     }
@@ -127,7 +132,7 @@ static void prefetch_start(void) {
     prefetch_idx = 0;
     if (prefetch_count > 0) {
         PrefetchOp* op = &prefetch_queue[0];
-        dma_start(op->dram_addr, op->spm_addr, op->word_count);
+        dma_load(op->dram_addr, op->spm_addr, 0, op->beat_count);
     }
 }
 
@@ -137,7 +142,7 @@ static void prefetch_wait_all(void) {
         prefetch_idx++;
         if (prefetch_idx < prefetch_count) {
             PrefetchOp* op = &prefetch_queue[prefetch_idx];
-            dma_start(op->dram_addr, op->spm_addr, op->word_count);
+            dma_load(op->dram_addr, op->spm_addr, 0, op->beat_count);
         }
     }
 }
@@ -149,6 +154,9 @@ void run_loop_tiling(const LayerConfig* cfg) {
     const TilingParams* t = &cfg->tiling;
     uint32_t wave_count = 0;
 
+    /* One-time init of constant DMA staging registers */
+    dma_init_linear();
+
     for (uint16_t oc = 0; oc < t->num_oc_tiles; oc++) {
       for (uint16_t h = 0; h < t->num_h_tiles; h++) {
         for (uint16_t w = 0; w < t->num_w_tiles; w++) {
@@ -156,13 +164,13 @@ void run_loop_tiling(const LayerConfig* cfg) {
 
             uint32_t buf = wave_count & 1;
 
-            /* AGU base address (ping/pong) */
+            /* AGU base address — PS/PD use ping/pong, PLI/PLO fixed */
             uint32_t agu_base_ps  = buf ? t->agu_pong[0] : t->agu_ping[0];
             uint32_t agu_base_pd  = buf ? t->agu_pong[1] : t->agu_ping[1];
-            uint32_t agu_base_pli = buf ? t->agu_pong[2] : t->agu_ping[2];
-            uint32_t agu_base_plo = buf ? t->agu_pong[3] : t->agu_ping[3];
+            uint32_t agu_base_pli = t->agu_ping[2];  /* fixed (bank swap handles routing) */
+            uint32_t agu_base_plo = t->agu_ping[3];  /* fixed */
 
-            /* SPM group mapping (PLI/PLO swap) */
+            /* SPM group mapping (PLI/PLO swap each ic) */
             uint8_t spm_map = (ic & 1) ? t->spm_map_odd : t->spm_map_even;
 
             /* DMA DRAM addresses (base + idx * stride) */
@@ -180,29 +188,45 @@ void run_loop_tiling(const LayerConfig* cfg) {
                               + h  * t->dram_out_h_stride
                               + w  * t->dram_out_w_stride;
 
-            /* DMA SPM addresses (ping/pong) */
+            /* DMA SPM addresses — PS/PD ping/pong by wave_count,
+               PLO by ic parity (even→spm_ping[3]=g3, odd→spm_pong[3]=g2) */
             uint32_t spm_ps  = buf ? t->spm_pong[0] : t->spm_ping[0];
             uint32_t spm_pd  = buf ? t->spm_pong[1] : t->spm_ping[1];
-            uint32_t spm_plo = buf ? t->spm_pong[3] : t->spm_ping[3];
+            uint32_t spm_plo = (ic & 1) ? t->spm_pong[3] : t->spm_ping[3];
 
             uint8_t is_last_ic = (ic == t->num_ic_tiles - 1);
             uint8_t need_ps_dma = !t->ps_reuse_across_spatial
                                 || (h == 0 && w == 0);
 
+            /* Bias DMA: load pre-expanded bias into PLI group when ic==0 */
+            uint8_t need_bias_dma = (ic == 0) && (t->dma_pli_words > 0)
+                                  && ((h == 0 && w == 0) || t->num_ic_tiles > 1);
+
             /* Phase 1: Ensure current data is ready */
             if (wave_count == 0) {
+                if (need_bias_dma) {
+                    uint32_t dram_bias = t->dram_bias_base
+                                       + oc * t->dma_pli_words * BEAT_BYTES;
+                    dma_load_sync(dram_bias, t->spm_ping[2], t->dma_pli_words);
+                }
                 if (need_ps_dma)
-                    dma_xfer_sync(dram_ps, spm_ps, t->dma_ps_words);
-                dma_xfer_sync(dram_pd, spm_pd, t->dma_pd_words);
+                    dma_load_sync(dram_ps, spm_ps, t->dma_ps_words);
+                dma_load_sync(dram_pd, spm_pd, t->dma_pd_words);
             } else {
                 prefetch_wait_all();
+                /* Reload bias if needed (g2 may have been overwritten by PLO) */
+                if (need_bias_dma) {
+                    uint32_t dram_bias = t->dram_bias_base
+                                       + oc * t->dma_pli_words * BEAT_BYTES;
+                    dma_load_sync(dram_bias, t->spm_ping[2], t->dma_pli_words);
+                }
             }
 
             /* Phase 2: SPM group mapping */
             bcast_write32(SPM_CONFIG_MAP,    spm_map);
             bcast_write32(SPM_CONFIG_UPDATE, 0x01u);
 
-            /* Phase 3: Update AGU base_addr (ping/pong) */
+            /* Phase 3: Update AGU base_addr */
             bcast_agu_write(AGU_PS,  AGU_REG_BASE_ADDR, agu_base_ps);
             bcast_agu_write(AGU_PD,  AGU_REG_BASE_ADDR, agu_base_pd);
             bcast_agu_write(AGU_PLI, AGU_REG_BASE_ADDR, agu_base_pli);
@@ -257,9 +281,9 @@ void run_loop_tiling(const LayerConfig* cfg) {
             /* Phase 7: Stop PE */
             bcast_write32(NOC_CMD, pack_noc_cmd(NOC_CMD_STOP_PE, 0));
 
-            /* Phase 8: DMA writeback (last ic tile only) */
+            /* Phase 8: DMA writeback (last ic tile only) — SPM→DRAM */
             if (is_last_ic) {
-                dma_xfer_sync(dram_out, spm_plo, t->dma_plo_words);
+                dma_store_sync(spm_plo, dram_out, t->dma_plo_words);
             }
 
             wave_count++;

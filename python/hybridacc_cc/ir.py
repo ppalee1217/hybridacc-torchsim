@@ -67,6 +67,31 @@ class HardwareDesc:
     def half_parallel(self) -> int:
         return self.bank_depth_bytes // 2
 
+    # -- word64-unit helpers for AGU configuration --
+    @property
+    def half_group_words(self) -> int:
+        """half_group_capacity in word64 units."""
+        return self.half_group_capacity // 8
+
+    @property
+    def parallel_ping_words(self) -> int:
+        """parallel_ping_base in word64 units."""
+        return self.parallel_ping_base // 8
+
+    @property
+    def parallel_pong_words(self) -> int:
+        """parallel_pong_base in word64 units."""
+        return self.parallel_pong_base // 8
+
+    @property
+    def group_span_bytes(self) -> int:
+        """DMA byte span per group = (banks_per_group + 1) * bank_depth * 8."""
+        return (self.spm_banks_per_group + 1) * self.spm_bank_depth * 8
+
+    def spm_dma_group_base(self, group: int) -> int:
+        """DMA byte address base for a specific bank group (0..3)."""
+        return group * self.group_span_bytes
+
 
 @dataclass
 class WorkloadIR:
@@ -235,6 +260,10 @@ class TilingParams:
     dma_ps_words: int
     dma_pd_words: int
     dma_plo_words: int
+
+    # Bias (PLI initial partial sum)
+    dram_bias_base: int    # DRAM address of pre-expanded bias (0 = no bias)
+    dma_pli_words: int     # DMA beats for one OC tile bias load (0 = no bias)
 
     # Weight reuse
     ps_reuse_across_spatial: bool

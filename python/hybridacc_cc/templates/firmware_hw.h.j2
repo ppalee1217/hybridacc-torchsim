@@ -22,25 +22,48 @@ typedef struct {
 #define DSRAM_BASE          0x10000000u
 #define DSRAM_SIZE          (64u * 1024u)
 
-/* Local Control MMIO */
-#define LOCAL_MMIO_BASE     0x20000000u
-#define REG_CORE_STATUS     (*(volatile uint32_t*)(LOCAL_MMIO_BASE + 0x0000u))
-#define REG_CLUSTER_MASK_LO (*(volatile uint32_t*)(LOCAL_MMIO_BASE + 0x0004u))
-#define REG_CLUSTER_MASK_HI (*(volatile uint32_t*)(LOCAL_MMIO_BASE + 0x0008u))
+/* Local Control MMIO (base 0x20000000) */
+#define LOCAL_CTRL_BASE     0x20000000u
+#define LOCAL_CLUSTER_MASK_LO  (LOCAL_CTRL_BASE + 0x000u)
+#define LOCAL_CLUSTER_MASK_HI  (LOCAL_CTRL_BASE + 0x004u)
 
-/* DMA MMIO */
+/* DMA MMIO (base 0x20001000) — 4D AGU DMA engine */
 #define DMA_MMIO_BASE       0x20001000u
-#define DMA_REG_CTRL        (*(volatile uint32_t*)(DMA_MMIO_BASE + 0x000u))
-#define DMA_REG_CLUSTER_MASK (*(volatile uint32_t*)(DMA_MMIO_BASE + 0x008u))
-#define DMA_REG_WORD_COUNT  (*(volatile uint32_t*)(DMA_MMIO_BASE + 0x00Cu))
-#define DMA_REG_ADDR        (*(volatile uint32_t*)(DMA_MMIO_BASE + 0x010u))
-#define DMA_REG_ERROR       (*(volatile uint32_t*)(DMA_MMIO_BASE + 0x014u))
-#define DMA_STREAM_BASE     0x20001800u
+#define DMA_CAP0            (DMA_MMIO_BASE + 0x000u)
+#define DMA_STATUS          (DMA_MMIO_BASE + 0x004u)
+#define DMA_CTRL            (DMA_MMIO_BASE + 0x008u)
+#define DMA_SRC_KIND        (DMA_MMIO_BASE + 0x00Cu)
+#define DMA_DST_KIND        (DMA_MMIO_BASE + 0x010u)
+#define DMA_SRC_ADDR_LO     (DMA_MMIO_BASE + 0x014u)
+#define DMA_SRC_ADDR_HI     (DMA_MMIO_BASE + 0x018u)
+#define DMA_DST_ADDR_LO     (DMA_MMIO_BASE + 0x01Cu)
+#define DMA_DST_ADDR_HI     (DMA_MMIO_BASE + 0x020u)
+#define DMA_SRC_CLUSTER_ID  (DMA_MMIO_BASE + 0x024u)
+#define DMA_DST_CLUSTER_ID  (DMA_MMIO_BASE + 0x028u)
+#define DMA_COUNT_D0        (DMA_MMIO_BASE + 0x02Cu)
+#define DMA_COUNT_D1        (DMA_MMIO_BASE + 0x030u)
+#define DMA_COUNT_D2        (DMA_MMIO_BASE + 0x034u)
+#define DMA_COUNT_D3        (DMA_MMIO_BASE + 0x038u)
+#define DMA_SRC_STRIDE_D0   (DMA_MMIO_BASE + 0x03Cu)
+#define DMA_SRC_STRIDE_D1   (DMA_MMIO_BASE + 0x040u)
+#define DMA_SRC_STRIDE_D2   (DMA_MMIO_BASE + 0x044u)
+#define DMA_SRC_STRIDE_D3   (DMA_MMIO_BASE + 0x048u)
+#define DMA_DST_STRIDE_D0   (DMA_MMIO_BASE + 0x04Cu)
+#define DMA_DST_STRIDE_D1   (DMA_MMIO_BASE + 0x050u)
+#define DMA_DST_STRIDE_D2   (DMA_MMIO_BASE + 0x054u)
+#define DMA_DST_STRIDE_D3   (DMA_MMIO_BASE + 0x058u)
+#define DMA_CMD_TAG         (DMA_MMIO_BASE + 0x05Cu)
+#define DMA_DONE_TAG        (DMA_MMIO_BASE + 0x060u)
+#define DMA_ERR_CODE        (DMA_MMIO_BASE + 0x064u)
+#define DMA_ERR_INFO        (DMA_MMIO_BASE + 0x068u)
+#define DMA_DEBUG_STATE     (DMA_MMIO_BASE + 0x06Cu)
 
-#define DMA_CTRL_START      (1u << 0)
-#define DMA_STATUS_BUSY     (1u << 0)
-#define DMA_STATUS_DONE     (1u << 1)
-#define DMA_STATUS_ERROR    (1u << 2)
+#define DMA_ENDPOINT_DRAM        0u
+#define DMA_ENDPOINT_CLUSTER_SPM 1u
+#define DMA_CTRL_SUBMIT          (1u << 0)
+#define DMA_STATUS_IDLE          (1u << 0)
+#define DMA_STATUS_BUSY          (1u << 1)
+#define BEAT_BYTES               8u  /* 64-bit cluster AXI bus */
 
 /* PLIC */
 #define PLIC_BASE           0x0C000000u
@@ -126,8 +149,8 @@ static inline void unicast_write32(uint32_t cluster_id,
 }
 
 static inline void set_cluster_mask(uint32_t mask_lo, uint32_t mask_hi) {
-    REG_CLUSTER_MASK_LO = mask_lo;
-    REG_CLUSTER_MASK_HI = mask_hi;
+    mmio_write32(LOCAL_CLUSTER_MASK_LO, mask_lo);
+    mmio_write32(LOCAL_CLUSTER_MASK_HI, mask_hi);
 }
 
 static inline uint32_t agu_addr(uint32_t bank, uint32_t reg) {
@@ -152,21 +175,56 @@ static inline uint32_t pack_load_program(uint16_t im_addr_bytes,
     return pack_noc_cmd(NOC_CMD_LOAD_PROGRAM, p);
 }
 
-static inline void dma_start(uint32_t dram_addr,
-                             uint32_t spm_addr,
-                             uint32_t word_count) {
-    DMA_REG_ADDR = dram_addr;
-    DMA_REG_WORD_COUNT = word_count;
-    mmio_write32(DMA_STREAM_BASE + 0x00u, spm_addr);
-    DMA_REG_CTRL = DMA_CTRL_START;
+/* ── 4D DMA one-time init (call once before first transfer) ── */
+static inline void dma_init_linear(void) {
+    mmio_write32(DMA_SRC_ADDR_HI,     0);
+    mmio_write32(DMA_DST_ADDR_HI,     0);
+    mmio_write32(DMA_COUNT_D1,        1);
+    mmio_write32(DMA_COUNT_D2,        1);
+    mmio_write32(DMA_COUNT_D3,        1);
+    mmio_write32(DMA_SRC_STRIDE_D0,   BEAT_BYTES);
+    mmio_write32(DMA_SRC_STRIDE_D1,   0);
+    mmio_write32(DMA_SRC_STRIDE_D2,   0);
+    mmio_write32(DMA_SRC_STRIDE_D3,   0);
+    mmio_write32(DMA_DST_STRIDE_D0,   BEAT_BYTES);
+    mmio_write32(DMA_DST_STRIDE_D1,   0);
+    mmio_write32(DMA_DST_STRIDE_D2,   0);
+    mmio_write32(DMA_DST_STRIDE_D3,   0);
+    mmio_write32(DMA_CMD_TAG,         0);
+}
+
+/* ── DMA load: DRAM → Cluster SPM (blocking) ── */
+static inline void dma_load(uint32_t dram_addr, uint32_t spm_offset,
+                            uint32_t cluster_id, uint32_t beat_count) {
+    mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_DRAM);
+    mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
+    mmio_write32(DMA_SRC_ADDR_LO,    dram_addr);
+    mmio_write32(DMA_DST_ADDR_LO,    spm_offset);
+    mmio_write32(DMA_SRC_CLUSTER_ID, 0);
+    mmio_write32(DMA_DST_CLUSTER_ID, cluster_id);
+    mmio_write32(DMA_COUNT_D0,       beat_count);
+    mmio_write32(DMA_CTRL,           DMA_CTRL_SUBMIT);
+}
+
+/* ── DMA store: Cluster SPM → DRAM (blocking) ── */
+static inline void dma_store(uint32_t spm_offset, uint32_t dram_addr,
+                             uint32_t cluster_id, uint32_t beat_count) {
+    mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
+    mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_DRAM);
+    mmio_write32(DMA_SRC_ADDR_LO,    spm_offset);
+    mmio_write32(DMA_DST_ADDR_LO,    dram_addr);
+    mmio_write32(DMA_SRC_CLUSTER_ID, cluster_id);
+    mmio_write32(DMA_DST_CLUSTER_ID, 0);
+    mmio_write32(DMA_COUNT_D0,       beat_count);
+    mmio_write32(DMA_CTRL,           DMA_CTRL_SUBMIT);
 }
 
 static inline void dma_wait_done(void) {
-    while (!(DMA_REG_CTRL & DMA_STATUS_DONE)) { /* busy wait */ }
+    while (!(mmio_read32(DMA_STATUS) & DMA_STATUS_IDLE)) { /* busy wait */ }
 }
 
 static inline int dma_is_done(void) {
-    return (DMA_REG_CTRL & DMA_STATUS_DONE) != 0;
+    return (mmio_read32(DMA_STATUS) & DMA_STATUS_IDLE) != 0;
 }
 
 static inline void wait_all_clusters_done(uint32_t num_clusters) {
@@ -216,6 +274,9 @@ typedef struct {
     uint32_t dma_ps_words;
     uint32_t dma_pd_words;
     uint32_t dma_plo_words;
+
+    uint32_t dram_bias_base;
+    uint32_t dma_pli_words;
 
     uint8_t ps_reuse_across_spatial;
 

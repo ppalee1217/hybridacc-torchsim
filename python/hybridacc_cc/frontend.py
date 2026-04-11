@@ -68,12 +68,15 @@ def _parse_hardware(raw: dict) -> HardwareDesc:
         raise CompilationError("schema", path, "num_clusters must be in [1, 16]")
 
     num_pes = _get(raw, "num_pes", 64, int)
-    if not (1 <= num_pes <= 256) or (num_pes & (num_pes - 1)):
-        raise CompilationError("schema", path, "num_pes must be power of 2 in [1, 256]")
+    if not (1 <= num_pes <= 256):
+        raise CompilationError("schema", path, "num_pes must be in [1, 256]")
 
     num_bus = _get(raw, "num_bus", 4, int)
     if not (1 <= num_bus <= 16):
         raise CompilationError("schema", path, "num_bus must be in [1, 16]")
+
+    if num_pes % num_bus != 0:
+        raise CompilationError("schema", path, f"num_pes ({num_pes}) must be divisible by num_bus ({num_bus})")
 
     spm_banks_per_group = _get(raw, "spm_banks_per_group", 3, int)
     if not (1 <= spm_banks_per_group <= 8):

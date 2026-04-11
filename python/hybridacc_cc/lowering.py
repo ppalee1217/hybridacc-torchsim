@@ -26,7 +26,9 @@ from .ir import (
     WorkloadIR,
 )
 
-PKT_SIZE = 8  # bytes per SPM transaction (64-bit)
+PKT_SIZE = 8   # bytes per SPM transaction (64-bit)
+WORD64 = 8     # bytes per word64 (AGU stride/base_addr unit)
+DRAM_BOOT_RESERVED = 0x100000  # 1 MB reserved for manifest + ELF payload
 
 
 class TilingFailed(Exception):
@@ -38,20 +40,30 @@ class TilingFailed(Exception):
 # ===================================================================
 
 _SPM_MAP_EVEN = 0xE4  # port0→g0, port1→g1, port2→g2, port3→g3
-_SPM_MAP_ODD = 0xD8   # port0→g0, port1→g1, port2→g3, port3→g2
+_SPM_MAP_ODD = 0xB4   # port0→g0, port1→g1, port2→g3, port3→g2  (swap PLI↔PLO only)
 
 
 # ===================================================================
-# Scan-chain computation (shared by all operators)
+# Scan-chain computation — operator-specific
 # ===================================================================
 
-def compute_scan_chain(num_pes: int, num_bus: int) -> List[ScanChainEntry]:
-    """Compute scan-chain entries for PE array.
+def compute_scan_chain_conv2d(
+    num_pes: int,
+    num_bus: int,
+    kernel_height: int,
+    out_h: int,
+    stride: int = 1,
+) -> List[ScanChainEntry]:
+    """Compute scan-chain entries for Conv2D PE array (normal mode).
 
-    Convention:
-    - First PE on each bus: PLI_FROM_BUS (mode 1)
-    - Last PE on each bus: PLO_TO_BUS (mode 2)
-    - Middle PEs: PLI_FROM_LN_PLO_TO_LN (mode 0)
+    Semantic mapping:
+    - Each bus handles one kernel-height row (bus_idx = kernel row).
+    - Each PE within a bus handles one output row.
+    - ps_id = bus_idx  (weight broadcast per bus)
+    - pd_id = (bus_idx + pe_local) * stride  (unique input row per PE)
+    - PLI: only bus 0 reads from bus (IB->OL)
+    - PLO: only last active bus writes to bus (IL->OB)
+    - Middle buses: IL->OL (pass through LN chain)
 
     Entries returned in forward order. Firmware sends in reverse.
     """
@@ -60,27 +72,83 @@ def compute_scan_chain(num_pes: int, num_bus: int) -> List[ScanChainEntry]:
 
     for bus_idx in range(num_bus):
         for pe_local in range(pes_per_bus):
-            gid = bus_idx * pes_per_bus + pe_local
-            ps_id = gid
-            pd_id = gid
+            active = (bus_idx < kernel_height and pe_local < out_h)
 
-            if pe_local == 0:
-                route_mode = 1  # PLI_FROM_BUS_PLO_TO_LN
-                pli_id = bus_idx
-                plo_id = gid
-            elif pe_local == pes_per_bus - 1:
-                route_mode = 2  # PLI_FROM_LN_PLO_TO_BUS
-                pli_id = gid
-                plo_id = bus_idx
+            if active:
+                ps_id = bus_idx
+                pd_id = (bus_idx + pe_local) * stride
+
+                if kernel_height == 1:
+                    # Single bus: read from bus, write to bus
+                    route_mode = 3  # PLI_FROM_BUS_PLO_TO_BUS
+                    pli_id = pe_local
+                    plo_id = pe_local
+                elif bus_idx == 0:
+                    route_mode = 1  # PLI_FROM_BUS_PLO_TO_LN
+                    pli_id = pe_local
+                    plo_id = 63
+                elif bus_idx == kernel_height - 1:
+                    route_mode = 2  # PLI_FROM_LN_PLO_TO_BUS
+                    pli_id = 63
+                    plo_id = pe_local
+                else:
+                    route_mode = 0  # PLI_FROM_LN_PLO_TO_LN
+                    pli_id = 63
+                    plo_id = 63
             else:
-                route_mode = 0  # PLI_FROM_LN_PLO_TO_LN
-                pli_id = gid
-                plo_id = gid
+                ps_id = 63
+                pd_id = 63
+                pli_id = 63
+                plo_id = 63
+                route_mode = 3  # PLI_FROM_BUS_PLO_TO_BUS (passthrough)
 
             entries.append(ScanChainEntry(
                 ps_id=ps_id, pd_id=pd_id,
                 pli_id=pli_id, plo_id=plo_id,
-                route_mode=route_mode, enable=True,
+                route_mode=route_mode, enable=active,
+            ))
+
+    return entries
+
+
+def compute_scan_chain_ultra(
+    num_pes: int,
+    num_bus: int,
+    out_h: int,
+    stride: int = 1,
+) -> List[ScanChainEntry]:
+    """Compute scan-chain for ultra/GEMM mode (PLI_FROM_BUS_PLO_TO_BUS).
+
+    All active PEs read PLI from bus and write PLO to bus.
+    - ps_id = 0  (weight shared across all PEs via ultra broadcast)
+    - pd_id = pe_local * stride
+    - pli_id = pe_local
+    - plo_id = pe_local
+    """
+    entries: List[ScanChainEntry] = []
+    pes_per_bus = num_pes // num_bus
+
+    for bus_idx in range(num_bus):
+        for pe_local in range(pes_per_bus):
+            active = pe_local < out_h
+
+            if active:
+                ps_id = 0
+                pd_id = pe_local * stride
+                pli_id = pe_local
+                plo_id = pe_local
+                route_mode = 3  # PLI_FROM_BUS_PLO_TO_BUS
+            else:
+                ps_id = 63
+                pd_id = 63
+                pli_id = 63
+                plo_id = 63
+                route_mode = 3
+
+            entries.append(ScanChainEntry(
+                ps_id=ps_id, pd_id=pd_id,
+                pli_id=pli_id, plo_id=plo_id,
+                route_mode=route_mode, enable=active,
             ))
 
     return entries
@@ -227,49 +295,49 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
         plo=SpmGroupLayout(ping_base=0, pong_base=half_cap, size=pli_wave, spm_mode="linear"),
     )
 
-    # -- AGU configs (ping base; runtime swaps to pong) --
+    # -- AGU configs — all addresses/strides in word64 units --
     agu_ps = AguBankConfig(
         base_addr=0, base_addr_h=0,
         iter0=in_ch_pack, iter1=KW, iter2=KH, iter3=tile_oc,
-        stride0=PKT_SIZE,
-        stride1=in_ch_pack * PKT_SIZE,
-        stride2=KW * in_ch_pack * PKT_SIZE,
-        stride3=KH * KW * in_ch_pack * PKT_SIZE,
+        stride0=1,
+        stride1=in_ch_pack,
+        stride2=KW * in_ch_pack,
+        stride3=KH * KW * in_ch_pack,
         ctrl=0x0, lane_cfg=0,
-        tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
+        tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=2,
         mask_cfg=0xF,
     )
     agu_pd = AguBankConfig(
         base_addr=0, base_addr_h=0,
         iter0=in_ch_pack, iter1=tile_h_in, iter2=tile_w_in, iter3=1,
-        stride0=PKT_SIZE,
-        stride1=tile_w_in * in_ch_pack * PKT_SIZE,
-        stride2=in_ch_pack * PKT_SIZE,
+        stride0=1,
+        stride1=tile_w_in * in_ch_pack,
+        stride2=in_ch_pack,
         stride3=0,
         ctrl=0x0, lane_cfg=0,
-        tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
+        tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=1,
         mask_cfg=0xF,
     )
     agu_pli = AguBankConfig(
         base_addr=0, base_addr_h=0,
         iter0=out_ch_pack, iter1=tile_h_out, iter2=tile_w_out, iter3=1,
-        stride0=PKT_SIZE,
-        stride1=tile_w_out * out_ch_pack * PKT_SIZE,
-        stride2=out_ch_pack * PKT_SIZE,
+        stride0=1,
+        stride1=tile_w_out * out_ch_pack,
+        stride2=out_ch_pack,
         stride3=0,
         ctrl=0x0, lane_cfg=0,
-        tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
+        tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=1,
         mask_cfg=0xF,
     )
     agu_plo = AguBankConfig(
         base_addr=0, base_addr_h=0,
         iter0=out_ch_pack, iter1=tile_h_out, iter2=tile_w_out, iter3=1,
-        stride0=PKT_SIZE,
-        stride1=tile_w_out * out_ch_pack * PKT_SIZE,
-        stride2=out_ch_pack * PKT_SIZE,
+        stride0=1,
+        stride1=tile_w_out * out_ch_pack,
+        stride2=out_ch_pack,
         stride3=0,
         ctrl=0x0, lane_cfg=0,
-        tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
+        tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=1,
         mask_cfg=0xF,
     )
 
@@ -277,7 +345,7 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
     vectors_per_kernel = KH * in_ch_pack  # = 3
     pe_params = {
         "KERNEL_DMA_LEN": tile_oc * vectors_per_kernel,
-        "OUTPUT_WINDOW_CNT_MINUS_ONE": tile_h_out * tile_w_out - 1,
+        "OUTPUT_WINDOW_CNT_MINUS_ONE": tile_w_out - 1,
         "KERNEL_COUNT": tile_oc,
         "KERNEL_LOOP_INNER": 1,
         "KERNEL_LOOP_OUTER": 1,
@@ -288,17 +356,19 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
     hddu = HdduConfig(plane_en=0xF, plane_mode=0x1)
 
     # -- Scan-chain --
-    scan_chain = compute_scan_chain(hw.num_pes, hw.num_bus)
+    scan_chain = compute_scan_chain_conv2d(
+        hw.num_pes, hw.num_bus,
+        kernel_height=KH,
+        out_h=tile_h_out,
+        stride=stride,
+    )
 
     # -- Cluster mapping --
     cluster_map = compute_cluster_mapping(hw.num_clusters, tiling, op.op_type)
 
     # -- TilingParams (compile-time constants for runtime) --
     dram_base = hw.dram_base
-    # Weight layout: [OC, KH, KW, C_in] contiguous in DRAM
-    wt_tile_bytes = tile_oc * KH * KW * tile_ic * 2  # fp16
-    act_tile_h_bytes = tile_h_in * W_in * tile_ic * 2
-    out_tile_bytes = tile_h_out * W_out * tile_oc * 2
+    tensor_base = dram_base + DRAM_BOOT_RESERVED
 
     # DRAM stride calculations
     dram_ps_oc_stride = tile_oc * KH * KW * C_in * 2
@@ -310,20 +380,54 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
     dram_out_h_stride = tile_h_out * W_out * OC * 2
     dram_out_w_stride = tile_w_out * OC * 2
 
+    # DRAM tensor base addresses
+    W_size = OC * KH * KW * C_in * 2
+    I_size = N * H_in * W_in * C_in * 2
+    O_size = N * H_out * W_out * OC * 2
+
+    dram_weight_base = tensor_base
+    dram_input_base = tensor_base + W_size
+    dram_output_base = tensor_base + W_size + I_size
+
+    # Bias (optional third input)
+    has_bias = len(op.inputs) >= 3
+    if has_bias:
+        # Pre-expanded bias in DRAM: [num_oc_tiles, tile_h_out, tile_w_out, tile_oc] fp16
+        dram_bias_base = tensor_base + W_size + I_size + O_size
+        dma_pli_words = pli_wave // PKT_SIZE  # same as dma_plo_words
+    else:
+        dram_bias_base = 0
+        dma_pli_words = 0
+
+    # DMA group bases (absolute SPM byte addresses for DMA engine)
+    g0_dma = hw.spm_dma_group_base(0)  # PS
+    g1_dma = hw.spm_dma_group_base(1)  # PD
+    g2_dma = hw.spm_dma_group_base(2)  # PLI (even ic)
+    g3_dma = hw.spm_dma_group_base(3)  # PLO (even ic)
+
+    # AGU pong offsets in word64 units
+    half_words = hw.half_group_words
+
     tiling_params = TilingParams(
         num_oc_tiles=num_oc_tiles,
         num_h_tiles=num_h_tiles,
         num_w_tiles=num_w_tiles,
         num_ic_tiles=num_ic_tiles,
-        spm_ping=[0, 0, 0, 0],
-        spm_pong=[half_cap, half_cap, half_cap, half_cap],
+        # DMA SPM addresses (with group bases) — bytes for DMA engine
+        # PS/PD: ping/pong for double-buffering within their group
+        # PLI/PLO: ping = even-ic group, pong = odd-ic group (bank swap)
+        spm_ping=[g0_dma,            g1_dma,            g2_dma, g3_dma],
+        spm_pong=[g0_dma + half_cap, g1_dma + half_cap, g3_dma, g2_dma],
+        # AGU addresses (group-local, word64 units)
+        # PS/PD: ping/pong for double-buffering
+        # PLI/PLO: always offset 0 (bank swap handles group routing)
         agu_ping=[0, 0, 0, 0],
-        agu_pong=[half_cap, half_cap, half_cap, half_cap],
+        agu_pong=[half_words, half_words, 0, 0],
         spm_map_even=_SPM_MAP_EVEN,
         spm_map_odd=_SPM_MAP_ODD,
-        dram_weight_base=dram_base,
-        dram_input_base=dram_base + OC * KH * KW * C_in * 2,  # after weights
-        dram_output_base=dram_base + OC * KH * KW * C_in * 2 + N * H_in * W_in * C_in * 2,
+        dram_weight_base=dram_weight_base,
+        dram_input_base=dram_input_base,
+        dram_output_base=dram_output_base,
         dram_ps_oc_stride=dram_ps_oc_stride,
         dram_ps_ic_stride=dram_ps_ic_stride,
         dram_pd_h_stride=dram_pd_h_stride,
@@ -335,6 +439,8 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
         dma_ps_words=ps_wave // PKT_SIZE,
         dma_pd_words=pd_wave // PKT_SIZE,
         dma_plo_words=pli_wave // PKT_SIZE,
+        dram_bias_base=dram_bias_base,
+        dma_pli_words=dma_pli_words,
         ps_reuse_across_spatial=True,  # weight depends on (oc, ic) only
         bank_depth_bytes=hw.bank_depth_bytes,
         parallel_groups=0x0,  # no parallel groups for 3x3
@@ -427,12 +533,16 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
         plo=SpmGroupLayout(ping_base=pp, pong_base=ppong, size=pli_wave, spm_mode="parallel"),
     )
 
-    # AGU - PS: Parallel/Ultra
+    # AGU - PS: Parallel/Ultra — all strides in word64 units
+    pp_w = hw.parallel_ping_words
+    ppong_w = hw.parallel_pong_words
+    half_words = hw.half_group_words
+
     agu_ps = AguBankConfig(
-        base_addr=pp, base_addr_h=0,
+        base_addr=pp_w, base_addr_h=0,
         iter0=in_ch_pack, iter1=1, iter2=1, iter3=tile_oc,
-        stride0=PKT_SIZE, stride1=0, stride2=0,
-        stride3=in_ch_pack * PKT_SIZE,
+        stride0=1, stride1=0, stride2=0,
+        stride3=in_ch_pack,
         ctrl=0x8, lane_cfg=0,  # ultra mode
         tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=0,
         mask_cfg=0xF,
@@ -441,36 +551,36 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
     agu_pd = AguBankConfig(
         base_addr=0, base_addr_h=0,
         iter0=in_ch_pack, iter1=tile_h, iter2=tile_w, iter3=1,
-        stride0=PKT_SIZE,
-        stride1=tile_w * in_ch_pack * PKT_SIZE,
-        stride2=in_ch_pack * PKT_SIZE,
+        stride0=1,
+        stride1=tile_w * in_ch_pack,
+        stride2=in_ch_pack,
         stride3=0,
         ctrl=0x0, lane_cfg=0,
-        tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
+        tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=1,
         mask_cfg=0xF,
     )
     # AGU - PLI: Parallel/Ultra
     agu_pli = AguBankConfig(
-        base_addr=pp, base_addr_h=0,
+        base_addr=pp_w, base_addr_h=0,
         iter0=out_ch_pack, iter1=tile_h, iter2=tile_w, iter3=1,
-        stride0=PKT_SIZE,
-        stride1=tile_w * out_ch_pack * PKT_SIZE,
-        stride2=out_ch_pack * PKT_SIZE,
+        stride0=1,
+        stride1=tile_w * out_ch_pack,
+        stride2=out_ch_pack,
         stride3=0,
         ctrl=0x8, lane_cfg=0,
-        tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
+        tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=1,
         mask_cfg=0xF,
     )
     # AGU - PLO: Parallel/Ultra
     agu_plo = AguBankConfig(
-        base_addr=pp, base_addr_h=0,
+        base_addr=pp_w, base_addr_h=0,
         iter0=out_ch_pack, iter1=tile_h, iter2=tile_w, iter3=1,
-        stride0=PKT_SIZE,
-        stride1=tile_w * out_ch_pack * PKT_SIZE,
-        stride2=out_ch_pack * PKT_SIZE,
+        stride0=1,
+        stride1=tile_w * out_ch_pack,
+        stride2=out_ch_pack,
         stride3=0,
         ctrl=0x8, lane_cfg=0,
-        tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
+        tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=1,
         mask_cfg=0xF,
     )
 
@@ -483,11 +593,12 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
     }
     pe_prog = PeProgramRef(template_name="conv1d_k1c12s1_template", params=pe_params)
     hddu = HdduConfig(plane_en=0xF, plane_mode=0x1)
-    scan_chain = compute_scan_chain(hw.num_pes, hw.num_bus)
+    scan_chain = compute_scan_chain_ultra(hw.num_pes, hw.num_bus, out_h=tile_h * tile_w)
     cluster_map = compute_cluster_mapping(hw.num_clusters, tiling, op.op_type)
 
     stride_v = op.attrs.get("stride", 1)
     dram_base = hw.dram_base
+    tensor_base = dram_base + DRAM_BOOT_RESERVED
     dram_ps_oc_stride = tile_oc * C_in * 2
     dram_ps_ic_stride = tile_ic * 2
     dram_pd_h_stride = tile_h * stride_v * W_in * C_in * 2
@@ -499,17 +610,35 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
 
     bdb = hw.bank_depth_bytes
 
+    W_size = OC * C_in * 2
+    I_size = N * H_in * W_in * C_in * 2
+    O_size = N * H_out * W_out * OC * 2
+
+    has_bias = len(op.inputs) >= 3
+    if has_bias:
+        dram_bias_base = tensor_base + W_size + I_size + O_size
+        dma_pli_words = pli_wave // PKT_SIZE
+    else:
+        dram_bias_base = 0
+        dma_pli_words = 0
+
+    # DMA group bases
+    g0_dma = hw.spm_dma_group_base(0)
+    g1_dma = hw.spm_dma_group_base(1)
+    g2_dma = hw.spm_dma_group_base(2)
+    g3_dma = hw.spm_dma_group_base(3)
+
     tiling_params = TilingParams(
         num_oc_tiles=num_oc_tiles, num_h_tiles=num_h_tiles,
         num_w_tiles=num_w_tiles, num_ic_tiles=num_ic_tiles,
-        spm_ping=[pp, 0, pp, pp],
-        spm_pong=[ppong, half_cap, ppong, ppong],
-        agu_ping=[pp, 0, pp, pp],
-        agu_pong=[ppong, half_cap, ppong, ppong],
+        spm_ping=[g0_dma + pp, g1_dma,            g2_dma + pp, g3_dma + pp],
+        spm_pong=[g0_dma + ppong, g1_dma + half_cap, g3_dma + pp, g2_dma + pp],
+        agu_ping=[pp_w, 0, pp_w, pp_w],
+        agu_pong=[ppong_w, half_words, pp_w, pp_w],
         spm_map_even=_SPM_MAP_EVEN, spm_map_odd=_SPM_MAP_ODD,
-        dram_weight_base=dram_base,
-        dram_input_base=dram_base + OC * C_in * 2,
-        dram_output_base=dram_base + OC * C_in * 2 + N * H_in * W_in * C_in * 2,
+        dram_weight_base=tensor_base,
+        dram_input_base=tensor_base + W_size,
+        dram_output_base=tensor_base + W_size + I_size,
         dram_ps_oc_stride=dram_ps_oc_stride,
         dram_ps_ic_stride=dram_ps_ic_stride,
         dram_pd_h_stride=dram_pd_h_stride,
@@ -521,6 +650,8 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
         dma_ps_words=ps_wave // PKT_SIZE,
         dma_pd_words=pd_wave // PKT_SIZE,
         dma_plo_words=pli_wave // PKT_SIZE,
+        dram_bias_base=dram_bias_base,
+        dma_pli_words=dma_pli_words,
         ps_reuse_across_spatial=True,
         bank_depth_bytes=bdb,
         parallel_groups=0xD,  # PS, PLI, PLO (groups 0, 2, 3)
@@ -556,6 +687,9 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
     half_cap = hw.half_group_capacity
     pp = hw.parallel_ping_base
     ppong = hw.parallel_pong_base
+    pp_w = hw.parallel_ping_words
+    ppong_w = hw.parallel_pong_words
+    half_words = hw.half_group_words
 
     # Tiling search
     M_tile = N_tile = K_tile = None
@@ -614,49 +748,49 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
         plo=SpmGroupLayout(ping_base=pp, pong_base=ppong, size=pli_wave, spm_mode="parallel"),
     )
 
-    # AGU PS: Parallel/Ultra — A tile [M_tile, K_tile]
+    # AGU PS: Parallel/Ultra — A tile [M_tile, K_tile], strides in word64
     agu_ps = AguBankConfig(
-        base_addr=pp, base_addr_h=0,
+        base_addr=pp_w, base_addr_h=0,
         iter0=M_tile // ep, iter1=K_tile // ep,
         iter2=1, iter3=1,
-        stride0=PKT_SIZE,
-        stride1=(M_tile // ep) * PKT_SIZE,
+        stride0=1,
+        stride1=M_tile // ep,
         stride2=0, stride3=0,
         ctrl=0x8, lane_cfg=0,
         tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
         mask_cfg=0xF,
     )
-    # AGU PD: Linear/Normal — B tile [K_tile, N_tile]
+    # AGU PD: Linear/Normal — B tile [K_tile, N_tile], strides in word64
     agu_pd = AguBankConfig(
         base_addr=0, base_addr_h=0,
         iter0=K_tile // ep, iter1=N_tile // ep,
         iter2=1, iter3=1,
-        stride0=PKT_SIZE,
-        stride1=(K_tile // ep) * PKT_SIZE,
+        stride0=1,
+        stride1=K_tile // ep,
         stride2=0, stride3=0,
         ctrl=0x0, lane_cfg=0,
         tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
         mask_cfg=0xF,
     )
-    # AGU PLI: Parallel/Ultra — C tile [M_tile, N_tile]
+    # AGU PLI: Parallel/Ultra — C tile [M_tile, N_tile], strides in word64
     agu_pli = AguBankConfig(
-        base_addr=pp, base_addr_h=0,
+        base_addr=pp_w, base_addr_h=0,
         iter0=M_tile // ep, iter1=N_tile // ep,
         iter2=1, iter3=1,
-        stride0=PKT_SIZE,
-        stride1=(M_tile // ep) * PKT_SIZE,
+        stride0=1,
+        stride1=M_tile // ep,
         stride2=0, stride3=0,
         ctrl=0x8, lane_cfg=0,
         tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
         mask_cfg=0xF,
     )
-    # AGU PLO: Parallel/Ultra
+    # AGU PLO: Parallel/Ultra, strides in word64
     agu_plo = AguBankConfig(
-        base_addr=pp, base_addr_h=0,
+        base_addr=pp_w, base_addr_h=0,
         iter0=M_tile // ep, iter1=N_tile // ep,
         iter2=1, iter3=1,
-        stride0=PKT_SIZE,
-        stride1=(M_tile // ep) * PKT_SIZE,
+        stride0=1,
+        stride1=M_tile // ep,
         stride2=0, stride3=0,
         ctrl=0x8, lane_cfg=0,
         tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
@@ -676,28 +810,43 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
     }
     pe_prog = PeProgramRef(template_name="gemm_template", params=pe_params)
     hddu = HdduConfig(plane_en=0xB, plane_mode=0x2)
-    scan_chain = compute_scan_chain(hw.num_pes, hw.num_bus)
+    scan_chain = compute_scan_chain_ultra(hw.num_pes, hw.num_bus, out_h=M_tile * N_tile // ep)
     cluster_map = compute_cluster_mapping(hw.num_clusters, tiling, op.op_type)
 
     dram_base = hw.dram_base
+    tensor_base = dram_base + DRAM_BOOT_RESERVED
     # A[M, K] contiguous, B[K, N] after A, C[M, N] after B
     a_bytes = M * K * 2
     b_bytes = K * N * 2
+    c_bytes = M * N * 2
     bdb = hw.bank_depth_bytes
+
+    has_bias = len(op.inputs) >= 3
+    if has_bias:
+        dram_bias_base = tensor_base + a_bytes + b_bytes + c_bytes
+        dma_pli_words = pli_wave // PKT_SIZE
+    else:
+        dram_bias_base = 0
+        dma_pli_words = 0
+
+    g0_dma = hw.spm_dma_group_base(0)
+    g1_dma = hw.spm_dma_group_base(1)
+    g2_dma = hw.spm_dma_group_base(2)
+    g3_dma = hw.spm_dma_group_base(3)
 
     tiling_params = TilingParams(
         num_oc_tiles=num_m_tiles,
         num_h_tiles=num_n_tiles,
         num_w_tiles=1,
         num_ic_tiles=num_k_tiles,
-        spm_ping=[pp, 0, pp, pp],
-        spm_pong=[ppong, half_cap, ppong, ppong],
-        agu_ping=[pp, 0, pp, pp],
-        agu_pong=[ppong, half_cap, ppong, ppong],
+        spm_ping=[g0_dma + pp, g1_dma,            g2_dma + pp, g3_dma + pp],
+        spm_pong=[g0_dma + ppong, g1_dma + half_cap, g3_dma + pp, g2_dma + pp],
+        agu_ping=[pp_w, 0, pp_w, pp_w],
+        agu_pong=[ppong_w, half_words, pp_w, pp_w],
         spm_map_even=_SPM_MAP_EVEN, spm_map_odd=_SPM_MAP_ODD,
-        dram_weight_base=dram_base,           # A matrix
-        dram_input_base=dram_base + a_bytes,  # B matrix
-        dram_output_base=dram_base + a_bytes + b_bytes,  # C matrix
+        dram_weight_base=tensor_base,           # A matrix
+        dram_input_base=tensor_base + a_bytes,  # B matrix
+        dram_output_base=tensor_base + a_bytes + b_bytes,  # C matrix
         dram_ps_oc_stride=M_tile * K * 2,     # stride in M dim
         dram_ps_ic_stride=K_tile * 2,         # stride in K dim
         dram_pd_h_stride=K * N_tile * 2,      # B: stride in N dim (row of columns)
@@ -709,6 +858,8 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc) -> LayerHwConfig:
         dma_ps_words=ps_wave // PKT_SIZE,
         dma_pd_words=pd_wave // PKT_SIZE,
         dma_plo_words=pli_wave // PKT_SIZE,
+        dram_bias_base=dram_bias_base,
+        dma_pli_words=dma_pli_words,
         ps_reuse_across_spatial=False,
         bank_depth_bytes=bdb,
         parallel_groups=0xD,  # PS, PLI, PLO
