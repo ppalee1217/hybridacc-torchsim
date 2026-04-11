@@ -1,16 +1,20 @@
 /**
  * @file main.c
- * @brief DMA engine tests: DRAM ↔ Cluster SPM with interrupt-driven completion.
+ * @brief DMA engine tests: DRAM ↔ Cluster SPM loopback.
  *
- * Test 1: DRAM → Cluster SPM (64 bytes = 8 beats, 1D contiguous)
- *         TB pre-loads pattern word[i] = i+1 at DRAM 0x80020000.
- *         Firmware verifies cluster SPM via MMIO reads.
+ * Architecture note:
+ *   ComputeCluster has two separate address spaces:
+ *     - AXI data path (64-bit) → SPM SRAM banks (used by DMA)
+ *     - AHB cmd  path (32-bit) → config regs / HDDU / NoC (used by MMIO)
+ *   Firmware MMIO (AHB) **cannot** read/write SPM SRAM data directly.
  *
- * Test 2: Cluster SPM → DRAM (64 bytes = 8 beats, 1D contiguous)
- *         Firmware writes pattern word[i] = 0xA0+i to cluster SPM offset 0x100.
- *         TB verifies DRAM at 0x80030000 post-sim.
+ * Strategy: loopback test
+ *   Step 1: DMA DRAM→SPM   (TB pre-loads pattern word[i]=i+1 at DRAM src)
+ *   Step 2: DMA SPM→DRAM   (same SPM offset → different DRAM dst)
+ *   Step 3: C++ testbench verifies DRAM dst == DRAM src post-sim.
  *
- * Both tests use PLIC external interrupt (source 2 = DMA) with trap handler.
+ * Firmware checks: DMA status, done_tag, err_code, idle flag.
+ * Both steps use PLIC external interrupt (source 2 = DMA).
  */
 
 #include "hacc_test.h"
@@ -21,9 +25,8 @@
 #define DMA_CTRL_SUBMIT          (1u << 0)
 #define DMA_CTRL_IRQ_EN          (1u << 3)
 #define DMA_STATUS_IDLE          (1u << 0)
-#define DMA_STATUS_BUSY          (1u << 1)
 
-/* One beat = 8 bytes (cluster bus is 64-bit) */
+/* One beat = 8 bytes (cluster AXI data bus is 64-bit) */
 #define BEAT_BYTES               8u
 
 /* PLIC source IDs (NUM_CLUSTERS=1, NUM_NLU=0) */
@@ -34,10 +37,9 @@
 #define TEST_DRAM_DST            0x80030000u
 #define TEST_BYTES               64u
 #define TEST_BEATS               (TEST_BYTES / BEAT_BYTES)  /* 8 */
-#define TEST_WORDS               (TEST_BYTES / 4)
 
-/* Cluster SPM offsets for test 2 write area */
-#define CL_SPM_TEST2_OFFSET      0x100u
+/* SPM byte offset used by the loopback */
+#define SPM_LOOPBACK_OFFSET      0u
 
 /* ---- Global flag set by ISR ---- */
 volatile uint32_t g_dma_done;
@@ -143,8 +145,14 @@ void main(void)
 
     setup_interrupts();
 
+    /* T001: DMA status should be idle before any transfer */
+    TEST_ASSERT(1, mmio_read(DMA_STATUS) & DMA_STATUS_IDLE);
+
     /* ================================================================
-     * Test 1: DRAM → Cluster SPM
+     * Step 1: DRAM → Cluster SPM  (loopback — first half)
+     *
+     * TB pre-loaded word[i] = i+1 at DRAM 0x80020000.
+     * DMA writes into SPM at SPM_LOOPBACK_OFFSET via AXI data path.
      * ================================================================ */
     g_dma_done = 0;
 
@@ -152,67 +160,56 @@ void main(void)
         DMA_ENDPOINT_DRAM,          /* src = DRAM */
         DMA_ENDPOINT_CLUSTER_SPM,   /* dst = Cluster SPM */
         TEST_DRAM_SRC,              /* src_addr (DRAM physical) */
-        0,                          /* dst_addr (cluster-local offset) */
+        SPM_LOOPBACK_OFFSET,        /* dst_addr (cluster-local byte offset) */
         0,                          /* src_cluster_id (unused for DRAM) */
         0,                          /* dst_cluster_id = 0 */
         TEST_BEATS,                 /* count_d0 = 8 beats */
         1, 1, 1,                    /* count_d1/d2/d3 = 1 (flat 1D) */
-        BEAT_BYTES, 0, 0, 0,       /* src strides: contiguous, rest unused */
-        BEAT_BYTES, 0, 0, 0,       /* dst strides: contiguous, rest unused */
+        BEAT_BYTES, 0, 0, 0,       /* src strides: contiguous */
+        BEAT_BYTES, 0, 0, 0,       /* dst strides: contiguous */
         1                           /* tag = 1 */
     );
 
     wait_dma_done();
 
-    /* Verify: read cluster[0] SPM via MMIO and compare */
-    {
-        uint32_t ok = 1;
-        for (uint32_t i = 0; i < TEST_WORDS; i++) {
-            uint32_t expected = i + 1;
-            uint32_t actual   = mmio_read(CLUSTER_BASE + i * 4);
-            if (actual != expected) {
-                ok = 0;
-            }
-        }
-        TEST_ASSERT(1, ok);
-    }
-
-    /* Check DMA completion status */
+    /* T002: DRAM→SPM completed with correct tag */
     TEST_EQ(2, mmio_read(DMA_DONE_TAG), 1);
+    /* T003: No DMA error */
     TEST_EQ(3, mmio_read(DMA_ERR_CODE), 0);
+    /* T004: DMA should be idle after completion */
+    TEST_ASSERT(4, mmio_read(DMA_STATUS) & DMA_STATUS_IDLE);
 
     /* ================================================================
-     * Test 2: Cluster SPM → DRAM
+     * Step 2: Cluster SPM → DRAM  (loopback — second half)
+     *
+     * Read from same SPM offset, write to DRAM dst.
+     * C++ testbench will verify DRAM dst == original DRAM src post-sim.
      * ================================================================ */
-
-    /* Write known pattern to cluster[0] SPM at offset 0x100 */
-    for (uint32_t i = 0; i < TEST_WORDS; i++) {
-        mmio_write(CLUSTER_BASE + CL_SPM_TEST2_OFFSET + i * 4, 0xA0 + i);
-    }
-
     g_dma_done = 0;
 
     dma_submit_4d(
         DMA_ENDPOINT_CLUSTER_SPM,   /* src = Cluster SPM */
         DMA_ENDPOINT_DRAM,          /* dst = DRAM */
-        CL_SPM_TEST2_OFFSET,       /* src_addr (cluster-local offset) */
+        SPM_LOOPBACK_OFFSET,        /* src_addr (cluster-local byte offset) */
         TEST_DRAM_DST,              /* dst_addr (DRAM physical) */
         0,                          /* src_cluster_id = 0 */
         0,                          /* dst_cluster_id (unused for DRAM) */
         TEST_BEATS,                 /* count_d0 = 8 beats */
         1, 1, 1,                    /* count_d1/d2/d3 = 1 (flat 1D) */
-        BEAT_BYTES, 0, 0, 0,       /* src strides: contiguous, rest unused */
-        BEAT_BYTES, 0, 0, 0,       /* dst strides: contiguous, rest unused */
+        BEAT_BYTES, 0, 0, 0,       /* src strides: contiguous */
+        BEAT_BYTES, 0, 0, 0,       /* dst strides: contiguous */
         2                           /* tag = 2 */
     );
 
     wait_dma_done();
 
-    /* Check DMA completion status */
-    TEST_EQ(4, mmio_read(DMA_DONE_TAG), 2);
-    TEST_EQ(5, mmio_read(DMA_ERR_CODE), 0);
+    /* T005: SPM→DRAM completed with correct tag */
+    TEST_EQ(5, mmio_read(DMA_DONE_TAG), 2);
+    /* T006: No DMA error */
+    TEST_EQ(6, mmio_read(DMA_ERR_CODE), 0);
 
-    /* Note: DRAM contents are verified by the C++ testbench post-sim */
+    /* Note: DRAM dst contents verified by C++ testbench post-sim
+     *       (expects loopback: word[i] = i+1, matching DRAM src) */
 
     TEST_FINISH();
 }
