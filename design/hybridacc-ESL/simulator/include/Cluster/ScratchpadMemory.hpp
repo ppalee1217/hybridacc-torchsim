@@ -848,6 +848,12 @@ private:
         }
 
         // --- DMA read (lowest priority) ---
+        if (!dma_read_req_fifo_empty.read()) {
+            DEBUG_MSG(" DMA_RD_ARB: fifo_not_empty addr=0x" << std::hex << dma_read_req_fifo_dout.read().to_uint() << std::dec
+                      << " resp_full=" << dma_read_resp_fifo_full.read()
+                      << " inflight=" << dma_rd_inflight_cnt_reg.read().to_uint()
+                      << " @" << sc_time_stamp(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
+        }
         if (!dma_read_req_fifo_empty.read() &&
             !dma_read_resp_fifo_full.read() &&
             dma_rd_inflight_cnt_reg.read().to_uint() < DMA_MAX_OUTSTANDING) {
@@ -855,12 +861,21 @@ private:
             uint32_t  gwaddr = dma_read_req_fifo_dout.read().to_uint() / BYTES_PER_BANK_WORD;
             unsigned  grp    = gwaddr / GROUP_SPAN_WORDS;
 
+            DEBUG_MSG(" DMA_RD_ARB: gwaddr=" << gwaddr << " grp=" << grp
+                      << " group_busy=" << group_busy[grp]
+                      << " meta_full=" << (grp < NUM_GROUPS ? group_meta_fifo_full[grp].read() : true)
+                      << " @" << sc_time_stamp(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
+
             if (grp < NUM_GROUPS && !group_busy[grp] &&
                 !group_meta_fifo_full[grp].read()) {
 
                 unsigned lidx = gwaddr % GROUP_SPAN_WORDS;
                 unsigned bidx = (lidx / BANK_DEPTH) + grp * BANKS_PER_GROUP;
                 uint32_t row  = lidx % BANK_DEPTH;
+
+                DEBUG_MSG(" DMA_RD_ARB: lidx=" << lidx << " bidx=" << bidx << " row=" << row
+                          << " bank_ready=" << bank_req_ready_sig[bidx].read()
+                          << " @" << sc_time_stamp(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
 
                 // Back pressure: bank pipeline must be ready
                 if (bank_req_ready_sig[bidx].read()) {
@@ -929,7 +944,17 @@ private:
                 for (unsigned k = 0; k < BANKS_PER_GROUP; ++k)
                     if (!bank_resp_valid_sig[bbase + k].read()) { all_avail = false; break; }
             }
-            if (!all_avail) continue;
+            if (!all_avail) {
+                DEBUG_MSG(" resp_merge g=" << g << " STALL: all_avail=0 @" << sc_time_stamp(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
+                continue;
+            }
+
+            if (!meta.is_dma) {
+                unsigned p = meta.port_id;
+                if (port_resp_fifo_full[p].read()) {
+                    DEBUG_MSG(" resp_merge g=" << g << " STALL: port_resp_fifo_full[" << p << "]=1 @" << sc_time_stamp(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
+                }
+            }
 
             if (meta.is_dma) {
                 if (!dma_read_resp_fifo_full.read()) {

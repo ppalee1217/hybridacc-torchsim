@@ -23,7 +23,7 @@ template <
 	unsigned SPM_SRAM_BANK_WIDTH_BITS = 64,
 	unsigned SPM_SRAM_BANK_DEPTH_WORDS = 8192,
 	unsigned SPM_SRAM_BANK_LATENCY = 1,
-	unsigned SPM_SRAM_BANK_PIPELINE_DEPTH = 1,
+	unsigned SPM_SRAM_BANK_PIPELINE_DEPTH = 3,
 	unsigned SPM_ADDR_WIDTH = 32,
 	unsigned NOC_NUM_PORTS = 3,
 	unsigned NOC_PORT_WIDTH_BITS = 64,
@@ -550,9 +550,19 @@ private:
 			hddu_mmio_write_sig.write(false);
 			spm_pmu_rst_sig.write(false);
 
-			// Keep current read path and insert one wait-state during read data phase.
+			// Pipeline Control: Capture Address Phase for Next Cycle Data Phase
+			const bool sel = hsel_i.read();
+			const bool ready = hready_i.read();
+			const sc_uint<2> trans = htrans_i.read();
+
+			// Insert read wait-state starting from the ADDRESS phase so that
+			// hready goes LOW before the bridge's data-phase capture.
+			// Without this, the bridge and seq_ahb_ctrl run in the same delta-0,
+			// and the bridge reads stale ahb_rdata_reg.
 			const bool read_data_phase = ahb_active_reg.read() && !ahb_write_reg.read();
-			ahb_read_wait_reg.write(read_data_phase);
+			const bool is_trans_pre = sel && ready && !read_data_phase && (trans[1] != 0);
+			const bool read_addr_phase = is_trans_pre && !hwrite_i.read();
+			ahb_read_wait_reg.write(read_addr_phase || read_data_phase);
 
 			if (!power_enable_i.read()) {
 				ahb_active_reg.write(false);
@@ -561,12 +571,8 @@ private:
 				continue;
 			}
 
-			// Pipeline Control: Capture Address Phase for Next Cycle Data Phase
-			const bool sel = hsel_i.read();
-			const bool ready = hready_i.read();
-			const sc_uint<2> trans = htrans_i.read();
 			// HTRANS: 2=NONSEQ, 3=SEQ implies valid transfer
-			const bool is_trans = sel && ready && !ahb_read_wait_reg.read() && (trans[1] != 0);
+			const bool is_trans = is_trans_pre;
 
 			if (is_trans) {
 				ahb_addr_reg.write(haddr_i.read());
@@ -659,6 +665,7 @@ private:
 							// Clear pending once real status shows BUSY or DONE
 							if (read_value & ((1u << 1) | (1u << 4)))
 								hddu_start_pending_ = false;
+
 						}
 					} else if (in_range(addr, kCmdNocBase, kCmdNocSize)) {
 						const uint32_t off = addr - kCmdNocBase;
