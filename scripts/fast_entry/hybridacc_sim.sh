@@ -87,6 +87,8 @@ Options (for test-fw / run-task):
   --fw-check        Enable DSRAM firmware test result verification
   --max-cycles N    Override max simulation cycles (default: 500000)
   --mirror FILE     Load/dump DRAM mirror image
+  --trace FILE      Generate Perfetto trace JSON file
+  --trace-level N   Trace detail level: 1=core 2=cluster 3=noc 4=pe (default: 2)
   -M SIZE           DRAM size (e.g. 1M, 256M)
 
 Firmware tests:
@@ -125,7 +127,7 @@ do_build_debug() {
     cmake "$SIM_MODEL_DIR" \
         -DCMAKE_BUILD_TYPE=Debug \
         -DENABLE_DEBUG_UTILS=ON \
-        -DDEBUG_LEVEL_MIN=4 \
+        -DDEBUG_LEVEL_MIN=7 \
         2>&1 | tail -5
     make -j"$(nproc)" 2>&1
     popd > /dev/null
@@ -329,7 +331,7 @@ do_verify() {
     fi
     info "Running output verification for $dir"
 
-    uv run python -m hybridacc_verify.compare_golden "$dir"
+    uv run python -m hybridacc_verify.check.compare_golden "$dir"
 }
 
 # ── Main dispatch ──────────────────────────────────────────────────────────
