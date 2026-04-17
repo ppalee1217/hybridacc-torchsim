@@ -766,6 +766,15 @@ private:
 
     // ========================= Comb: PR Control =========================
     void comb_pr_static_signals() {
+        if (stage_reset.read()) {
+            pr_enable_sig.write(false);
+            pr_pid_sig.write(0);
+            pr_use_pcounter_sig.write(false);
+            pr_clear_regs_sig.write(true);
+            pr_clear_pcounter_sig.write(true);
+            return;
+        }
+
         EXE_A_State state = state_reg.read();
         pe_decode_signals_t decode;
 
@@ -817,6 +826,11 @@ private:
     }
 
     void comb_pr_write_en() {
+        if (stage_reset.read()) {
+            pr_vpid_write_en_sig.write(false);
+            return;
+        }
+
         EXE_A_State state = state_reg.read();
         bool en = false;
 
@@ -829,6 +843,11 @@ private:
     }
 
     void comb_pr_incr() {
+        if (stage_reset.read()) {
+            pr_incr_pcounter_sig.write(false);
+            return;
+        }
+
         EXE_A_State state = state_reg.read();
         bool incr = false;
 

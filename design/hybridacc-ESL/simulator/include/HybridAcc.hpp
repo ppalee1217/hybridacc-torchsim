@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "Core/CoreController.hpp"
 #include "Core/CmdToAhbBridge.hpp"
@@ -415,6 +416,23 @@ SC_MODULE(HybridAcc) {
 
     void set_cluster_power_enable(unsigned c, bool en) {
         if (c < NUM_CLUSTERS) sig_cluster_power_en[c].write(en);
+    }
+
+    std::pair<uint32_t, uint32_t> enable_perffeto_trace(uint32_t start_pid = 100,
+                                                        uint32_t start_tid = 1000) {
+        uint32_t next_pid = start_pid;
+        uint32_t next_tid = start_tid;
+
+        for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
+            if (!cluster[c]) {
+                continue;
+            }
+            auto cluster_next = cluster[c]->enable_perffeto_trace(next_pid, next_tid);
+            next_pid = cluster_next.first;
+            next_tid = cluster_next.second;
+        }
+
+        return {next_pid, next_tid};
     }
 
 private:

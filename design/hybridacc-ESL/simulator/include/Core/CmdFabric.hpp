@@ -206,6 +206,8 @@ private:
         WAIT_NLU,
         BCAST_SEQ,   ///< broadcasting to multiple clusters sequentially
     };
+    uint32_t last_req_addr_ = 0;
+    bool last_req_was_read_ = false;
 
     FabricState state_reg        = FabricState::IDLE;
     unsigned    bcast_idx_reg    = 0;    ///< current broadcast cluster index
@@ -330,6 +332,8 @@ private:
                             cl_cmd_req_wdata_o[dec.target_id].write(wdata);
                             state_reg = FabricState::WAIT_CLUSTER;
                             last_target_id_reg = dec.target_id;
+                            last_req_addr_ = dec.local_offset;
+                            last_req_was_read_ = !wr;
                         } else {
                             // Out of range
                             mmio_err_status_reg |= 0x3; // pending + decode_fault
@@ -438,8 +442,9 @@ private:
             case FabricState::WAIT_CLUSTER: {
                 const unsigned tid = last_target_id_reg;
                 if (tid < NUM_CLUSTERS && cl_cmd_resp_valid_i[tid].read()) {
+                    uint32_t rdata = cl_cmd_resp_rdata_i[tid].read().to_uint();
                     core_mmio_resp_valid_o.write(true);
-                    core_mmio_resp_rdata_o.write(cl_cmd_resp_rdata_i[tid].read());
+                    core_mmio_resp_rdata_o.write(rdata);
                     state_reg = FabricState::IDLE;
                 }
                 break;

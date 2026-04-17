@@ -615,9 +615,15 @@ public:
 
         while (true) {
             // On each clock edge, update registers with next values
-            decode_signals_reg.write(decode_signals_next.read());
-            valid_reg.write(valid_next.read());
-            halted_reg.write(halted_next.read());
+            if (stage_reset.read()) {
+                decode_signals_reg.write(pe_decode_signals_t());
+                valid_reg.write(false);
+                halted_reg.write(false);
+            } else {
+                decode_signals_reg.write(decode_signals_next.read());
+                valid_reg.write(valid_next.read());
+                halted_reg.write(halted_next.read());
+            }
 
             if (pe_running.read()) {
                 DEBUG_MSG("[EXE_M_Stage] Clocked: Valid=" << valid_reg.read()

@@ -1,0 +1,52 @@
+# Isolation Test B: Two INDEPENDENT multi-wave Conv3x3 ops
+# Both layers use separate tensors (Ia × Wa → Oa, Ib × Wb → Ob)
+# Purpose: Verify multi-layer firmware with multi-IC-wave execution
+# Both layers: IC=16, tile_ic=4, num_ic_tiles=4 → 4 IC waves each
+name: test_isolation_2x_multiwave
+hardware:
+  num_clusters: 1
+  num_pes: 48
+  num_bus: 3
+  spm_banks_per_group: 3
+  spm_bank_depth: 8192
+  dram_base: 0x80000000
+tensors:
+  inputA:
+    shape: [1, 14, 14, 16]
+    dtype: fp16
+    layout: NHWC
+  weightA:
+    shape: [16, 3, 3, 16]
+    dtype: fp16
+    layout: OIHW
+  outputA:
+    shape: [1, 12, 12, 16]
+    dtype: fp16
+    layout: NHWC
+  inputB:
+    shape: [1, 14, 14, 16]
+    dtype: fp16
+    layout: NHWC
+  weightB:
+    shape: [16, 3, 3, 16]
+    dtype: fp16
+    layout: OIHW
+  outputB:
+    shape: [1, 12, 12, 16]
+    dtype: fp16
+    layout: NHWC
+ops:
+  - name: convA
+    type: conv2d_3x3
+    inputs: [inputA, weightA]
+    outputs: [outputA]
+    attrs:
+      stride: 1
+      padding: 0
+  - name: convB
+    type: conv2d_3x3
+    inputs: [inputB, weightB]
+    outputs: [outputB]
+    attrs:
+      stride: 1
+      padding: 0

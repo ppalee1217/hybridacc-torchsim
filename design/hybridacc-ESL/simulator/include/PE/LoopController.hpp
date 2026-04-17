@@ -16,6 +16,7 @@ public:
     // Ports
     sc_in<bool> clk;
     sc_in<bool> reset_n;
+    sc_in<bool> stage_reset;
 
     sc_in<uint16_t> pc_in;
     sc_in<uint16_t> count_in;
@@ -29,6 +30,7 @@ public:
     SC_CTOR(LoopController)
         : clk("clk"),
           reset_n("reset_n"),
+                    stage_reset("stage_reset"),
           pc_in("pc_in"),
           count_in("count_in"),
           loop_in_en("loop_in_en"),
@@ -40,7 +42,7 @@ public:
         SC_CTHREAD(sequential_process, clk.pos());
         reset_signal_is(reset_n, false);
         SC_METHOD(combinational_process);
-        sensitive << loop_end_en << loopstack_size_sig << remaining_sig;
+        sensitive << stage_reset << loop_end_en << loopstack_size_sig << remaining_sig;
     }
 
     std::vector<LoopFrame> loopstack; // 使用 vector 來儲存 loop frames
@@ -61,6 +63,12 @@ public:
     // 組合邏輯: 決定是否跳轉
     // 必須是 Combinational，以便 IF_ID 在當前 cycle 決定 next_pc
     void combinational_process() {
+        if (stage_reset.read()) {
+            pc_out.write(0);
+            jump.write(false);
+            return;
+        }
+
         // pc_out 維持頂層 loop 起點
         if (loopstack_size_sig.read() == 0) {
             pc_out.write(0);
@@ -94,6 +102,15 @@ public:
         wait();
 
         while (true) {
+            if (stage_reset.read()) {
+                reset();
+                pc_start_reg.write(0);
+                loopstack_size_sig.write(0);
+                remaining_sig.write(0);
+                wait();
+                continue;
+            }
+
             // 1. 更新 loop stack 控制 (Push/Break)
             if (loop_in_en.read()) {
                 loopIn(pc_in.read(), count_in.read());

@@ -305,6 +305,7 @@ private:
                         load_phase_o.write(true);
                         busy_o.write(true);
                         ld_state = LdState::LD_FETCH;
+                        TRACE_EVENT("section_load", "Core", TRACE_BEGIN, 0, 0, "{}");
                         DEBUG_MSG("SectionLoader: kick entries=" << total_entries,
                                   DEBUG_LEVEL_CORE_COMPONENTS);
                     }
@@ -440,6 +441,7 @@ private:
                 load_phase_o.write(false);
                 busy_o.write(false);
                 done_o.write(true);
+                TRACE_EVENT("section_load", "Core", TRACE_END, 0, 0, "{}");
                 status_o.write(make_status(ld_state, entry_idx));
                 // DEBUG_MSG("SectionLoader: all entries loaded (" << total_entries << ")",
                 //           DEBUG_LEVEL_CORE_COMPONENTS);
@@ -454,6 +456,7 @@ private:
             case LdState::LD_ERR: {
                 load_phase_o.write(false);
                 busy_o.write(false);
+                TRACE_EVENT("section_load", "Core", TRACE_END, 0, 0, "{}");
                 status_o.write(make_status(ld_state, entry_idx));
                 DEBUG_MSG("SectionLoader: error code="
                           << err_code_o.read().to_uint()

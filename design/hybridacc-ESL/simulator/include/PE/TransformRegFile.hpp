@@ -111,24 +111,22 @@ SC_MODULE(TransformRegFile) {
             wait();
 
             while (true) {
-                if (enable.read()) {
-                    // Register logic
+                if (clear_regs.read()) {
+                    clear();
+                } else if (enable.read()) {
                     if (shift_en.read()) {
                         shift(shift_mode.read());
                     } else if (tid_write_en.read()) {
                         setT(tid.read(), tid_in.read());
                     } else if (vtid_write_en.read()) {
                         setVT(tid.read(), vtid_in.read());
-                    } else if (clear_regs.read()) {
-                        clear();
                     }
+                }
 
-                    // Counter logic
-                    if (incr_vcounter.read()) {
-                        vcounter.write(vcounter.read() + tid.read());
-                    } else if (clear_vcounter.read()) {
-                        vcounter.write(0);
-                    }
+                if (clear_vcounter.read()) {
+                    vcounter.write(0);
+                } else if (enable.read() && incr_vcounter.read()) {
+                    vcounter.write(vcounter.read() + tid.read());
                 }
                 wait();
             }

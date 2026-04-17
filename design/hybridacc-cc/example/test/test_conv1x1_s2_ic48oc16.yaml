@@ -1,0 +1,30 @@
+# T-1x1-S2: Conv1x1 Multi Wave, Single Output Tile — IC tiling
+name: test_conv1x1_s2_ic48oc16
+hardware:
+  num_clusters: 1
+  num_pes: 48
+  num_bus: 3
+  spm_banks_per_group: 3
+  spm_bank_depth: 8192
+  dram_base: 0x80000000
+tensors:
+  input:
+    shape: [1, 8, 8, 48]
+    dtype: fp16
+    layout: NHWC
+  weight:
+    shape: [16, 1, 1, 48]
+    dtype: fp16
+    layout: OIHW
+  output:
+    shape: [1, 8, 8, 16]
+    dtype: fp16
+    layout: NHWC
+ops:
+  - name: conv1x1
+    type: conv2d_1x1
+    inputs: [input, weight]
+    outputs: [output]
+    attrs:
+      stride: 1
+      padding: 0

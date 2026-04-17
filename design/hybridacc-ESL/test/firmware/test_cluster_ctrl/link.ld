@@ -1,0 +1,1 @@
+INCLUDE ../common/link.ld

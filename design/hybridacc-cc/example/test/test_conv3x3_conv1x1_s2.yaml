@@ -1,0 +1,47 @@
+# T-C3G-S2: Conv3x3 → Conv1x1 (simulating conv3x3→gemm pattern as 2-layer pipeline)
+# Note: True conv→gemm reshape mapping may not be supported by compiler.
+# Using conv3x3→conv1x1 as the 2-layer cross-layer relay test.
+name: test_conv3x3_conv1x1_s2
+hardware:
+  num_clusters: 1
+  num_pes: 48
+  num_bus: 3
+  spm_banks_per_group: 3
+  spm_bank_depth: 8192
+  dram_base: 0x80000000
+tensors:
+  input:
+    shape: [1, 10, 10, 12]
+    dtype: fp16
+    layout: NHWC
+  weight_conv:
+    shape: [12, 3, 3, 12]
+    dtype: fp16
+    layout: OIHW
+  mid:
+    shape: [1, 8, 8, 12]
+    dtype: fp16
+    layout: NHWC
+  weight_1x1:
+    shape: [24, 1, 1, 12]
+    dtype: fp16
+    layout: OIHW
+  output:
+    shape: [1, 8, 8, 24]
+    dtype: fp16
+    layout: NHWC
+ops:
+  - name: conv3x3_layer
+    type: conv2d_3x3
+    inputs: [input, weight_conv]
+    outputs: [mid]
+    attrs:
+      stride: 1
+      padding: 0
+  - name: conv1x1_layer
+    type: conv2d_1x1
+    inputs: [mid, weight_1x1]
+    outputs: [output]
+    attrs:
+      stride: 1
+      padding: 0

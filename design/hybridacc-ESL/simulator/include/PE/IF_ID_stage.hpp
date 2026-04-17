@@ -123,6 +123,7 @@ public:
         IM.reset_n(reset_n);
         loops.clk(clk);
         loops.reset_n(reset_n);
+        loops.stage_reset(stage_reset);
 
         // Instruction Memory connections
         IM.im_write_en(im_write_en);

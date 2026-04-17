@@ -1,0 +1,52 @@
+# Isolation Test A: Two INDEPENDENT single-wave Conv3x3 ops
+# Both layers use separate tensors (Ia × Wa → Oa, Ib × Wb → Ob)
+# Purpose: Verify multi-layer firmware works when layers don't share tensors
+# Both layers are single-wave (IC=4, tile_ic=4, num_ic=1)
+name: test_isolation_2x_singlewave
+hardware:
+  num_clusters: 1
+  num_pes: 48
+  num_bus: 3
+  spm_banks_per_group: 3
+  spm_bank_depth: 8192
+  dram_base: 0x80000000
+tensors:
+  inputA:
+    shape: [1, 16, 16, 4]
+    dtype: fp16
+    layout: NHWC
+  weightA:
+    shape: [16, 3, 3, 4]
+    dtype: fp16
+    layout: OIHW
+  outputA:
+    shape: [1, 14, 14, 16]
+    dtype: fp16
+    layout: NHWC
+  inputB:
+    shape: [1, 14, 14, 4]
+    dtype: fp16
+    layout: NHWC
+  weightB:
+    shape: [16, 3, 3, 4]
+    dtype: fp16
+    layout: OIHW
+  outputB:
+    shape: [1, 12, 12, 16]
+    dtype: fp16
+    layout: NHWC
+ops:
+  - name: convA
+    type: conv2d_3x3
+    inputs: [inputA, weightA]
+    outputs: [outputA]
+    attrs:
+      stride: 1
+      padding: 0
+  - name: convB
+    type: conv2d_3x3
+    inputs: [inputB, weightB]
+    outputs: [outputB]
+    attrs:
+      stride: 1
+      padding: 0

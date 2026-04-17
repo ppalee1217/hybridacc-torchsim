@@ -572,6 +572,7 @@ private:
                     // Clear transfer FIFO
                     sig_fifo_clear.write(true);
 
+                    TRACE_EVENT("dma_transfer", "DMA", TRACE_BEGIN, 0, 1, "{}");
                     // Start reading from source
                     fsm_state = DmaState::SRC_READ_ISSUE;
                 }
@@ -794,6 +795,7 @@ private:
                 done_tag_ = active_cmd.cmd_tag;
                 DEBUG_MSG("DmaEngine: done tag=" << active_cmd.cmd_tag,
                           DEBUG_LEVEL_CORE_COMPONENTS);
+                TRACE_EVENT("dma_transfer", "DMA", TRACE_END, 0, 1, "{}");
                 if (irq_en) dma_irq_o.write(true);
                 fsm_state = DmaState::IDLE;
                 break;
@@ -802,6 +804,7 @@ private:
                 done_tag_ = active_cmd.cmd_tag;
                 DEBUG_MSG("DmaEngine: error code=" << err_code_ << " tag=" << active_cmd.cmd_tag,
                           DEBUG_LEVEL_CORE_COMPONENTS);
+                TRACE_EVENT("dma_transfer", "DMA", TRACE_END, 0, 1, "{}");
                 if (irq_en) dma_irq_o.write(true);
                 // Drain FIFO on fatal
                 sig_fifo_clear.write(true);
