@@ -25,6 +25,8 @@ class TraceParser:
                 return cls([])
             try:
                 data = json.loads(txt)
+                if isinstance(data, dict):
+                    return cls(data.get("traceEvents", []))
                 if isinstance(data, list):
                     return cls(data)
             except json.JSONDecodeError:
