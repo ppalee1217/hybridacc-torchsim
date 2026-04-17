@@ -307,6 +307,24 @@ private:
 
 class FakeClusterSpm : public sc_module {
 public:
+    static constexpr uint32_t kClusterModeOffset = 0x2100u;
+    static constexpr uint32_t kClusterCtrlOffset = 0x2104u;
+    static constexpr uint32_t kClusterStatusOffset = 0x2108u;
+    static constexpr uint32_t kClusterErrorCodeOffset = 0x210Cu;
+    static constexpr uint32_t kClusterSubstateOffset = 0x2110u;
+
+    static constexpr uint32_t kClusterModeDirectDebug = 0u;
+    static constexpr uint32_t kClusterModeLayerManaged = 1u;
+    static constexpr uint32_t kClusterCtrlStart = (1u << 0);
+    static constexpr uint32_t kClusterCtrlStop = (1u << 1);
+    static constexpr uint32_t kClusterCtrlSoftReset = (1u << 2);
+    static constexpr uint32_t kClusterStatusIdle = (1u << 0);
+    static constexpr uint32_t kClusterStatusBusy = (1u << 1);
+    static constexpr uint32_t kClusterStatusDone = (1u << 2);
+    static constexpr uint32_t kClusterStatusQuiesced = (1u << 3);
+    static constexpr uint32_t kClusterSubstateIdle = 0u;
+    static constexpr uint32_t kClusterSubstateRunning = 2u;
+
     sc_in<bool> clk;
     sc_in<bool> reset_n;
 
@@ -391,6 +409,11 @@ public:
     }
 
 private:
+    uint32_t cluster_mode_reg_ = kClusterModeDirectDebug;
+    uint32_t cluster_status_reg_ = kClusterStatusIdle | kClusterStatusQuiesced;
+    uint32_t cluster_error_code_reg_ = 0u;
+    uint32_t cluster_substate_reg_ = kClusterSubstateIdle;
+
     sc_biguint<kClAxiDataWidth> read_data_beat(uint32_t addr) const {
         sc_biguint<kClAxiDataWidth> val = 0;
         for (unsigned b = 0; b < kDataBeatBytes; ++b) {
@@ -413,11 +436,53 @@ private:
     }
 
     void cmd_write_word(uint32_t addr, uint32_t val) {
+        if (addr == kClusterModeOffset) {
+            cluster_mode_reg_ = val;
+            return;
+        }
+        if (addr == kClusterCtrlOffset) {
+            if (cluster_mode_reg_ == kClusterModeLayerManaged) {
+                if (val & kClusterCtrlStart) {
+                    cluster_status_reg_ = kClusterStatusBusy;
+                    cluster_substate_reg_ = kClusterSubstateRunning;
+                    cluster_error_code_reg_ = 0u;
+                }
+                if (val & kClusterCtrlStop) {
+                    cluster_status_reg_ = kClusterStatusIdle | kClusterStatusDone | kClusterStatusQuiesced;
+                    cluster_substate_reg_ = kClusterSubstateIdle;
+                }
+                if (val & kClusterCtrlSoftReset) {
+                    cluster_status_reg_ = kClusterStatusIdle | kClusterStatusDone | kClusterStatusQuiesced;
+                    cluster_substate_reg_ = kClusterSubstateIdle;
+                    cluster_error_code_reg_ = 0u;
+                }
+            }
+            return;
+        }
+        if (addr == kClusterErrorCodeOffset) {
+            cluster_error_code_reg_ = val;
+            return;
+        }
         for (int b = 0; b < 4; ++b)
             mem_[addr + b] = (val >> (b * 8)) & 0xFF;
     }
 
     uint32_t cmd_read_word(uint32_t addr) const {
+        if (addr == kClusterModeOffset) {
+            return cluster_mode_reg_;
+        }
+        if (addr == kClusterCtrlOffset) {
+            return 0u;
+        }
+        if (addr == kClusterStatusOffset) {
+            return cluster_status_reg_;
+        }
+        if (addr == kClusterErrorCodeOffset) {
+            return cluster_error_code_reg_;
+        }
+        if (addr == kClusterSubstateOffset) {
+            return cluster_substate_reg_;
+        }
         // If none of the 4 bytes were ever written, return 0xDEADBEEF
         // (matches real HW default / BusStub behaviour).
         bool any_written = false;
@@ -436,6 +501,10 @@ private:
         cmd_resp_valid.write(false);
         cmd_resp_rdata.write(0);
         cluster_irq.write(false);
+        cluster_mode_reg_ = kClusterModeDirectDebug;
+        cluster_status_reg_ = kClusterStatusIdle | kClusterStatusQuiesced;
+        cluster_error_code_reg_ = 0u;
+        cluster_substate_reg_ = kClusterSubstateIdle;
         wait();
 
         while (true) {

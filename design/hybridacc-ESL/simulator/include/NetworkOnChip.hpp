@@ -74,6 +74,7 @@ public:
     sc_vector<sc_vector<VRDSIG<noc_addr_req_t>>> bus_to_pe_plo_req;
     sc_vector<sc_vector<VRDSIG<noc_response_t>>> pe_to_bus_plo_resp;
     sc_vector<sc_vector<sc_signal<bool>>> pe_busy;
+    sc_vector<sc_vector<sc_signal<bool>>> pe_halted;
 
     //  Internal signals - PE/PE
     sc_vector<sc_vector<VRDSIG<uint64_t>>> ln_pli_plo;
@@ -110,6 +111,7 @@ public:
           bus_to_pe_plo_req("bus_to_pe_plo_req"),
           pe_to_bus_plo_resp("pe_to_bus_plo_resp"),
           pe_busy("pe_busy"),
+          pe_halted("pe_halted"),
           ln_pli_plo("ln_pli_plo")
     {
         DEBUG_MSG("[Create] NetworkOnChip with " << NUM_PORTS << " ports, "
@@ -161,6 +163,10 @@ public:
         });
 
         pe_busy.init(NUM_PORTS, [this, config](const char* n, size_t i) {
+            return new sc_vector<sc_signal<bool>>(n, NUM_PES_PER_PORT);
+        });
+
+        pe_halted.init(NUM_PORTS, [this, config](const char* n, size_t i) {
             return new sc_vector<sc_signal<bool>>(n, NUM_PES_PER_PORT);
         });
 
@@ -271,6 +277,7 @@ private:
 
                 // PE busy signal
                 pe_inst.pe_busy(pe_busy[i][j]);
+                pe_inst.pe_halted(pe_halted[i][j]);
 
                 // Connect Local Network signals (PE-to-PE communication)
                 connect_vr_signals(pe_inst.ln_pli, ln_pli_plo[i][j]);
@@ -281,6 +288,89 @@ private:
     }
 
 public:
+    bool any_pe_busy() const {
+        for (size_t i = 0; i < NUM_PORTS; ++i) {
+            for (size_t j = 0; j < NUM_PES_PER_PORT; ++j) {
+                if (pe_busy[i][j].read()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool all_active_pes_halted() const {
+        for (size_t i = 0; i < NUM_PORTS; ++i) {
+            for (size_t j = 0; j < NUM_PES_PER_PORT; ++j) {
+                if (!router_enable[i][j].read()) {
+                    continue;
+                }
+                if (!pe_halted[i][j].read()) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    bool any_router_pending_resp() const {
+        for (size_t i = 0; i < NUM_PORTS; ++i) {
+            for (size_t j = 0; j < NUM_PES_PER_PORT; ++j) {
+                if (!router_enable[i][j].read()) {
+                    continue;
+                }
+                if (pes[i][j].router.has_pending_quiesce()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool any_router_fifo_nonempty() const {
+        for (size_t i = 0; i < NUM_PORTS; ++i) {
+            for (size_t j = 0; j < NUM_PES_PER_PORT; ++j) {
+                if (!router_enable[i][j].read()) {
+                    continue;
+                }
+                if (pes[i][j].router.any_fifo_nonempty()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    uint32_t status_word() const {
+        constexpr uint32_t kAnyPeBusyBit = 0u;
+        constexpr uint32_t kAllActivePesHaltedBit = 1u;
+        constexpr uint32_t kAnyRouterPendingRespBit = 2u;
+        constexpr uint32_t kAnyRouterFifoNonemptyBit = 3u;
+
+        uint32_t status = 0u;
+        if (any_pe_busy()) {
+            status |= (1u << kAnyPeBusyBit);
+        }
+        if (all_active_pes_halted()) {
+            status |= (1u << kAllActivePesHaltedBit);
+        }
+        if (any_router_pending_resp()) {
+            status |= (1u << kAnyRouterPendingRespBit);
+        }
+        if (any_router_fifo_nonempty()) {
+            status |= (1u << kAnyRouterFifoNonemptyBit);
+        }
+        return status;
+    }
+
+    /// NoC is quiesced when all PEs halted, all PE routers quiesced, and central router quiesced.
+    bool is_quiesced() const {
+        return all_active_pes_halted()
+            && !any_router_pending_resp()
+            && !any_router_fifo_nonempty()
+            && router.is_quiesced();
+    }
+
     std::pair<uint32_t, uint32_t> enable_perffeto_trace(uint32_t start_pid, uint32_t start_tid) {
         uint32_t next_pid = start_pid;
         uint32_t next_tid = start_tid;

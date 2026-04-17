@@ -69,10 +69,33 @@ public:
 	static constexpr uint32_t kCmdSpmPmuPort3TxnHi = 0x005C;
 	static constexpr uint32_t kCmdHdduBase = 0x1000;
 	static constexpr uint32_t kCmdNocData = 0x2000;
+	static constexpr uint32_t kCmdNocStatus = 0x2004;
+	static constexpr uint32_t kCmdClusterMode = 0x2100;
+	static constexpr uint32_t kCmdClusterCtrl = 0x2104;
+	static constexpr uint32_t kCmdClusterStatus = 0x2108;
+	static constexpr uint32_t kCmdClusterErrorCode = 0x210C;
+	static constexpr uint32_t kCmdClusterSubstate = 0x2110;
+
+	static constexpr uint32_t kClusterModeDirectDebug = 0u;
+	static constexpr uint32_t kClusterModeLayerManaged = 1u;
+	static constexpr uint32_t kClusterCtrlStart = (1u << 0);
+	static constexpr uint32_t kClusterCtrlStop = (1u << 1);
+	static constexpr uint32_t kClusterCtrlSoftReset = (1u << 2);
+	static constexpr uint32_t kClusterStatusIdle = (1u << 0);
+	static constexpr uint32_t kClusterStatusBusy = (1u << 1);
+	static constexpr uint32_t kClusterStatusDone = (1u << 2);
+	static constexpr uint32_t kClusterStatusQuiesced = (1u << 3);
+	static constexpr uint32_t kNocStatusAllActivePesHalted = (1u << 1);
+	static constexpr uint32_t kNocCmdReset = 0u;
+	static constexpr uint32_t kNocCmdStopPe = 3u;
+	static constexpr uint32_t kNocCmdStartPe = 4u;
 
 	static constexpr uint32_t kHdduPlaneEn = 0x808;
 	static constexpr uint32_t kHdduPlaneMode = 0x80C;
 	static constexpr uint32_t kHdduCtrl = 0x800;
+	static constexpr uint32_t kHdduCtrlStart     = (1u << 0); // aligned with HdduCtrlBit::START
+	static constexpr uint32_t kHdduCtrlStop      = (1u << 1); // aligned with HdduCtrlBit::STOP
+	static constexpr uint32_t kHdduCtrlSoftReset = (1u << 2); // aligned with HdduCtrlBit::SOFT_RESET
 	static constexpr uint32_t kHdduMaxOutstanding = 0x818;
 
 	static constexpr uint32_t kHdduAguBankStride = 0x100;
@@ -446,7 +469,7 @@ int sc_main(int argc, char* argv[]) {
 
 		const uint32_t b0 = ClusterUnitTestBench::kCmdHdduBase + 0u * ClusterUnitTestBench::kHdduAguBankStride;
 		bool ok = rb_ok;
-		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduCtrl, (1u << 1));
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduCtrl, ClusterUnitTestBench::kHdduCtrlStart);
 		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneEn, 0x1u);
 		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneMode, 0x0u);
 		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduMaxOutstanding, 4u);
@@ -488,7 +511,7 @@ int sc_main(int argc, char* argv[]) {
 
 		const uint32_t b2 = ClusterUnitTestBench::kCmdHdduBase + 2u * ClusterUnitTestBench::kHdduAguBankStride;
 		bool ok = rb_ok;
-		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduCtrl, (1u << 1));
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduCtrl, ClusterUnitTestBench::kHdduCtrlStart);
 		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneEn, 0x4u);
 		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneMode, 0x0u);
 		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduMaxOutstanding, 4u);
@@ -542,7 +565,7 @@ int sc_main(int argc, char* argv[]) {
 			after[p] = before[p];
 		}
 
-		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduCtrl, (1u << 1));
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduCtrl, ClusterUnitTestBench::kHdduCtrlStart);
 		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneEn, 0xFu);
 		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneMode, 0x0u);
 		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduMaxOutstanding, 8u);
@@ -593,7 +616,7 @@ int sc_main(int argc, char* argv[]) {
 		bool ok = tb.ahb_read(ClusterUnitTestBench::kCmdSpmPmuPort3TxnLo, p3_before);
 
 		const uint32_t b3 = ClusterUnitTestBench::kCmdHdduBase + 3u * ClusterUnitTestBench::kHdduAguBankStride;
-		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduCtrl, (1u << 1));
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduCtrl, ClusterUnitTestBench::kHdduCtrlStart);
 		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneEn, 0x8u);
 		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduRegBaseAddr + 3u * ClusterUnitTestBench::kHdduAguBankStride, 0x200u);
 		ok = ok && tb.ahb_write(b3 + ClusterUnitTestBench::kHdduRegIter01, (1u << 16) | 1u);
@@ -645,11 +668,111 @@ int sc_main(int argc, char* argv[]) {
 		return TestResult{"", w_ok && r_ok && v == 0x12345674, "NOC_CMD=0x" + std::to_string(v)};
 	});
 
-	run("NoC unknown offset reads zero", [&]() {
+	run("NoC status read exposes halted bit", [&]() {
 		tb.reset_with_power_on();
 		uint32_t v = 1;
-		bool r_ok = tb.ahb_read(0x2004, v);
-		return TestResult{"", r_ok && v == 0, "NOC[0x2004]=" + std::to_string(v)};
+		bool r_ok = tb.ahb_read(ClusterUnitTestBench::kCmdNocStatus, v);
+		return TestResult{"", r_ok && ((v & ClusterUnitTestBench::kNocStatusAllActivePesHalted) != 0u),
+			"NOC_STATUS=0x" + std::to_string(v)};
+	});
+
+	run("Cluster mode register write/read", [&]() {
+		tb.reset_with_power_on();
+		bool w_ok = tb.ahb_write(ClusterUnitTestBench::kCmdClusterMode,
+			ClusterUnitTestBench::kClusterModeLayerManaged);
+		uint32_t v = 0;
+		bool r_ok = tb.ahb_read(ClusterUnitTestBench::kCmdClusterMode, v);
+		return TestResult{"", w_ok && r_ok && v == ClusterUnitTestBench::kClusterModeLayerManaged,
+			"CLUSTER_MODE=" + std::to_string(v)};
+	});
+
+	run("Layer-managed cluster start preserves direct SPM/HDDU writes", [&]() {
+		tb.reset_with_power_on();
+		bool ok = tb.ahb_write(ClusterUnitTestBench::kCmdClusterMode,
+			ClusterUnitTestBench::kClusterModeLayerManaged);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlStart);
+
+		uint32_t noc_cmd = 0;
+		uint32_t cluster_status = 0;
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdNocData, noc_cmd);
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdClusterStatus, cluster_status);
+
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdSpmCfgMap, 0x5A);
+		uint32_t cfg_map = 0;
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdSpmCfgMap, cfg_map);
+
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneEn, 0x3u);
+		uint32_t plane_en = 0;
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneEn, plane_en);
+
+		const bool cluster_started = ((noc_cmd & 0xFu) == ClusterUnitTestBench::kNocCmdStartPe)
+			&& ((cluster_status & ClusterUnitTestBench::kClusterStatusBusy) != 0u);
+		const bool direct_ok = (cfg_map == 0x5Au) && ((plane_en & 0xFFFFu) == 0x3u);
+		return TestResult{"", ok && cluster_started && direct_ok,
+			"noc_cmd=0x" + std::to_string(noc_cmd)
+			+ ", cluster_status=0x" + std::to_string(cluster_status)
+			+ ", cfg_map=0x" + std::to_string(cfg_map)};
+	});
+
+	run("Layer-managed cluster stop reaches done and quiesced", [&]() {
+		tb.reset_with_power_on();
+		bool ok = tb.ahb_write(ClusterUnitTestBench::kCmdClusterMode,
+			ClusterUnitTestBench::kClusterModeLayerManaged);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlStart);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlStop);
+
+		uint32_t noc_cmd = 0;
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdNocData, noc_cmd);
+
+		uint32_t cluster_status = 0;
+		bool reached = false;
+		for (int i = 0; i < 8 && ok; ++i) {
+			tb.tick(1);
+			ok = tb.ahb_read(ClusterUnitTestBench::kCmdClusterStatus, cluster_status);
+			const uint32_t required = ClusterUnitTestBench::kClusterStatusDone
+				| ClusterUnitTestBench::kClusterStatusQuiesced;
+			if ((cluster_status & required) == required) {
+				reached = true;
+				break;
+			}
+		}
+
+		return TestResult{"", ok && ((noc_cmd & 0xFu) == ClusterUnitTestBench::kNocCmdStopPe) && reached,
+			"noc_cmd=0x" + std::to_string(noc_cmd)
+			+ ", cluster_status=0x" + std::to_string(cluster_status)};
+	});
+
+	run("Layer-managed cluster soft reset issues NOC reset", [&]() {
+		tb.reset_with_power_on();
+		bool ok = tb.ahb_write(ClusterUnitTestBench::kCmdClusterMode,
+			ClusterUnitTestBench::kClusterModeLayerManaged);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlStart);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlSoftReset);
+
+		uint32_t noc_cmd = 0;
+		uint32_t cluster_status = 0;
+		bool reached = false;
+		for (int i = 0; i < 8 && ok; ++i) {
+			tb.tick(1);
+			ok = tb.ahb_read(ClusterUnitTestBench::kCmdNocData, noc_cmd);
+			ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdClusterStatus, cluster_status);
+			const uint32_t required = ClusterUnitTestBench::kClusterStatusIdle
+				| ClusterUnitTestBench::kClusterStatusDone;
+			if (((noc_cmd & 0xFu) == ClusterUnitTestBench::kNocCmdReset)
+				&& ((cluster_status & required) == required)) {
+				reached = true;
+				break;
+			}
+		}
+
+		return TestResult{"", ok && reached,
+			"noc_cmd=0x" + std::to_string(noc_cmd)
+			+ ", cluster_status=0x" + std::to_string(cluster_status)};
 	});
 
 	run("Out-of-range MMIO reads zero", [&]() {
@@ -706,6 +829,182 @@ int sc_main(int argc, char* argv[]) {
 		uint32_t v = 0;
 		bool r_ok = tb.ahb_read(ClusterUnitTestBench::kCmdSpmCfgMap, v);
 		return TestResult{"", w_ok && r_ok && v == 0, "CFG_MAP_after_power_cycle=0x" + std::to_string(v)};
+	});
+
+	// ── Multi-layer lifecycle and mixed-control scenarios ──
+
+	run("Multi-layer: START->STOP->quiesce->SOFT_RESET->START", [&]() {
+		tb.reset_with_power_on();
+		bool ok = tb.ahb_write(ClusterUnitTestBench::kCmdClusterMode,
+			ClusterUnitTestBench::kClusterModeLayerManaged);
+
+		// Layer 0: START
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlStart);
+		uint32_t st = 0;
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdClusterStatus, st);
+		bool layer0_busy = (st & ClusterUnitTestBench::kClusterStatusBusy) != 0;
+
+		// Layer 0: STOP
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlStop);
+
+		// Wait for DONE+QUIESCED
+		bool stop_done = false;
+		for (int i = 0; i < 16 && ok; ++i) {
+			tb.tick(1);
+			ok = tb.ahb_read(ClusterUnitTestBench::kCmdClusterStatus, st);
+			if ((st & (ClusterUnitTestBench::kClusterStatusDone | ClusterUnitTestBench::kClusterStatusQuiesced))
+				== (ClusterUnitTestBench::kClusterStatusDone | ClusterUnitTestBench::kClusterStatusQuiesced)) {
+				stop_done = true;
+				break;
+			}
+		}
+
+		// SOFT_RESET
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlSoftReset);
+		bool reset_done = false;
+		for (int i = 0; i < 8 && ok; ++i) {
+			tb.tick(1);
+			ok = tb.ahb_read(ClusterUnitTestBench::kCmdClusterStatus, st);
+			uint32_t noc_cmd = 0;
+			tb.ahb_read(ClusterUnitTestBench::kCmdNocData, noc_cmd);
+			if ((noc_cmd & 0xFu) == ClusterUnitTestBench::kNocCmdReset
+				&& (st & ClusterUnitTestBench::kClusterStatusDone)) {
+				reset_done = true;
+				break;
+			}
+		}
+
+		// Layer 1: START again
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlStart);
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdClusterStatus, st);
+		bool layer1_busy = (st & ClusterUnitTestBench::kClusterStatusBusy) != 0;
+
+		return TestResult{"", ok && layer0_busy && stop_done && reset_done && layer1_busy,
+			"l0_busy=" + std::to_string(layer0_busy) + " stop_done=" + std::to_string(stop_done)
+			+ " reset_done=" + std::to_string(reset_done) + " l1_busy=" + std::to_string(layer1_busy)};
+	});
+
+	run("Repeated START/STOP across two layers", [&]() {
+		tb.reset_with_power_on();
+		bool ok = tb.ahb_write(ClusterUnitTestBench::kCmdClusterMode,
+			ClusterUnitTestBench::kClusterModeLayerManaged);
+
+		bool both_ok = true;
+		for (int layer = 0; layer < 2; ++layer) {
+			ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+				ClusterUnitTestBench::kClusterCtrlStart);
+			uint32_t st = 0;
+			ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdClusterStatus, st);
+			both_ok = both_ok && ((st & ClusterUnitTestBench::kClusterStatusBusy) != 0);
+
+			ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+				ClusterUnitTestBench::kClusterCtrlStop);
+			bool done = false;
+			for (int i = 0; i < 16 && ok; ++i) {
+				tb.tick(1);
+				ok = tb.ahb_read(ClusterUnitTestBench::kCmdClusterStatus, st);
+				if ((st & ClusterUnitTestBench::kClusterStatusDone) != 0) {
+					done = true;
+					break;
+				}
+			}
+			both_ok = both_ok && done;
+		}
+
+		return TestResult{"", ok && both_ok, "both_layers_ok=" + std::to_string(both_ok)};
+	});
+
+	run("Cluster START preserves direct HDDU/AGU/SPM writes", [&]() {
+		tb.reset_with_power_on();
+		bool ok = tb.ahb_write(ClusterUnitTestBench::kCmdClusterMode,
+			ClusterUnitTestBench::kClusterModeLayerManaged);
+
+		// Write SPM cfg_map, HDDU plane_en, and an AGU register BEFORE cluster START
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdSpmCfgMap, 0xBB);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneEn, 0x5u);
+
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlStart);
+
+		// Verify registers survived cluster START
+		uint32_t cfg_map = 0, plane_en = 0;
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdSpmCfgMap, cfg_map);
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdHdduBase + ClusterUnitTestBench::kHdduPlaneEn, plane_en);
+
+		return TestResult{"", ok && cfg_map == 0xBBu && (plane_en & 0xFFFF) == 0x5u,
+			"cfg_map=0x" + std::to_string(cfg_map) + " plane_en=0x" + std::to_string(plane_en & 0xFFFF)};
+	});
+
+	run("Substate transitions: IDLE->RUNNING->(STOPPING)->IDLE", [&]() {
+		tb.reset_with_power_on();
+		bool ok = tb.ahb_write(ClusterUnitTestBench::kCmdClusterMode,
+			ClusterUnitTestBench::kClusterModeLayerManaged);
+
+		uint32_t ss = 0;
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdClusterSubstate, ss);
+		bool idle0 = (ss == static_cast<uint32_t>(cluster::ClusterSubstate::IDLE));
+
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlStart);
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdClusterSubstate, ss);
+		bool running = (ss == static_cast<uint32_t>(cluster::ClusterSubstate::RUNNING));
+
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlStop);
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdClusterSubstate, ss);
+		// With plain-variable ClusterControlUnit, background_tick may resolve
+		// STOPPING→IDLE in the same cycle if NoC is already quiesced.
+		bool stopping_or_idle = (ss == static_cast<uint32_t>(cluster::ClusterSubstate::STOPPING)
+			|| ss == static_cast<uint32_t>(cluster::ClusterSubstate::IDLE));
+
+		// Eventually reaches IDLE
+		bool back_idle = false;
+		for (int i = 0; i < 16 && ok; ++i) {
+			ok = tb.ahb_read(ClusterUnitTestBench::kCmdClusterSubstate, ss);
+			if (ss == static_cast<uint32_t>(cluster::ClusterSubstate::IDLE)) {
+				back_idle = true;
+				break;
+			}
+			tb.tick(1);
+		}
+
+		return TestResult{"", ok && idle0 && running && stopping_or_idle && back_idle,
+			"idle0=" + std::to_string(idle0) + " running=" + std::to_string(running)
+			+ " stop_or_idle=" + std::to_string(stopping_or_idle) + " back_idle=" + std::to_string(back_idle)};
+	});
+
+	run("SOFT_RESET when active reaches IDLE via quiesce", [&]() {
+		tb.reset_with_power_on();
+		bool ok = tb.ahb_write(ClusterUnitTestBench::kCmdClusterMode,
+			ClusterUnitTestBench::kClusterModeLayerManaged);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlStart);
+		ok = ok && tb.ahb_write(ClusterUnitTestBench::kCmdClusterCtrl,
+			ClusterUnitTestBench::kClusterCtrlSoftReset);
+
+		uint32_t ss = 0;
+		ok = ok && tb.ahb_read(ClusterUnitTestBench::kCmdClusterSubstate, ss);
+		// May be WAIT_QUIESCED or already resolved to IDLE
+		bool wait_q_or_idle = (ss == static_cast<uint32_t>(cluster::ClusterSubstate::WAIT_QUIESCED)
+			|| ss == static_cast<uint32_t>(cluster::ClusterSubstate::IDLE));
+
+		// Eventually returns to IDLE
+		bool back_idle = false;
+		for (int i = 0; i < 16 && ok; ++i) {
+			ok = tb.ahb_read(ClusterUnitTestBench::kCmdClusterSubstate, ss);
+			if (ss == static_cast<uint32_t>(cluster::ClusterSubstate::IDLE)) {
+				back_idle = true;
+				break;
+			}
+			tb.tick(1);
+		}
+
+		return TestResult{"", ok && wait_q_or_idle && back_idle,
+			"wq_or_idle=" + std::to_string(wait_q_or_idle) + " back_idle=" + std::to_string(back_idle)};
 	});
 
 	print_report(results, "ComputeCluster Unit Tests (Basic Debug/Check)");

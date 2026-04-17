@@ -14,16 +14,18 @@ namespace hybridacc {
 namespace cluster {
 
 enum class AguCtrlBit : int {
-	CTRL_GEN_START = 0,
-	CTRL_GEN_STOP = 1,
-	CTRL_ULTRA = 3,
+	CTRL_GEN_START = 0,      // bit 0 – aligned with UnifiedCtrlBit::START
+	CTRL_GEN_STOP  = 1,      // bit 1 – aligned with UnifiedCtrlBit::STOP
+	CTRL_SOFT_RESET = 2,     // bit 2 – aligned with UnifiedCtrlBit::SOFT_RESET
+	CTRL_ULTRA     = 3,      // bit 3 – AGU-specific ultra mode
 };
 
 enum class AguStatusBit : int {
-	STATUS_BUSY = 0,
-	STATUS_DONE = 1,
-	STATUS_ERROR = 2,
-	STATUS_STALL = 3,
+	STATUS_IDLE     = 0,     // bit 0 – aligned with UnifiedStatusBit::IDLE
+	STATUS_BUSY     = 1,     // bit 1 – aligned with UnifiedStatusBit::BUSY
+	STATUS_DONE     = 2,     // bit 2 – aligned with UnifiedStatusBit::DONE
+	STATUS_QUIESCED = 3,     // bit 3 – aligned with UnifiedStatusBit::QUIESCED
+	STATUS_ERROR    = 4,     // bit 4 – aligned with UnifiedStatusBit::ERROR
 };
 
 // -----------------------------------------------------------------------------
@@ -51,8 +53,8 @@ public:
 		REG_STRIDE1     = 0x14, // 32-bit stride for idx1 (unit: word64)
 		REG_STRIDE2     = 0x18, // 32-bit stride for idx2 (unit: word64)
 		REG_STRIDE3     = 0x1C, // 32-bit stride for idx3 (unit: word64)
-		REG_CTRL        = 0x20, // bit0=gen start, bit1=gen stop, bit3=ultra
-		REG_STATUS      = 0x24, // bit0=busy, bit1=done, bit2=error, bit3=stalled
+		REG_CTRL        = 0x20, // bit0=start, bit1=stop, bit2=soft_reset, bit3=ultra
+		REG_STATUS      = 0x24, // bit0=idle, bit1=busy, bit2=done, bit3=quiesced, bit4=error
 		REG_LANE_CFG    = 0x28, // bit0=idx0 to addr, bit1=idx1 to addr, ...
 								// bit8=idx0 to tag, bit9=idx1 to tag, ...
 		REG_TAG_BASE    = 0x40, // 32-bit tag base (only low 6 bit used)
@@ -420,10 +422,11 @@ private:
 			case REG_STRIDE3: r = stride_reg[3].read(); break;
 			case REG_CTRL: r = ctrl_reg.read(); break;
 			case REG_STATUS:
-				r[0] = busy_reg.read();
-				r[1] = done_reg.read();
-				r[2] = error_reg.read();
-				r[3] = stalled_reg.read();
+				r[0] = !busy_reg.read() && !done_reg.read() && !error_reg.read(); // IDLE
+				r[1] = busy_reg.read();     // BUSY
+				r[2] = done_reg.read();     // DONE
+				r[3] = !busy_reg.read() && !stalled_reg.read(); // QUIESCED
+				r[4] = error_reg.read();    // ERROR
 				break;
 			case REG_LANE_CFG: r = lane_cfg_reg.read(); break;
 			case REG_TAG_BASE: r = tag_base_reg.read(); break;

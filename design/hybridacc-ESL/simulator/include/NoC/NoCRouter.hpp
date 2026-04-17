@@ -121,7 +121,7 @@ public:
         ps_fifo.pop(ps_fifo_pop_sig);
         ps_fifo.empty(ps_fifo_empty_sig);
         ps_fifo.full(ps_fifo_full_sig);
-        ps_fifo.clear(zero_signal);
+        ps_fifo.clear(fifo_flush);
 
         pd_fifo.clk(clk);
         pd_fifo.reset_n(reset_n);
@@ -131,7 +131,7 @@ public:
         pd_fifo.pop(pd_fifo_pop_sig);
         pd_fifo.empty(pd_fifo_empty_sig);
         pd_fifo.full(pd_fifo_full_sig);
-        pd_fifo.clear(zero_signal);
+        pd_fifo.clear(fifo_flush);
 
         pli_fifo.clk(clk);
         pli_fifo.reset_n(reset_n);
@@ -141,7 +141,7 @@ public:
         pli_fifo.pop(pli_fifo_pop_sig);
         pli_fifo.empty(pli_fifo_empty_sig);
         pli_fifo.full(pli_fifo_full_sig);
-        pli_fifo.clear(zero_signal);
+        pli_fifo.clear(fifo_flush);
 
         plo_fifo.clk(clk);
         plo_fifo.reset_n(reset_n);
@@ -151,7 +151,7 @@ public:
         plo_fifo.pop(plo_fifo_pop_sig);
         plo_fifo.empty(plo_fifo_empty_sig);
         plo_fifo.full(plo_fifo_full_sig);
-        plo_fifo.clear(zero_signal);
+        plo_fifo.clear(fifo_flush);
 
         resp_fifo.clk(clk);
         resp_fifo.reset_n(reset_n);
@@ -161,7 +161,7 @@ public:
         resp_fifo.pop(resp_fifo_pop_sig);
         resp_fifo.empty(resp_fifo_empty_sig);
         resp_fifo.full(resp_fifo_full_sig);
-        resp_fifo.clear(zero_signal);
+        resp_fifo.clear(fifo_flush);
 
         // Register sequential process
         SC_CTHREAD(seq_process, clk.pos());
@@ -291,12 +291,12 @@ private:
     // Internal signal for Rx stall
     sc_signal<bool> rx_stall_sig;
 
-    sc_signal<bool> zero_signal;
+    sc_signal<bool> fifo_flush;
 
     // === Sequential Process ===
     void seq_process() {
         // Reset initialization
-        zero_signal.write(false);
+        fifo_flush.write(false);
         ScanChainFormat init_config;
         init_config.ps_id = 0;
         init_config.pd_id = 0;
@@ -313,6 +313,13 @@ private:
         wait();
 
         while (true) {
+            // Flush all NoC FIFOs for 1 cycle on CMD_START_PE
+            bool cmd_active = command_mode.read();
+            sc_uint<32> cmd_val = command_data.read();
+            message_command_t cmd_type = static_cast<message_command_t>(cmd_val.range(3, 0).to_uint());
+            bool flush = cmd_active && (cmd_type == message_command_t::CMD_START_PE);
+            fifo_flush.write(flush);
+
             scan_chain_data_reg.write(scan_chain_data_next.read());
             scan_chain_enable_reg.write(scan_chain_enable_next.read());
             pending_read_reg.write(pending_read_next.read());
@@ -814,6 +821,23 @@ private:
     bool trace_init = false;
 
 public:
+    bool has_pending_plo_response() const {
+        return pending_read_reg.read() || pending_read_ultra_reg.read();
+    }
+
+    bool any_fifo_nonempty() const {
+        return !ps_fifo_empty_sig.read()
+            || !pd_fifo_empty_sig.read()
+            || !pli_fifo_empty_sig.read()
+            || !plo_fifo_empty_sig.read()
+            || !resp_fifo_empty_sig.read();
+    }
+
+    /// Central router is quiesced when all FIFOs are empty and no pending PLO response.
+    bool is_quiesced() const {
+        return !any_fifo_nonempty() && !has_pending_plo_response();
+    }
+
     void set_trace_id(int id) { trace_id = id; }
     void set_trace_context(uint32_t pid, int tid_base) {
         trace_pid = pid;

@@ -209,7 +209,7 @@ public:
 	void cfg_hddu_global(uint32_t plane_en, uint32_t plane_mode) {
 		hooks_.mmio_write(CLUSTER_HDDU_BASE + HDDU_PLANE_EN, plane_en);
 		hooks_.mmio_write(CLUSTER_HDDU_BASE + HDDU_PLANE_MODE, plane_mode);
-		hooks_.mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrllBit::CTRL_START));
+		hooks_.mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrlBit::START));
 	}
 
 	void noc_cmd_write(uint32_t packed_cmd) {
@@ -235,11 +235,11 @@ public:
 
 	void start_all() {
 		noc_cmd_write(pack_noc_cmd(CMD_START_PE, 0));
-		hooks_.mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrllBit::CTRL_START));
+		hooks_.mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrlBit::START));
 	}
 
 	void stop_all() {
-		hooks_.mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrllBit::CTRL_STOP));
+		hooks_.mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrlBit::STOP));
 		noc_cmd_write(pack_noc_cmd(CMD_STOP_PE, 0));
 	}
 

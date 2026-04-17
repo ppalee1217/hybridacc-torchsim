@@ -11,6 +11,7 @@
  * CLI:
  *   hybridacc-sim [-M dram_size(K/M/G)] [--mirror file.bin]
  *                 [--max-cycles N] [--core-debug] [--dma-check]
+ *                 [--trace file.json] [--trace-level N]
  *                 <firmware.elf>
  */
 
@@ -50,10 +51,22 @@ static uint64_t parse_size(const std::string& s) {
     return val;
 }
 
+static bool parse_trace_level(const std::string& s, uint32_t& out_level) {
+    char* end = nullptr;
+    unsigned long val = std::strtoul(s.c_str(), &end, 10);
+    if (end == nullptr || *end != '\0' || val < 1 || val > 4) {
+        return false;
+    }
+    out_level = static_cast<uint32_t>(val);
+    return true;
+}
+
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " [-M dram_size] [--mirror file.bin] [--max-cycles N]"
-              << " [--core-debug] [--dma-check] <firmware.elf>\n";
+              << " [--core-debug] [--dma-check]"
+              << " [--trace file.json] [--trace-level N]"
+              << " <firmware.elf>\n";
 }
 
 // ============================================================================
@@ -212,6 +225,8 @@ static void dump_mirror(const FakeDram& dram, const std::string& path,
 // ============================================================================
 
 static constexpr unsigned NUM_CLUSTERS = 1;
+static constexpr uint32_t kClusterTraceStartPid = 100;
+static constexpr uint32_t kClusterTraceStartTid = 1000;
 
 // DRAM addresses for manifest / payload
 static constexpr uint32_t kManifestDramAddr = 0x80000000;
@@ -234,6 +249,8 @@ int sc_main(int argc, char* argv[]) {
     bool core_debug = false;
     bool dma_check = false;
     bool fw_check = false;
+    std::string trace_path;
+    uint32_t trace_level = 2;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -249,6 +266,14 @@ int sc_main(int argc, char* argv[]) {
             fw_check = true;
         } else if (arg == "--dma-check") {
             dma_check = true;
+        } else if (arg == "--trace" && i + 1 < argc) {
+            trace_path = argv[++i];
+        } else if (arg == "--trace-level" && i + 1 < argc) {
+            if (!parse_trace_level(argv[++i], trace_level)) {
+                std::cerr << "[SIM] Invalid trace level: expected 1..4\n";
+                print_usage(argv[0]);
+                return 1;
+            }
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -506,6 +531,23 @@ int sc_main(int argc, char* argv[]) {
     }
 
     // ========================================================================
+    // Trace setup
+    // ========================================================================
+    if (!trace_path.empty()) {
+        PerfettoTrace::getInstance().setLevel(trace_level);
+        PerfettoTrace::getInstance().open(trace_path);
+        dut.enable_perffeto_trace(kClusterTraceStartPid, kClusterTraceStartTid);
+
+        std::cout << "[SIM] Trace enabled: " << trace_path
+                  << " (level " << trace_level << ")" << std::endl;
+
+        // Host-side trace lanes use fixed pid/tid values.
+        TRACE_THREAD_NAME(0, 0, "CPU Pipeline");
+        TRACE_THREAD_NAME(0, 1, "DMA Engine");
+        TRACE_THREAD_NAME(0, 2, "DRAM");
+    }
+
+    // ========================================================================
     // Reset and run
     // ========================================================================
 
@@ -519,6 +561,14 @@ int sc_main(int argc, char* argv[]) {
 
     std::cout << "[SIM] Simulation ended at " << sc_time_stamp() << std::endl;
     dram.print_oob_summary();
+
+    // ========================================================================
+    // Write trace file
+    // ========================================================================
+    if (!trace_path.empty()) {
+        PerfettoTrace::getInstance().close();
+        std::cout << "[SIM] Trace written to " << trace_path << std::endl;
+    }
 
     // ========================================================================
     // Post-simulation: dump mirror if specified

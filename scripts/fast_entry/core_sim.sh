@@ -39,6 +39,7 @@ CORE_SIM_TESTS=(
     empty
     test_alu
     test_branch
+    test_cluster_ctrl
     test_compound
     test_csr
     test_diag
@@ -52,6 +53,7 @@ CORE_SIM_TESTS=(
     test_sram_timing
     test_stack
     test_trap
+    test_wfi_timer
 )
 
 # ── Pretty print ──────────────────────────────────────────────────────────

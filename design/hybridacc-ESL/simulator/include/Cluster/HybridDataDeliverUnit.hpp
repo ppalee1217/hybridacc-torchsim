@@ -24,17 +24,17 @@ enum PlaneId : int {
 };
 
 enum class HdduStatusBit : int {
-	IDLE = 0,
-	BUSY = 1,
-	DONE = 2,
-	STALL = 3,
-	ERROR = 4,
+	IDLE     = 0,            // bit 0 – aligned with UnifiedStatusBit::IDLE
+	BUSY     = 1,            // bit 1 – aligned with UnifiedStatusBit::BUSY
+	DONE     = 2,            // bit 2 – aligned with UnifiedStatusBit::DONE
+	QUIESCED = 3,            // bit 3 – aligned with UnifiedStatusBit::QUIESCED (was STALL)
+	ERROR    = 4,            // bit 4 – aligned with UnifiedStatusBit::ERROR
 };
 
-enum class HdduCtrllBit : int {
-	CTRL_RESET = 0,
-	CTRL_START = 1,
-	CTRL_STOP = 2,
+enum class HdduCtrlBit : int {
+	START      = 0,          // bit 0 – aligned with UnifiedCtrlBit::START
+	STOP       = 1,          // bit 1 – aligned with UnifiedCtrlBit::STOP
+	SOFT_RESET = 2,          // bit 2 – aligned with UnifiedCtrlBit::SOFT_RESET
 };
 
 enum class HdduErrorCode : int {
@@ -591,7 +591,7 @@ private:
 		trace_state(last_state_rx, rx_state, "HDDU_Rx", tid_rx,
 					std::string("{\"valid\": ") + bool_to_json(rx_valid)
 					+ ", \"ready\": " + bool_to_json(rx_ready)
-					+ ", \"pending_addr\": " + (write_addr_fifo_empty_out.read() ? std::string("0") : std::string("1+"))
+					+ ", \"pending_addr\": \"" + (write_addr_fifo_empty_out.read() ? std::string("0") : std::string("1+")) + "\""
 					+ ", \"write_addr_fifo\": \"" + write_addr_fifo_state + "\""
 					+ ", \"spm_req_fifo\": \"" + spm_req_fifo_state + "\""
 					+ "}");
@@ -837,7 +837,7 @@ private:
 		switch (a) {
 			case MMIO_GLOBAL_CTRL: {
 				global_ctrl_reg.write(wdata);
-				if (wdata[(int)HdduCtrllBit::CTRL_RESET]) { // Global reset bit
+				if (wdata[(int)HdduCtrlBit::SOFT_RESET]) { // Global soft-reset bit
 					err_code_reg.write(0);
 					err_info0_reg.write(0);
 					err_info1_reg.write(0);
@@ -850,7 +850,7 @@ private:
 					write_addr_fifo_clear_sig.write(true);
 					spm_req_fifo_clear_sig.write(true);
 				}
-				if (wdata[(int)HdduCtrllBit::CTRL_START]) { // Global start bit
+				if (wdata[(int)HdduCtrlBit::START]) { // Global start bit
 					for (int i = 0; i < NUM_AGU; ++i) {
 						agu_start_sig[i].write(true);
 					}
@@ -862,7 +862,7 @@ private:
 					global_status_reg.write(status);
 					start_pending_ = true;  // visible to comb_mmio_read immediately
 				}
-				if (wdata[(int)HdduCtrllBit::CTRL_STOP]) { // Global stop bit
+				if (wdata[(int)HdduCtrlBit::STOP]) { // Global stop bit
 					for (int i = 0; i < NUM_AGU; ++i) {
 						agu_stop_sig[i].write(true);
 					}
@@ -1185,9 +1185,9 @@ private:
 			const bool global_ctrl_write =
 				mmio_write.read() && (mmio_addr.read().to_uint() == MMIO_GLOBAL_CTRL);
 			const sc_uint<32> ctrl_wdata = mmio_wdata.read();
-			const bool global_reset_cmd = global_ctrl_write && ctrl_wdata[(int)HdduCtrllBit::CTRL_RESET];
-			const bool global_start_cmd = global_ctrl_write && ctrl_wdata[(int)HdduCtrllBit::CTRL_START];
-			const bool global_stop_cmd = global_ctrl_write && ctrl_wdata[(int)HdduCtrllBit::CTRL_STOP];
+			const bool global_reset_cmd = global_ctrl_write && ctrl_wdata[(int)HdduCtrlBit::SOFT_RESET];
+			const bool global_start_cmd = global_ctrl_write && ctrl_wdata[(int)HdduCtrlBit::START];
+			const bool global_stop_cmd = global_ctrl_write && ctrl_wdata[(int)HdduCtrlBit::STOP];
 
 			if (global_reset_cmd) {
 				run_active_latched = false;
@@ -1197,6 +1197,7 @@ private:
 			if (global_start_cmd) {
 				run_active_latched = true;
 				done_latched = false;
+				prev_any_busy_latched = false;
 			}
 			if (global_stop_cmd) {
 				run_active_latched = false;
@@ -1274,7 +1275,7 @@ private:
 			if (stall_inc > 0) {
 				sc_uint<32> stall = counter_stall_reg.read();
 				counter_stall_reg.write(stall + stall_inc);
-				status[(int)HdduStatusBit::STALL] = true;
+				status[(int)HdduStatusBit::QUIESCED] = true;
 			}
 			if (tx_pkt_inc > 0) {
 				sc_uint<32> tx_pkt = counter_tx_pkt_reg.read();

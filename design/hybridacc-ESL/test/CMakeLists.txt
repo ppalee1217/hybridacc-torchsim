@@ -314,6 +314,24 @@ add_custom_target(run_cluster_unit_test
 
 add_test(NAME ComputeCluster_Unit_Tests COMMAND test_cluster_unit)
 
+# ClusterControlUnit Pure-Logic Unit Tests (no SystemC)
+add_executable(test_cluster_control_unit
+    test_cluster_control_unit.cpp
+)
+
+target_include_directories(test_cluster_control_unit PRIVATE
+    ../simulator/include
+)
+
+add_custom_target(run_cluster_control_unit_test
+    COMMAND ./test_cluster_control_unit
+    DEPENDS test_cluster_control_unit
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running ClusterControlUnit pure-logic unit test"
+)
+
+add_test(NAME ClusterControlUnit_Unit_Tests COMMAND test_cluster_control_unit)
+
 # ComputeCluster Simulation
 add_executable(test_cluster_sim
     test_cluster_sim.cpp

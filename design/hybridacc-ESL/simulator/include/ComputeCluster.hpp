@@ -8,6 +8,8 @@
 
 #include "Utils/utils.hpp"
 #include "AXI4_lite/axi4-lite.hpp"
+#include "Cluster/ControlTypes.hpp"
+#include "Cluster/ClusterControlUnit.hpp"
 #include "Cluster/ScratchpadMemory.hpp"
 #include "Cluster/HybridDataDeliverUnit.hpp"
 #include "NetworkOnChip.hpp"
@@ -48,6 +50,10 @@ SC_MODULE(ComputeCluster) {
 	static constexpr uint32_t kCmdHdduSize = 0x1000;
 	static constexpr uint32_t kCmdNocBase = 0x2000;
 	static constexpr uint32_t kCmdNocSize = 0x0100;
+	static constexpr uint32_t kCmdClusterBase = cluster::kClusterMmioBase;
+	static constexpr uint32_t kCmdClusterSize = cluster::kClusterMmioSize;
+	static constexpr uint32_t kHdduCtrlOffset = 0x800;
+	static constexpr uint32_t kHdduStatusOffset = 0x804;
 
 	static constexpr uint32_t kSpmCfgMapOffset = 0x00;
 	static constexpr uint32_t kSpmCfgUpdateOffset = 0x04;
@@ -63,6 +69,7 @@ SC_MODULE(ComputeCluster) {
 	static constexpr uint32_t kSpmPmuPortTxnStride = 0x08;
 
 	static constexpr uint32_t kNocCmdDataOffset = 0x00;
+	static constexpr uint32_t kNocStatusOffset = 0x04;
 
 public:
 	sc_in<bool> clk;
@@ -230,6 +237,8 @@ public:
 		spm.config_update_i(spm_cfg_update_sig);
 		spm.arb_policy_i(spm_arb_policy_sig);
 		spm.pmu_rst_i(spm_pmu_rst_sig);
+		spm.drop_noc_resp_i(spm_drop_noc_resp_sig);
+		spm.soft_reset_i(spm_soft_reset_sig);
 		spm.pmu_cycle_cnt_o(spm_pmu_cycle_cnt_sig);
 		spm.pmu_arb_stall_cnt_o(spm_pmu_arb_stall_cnt_sig);
 		spm.pmu_credit_stall_cnt_o(spm_pmu_credit_stall_cnt_sig);
@@ -442,6 +451,8 @@ private:
 	// NoC command and request path
 	sc_signal<bool> noc_command_mode_sig;
 	sc_signal<sc_uint<32>> noc_command_data_sig;
+	sc_signal<bool> spm_drop_noc_resp_sig;
+	sc_signal<bool> spm_soft_reset_sig;
 
 	// NoC interfaces as signals
 	VRDSIG<noc_req_payload_t> ps_req_sig;
@@ -478,9 +489,63 @@ private:
 
 	sc_uint<32> noc_last_cmd_reg{};
 	bool hddu_start_pending_ = false;  // AHB pipeline race fix: set on CTRL_START write, cleared when STATUS shows BUSY
+	cluster::ClusterControlUnit cluster_ctrl_;
 
 	static bool in_range(uint32_t addr, uint32_t base, uint32_t size) {
 		return addr >= base && addr < (base + size);
+	}
+
+	static uint32_t raw_noc_command(message_command_t cmd) {
+		return static_cast<uint32_t>(cmd);
+	}
+
+	bool noc_is_quiesced() const {
+		return noc.is_quiesced();
+	}
+
+	uint32_t cluster_status_word() const {
+		return cluster_ctrl_.status_word(noc_is_quiesced(), spm.spm_quiesced());
+	}
+
+	void issue_noc_command(uint32_t raw_cmd) {
+		noc_last_cmd_reg = raw_cmd;
+		noc_command_data_sig.write(static_cast<sc_uint<32>>(raw_cmd));
+		noc_command_mode_sig.write(true);
+
+		const message_command_t cmd = static_cast<message_command_t>(raw_cmd & 0x0Fu);
+		if (cmd == message_command_t::CMD_STOP_PE) {
+			spm_drop_noc_resp_sig.write(true);
+		} else if (cmd == message_command_t::CMD_START_PE
+				   || cmd == message_command_t::CMD_RESET
+				   || cmd == message_command_t::CMD_INIT) {
+			spm_drop_noc_resp_sig.write(false);
+		}
+	}
+
+	void mirror_cluster_state_from_direct_noc_command(uint32_t raw_cmd) {
+		const message_command_t cmd = static_cast<message_command_t>(raw_cmd & 0x0Fu);
+		switch (cmd) {
+		case message_command_t::CMD_START_PE: cluster_ctrl_.notify_direct_start_pe(); break;
+		case message_command_t::CMD_STOP_PE:  cluster_ctrl_.notify_direct_stop_pe();  break;
+		case message_command_t::CMD_RESET:    cluster_ctrl_.notify_direct_reset();    break;
+		default: break;
+		}
+	}
+
+	void apply_cluster_output(const cluster::ClusterCycleOutput& out) {
+		if (out.noc_action != cluster::ClusterAction::NONE) {
+			uint32_t cmd = 0u;
+			switch (out.noc_action) {
+			case cluster::ClusterAction::NOC_START_PE: cmd = raw_noc_command(message_command_t::CMD_START_PE); break;
+			case cluster::ClusterAction::NOC_STOP_PE:  cmd = raw_noc_command(message_command_t::CMD_STOP_PE);  break;
+			case cluster::ClusterAction::NOC_RESET:    cmd = raw_noc_command(message_command_t::CMD_RESET);    break;
+			default: break;
+			}
+			issue_noc_command(cmd);
+		}
+		if (out.spm_soft_reset) {
+			spm_soft_reset_sig.write(true);
+		}
 	}
 
 	void comb_power_and_wiring() {
@@ -527,6 +592,8 @@ private:
 		spm_cfg_update_sig.write(false);
 		spm_arb_policy_sig.write(false);
 		spm_pmu_rst_sig.write(false);
+		spm_drop_noc_resp_sig.write(false);
+		spm_soft_reset_sig.write(false);
 
 		noc_command_mode_sig.write(false);
 		noc_command_data_sig.write(0);
@@ -541,6 +608,7 @@ private:
 		hddu_mmio_addr_sig.write(0);
 		hddu_mmio_wdata_sig.write(0);
 		hddu_mmio_write_sig.write(false);
+		cluster_ctrl_.reset();
 
 		wait();
 
@@ -549,6 +617,10 @@ private:
 			noc_command_mode_sig.write(false);
 			hddu_mmio_write_sig.write(false);
 			spm_pmu_rst_sig.write(false);
+			spm_soft_reset_sig.write(false);
+
+			const bool noc_quiesced = noc_is_quiesced();
+			apply_cluster_output(cluster_ctrl_.background_tick(noc_quiesced));
 
 			// Pipeline Control: Capture Address Phase for Next Cycle Data Phase
 			const bool sel = hsel_i.read();
@@ -567,6 +639,7 @@ private:
 			if (!power_enable_i.read()) {
 				ahb_active_reg.write(false);
 				ahb_read_wait_reg.write(false);
+				spm_drop_noc_resp_sig.write(false);
 				wait();
 				continue;
 			}
@@ -579,6 +652,17 @@ private:
 				ahb_write_reg.write(hwrite_i.read());
 				ahb_hsize_reg.write(hsize_i.read());
 				ahb_active_reg.write(true);
+
+				// Pre-set HDDU address during address phase for reads,
+				// so that comb_mmio_read has a full cycle to evaluate
+				// before the data phase captures hddu_mmio_rdata_sig.
+				if (!hwrite_i.read()) {
+					const uint32_t a = haddr_i.read().to_uint();
+					if (in_range(a, kCmdHdduBase, kCmdHdduSize)) {
+						hddu_mmio_addr_sig.write(
+							static_cast<sc_uint<32>>(a - kCmdHdduBase));
+					}
+				}
 			} else {
 				ahb_active_reg.write(false);
 			}
@@ -609,16 +693,24 @@ private:
 					} else if (in_range(addr, kCmdNocBase, kCmdNocSize)) {
 						const uint32_t off = addr - kCmdNocBase;
 						if (off == kNocCmdDataOffset) {
-							noc_last_cmd_reg = wdata;
-							noc_command_data_sig.write(static_cast<sc_uint<32>>(wdata));
-							noc_command_mode_sig.write(true);
+							issue_noc_command(wdata);
+							mirror_cluster_state_from_direct_noc_command(wdata);
+						}
+					} else if (in_range(addr, kCmdClusterBase, kCmdClusterSize)) {
+						const uint32_t off = addr - kCmdClusterBase;
+						if (off == cluster::REG_MODE) {
+							cluster_ctrl_.write_mode(wdata);
+						} else if (off == cluster::REG_CTRL) {
+							apply_cluster_output(cluster_ctrl_.write_ctrl(wdata, noc_quiesced));
+						} else if (off == cluster::REG_ERROR_CODE) {
+							cluster_ctrl_.write_error_code(wdata);
 						}
 					} else if (in_range(addr, kCmdHdduBase, kCmdHdduSize)) {
 						hddu_mmio_addr_sig.write(static_cast<sc_uint<32>>(addr - kCmdHdduBase));
 						hddu_mmio_wdata_sig.write(static_cast<sc_uint<32>>(wdata));
 						hddu_mmio_write_sig.write(true);
-						// Detect CTRL_START: HDDU CTRL offset = 0x800, START bit = bit 1
-						if ((addr - kCmdHdduBase) == 0x800 && (wdata & 0x2))
+						// Detect START: HDDU CTRL offset = 0x800, START bit = bit 0
+						if ((addr - kCmdHdduBase) == kHdduCtrlOffset && (wdata & 0x1))
 							hddu_start_pending_ = true;
 					}
 				} else {
@@ -654,10 +746,12 @@ private:
 							}
 						}
 					} else if (in_range(addr, kCmdHdduBase, kCmdHdduSize)) {
-						hddu_mmio_addr_sig.write(static_cast<sc_uint<32>>(addr - kCmdHdduBase));
+						// hddu_mmio_addr_sig was pre-set during the address
+						// phase, giving comb_mmio_read a full cycle to produce
+						// the correct rdata. Do NOT write addr_sig again here.
 						read_value = hddu_mmio_rdata_sig.read();
 						// HDDU STATUS offset = 0x804
-						if ((addr - kCmdHdduBase) == 0x804) {
+						if ((addr - kCmdHdduBase) == kHdduStatusOffset) {
 							if (hddu_start_pending_) {
 								read_value |= (1u << 1);  // force BUSY
 								read_value &= ~(1u << 0); // clear IDLE
@@ -671,6 +765,21 @@ private:
 						const uint32_t off = addr - kCmdNocBase;
 						if (off == kNocCmdDataOffset) {
 							read_value = noc_last_cmd_reg;
+						} else if (off == kNocStatusOffset) {
+							read_value = noc.status_word();
+						}
+					} else if (in_range(addr, kCmdClusterBase, kCmdClusterSize)) {
+						const uint32_t off = addr - kCmdClusterBase;
+						if (off == cluster::REG_MODE) {
+							read_value = static_cast<uint32_t>(cluster_ctrl_.mode());
+						} else if (off == cluster::REG_CTRL) {
+							read_value = 0u;
+						} else if (off == cluster::REG_STATUS) {
+							read_value = cluster_status_word();
+						} else if (off == cluster::REG_ERROR_CODE) {
+							read_value = cluster_ctrl_.error_code();
+						} else if (off == cluster::REG_SUBSTATE) {
+							read_value = static_cast<uint32_t>(cluster_ctrl_.substate());
 						}
 					}
 					ahb_rdata_reg.write(read_value);

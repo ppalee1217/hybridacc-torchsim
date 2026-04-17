@@ -74,6 +74,8 @@ SC_MODULE(spm_tb) {
     // -------------------------------------------------------------------------
     sc_signal<bool>       reset_n;
     sc_signal<bool>       pmu_rst_i;
+    sc_signal<bool>       drop_noc_resp_i;
+    sc_signal<bool>       soft_reset_i;
     sc_signal<sc_uint<8>> config_map_i;
     sc_signal<bool>       config_update_i;
     sc_signal<bool>       arb_policy_i;
@@ -123,6 +125,8 @@ SC_MODULE(spm_tb) {
         dut.clk           (clk);
         dut.reset_n       (reset_n);
         dut.pmu_rst_i     (pmu_rst_i);
+        dut.drop_noc_resp_i(drop_noc_resp_i);
+        dut.soft_reset_i  (soft_reset_i);
         dut.config_map_i  (config_map_i);
         dut.config_update_i(config_update_i);
         dut.arb_policy_i  (arb_policy_i);
@@ -1003,6 +1007,8 @@ SC_MODULE(spm_tb) {
         // De-assert everything before asserting reset
         reset_n.write(false);
         pmu_rst_i.write(false);
+        drop_noc_resp_i.write(false);
+        soft_reset_i.write(false);
         config_map_i.write(0xE4);   // default Port-to-Group map: 0→0, 1→1, 2→2, 3→3
         config_update_i.write(false);
         arb_policy_i.write(false);

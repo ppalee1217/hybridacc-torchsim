@@ -135,7 +135,7 @@ public:
         ps_fifo.pop(ps_fifo_pop_sig);
         ps_fifo.empty(ps_fifo_empty_sig);
         ps_fifo.full(ps_fifo_full_sig);
-        ps_fifo.clear(zero_signal);
+        ps_fifo.clear(fifo_flush);
 
         pd_fifo.clk(clk);
         pd_fifo.reset_n(reset_n);
@@ -149,7 +149,7 @@ public:
         pd_fifo.set_valid(pd_fifo_set_valid_sig);
         pd_fifo.empty(pd_fifo_empty_sig);
         pd_fifo.full(pd_fifo_full_sig);
-        pd_fifo.clear(zero_signal);
+        pd_fifo.clear(fifo_flush);
 
         pli_fifo.clk(clk);
         pli_fifo.reset_n(reset_n);
@@ -158,7 +158,7 @@ public:
         pli_fifo.data_out(pli_fifo_data_out_sig);
         pli_fifo.pop(pli_fifo_pop_sig);
         pli_fifo.empty(pli_fifo_empty_sig);
-        pli_fifo.clear(zero_signal);
+        pli_fifo.clear(fifo_flush);
         pli_fifo.full(pli_fifo_full_sig);
 
         plo_fifo.clk(clk);
@@ -167,7 +167,7 @@ public:
         plo_fifo.push(plo_fifo_push_sig);
         plo_fifo.data_out(plo_fifo_data_out_sig);
         plo_fifo.pop(plo_fifo_pop_sig);
-        plo_fifo.clear(zero_signal);
+        plo_fifo.clear(fifo_flush);
         plo_fifo.empty(plo_fifo_empty_sig);
         plo_fifo.full(plo_fifo_full_sig);
 
@@ -177,23 +177,23 @@ public:
         SC_METHOD(comb_noc_ps);
         sensitive << reset_n << enable
               << noc_ps_req_in_if.valid_in << noc_ps_req_in_if.data_in
-              << ps_fifo_full_sig << ps_fifo_pop_sig << router_running_reg;
+              << ps_fifo_full_sig << ps_fifo_pop_sig << router_running_reg << stop_pending_reg;
 
         SC_METHOD(comb_noc_pd);
         sensitive << reset_n << enable
               << noc_pd_req_in_if.valid_in << noc_pd_req_in_if.data_in
-              << pd_fifo_full_sig << pd_fifo_pop_sig << router_running_reg;
+              << pd_fifo_full_sig << pd_fifo_pop_sig << router_running_reg << stop_pending_reg;
 
         SC_METHOD(comb_noc_pli);
         sensitive << reset_n << enable << route_mode
                   << noc_pli_req_in_if.valid_in << noc_pli_req_in_if.data_in
                   << ln_pli_in_if.valid_in << ln_pli_in_if.data_in
-              << pli_fifo_full_sig << pli_fifo_pop_sig << router_running_reg;
+              << pli_fifo_full_sig << pli_fifo_pop_sig << router_running_reg << stop_pending_reg;
 
         SC_METHOD(comb_noc_plo_req);
         sensitive << reset_n << enable << route_mode << state_reg
                   << noc_plo_req_in_if.valid_in << noc_plo_req_in_if.data_in
-                  << plo_fifo_empty_sig << router_running_reg;
+                  << plo_fifo_empty_sig << router_running_reg << stop_pending_reg;
 
         SC_METHOD(comb_pe_collect);
         sensitive << reset_n << enable
@@ -219,6 +219,28 @@ public:
         // -----------------------------------------------------------------
         SC_CTHREAD(seq_process, clk.pos());
         reset_signal_is(reset_n, false);
+    }
+
+    bool has_pending_noc_response() const {
+        return pending_noc_resp_reg.read() || state_reg.read() == PErouterState::WAIT_RESP;
+    }
+
+    bool has_pending_quiesce() const {
+        return stop_pending_reg.read() || has_pending_noc_response();
+    }
+
+    bool any_fifo_nonempty() const {
+        return !ps_fifo_empty_sig.read()
+            || !pd_fifo_empty_sig.read()
+            || !pli_fifo_empty_sig.read()
+            || !plo_fifo_empty_sig.read();
+    }
+
+    bool is_quiesced() const {
+        return !router_running_reg.read()
+            && !stop_pending_reg.read()
+            && !has_pending_noc_response()
+            && !any_fifo_nonempty();
     }
 
     // ========================= Register definitions =========================
@@ -247,9 +269,12 @@ public:
 
     sc_signal<bool> pe_program_reg;
 
+    sc_signal<bool> stop_pending_reg;
+
     // One-cycle command pulses (from NoC-PS command messages)
     sc_signal<bool> cmd_reset_pulse;
     sc_signal<bool> cmd_start_pulse;
+    sc_signal<bool> cmd_stop_pulse;
     sc_signal<bool> cmd_program_pulse;
     sc_signal<bool> cmd_im_write_pulse;
     sc_signal<uint16_t> cmd_im_addr;
@@ -260,7 +285,7 @@ public:
     // Channel-specific data queues (these are not registers in HDL sense)
     size_t pe_fifo_depth = 4;
 
-    sc_signal<bool> zero_signal;
+    sc_signal<bool> fifo_flush;
 
     FIFO<uint64_t> ps_fifo;   // PS channel: NoC -> PE (weights)
     asyncFIFO<uint64_t, uint16_t> pd_fifo;   // PD channel: NoC -> PE (activations)
@@ -343,6 +368,7 @@ public:
 
         cmd_reset_pulse.write(false);
         cmd_start_pulse.write(false);
+        cmd_stop_pulse.write(false);
         cmd_program_pulse.write(false);
         cmd_im_write_pulse.write(false);
         cmd_im_addr.write(0);
@@ -360,7 +386,8 @@ public:
         if(is_cmd){
             ready = enable.read();
         } else {
-            ready = enable.read() && router_running_reg.read() && (!ps_fifo_full_sig.read() || ps_fifo_pop_sig.read());
+            ready = enable.read() && router_running_reg.read() && !stop_pending_reg.read()
+                 && (!ps_fifo_full_sig.read() || ps_fifo_pop_sig.read());
         }
 
         noc_ps_req_in_if.ready_out.write(ready);
@@ -388,6 +415,9 @@ public:
                 case message_command_t::CMD_START_PE:
                     cmd_start_pulse.write(true);
                     break;
+                case message_command_t::CMD_STOP_PE:
+                    cmd_stop_pulse.write(true);
+                    break;
                 default:
                     break;
             }
@@ -407,7 +437,7 @@ public:
 
         if (!reset_n.read()) return;
 
-        const bool ready = enable.read() && router_running_reg.read() &&    (!pd_fifo_full_sig.read());
+        const bool ready = enable.read() && router_running_reg.read() && !stop_pending_reg.read() && (!pd_fifo_full_sig.read());
         noc_pd_req_in_if.ready_out.write(ready);
 
         const bool fire = noc_pd_req_in_if.valid_in.read() && ready;
@@ -429,7 +459,7 @@ public:
 
         if (!reset_n.read()) return;
 
-        const bool enabled = enable.read() && router_running_reg.read();
+        const bool enabled = enable.read() && router_running_reg.read() && !stop_pending_reg.read();
         const bool fifo_has_space = (!pli_fifo_full_sig.read() || pli_fifo_pop_sig.read());
         const bool allow_bus = enabled && can_route_to_bus(NOC_CHANNEL_PLI) && fifo_has_space;
         const bool allow_ln = enabled && can_route_from_ln(NOC_CHANNEL_PLI) && fifo_has_space;
@@ -460,6 +490,7 @@ public:
         if (!reset_n.read()) return;
         if (!enable.read()) return;
         if (!router_running_reg.read()) return;
+        if (stop_pending_reg.read()) return;
         bool stage_valid = (state_reg.read() == PErouterState::IDLE);
         if (!stage_valid) return;
         if (!can_route_to_bus(NOC_CHANNEL_PLO)) return;
@@ -644,7 +675,7 @@ public:
     // ========================= Sequential Logic =========================
     // All registers update here (single clocked process)
     void seq_process() {
-        zero_signal.write(false);
+        fifo_flush.write(false);
         // Reset values
         state_reg.write(PErouterState::IDLE);
         pending_noc_resp_reg.write(false);
@@ -656,6 +687,7 @@ public:
         pe_reset_reg.write(false);
         pe_start_reg.write(false);
         pe_program_reg.write(false);
+        stop_pending_reg.write(false);
         router_running_reg.write(false);
 
         wait();
@@ -677,12 +709,41 @@ public:
                 im_write_data_reg.write(cmd_im_data.read());
             }
 
-            if(cmd_start_pulse.read()) {
-                router_running_reg.write(true);
+            bool next_router_running = router_running_reg.read();
+            bool next_stop_pending = stop_pending_reg.read();
+
+            if (cmd_start_pulse.read()) {
+                next_router_running = true;
+                next_stop_pending = false;
+                // Flush PErouter FIFOs to clear stale data from previous wave.
+                fifo_flush.write(true);
+            } else {
+                fifo_flush.write(false);
             }
-            if(cmd_reset_pulse.read()) {
-                router_running_reg.write(false);
+
+            if (cmd_reset_pulse.read()) {
+                next_router_running = false;
+                next_stop_pending = false;
             }
+
+            if (cmd_stop_pulse.read()) {
+                next_stop_pending = true;
+            }
+
+            const bool router_drained = ps_fifo_empty_sig.read()
+                                     && pd_fifo_empty_sig.read()
+                                     && pli_fifo_empty_sig.read()
+                                     && plo_fifo_empty_sig.read()
+                                     && !pending_noc_resp_reg.read()
+                                     && state_reg.read() == PErouterState::IDLE;
+
+            if (next_stop_pending && router_drained) {
+                next_router_running = false;
+                next_stop_pending = false;
+            }
+
+            router_running_reg.write(next_router_running);
+            stop_pending_reg.write(next_stop_pending);
 
             // Output registered control signals
             im_write_en.write(im_write_en_reg.read());

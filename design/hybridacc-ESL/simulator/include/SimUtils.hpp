@@ -721,6 +721,7 @@ private:
 
         for (int i = 0; i < 5; ++i) wait();
 
+        TRACE_EVENT("host_configure", "Core", TRACE_BEGIN, 0, 0, "{}");
         std::cout << "[TB] === Phase 1: Configure BootHostIf ===" << std::endl;
 
         axi_write(kCoreBootAddr, boot_addr);
@@ -729,6 +730,9 @@ private:
         axi_write(kManifestSize, manifest_num_entries * 32);
         axi_write(kManifestKick, 1);
         std::cout << "[TB] Loader kicked" << std::endl;
+        TRACE_EVENT("host_configure", "Core", TRACE_END, 0, 0, "{}");
+
+        TRACE_EVENT("wait_loader", "Core", TRACE_BEGIN, 0, 0, "{}");
 
         uint32_t cycle = 0;
         while (!controller_irq_i.read() && cycle < max_cycles) {
@@ -744,7 +748,9 @@ private:
                   << ", IRQ_SUMMARY=0x" << std::hex << irq << std::dec << std::endl;
         axi_write(kIrqForceAck, irq);
         for (int i = 0; i < 3; ++i) wait();
+        TRACE_EVENT("wait_loader", "Core", TRACE_END, 0, 0, "{}");
 
+        TRACE_EVENT("core_running", "Core", TRACE_BEGIN, 0, 0, "{}");
         std::cout << "[TB] === Phase 2: Enable core ===" << std::endl;
         axi_write(kHaccCtrl, 0x01);
         std::cout << "[TB] Core enabled, boot_addr=0x" << std::hex << boot_addr
@@ -769,6 +775,7 @@ private:
         std::cout << "[TB] === Simulation complete ===" << std::endl;
         std::cout << "[TB] EBREAK at cycle " << cycle
                   << ", IRQ_SUMMARY=0x" << std::hex << irq << std::dec << std::endl;
+        TRACE_EVENT("core_running", "Core", TRACE_END, 0, 0, "{}");
         sc_stop();
     }
 };

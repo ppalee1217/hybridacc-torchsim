@@ -6,6 +6,7 @@
 #include <array>
 #include <iostream>
 #include <iomanip>
+#include <string>
 #include <type_traits>
 #include <systemc>
 
@@ -641,6 +642,13 @@ inline ScanChainFormat parse_scan_chain_data(uint32_t data) {
 #include <mutex>
 #include <fstream>
 
+enum class TraceLevel : uint8_t {
+    CORE = 1,
+    CLUSTER = 2,
+    NOC = 3,
+    PE = 4,
+};
+
 // Perfetto Trace Manager
 class PerfettoTrace {
 public:
@@ -649,12 +657,26 @@ public:
         return instance;
     }
 
+    void setLevel(uint32_t level) {
+        if (level < static_cast<uint32_t>(TraceLevel::CORE)) {
+            trace_level = static_cast<uint8_t>(TraceLevel::CORE);
+        } else if (level > static_cast<uint32_t>(TraceLevel::PE)) {
+            trace_level = static_cast<uint8_t>(TraceLevel::PE);
+        } else {
+            trace_level = static_cast<uint8_t>(level);
+        }
+    }
+
+    uint32_t level() const {
+        return trace_level;
+    }
+
     void open(const std::string& filename) {
         std::lock_guard<std::mutex> lock(mutex);
         if (file.is_open()) file.close();
         file.open(filename);
         if (file.is_open()) {
-            file << "[\n";
+            file << "{\n\"traceEvents\": [\n";
             is_first = true;
         }
     }
@@ -662,14 +684,14 @@ public:
     void close() {
         std::lock_guard<std::mutex> lock(mutex);
         if (file.is_open()) {
-            file << "\n]";
+            file << "\n]\n}";
             file.close();
         }
     }
 
     void logEvent(const std::string& name, const std::string& cat, const std::string& ph,
                   uint32_t pid, uint32_t tid, const std::string& args = "{}") {
-        if (!file.is_open()) return;
+        if (!file.is_open() || !shouldLogCategory(cat)) return;
 
         double ts = sc_core::sc_time_stamp().to_seconds() * 1000000.0; // microseconds
 
@@ -679,27 +701,83 @@ public:
         }
         is_first = false;
 
-        file << "{\"name\": \"" << name << "\", \"cat\": \"" << cat << "\", \"ph\": \"" << ph
+        file << "{\"name\": \"" << escapeJsonString(name)
+             << "\", \"cat\": \"" << escapeJsonString(cat)
+             << "\", \"ph\": \"" << escapeJsonString(ph)
              << "\", \"ts\": " << std::fixed << std::setprecision(3) << ts
              << ", \"pid\": " << pid << ", \"tid\": " << tid
              << ", \"args\": " << args << "}";
     }
 
     void setThreadName(uint32_t pid, uint32_t tid, const std::string& thread_name) {
-        logEvent("thread_name", "__metadata", "M", pid, tid, "{\"name\": \"" + thread_name + "\"}");
+        logEvent("thread_name", "__metadata", "M", pid, tid,
+                 "{\"name\": \"" + escapeJsonString(thread_name) + "\"}");
     }
 
 private:
+    std::string escapeJsonString(const std::string& value) const {
+        std::string out;
+        out.reserve(value.size());
+        for (unsigned char ch : value) {
+            switch (ch) {
+                case '"': out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\b': out += "\\b"; break;
+                case '\f': out += "\\f"; break;
+                case '\n': out += "\\n"; break;
+                case '\r': out += "\\r"; break;
+                case '\t': out += "\\t"; break;
+                default:
+                    if (ch < 0x20) {
+                        std::ostringstream oss;
+                        oss << "\\u"
+                            << std::hex << std::setw(4) << std::setfill('0')
+                            << static_cast<unsigned int>(ch);
+                        out += oss.str();
+                    } else {
+                        out.push_back(static_cast<char>(ch));
+                    }
+                    break;
+            }
+        }
+        return out;
+    }
+
+    bool hasPrefix(const std::string& value, const char* prefix) const {
+        return value.compare(0, std::strlen(prefix), prefix) == 0;
+    }
+
+    bool shouldLogCategory(const std::string& cat) const {
+        if (cat == "__metadata") {
+            return true;
+        }
+        if (cat == "Core") {
+            return trace_level >= static_cast<uint8_t>(TraceLevel::CORE);
+        }
+        if (cat == "DMA" || hasPrefix(cat, "Cluster") || hasPrefix(cat, "HDDU")
+                || hasPrefix(cat, "AGU") || hasPrefix(cat, "SPM")) {
+            return trace_level >= static_cast<uint8_t>(TraceLevel::CLUSTER);
+        }
+        if (hasPrefix(cat, "NoC") || hasPrefix(cat, "MBUS")) {
+            return trace_level >= static_cast<uint8_t>(TraceLevel::NOC);
+        }
+        if (hasPrefix(cat, "PE")) {
+            return trace_level >= static_cast<uint8_t>(TraceLevel::PE);
+        }
+        return true;
+    }
+
     PerfettoTrace() {}
     ~PerfettoTrace() {
         if (file.is_open()) {
-            file << "\n]";
+            file << "\n]\n}";
             file.close();
         }
     }
     std::ofstream file;
     std::mutex mutex;
     bool is_first = true;
+    uint8_t trace_level = static_cast<uint8_t>(TraceLevel::CLUSTER);
 };
 
 #define TRACE_EVENT(name, cat, ph, pid, tid, args) \

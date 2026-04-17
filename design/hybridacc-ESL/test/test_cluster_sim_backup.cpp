@@ -577,7 +577,7 @@ private:
 			<< " [idle=" << ((st >> (int)hybridacc::cluster::HdduStatusBit::IDLE) & 0x1)
 			<< " busy=" << ((st >> (int)hybridacc::cluster::HdduStatusBit::BUSY) & 0x1)
 			<< " done=" << ((st >> (int)hybridacc::cluster::HdduStatusBit::DONE) & 0x1)
-			<< " stall=" << ((st >> (int)hybridacc::cluster::HdduStatusBit::STALL) & 0x1)
+			<< " quiesced=" << ((st >> (int)hybridacc::cluster::HdduStatusBit::QUIESCED) & 0x1)
 			<< " error=" << ((st >> (int)hybridacc::cluster::HdduStatusBit::ERROR) & 0x1)
 			<< "]";
 		return oss.str();
@@ -589,7 +589,7 @@ private:
 			<< " [busy=" << ((st >> (int)hybridacc::cluster::AguStatusBit::STATUS_BUSY) & 0x1)
 			<< " done=" << ((st >> (int)hybridacc::cluster::AguStatusBit::STATUS_DONE) & 0x1)
 			<< " error=" << ((st >> (int)hybridacc::cluster::AguStatusBit::STATUS_ERROR) & 0x1)
-			<< " stall=" << ((st >> (int)hybridacc::cluster::AguStatusBit::STATUS_STALL) & 0x1)
+			<< " quiesced=" << ((st >> (int)hybridacc::cluster::AguStatusBit::STATUS_QUIESCED) & 0x1)
 			<< "]";
 		return oss.str();
 	}
@@ -674,7 +674,7 @@ private:
 	void cfg_hddu_global(uint32_t plane_en, uint32_t plane_mode) {
 		mmio_write(CLUSTER_HDDU_BASE + HDDU_PLANE_EN, plane_en);
 		mmio_write(CLUSTER_HDDU_BASE + HDDU_PLANE_MODE, plane_mode);
-		mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrllBit::CTRL_START));
+		mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrlBit::START));
 	}
 
 	// Helper function to send a NoC command with the given command and parameter
@@ -697,12 +697,12 @@ private:
 	// Helper functions to start and stop the compute wave, and to wait for HDDU completion
 	void start_all() {
 		noc_cmd_write(pack_noc_cmd(CMD_START_PE, 0));
-		mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrllBit::CTRL_START));
+		mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrlBit::START));
 	}
 
 	// Helper function to stop the compute wave and all PEs
 	void stop_all() {
-		mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrllBit::CTRL_STOP));
+		mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrlBit::STOP));
 		noc_cmd_write(pack_noc_cmd(CMD_STOP_PE, 0));
 	}
 
@@ -745,7 +745,7 @@ private:
 						  << std::endl;
 				last_status = st;
 			}
-			if (!stall_snapshot_taken && (st & (1u << (int)hybridacc::cluster::HdduStatusBit::STALL))) {
+			if (!stall_snapshot_taken && (st & (1u << (int)hybridacc::cluster::HdduStatusBit::QUIESCED))) {
 				stall_snapshot_taken = true;
 				dump_runtime_snapshot("stall-detected " + debug_tag + " waited=" + std::to_string(waited), current_spm_map);
 			}

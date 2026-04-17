@@ -44,6 +44,19 @@ static constexpr uint32_t CLUSTER_SPM_CFG_MAP = 0x0000;
 static constexpr uint32_t CLUSTER_SPM_CFG_UPDATE = 0x0004;
 static constexpr uint32_t CLUSTER_HDDU_BASE = 0x1000;
 static constexpr uint32_t CLUSTER_NOC_CMD = 0x2000;
+static constexpr uint32_t CLUSTER_MODE = 0x2100;
+static constexpr uint32_t CLUSTER_CTRL = 0x2104;
+static constexpr uint32_t CLUSTER_STATUS = 0x2108;
+
+static constexpr uint32_t CLUSTER_MODE_LAYER_MANAGED = 1u;
+static constexpr uint32_t CLUSTER_CTRL_START = (1u << 0);
+static constexpr uint32_t CLUSTER_CTRL_STOP = (1u << 1);
+static constexpr uint32_t CLUSTER_CTRL_SOFT_RESET = (1u << 2);
+static constexpr uint32_t CLUSTER_STATUS_IDLE = (1u << 0);
+static constexpr uint32_t CLUSTER_STATUS_BUSY = (1u << 1);
+static constexpr uint32_t CLUSTER_STATUS_DONE = (1u << 2);
+static constexpr uint32_t CLUSTER_STATUS_QUIESCED = (1u << 3);
+static constexpr uint32_t CLUSTER_STATUS_ERROR = (1u << 4);
 
 static constexpr uint32_t AGU_BANK_STRIDE = 0x100;
 static constexpr uint32_t AGU_PS = 0;
@@ -178,6 +191,7 @@ struct SimRunnerOptions {
 	bool enable_trace = false;
 	int clock_period_ns = 10;
 	int timeout_cycles = 200;
+	int repeat_layers = 1;
     std::string test_path;
 	std::string trace_file;
 };
@@ -453,7 +467,7 @@ public:
 	void cfg_hddu_global(uint32_t plane_en, uint32_t plane_mode) {
 		mmio_write(CLUSTER_HDDU_BASE + HDDU_PLANE_EN, plane_en);
 		mmio_write(CLUSTER_HDDU_BASE + HDDU_PLANE_MODE, plane_mode);
-		mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrllBit::CTRL_START));
+		mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrlBit::START));
 	}
 
 	/**
@@ -484,16 +498,60 @@ public:
 		}
 	}
 
-	/** @brief Start PE execution and HDDU engine. */
-	void start_all() {
-		noc_cmd_write(pack_noc_cmd(CMD_START_PE, 0));
-		mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrllBit::CTRL_START));
+	/** @brief Start HDDU engine only without starting PE execution. */
+	void start_hddu() {
+		mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrlBit::START));
 	}
 
-	/** @brief Stop HDDU engine and PE execution. */
-	void stop_all() {
-		mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrllBit::CTRL_STOP));
-		noc_cmd_write(pack_noc_cmd(CMD_STOP_PE, 0));
+	void set_cluster_layer_managed_mode() {
+		mmio_write(CLUSTER_MODE, CLUSTER_MODE_LAYER_MANAGED);
+	}
+
+	/** @brief Start layer-scoped NoC/PE execution via cluster control. */
+	void start_pe() {
+		set_cluster_layer_managed_mode();
+		mmio_write(CLUSTER_CTRL, CLUSTER_CTRL_START);
+	}
+
+	/** @brief Stop HDDU engine only. */
+	void stop_hddu() {
+		mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrlBit::STOP));
+	}
+
+	bool wait_cluster_quiesced(uint32_t timeout_cycles, uint32_t poll_step = 1) {
+		for (uint32_t waited = 0; waited < timeout_cycles; waited += poll_step) {
+			const uint32_t st = mmio_read(CLUSTER_STATUS);
+			if (st & CLUSTER_STATUS_ERROR) {
+				std::cerr << sc_core::sc_time_stamp() << " Cluster error detected, status=0x" << std::hex << st << std::dec << std::endl;
+				return false;
+			}
+			if (st & CLUSTER_STATUS_QUIESCED) {
+				return true;
+			}
+			wait_cycles(poll_step);
+		}
+		std::cerr << sc_core::sc_time_stamp() << " Cluster quiesce timeout after " << timeout_cycles << " cycles" << std::endl;
+		return false;
+	}
+
+	/** @brief Stop layer-scoped NoC/PE execution via cluster control. */
+	void stop_pe() {
+		mmio_write(CLUSTER_CTRL, CLUSTER_CTRL_STOP);
+		if (!wait_cluster_quiesced(WAVE_TIMEOUT_CYCLES, POLL_INTERVAL_CYCLES)) {
+			throw std::runtime_error("ComputeCluster cluster stop/quiesce timeout");
+		}
+	}
+
+	/** @brief Issue cluster SOFT_RESET after stop+quiesce. Preserves scan chain and PE program. */
+	void soft_reset_cluster() {
+		mmio_write(CLUSTER_CTRL, CLUSTER_CTRL_SOFT_RESET);
+		if (!wait_cluster_quiesced(WAVE_TIMEOUT_CYCLES, POLL_INTERVAL_CYCLES)) {
+			throw std::runtime_error("ComputeCluster cluster soft_reset/quiesce timeout");
+		}
+		const uint32_t st = mmio_read(CLUSTER_STATUS);
+		if (!(st & CLUSTER_STATUS_IDLE)) {
+			throw std::runtime_error("ComputeCluster not IDLE after soft_reset");
+		}
 	}
 
 	/** @brief Dump HDDU error code and diagnostic registers. */
@@ -1193,6 +1251,19 @@ private:
 		}
 
 		pass_ = run_from_config(options_.test_path);
+		if (pass_ && options_.repeat_layers > 1) {
+			for (int layer = 1; layer < options_.repeat_layers; ++layer) {
+				std::cout << "[runner] === SOFT_RESET between layer "
+						  << (layer - 1) << " and layer " << layer << " ===" << std::endl;
+				soft_reset_cluster();
+				std::cout << "[runner] === Starting layer " << layer << " ===" << std::endl;
+				pass_ = run_from_config(options_.test_path);
+				if (!pass_) {
+					std::cerr << "[runner] Layer " << layer << " FAILED" << std::endl;
+					break;
+				}
+			}
+		}
 		run_finished_ = true;
 		sc_core::sc_stop();
 	}
@@ -1873,6 +1944,8 @@ private:
 			return 0xE4;
 		};
 
+		start_pe();
+
 		for (size_t i = 0; i < plans.size(); ++i) {
 			auto plan = plans[i];
 			const uint8_t curr_spm_map = wave_spm_map(i);
@@ -1910,7 +1983,7 @@ private:
 			cfg_agu(AGU_PLI, plan.agu_pli);
 			cfg_agu(AGU_PLO, plan.agu_plo);
 			cfg_hddu_global(plan.global_mask, is_ultra ? 0x2 : 0x1);
-			start_all();
+			start_hddu();
 
 			// Overlap: prefetch next wave input while current wave computes.
 			const size_t next_idx = i + 1;
@@ -1969,12 +2042,14 @@ private:
 				all_ok = false;
 				break;
 			}
-			stop_all();
+			stop_hddu();
 			if (i < dma_waves.size() && !run_dma_wave(dma_waves[i], DmaTransferCfg::Direction::SpmToDram)) {
 				all_ok = false;
 				break;
 			}
 		}
+
+		stop_pe();
 
 		size_t out_words = gold_.size() / 4;
 		if (gold_.size() % 4 != 0) out_words++;
@@ -2123,8 +2198,16 @@ int sc_main(int argc, char* argv[]) {
 			}
 			options.trace_file = argv[++i];
 			options.enable_trace = true;
+		} else if (a == "--repeat-layers") {
+			if (i + 1 >= argc) {
+				std::cerr << "missing value for --repeat-layers" << std::endl;
+				return 1;
+			}
+			options.repeat_layers = std::stoi(argv[++i]);
+			if (options.repeat_layers < 1) options.repeat_layers = 1;
+			std::cout << "Repeat layers set to " << options.repeat_layers << std::endl;
 		} else if (a == "--help" || a == "-h") {
-			std::cout << "Usage: test_cluster_sim [-d <dir>] [--case conv2d|gemm|both] [--clock-period <ns>] [--timeout-cycles <cycles>] [--dry-run] [--verbose|-v] [-f <trace_file>]" << std::endl;
+			std::cout << "Usage: test_cluster_sim [-d <dir>] [--case conv2d|gemm|both] [--clock-period <ns>] [--timeout-cycles <cycles>] [--repeat-layers <N>] [--dry-run] [--verbose|-v] [-f <trace_file>]" << std::endl;
 			return 1;
 		} else {
 			std::cerr << "unknown arg: " << a << std::endl;

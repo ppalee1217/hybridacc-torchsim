@@ -31,8 +31,29 @@
 #define LOCAL_TIMER_BASE    0x20002000u
 #define PLIC_BASE           0x0C000000u
 #define CLUSTER_BASE        0x40000000u
+#define CLUSTER_STRIDE      0x00010000u
 #define CLUSTER_BCAST_BASE  0x50000000u
 #define NLU_BASE            0x60000000u
+
+/* ---- Cluster control offsets ---- */
+#define CLUSTER_MODE_OFF        0x2100u
+#define CLUSTER_CTRL_OFF        0x2104u
+#define CLUSTER_STATUS_OFF      0x2108u
+#define CLUSTER_ERROR_CODE_OFF  0x210Cu
+#define CLUSTER_SUBSTATE_OFF    0x2110u
+
+#define CLUSTER_MODE_DIRECT_DEBUG   0u
+#define CLUSTER_MODE_LAYER_MANAGED  1u
+
+#define CLUSTER_CTRL_START       (1u << 0)
+#define CLUSTER_CTRL_STOP        (1u << 1)
+#define CLUSTER_CTRL_SOFT_RESET  (1u << 2)
+
+#define CLUSTER_STATUS_IDLE      (1u << 0)
+#define CLUSTER_STATUS_BUSY      (1u << 1)
+#define CLUSTER_STATUS_DONE      (1u << 2)
+#define CLUSTER_STATUS_QUIESCED  (1u << 3)
+#define CLUSTER_STATUS_ERROR     (1u << 4)
 
 /* ---- Local Control registers (base 0x20000000) ---- */
 #define LOCAL_CLUSTER_MASK_LO  (LOCAL_CTRL_BASE + 0x000)
@@ -125,6 +146,10 @@
 
 static inline uint32_t mmio_read(uint32_t addr)  { return REG32(addr); }
 static inline void mmio_write(uint32_t addr, uint32_t val) { REG32(addr) = val; }
+
+static inline uint32_t cluster_addr(uint32_t cluster_id, uint32_t offset) {
+    return CLUSTER_BASE + cluster_id * CLUSTER_STRIDE + offset;
+}
 
 /* ========================================================================
  * Test result area in DSRAM

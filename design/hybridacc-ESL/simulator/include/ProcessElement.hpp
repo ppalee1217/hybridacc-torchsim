@@ -33,6 +33,7 @@ public:
 
     // Control ports
     sc_out<bool> pe_busy;
+    sc_out<bool> pe_halted;
 
     // Local Network ports - using VRDIF/VRDOF
     VRDIF<uint64_t> ln_pli;
@@ -52,6 +53,7 @@ public:
           noc_plo_in("noc_plo_in"),
           noc_plo_out("noc_plo_out"),
           pe_busy("pe_busy"),
+          pe_halted("pe_halted"),
           ln_pli("ln_pli"),
           ln_plo("ln_plo"),
           router("PE_Router", pe_fifo_depth),
@@ -75,13 +77,15 @@ public:
         // 1. Control Logic (Next State Calculation)
         SC_METHOD(comb_control_next);
         sensitive << pe_running_reg << cycles_reg << instr_count_reg << stage_reset_reg
+                  << startup_guard_reg
                   << router_pe_reset << router_pe_start << router_pe_program
                   << if_id_halted_sig << exe_m_halted_sig << exe_a_halted_sig
                   << exe_m_to_exe_a_valid << exe_a_to_exe_m_ready << exe_a_stall_adder << exe_a_stall_port_pli << exe_a_stall_port_plo;
 
         // 2. Output Logic
         SC_METHOD(comb_outputs);
-        sensitive << pe_running_reg << stage_reset_reg;
+        sensitive << pe_running_reg << stage_reset_reg
+              << if_id_halted_sig << exe_m_halted_sig << exe_a_halted_sig;
 
         // 3. Status/Performance Monitoring
         SC_METHOD(comb_monitoring);
@@ -113,6 +117,11 @@ public:
 
     sc_signal<bool> stage_reset_reg;
     sc_signal<bool> stage_reset_next;
+
+    // Suppress auto-halt for a few cycles after START to let stage_reset
+    // clear registered halted flags across all pipeline stages.
+    sc_signal<sc_dt::sc_uint<3>> startup_guard_reg;
+    sc_signal<sc_dt::sc_uint<3>> startup_guard_next;
 
     // Pipeline interconnect signals
     sc_signal<pe_decode_signals_t> if_id_to_exe_m_signals;
@@ -297,16 +306,18 @@ public:
         uint64_t cycles_current = cycles_reg.read();
         uint64_t instr_count_current = instr_count_reg.read();
         bool stage_reset_current = stage_reset_reg.read();
+        sc_dt::sc_uint<3> startup_guard_current = startup_guard_reg.read();
 
         // Default: hold current values
         bool pe_running_n = pe_running_current;
         uint64_t cycles_n = cycles_current;
         uint64_t instr_count_n = instr_count_current;
-        bool stage_reset_n = false;  // stage_reset is a pulse signal
+        bool stage_reset_n = false;
+        sc_dt::sc_uint<3> startup_guard_n = startup_guard_current;
 
-        // Clear stage_reset after one cycle pulse
-        if (stage_reset_current) {
-            stage_reset_n = false;
+        if (startup_guard_current > 0) {
+            startup_guard_n = startup_guard_current - 1;
+            stage_reset_n = true;
         }
 
         // Check router control signals
@@ -314,15 +325,19 @@ public:
             // Reset all stages, keep pe_running state
             DEBUG_MSG("[ProcessElement] RESET signal detected", DEBUG_LEVEL_PE_TOP);
             stage_reset_n = true;
+            startup_guard_n = 4;
         }
 
-        if (router_pe_start.read() && !pe_running_current) {
-            // Start PE: reset + set running
+        if (router_pe_start.read()) {
+            // Start PE: always reset + set running, even if already running.
+            // This handles the case where the PE was stuck waiting for
+            // in-flight NoC data that was dropped by spm_drop_noc_resp.
             DEBUG_MSG("[ProcessElement] START signal detected", DEBUG_LEVEL_PE_TOP);
             stage_reset_n = true;
             pe_running_n = true;
             cycles_n = 0;
             instr_count_n = 0;
+            startup_guard_n = 4;
         }
 
         if (router_pe_program.read() && pe_running_current) {
@@ -332,8 +347,10 @@ public:
         }
 
         // Check for Auto Halting (All stages reported halted)
-         // Only halt if actually running
-        if (pe_running_current) {
+         // Only halt if actually running AND not in stage_reset cycle
+         // (stage_reset clears halted flags, but they're registered —
+         //  checking on the same cycle would see stale True from prev wave)
+        if (pe_running_current && !stage_reset_current && !stage_reset_n && startup_guard_current == 0) {
             bool all_stages_halted = if_id_halted_sig.read() &&
                                      exe_m_halted_sig.read() &&
                                      exe_a_halted_sig.read();
@@ -373,6 +390,7 @@ public:
         cycles_next.write(cycles_n);
         instr_count_next.write(instr_count_n);
         stage_reset_next.write(stage_reset_n);
+        startup_guard_next.write(startup_guard_n);
     }
 
     // 2. Output Logic
@@ -380,6 +398,10 @@ public:
         pe_running_signal.write(pe_running_reg.read());
         stage_reset_signal.write(stage_reset_reg.read());
         pe_busy.write(pe_running_reg.read());
+        pe_halted.write(!pe_running_reg.read()
+                        && if_id_halted_sig.read()
+                        && exe_m_halted_sig.read()
+                        && exe_a_halted_sig.read());
     }
 
     // 3. Status/Performance Monitoring logic
@@ -410,6 +432,7 @@ public:
         cycles_reg.write(0);
         instr_count_reg.write(0);
         stage_reset_reg.write(false);
+        startup_guard_reg.write(0);
         pc_init_value.write(0);
 
         wait(); // Wait for first clock edge
@@ -420,6 +443,7 @@ public:
             cycles_reg.write(cycles_next.read());
             instr_count_reg.write(instr_count_next.read());
             stage_reset_reg.write(stage_reset_next.read());
+            startup_guard_reg.write(startup_guard_next.read());
 
             wait(); // Wait for next clock edge
         }

@@ -132,6 +132,8 @@ SC_MODULE(ScratchpadMemory) {
     sc_in<bool>       clk      {"clk"};
     sc_in<bool>       reset_n  {"reset_n"};
     sc_in<bool>       pmu_rst_i{"pmu_rst_i"};
+    sc_in<bool>       drop_noc_resp_i{"drop_noc_resp_i"};
+    sc_in<bool>       soft_reset_i{"soft_reset_i"};   // unified SOFT_RESET
 
     sc_in<sc_uint<8>> config_map_i    {"config_map_i"};
     sc_in<bool>       config_update_i {"config_update_i"};
@@ -348,6 +350,29 @@ SC_MODULE(ScratchpadMemory) {
     SC_HAS_PROCESS(ScratchpadMemory);
 
     // =========================================================================
+    // Unified status helpers
+    // =========================================================================
+    /** All internal FIFOs empty, no pending DMA, no skid buffered requests. */
+    bool spm_quiesced() const {
+        for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) {
+            if (skid_valid_reg[p].read()) return false;
+            if (!port_resp_fifo_empty[p].read()) return false;
+        }
+        for (unsigned g = 0; g < NUM_GROUPS; ++g) {
+            if (!group_meta_fifo_empty[g].read()) return false;
+        }
+        if (!dma_aw_fifo_empty.read())        return false;
+        if (!dma_w_data_fifo_empty.read())    return false;
+        if (!dma_w_strb_fifo_empty.read())    return false;
+        if (!dma_write_req_fifo_empty.read()) return false;
+        if (!dma_read_req_fifo_empty.read())  return false;
+        if (!dma_read_resp_fifo_empty.read()) return false;
+        if (dma_b_pending_cnt_reg.read() != 0) return false;
+        if (dma_rd_inflight_cnt_reg.read() != 0) return false;
+        return true;
+    }
+
+    // =========================================================================
     // Constructor
     // =========================================================================
     ScratchpadMemory(sc_module_name name) : sc_module(name) {
@@ -518,6 +543,8 @@ SC_MODULE(ScratchpadMemory) {
         // ---- comb_dma_read_resp_fifo_pop: R handshake ----
         SC_METHOD(comb_dma_read_resp_fifo_pop);
         sensitive << dma_read_resp_fifo_empty << s_axi_rready_i;
+
+        sensitive << drop_noc_resp_i;
 
         // ---- comb_bank_resp_ready: accept only when merge will consume ----
         SC_METHOD(comb_bank_resp_ready);
@@ -951,6 +978,10 @@ private:
 
             if (!meta.is_dma) {
                 unsigned p = meta.port_id;
+                if (drop_noc_resp_i.read()) {
+                    group_meta_fifo_pop[g].write(true);
+                    continue;
+                }
                 if (port_resp_fifo_full[p].read()) {
                     DEBUG_MSG(" resp_merge g=" << g << " STALL: port_resp_fifo_full[" << p << "]=1 @" << sc_time_stamp(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
                 }
@@ -1166,6 +1197,10 @@ private:
 
         // ----- Main loop -----
         while (true) {
+            for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) {
+                port_resp_fifo_clear[p].write(drop_noc_resp_i.read());
+            }
+
             // WDATA and WSTRB are generated from the same AXI W handshake.
             // If they diverge, the merged DMA write packet can carry mismatched mask/data.
             if (dma_w_data_fifo_empty.read() != dma_w_strb_fifo_empty.read()) {
@@ -1204,6 +1239,38 @@ private:
                     for (unsigned p = 0; p < NUM_NOC_PORTS; ++p)
                         active_map_reg[p].write(sc_uint<2>((map >> (p * 2)) & 0x3u));
                 }
+            }
+
+            // -- Soft reset: clear FIFOs / skid / DMA counters, preserve SRAM & config --
+            if (soft_reset_i.read()) {
+                for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) {
+                    skid_valid_reg[p].write(false);
+                    credit_cnt_reg[p].write(sc_uint<8>(MAX_OUTSTANDING));
+                    port_resp_fifo_clear[p].write(true);
+                }
+                for (unsigned g = 0; g < NUM_GROUPS; ++g)
+                    group_meta_fifo_clear[g].write(true);
+                dma_b_pending_cnt_reg.write(0);
+                dma_rd_inflight_cnt_reg.write(0);
+                dma_aw_fifo_clear.write(true);
+                dma_w_data_fifo_clear.write(true);
+                dma_w_strb_fifo_clear.write(true);
+                dma_write_req_fifo_clear.write(true);
+                dma_read_req_fifo_clear.write(true);
+                dma_read_resp_fifo_clear.write(true);
+                wait();
+                // Deassert clears after one cycle
+                for (unsigned p = 0; p < NUM_NOC_PORTS; ++p)
+                    port_resp_fifo_clear[p].write(false);
+                for (unsigned g = 0; g < NUM_GROUPS; ++g)
+                    group_meta_fifo_clear[g].write(false);
+                dma_aw_fifo_clear.write(false);
+                dma_w_data_fifo_clear.write(false);
+                dma_w_strb_fifo_clear.write(false);
+                dma_write_req_fifo_clear.write(false);
+                dma_read_req_fifo_clear.write(false);
+                dma_read_resp_fifo_clear.write(false);
+                continue;  // restart main loop
             }
 
             // -- Skid buffer update --
@@ -1329,7 +1396,10 @@ private:
         auto btj =[](bool v) -> const char* { return v ? "true" : "false"; };
         auto csv_u =[](const auto& arr) {
             std::ostringstream o;
-            for (size_t i = 0; i < arr.size(); ++i) { if (i) o << ","; o << arr[i]; }
+            for (size_t i = 0; i < arr.size(); ++i) {
+                if (i) o << ",";
+                o << static_cast<unsigned int>(arr[i]);
+            }
             return o.str();
         };
 

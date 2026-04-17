@@ -20,6 +20,7 @@ public:
     sc_signal<bool> router_enable;
     sc_signal<PERouterMode> router_mode;
     sc_signal<bool> pe_busy;
+    sc_signal<bool> pe_halted;
 
     // NoC interfaces (Valid/Ready)
     VRDSIG<noc_request_t> ps_sig;
@@ -43,6 +44,7 @@ public:
           router_enable("router_enable"),
           router_mode("router_mode"),
           pe_busy("pe_busy"),
+          pe_halted("pe_halted"),
           ps_sig("ps_sig"),
           pd_sig("pd_sig"),
           pli_sig("pli_sig"),
@@ -57,6 +59,7 @@ public:
         pe.router_enable(router_enable);
         pe.router_mode(router_mode);
         pe.pe_busy(pe_busy);
+        pe.pe_halted(pe_halted);
 
         connect_vr_signals(pe.noc_ps_in, ps_sig);
         connect_vr_signals(pe.noc_pd_in, pd_sig);

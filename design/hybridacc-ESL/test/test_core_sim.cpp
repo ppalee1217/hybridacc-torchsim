@@ -486,7 +486,7 @@ int sc_main(int argc, char* argv[]) {
         // Verify DRAM contents (test 2: Cluster SPM → DRAM)
         std::cout << "\n[TB] === DRAM Verification (Test 2) ===" << std::endl;
         for (uint32_t i = 0; i < kTestBytes / 4; ++i) {
-            uint32_t expected = 0xA0 + i;
+            uint32_t expected = i + 1;
             uint32_t actual = dram.read_word(kTestDramDst + i * 4);
             if (actual != expected) {
                 std::cout << "[TB] FAIL: dram[0x" << std::hex

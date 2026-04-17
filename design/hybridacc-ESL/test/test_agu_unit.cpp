@@ -314,15 +314,16 @@ int sc_main(int argc, char* argv[]) {
 		return TestResult{"", m == 0x00A5, "mask=0x" + std::to_string(m)};
 	});
 
-	run("Stall bit when gen_ready low", [&]() {
+	run("Busy and not quiesced when gen_ready low", [&]() {
 		tb.reset();
 		tb.mmio_wr(AddressGenerateUnit::REG_CTRL, 0x1);
 		tb.gen_ready.write(false);
 		tb.tick(2);
 		uint32_t status = tb.mmio_rd(AddressGenerateUnit::REG_STATUS);
-		bool stalled = ((status >> 3) & 0x1) != 0;
+		bool busy     = ((status >> 1) & 0x1) != 0;   // BUSY  = bit 1
+		bool quiesced = ((status >> 3) & 0x1) != 0;    // QUIESCED = bit 3
 		tb.gen_ready.write(true);
-		return TestResult{"", stalled, "STATUS=0x" + std::to_string(status)};
+		return TestResult{"", busy && !quiesced, "STATUS=0x" + std::to_string(status)};
 	});
 
 	run("Stop pin clears busy", [&]() {
