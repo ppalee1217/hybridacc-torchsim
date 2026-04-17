@@ -157,6 +157,16 @@ void run_loop_tiling(const LayerConfig* cfg) {
     /* One-time init of constant DMA staging registers */
     dma_init_linear();
 
+    /* ── Layer-scoped cluster start (once, before all waves) ──
+     * The PE program's KERNEL_LOOP_INNER/OUTER are patched to cover
+     * all waves.  PE stalls between waves waiting for HDDU-driven
+     * data, then continues when the next wave's HDDU starts.
+     * This keeps NoC/PE under layer-scope control while preserving
+     * wave-scope direct HDDU/AGU/SPM re-arm below.
+     * It also avoids the spm_drop_noc_resp workaround entirely — keeping
+     * PE running lets it drain any residual NoC responses naturally. */
+    cluster_start_layer();
+
     for (uint16_t oc = 0; oc < t->num_oc_tiles; oc++) {
       for (uint16_t h = 0; h < t->num_h_tiles; h++) {
         for (uint16_t w = 0; w < t->num_w_tiles; w++) {
@@ -166,7 +176,8 @@ void run_loop_tiling(const LayerConfig* cfg) {
 
             /* AGU base address — PS/PD use ping/pong, PLI/PLO fixed */
             uint32_t agu_base_ps  = buf ? t->agu_pong[0] : t->agu_ping[0];
-            uint32_t agu_base_pd  = buf ? t->agu_pong[1] : t->agu_ping[1];
+            uint32_t agu_base_pd  = (buf ? t->agu_pong[1] : t->agu_ping[1])
+                                  + ic * t->pd_ic_agu_offset;
             uint32_t agu_base_pli = t->agu_ping[2];  /* fixed (bank swap handles routing) */
             uint32_t agu_base_plo = t->agu_ping[3];  /* fixed */
 
@@ -226,15 +237,27 @@ void run_loop_tiling(const LayerConfig* cfg) {
             bcast_write32(SPM_CONFIG_MAP,    spm_map);
             bcast_write32(SPM_CONFIG_UPDATE, 0x01u);
 
-            /* Phase 3: Update AGU base_addr */
-            bcast_agu_write(AGU_PS,  AGU_REG_BASE_ADDR, agu_base_ps);
-            bcast_agu_write(AGU_PD,  AGU_REG_BASE_ADDR, agu_base_pd);
-            bcast_agu_write(AGU_PLI, AGU_REG_BASE_ADDR, agu_base_pli);
-            bcast_agu_write(AGU_PLO, AGU_REG_BASE_ADDR, agu_base_plo);
+                /* Phase 3: Re-apply AGU config each wave, then override dynamic base_addr.
+                    This mirrors the cluster testbench's per-wave re-arm sequence. */
+                cfg_agu_bank(AGU_PS,  &cfg->agu_ps);
+                cfg_agu_bank(AGU_PD,  &cfg->agu_pd);
+                cfg_agu_bank(AGU_PLI, &cfg->agu_pli);
+                cfg_agu_bank(AGU_PLO, &cfg->agu_plo);
+                bcast_agu_write(AGU_PS,  AGU_REG_BASE_ADDR, agu_base_ps);
+                bcast_agu_write(AGU_PD,  AGU_REG_BASE_ADDR, agu_base_pd);
+                bcast_agu_write(AGU_PLI, AGU_REG_BASE_ADDR, agu_base_pli);
+                bcast_agu_write(AGU_PLO, AGU_REG_BASE_ADDR, agu_base_plo);
 
-            /* Phase 4: Start PE + HDDU */
-            bcast_write32(NOC_CMD, pack_noc_cmd(NOC_CMD_START_PE, 0));
-            bcast_write32(HDDU_BASE + HDDU_CTRL, (1u << 1));
+            /* Phase 4: Start HDDU compute.
+             *
+             * PE is already running (started once before the wave loop).
+             * Each wave only re-arms the HDDU/AGU.  The PE stalls on NoC
+             * reads between waves and resumes automatically when the HDDU
+             * begins driving new data. */
+            bcast_write32(HDDU_BASE + HDDU_PLANE_EN,   cfg->hddu_plane_en);
+            bcast_write32(HDDU_BASE + HDDU_PLANE_MODE, cfg->hddu_plane_mode);
+            bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);  /* cfg_hddu_global START */
+            bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);  /* start_all START */
 
             /* Phase 5: DMA prefetch next wave (overlap with compute) */
             {
@@ -275,11 +298,14 @@ void run_loop_tiling(const LayerConfig* cfg) {
                 }
             }
 
-            /* Phase 6: Wait compute done */
-            wait_all_clusters_done(cfg->num_clusters);
+            /* Phase 6: Wait HDDU issue done for the current wave */
+            wait_all_clusters_hddu_done(cfg->num_clusters);
 
-            /* Phase 7: Stop PE */
-            bcast_write32(NOC_CMD, pack_noc_cmd(NOC_CMD_STOP_PE, 0));
+            /* Phase 7: Stop HDDU and wait for AGU idle at the wave boundary.
+             * PE stays running — it stalls waiting for the next wave's data.
+             * Layer-end STOP_PE is deferred until the full tiling loop finishes. */
+            bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_STOP);  /* STOP */
+            wait_all_clusters_agu_idle(cfg->num_clusters);
 
             /* Phase 8: DMA writeback (last ic tile only) — SPM→DRAM */
             if (is_last_ic) {
@@ -291,6 +317,15 @@ void run_loop_tiling(const LayerConfig* cfg) {
         } /* w */
       } /* h */
     } /* oc */
+
+    /* ── Layer-scoped cluster graceful quiesce (once, after all waves) ──
+     * The PE program should have reached HALT by now (all
+     * KERNEL_LOOP_OUTER × KERNEL_LOOP_INNER iterations completed).
+     * Cluster STOP is now part of the correctness-critical layer-end path:
+     * it blocks new ingress, drains residual router state, and only then
+     * allows the next layer to re-arm the cluster. */
+    cluster_stop_layer();
+    wait_all_clusters_cluster_quiesced(cfg->num_clusters);
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -299,8 +334,12 @@ void run_loop_tiling(const LayerConfig* cfg) {
 void run_layer(const LayerConfig* cfg) {
     set_cluster_mask(cfg->cluster_mask_lo, cfg->cluster_mask_hi);
 
+    /* Layer-scope owner: NoC/PE lifecycle uses cluster MMIO, while
+     * wave-scope HDDU/AGU/SPM programming remains direct below. */
+    cluster_set_mode(CLUSTER_MODE_LAYER_MANAGED);
+
     /* HDDU soft-reset */
-    bcast_write32(HDDU_BASE + HDDU_CTRL, (1u << 0));
+    bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_SOFT_RESET);
 
     /* AGU iter/stride setup (once per layer) */
     cfg_agu_bank(AGU_PS,  &cfg->agu_ps);
@@ -324,6 +363,9 @@ void run_layer(const LayerConfig* cfg) {
                      cfg->patches, cfg->patch_count);
     load_pe_program(patched_prog, cfg->pe_template_len);
 
-    /* Tiling loop */
+    /* Tiling loop
+     * Assumption: the previous layer has already completed its
+     * STOP_PE-driven NOC quiesce barrier before this layer re-arms
+     * HDDU/NoC/scan-chain state. */
     run_loop_tiling(cfg);
 }

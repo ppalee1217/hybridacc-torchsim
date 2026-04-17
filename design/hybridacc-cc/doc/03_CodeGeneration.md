@@ -258,23 +258,28 @@ static inline int dma_is_done(void) {
     return (DMA_REG_CTRL & DMA_STATUS_DONE) != 0;
 }
 
-/* ── HDDU Status polling ── */
+/* ── HDDU / NoC Status polling ── */
 
-static inline void wait_hddu_done(void) {
-    while (1) {
-        uint32_t st = mmio_read32(CLUSTER_BCAST_BASE + HDDU_BASE + HDDU_STATUS);
-        if (st & (1u << 4)) break;  /* error */
-        if (!(st & (1u << 1))) break; /* not busy → done */
-    }
-}
-
-static inline void wait_all_clusters_done(uint32_t num_clusters) {
+static inline void wait_all_clusters_hddu_done(uint32_t num_clusters) {
     for (uint32_t c = 0; c < num_clusters; c++) {
         uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
         while (1) {
             uint32_t st = mmio_read32(base + HDDU_BASE + HDDU_STATUS);
-            if (st & (1u << 4)) return;  /* error */
-            if (!(st & (1u << 1))) break; /* done */
+            if (st & HDDU_STATUS_ERROR) return;
+            if (st & HDDU_STATUS_DONE) break;
+        }
+    }
+}
+
+static inline void wait_all_clusters_noc_quiesced(uint32_t num_clusters) {
+    for (uint32_t c = 0; c < num_clusters; c++) {
+        uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
+        while (1) {
+            uint32_t st = mmio_read32(base + NOC_STATUS);
+            uint32_t required = NOC_STATUS_ALL_ACTIVE_PES_HALTED;
+            uint32_t blocked = NOC_STATUS_ANY_ROUTER_PENDING_RESP
+                             | NOC_STATUS_ANY_ROUTER_FIFO_NONEMPTY;
+            if ((st & required) == required && (st & blocked) == 0u) break;
         }
     }
 }
@@ -289,6 +294,7 @@ static inline void wait_all_clusters_done(uint32_t num_clusters) {
 - **`pack_scan_chain` 已移除**：scan chain 在 compile 階段就 pre-encode 成 `uint32_t[]` hex array，runtime 只需逐 word 寫入 NOC_CMD（見 §4.2）
 - `pack_load_program` 保留：encoding 簡單（僅兩個 field），且每個 word 的 `im_addr_bytes` 不同，無法完全 pre-encode
 - **DMA helpers 新增**：`dma_start()` / `dma_wait_done()` / `dma_is_done()` 封裝 DMA 控制暫存器操作
+- **完成條件已拆開**：`wait_all_clusters_hddu_done()` 專看 HDDU DONE；`wait_all_clusters_noc_quiesced()` 專看 layer-tail 的 STOP_PE + quiesce barrier
 - 位址常數完全對應 Core.md §6.4 的 address map
 
 ---
@@ -1087,14 +1093,15 @@ void run_loop_tiling(const LayerConfig* cfg) {
             }
 
             /* ══════════════════════════════════════════
-             * Phase 6: 等待 compute 完成
+             * Phase 6: 等待 HDDU issue done
              * ══════════════════════════════════════════ */
-            wait_all_clusters_done(cfg->num_clusters);
+            wait_all_clusters_hddu_done(cfg->num_clusters);
 
             /* ══════════════════════════════════════════
-             * Phase 7: Stop PE
+             * Phase 7: Stop HDDU，等待 AGU idle
              * ══════════════════════════════════════════ */
-            bcast_write32(NOC_CMD, pack_noc_cmd(NOC_CMD_STOP_PE, 0));
+            bcast_write32(HDDU_BASE + HDDU_CTRL, (1u << 2));
+            wait_all_clusters_agu_idle(cfg->num_clusters);
 
             /* ══════════════════════════════════════════
              * Phase 8: DMA writeback（僅 IC 累加的最後一個 tile）
@@ -1108,6 +1115,12 @@ void run_loop_tiling(const LayerConfig* cfg) {
         } /* w */
       } /* h */
     } /* oc */
+
+    /* ══════════════════════════════════════════════════
+     * Layer tail: STOP_PE graceful quiesce
+     * ══════════════════════════════════════════════════ */
+    bcast_write32(NOC_CMD, pack_noc_cmd(NOC_CMD_STOP_PE, 0));
+    wait_all_clusters_noc_quiesced(cfg->num_clusters);
 }
 ```
 
@@ -1220,9 +1233,10 @@ Wave 級別（由 `run_loop_tiling()` 的 innermost loop 每次迭代執行）�
 | W4 | Bcast | Write `NOC_CMD_START_PE` | — |
 | W5 | Bcast | Write `HDDU_CTRL` (bit1) | start_all |
 | W6 | DMA | Async prefetch next wave | 計算 next_tile_indices → `base + next_idx × stride` |
-| W7 | Unicast | Poll `HDDU_STATUS` | 等待完成 |
-| W8 | Bcast | Write `NOC_CMD_STOP_PE` | — |
+| W7 | Unicast | Poll `HDDU_STATUS` | 等待 HDDU DONE |
+| W8 | Bcast + Unicast | Write `HDDU_CTRL[STOP]` + wait AGU idle | wave boundary clean-up |
 | W9 | DMA | Writeback（if `is_last_ic`） | `dram_out = base + oc × s + h × s + w × s` |
+| W10 | Bcast + Unicast | Write `NOC_CMD_STOP_PE` + wait NOC quiesced | layer-tail graceful quiesce |
 
 **關鍵原則**：
 - AGU iter/stride + scan chain + PE program 在 layer 內**只配置一次**，所有 wave 共用

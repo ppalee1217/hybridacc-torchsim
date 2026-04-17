@@ -55,6 +55,7 @@ const LayerConfig layer_configs[] = {
             .dram_bias_base = {{ "0x%08X" | format(l.tiling.dram_bias_base) }}u,
             .dma_pli_words  = {{ l.tiling.dma_pli_words }}u,
             .ps_reuse_across_spatial = {{ l.tiling.ps_reuse_across_spatial }}u,
+            .pd_ic_agu_offset = {{ l.tiling.pd_ic_agu_offset }}u,
             .bank_depth_bytes = {{ l.tiling.bank_depth_bytes }}u,
             .parallel_groups  = {{ "0x%02X" | format(l.tiling.parallel_groups) }}u,
             .dma_ps_words_per_bank  = {{ l.tiling.dma_ps_words_per_bank }}u,

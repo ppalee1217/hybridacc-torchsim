@@ -163,8 +163,10 @@ def collect_payload_context(
         if topo_key not in scan_chains:
             encoded = encode_scan_chain(layer.scan_chain)
             num_pes = len(layer.scan_chain)
+            idx = len(scan_chains)
+            suffix = "" if idx == 0 else f"_{idx}"
             scan_chains[topo_key] = {
-                "symbol": f"noc_scan_chain_{num_pes}pe",
+                "symbol": f"noc_scan_chain_{num_pes}pe{suffix}",
                 "words": encoded,
                 "len": len(encoded),
             }

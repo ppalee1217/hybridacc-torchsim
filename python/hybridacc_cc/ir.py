@@ -268,6 +268,10 @@ class TilingParams:
     # Weight reuse
     ps_reuse_across_spatial: bool
 
+    # PD IC-tile AGU offset (for NHWC-input multi-IC-tile layers)
+    # When > 0, firmware adds ic * pd_ic_agu_offset to PD base_addr each wave
+    pd_ic_agu_offset: int
+
     # Parallel-mode DMA params
     bank_depth_bytes: int
     parallel_groups: int   # bitmask

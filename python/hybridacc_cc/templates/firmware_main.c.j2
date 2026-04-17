@@ -13,10 +13,16 @@ extern const LayerConfig layer_configs[];
 extern const uint32_t num_layers;
 
 /* ═══════════════════════════════════════════════════════
- * Trap Handler (minimal — hang on trap)
+ * Trap Handler (WFI wakeup for cluster done IRQ)
  * ═══════════════════════════════════════════════════════ */
 void __attribute__((interrupt("machine"), aligned(4)))
 trap_handler(void) {
+    uint32_t mcause = csr_read(CSR_MCAUSE);
+    if ((mcause & MCAUSE_INT_BIT) && ((mcause & 0x7FFFFFFFu) == MCAUSE_MTI_CODE)) {
+        mmio_write32(TIMER_MTIMECMP_LO, 0xFFFFFFFFu);
+        mmio_write32(TIMER_MTIMECMP_HI, 0xFFFFFFFFu);
+        return;
+    }
     while (1) { __asm__ volatile("wfi"); }
 }
 
@@ -34,6 +40,7 @@ _start(void) {
 }
 
 void main(void) {
+    enable_wfi_timer_interrupts();
     for (uint32_t i = 0; i < num_layers; i++) {
         run_layer(&layer_configs[i]);
     }

@@ -69,6 +69,7 @@ run_single_tb() {
     local trace_enable="$7"
     local trace_file_hint="$8"
     local advanced_mode="$9"
+    local repeat_layers="${10}"
     local trace_file=""
     local test_bin="test_cluster_sim"
 
@@ -151,6 +152,9 @@ run_single_tb() {
     if [ "$trace_enable" == "1" ]; then
         cmd+=(-f "$trace_file")
     fi
+    if [ -n "$repeat_layers" ] && [ "$repeat_layers" -gt 1 ] 2>/dev/null; then
+        cmd+=(--repeat-layers "$repeat_layers")
+    fi
 
     "${cmd[@]}" > "$out_log" 2>&1
     local rc=$?
@@ -178,6 +182,7 @@ if [ "$MODE" == "run" ]; then
     CLOCK_PERIOD_ARG="$CLOCK_PERIOD"
     TIMEOUT_CYCLES_ARG="$TIMEOUT_CYCLES"
     ADVANCED_MODE=0
+    REPEAT_LAYERS=1
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -230,6 +235,15 @@ if [ "$MODE" == "run" ]; then
                 ADVANCED_MODE=1
                 shift
                 ;;
+            --repeat-layers)
+                if [ -z "$2" ]; then
+                    echo "Error: --repeat-layers requires an argument"
+                    usage
+                    exit 1
+                fi
+                REPEAT_LAYERS="$2"
+                shift 2
+                ;;
             *)
                 TB_NAME="$1"
                 shift
@@ -247,7 +261,7 @@ if [ "$MODE" == "run" ]; then
         TB_DIR="$TOP_DIR/$TB_DIR"
     fi
 
-    run_single_tb "$TB_NAME" "$TB_DIR" "$RUN_MODE_FLAG" "$VERBOSE_FLAG" "$CLOCK_PERIOD_ARG" "$TIMEOUT_CYCLES_ARG" "$TRACE_ENABLE" "$TRACE_FILE" "$ADVANCED_MODE"
+    run_single_tb "$TB_NAME" "$TB_DIR" "$RUN_MODE_FLAG" "$VERBOSE_FLAG" "$CLOCK_PERIOD_ARG" "$TIMEOUT_CYCLES_ARG" "$TRACE_ENABLE" "$TRACE_FILE" "$ADVANCED_MODE" "$REPEAT_LAYERS"
 
 elif [ "$MODE" == "run-all" ]; then
     shift

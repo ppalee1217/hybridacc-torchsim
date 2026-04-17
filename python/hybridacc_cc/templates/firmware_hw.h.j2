@@ -24,6 +24,7 @@ typedef struct {
 
 /* Local Control MMIO (base 0x20000000) */
 #define LOCAL_CTRL_BASE     0x20000000u
+#define LOCAL_TIMER_BASE    0x20002000u
 #define LOCAL_CLUSTER_MASK_LO  (LOCAL_CTRL_BASE + 0x000u)
 #define LOCAL_CLUSTER_MASK_HI  (LOCAL_CTRL_BASE + 0x004u)
 
@@ -67,6 +68,19 @@ typedef struct {
 
 /* PLIC */
 #define PLIC_BASE           0x0C000000u
+#define PLIC_PRIORITY_BASE  (PLIC_BASE + 0x0000u)
+#define PLIC_ENABLE_LO      (PLIC_BASE + 0x1000u)
+#define PLIC_ENABLE_HI      (PLIC_BASE + 0x1004u)
+#define PLIC_THRESHOLD      (PLIC_BASE + 0x1800u)
+#define PLIC_CLAIM_COMPLETE (PLIC_BASE + 0x1804u)
+
+/* Timer / MSIP */
+#define TIMER_MSIP          (LOCAL_TIMER_BASE + 0x000u)
+#define TIMER_MTIMECMP_LO   (LOCAL_TIMER_BASE + 0x004u)
+#define TIMER_MTIMECMP_HI   (LOCAL_TIMER_BASE + 0x008u)
+#define TIMER_MTIME_LO      (LOCAL_TIMER_BASE + 0x00Cu)
+#define TIMER_MTIME_HI      (LOCAL_TIMER_BASE + 0x010u)
+#define TIMER_CTRL          (LOCAL_TIMER_BASE + 0x014u)
 
 /* Cluster Unicast MMIO */
 #define CLUSTER_UNICAST_BASE  0x40000000u
@@ -115,8 +129,63 @@ typedef struct {
 #define HDDU_STATUS         0x804u
 #define HDDU_PLANE_EN       0x808u
 #define HDDU_PLANE_MODE     0x80Cu
+#define HDDU_ERR_CODE       0x81Cu
+#define HDDU_ERR_INFO0      0x820u
+#define HDDU_ERR_INFO1      0x824u
+#define HDDU_COUNTER_STALL  0x834u
+
+/* HDDU CTRL register bits (aligned with UnifiedCtrlBit) */
+#define HDDU_CTRL_START_BIT      0u
+#define HDDU_CTRL_STOP_BIT       1u
+#define HDDU_CTRL_SOFT_RESET_BIT 2u
+#define HDDU_CTRL_START      (1u << HDDU_CTRL_START_BIT)
+#define HDDU_CTRL_STOP       (1u << HDDU_CTRL_STOP_BIT)
+#define HDDU_CTRL_SOFT_RESET (1u << HDDU_CTRL_SOFT_RESET_BIT)
+
+/* HDDU STATUS register bits (aligned with UnifiedStatusBit) */
+#define HDDU_STATUS_IDLE_BIT      0u
+#define HDDU_STATUS_BUSY_BIT      1u
+#define HDDU_STATUS_DONE_BIT      2u
+#define HDDU_STATUS_QUIESCED_BIT  3u
+#define HDDU_STATUS_ERROR_BIT     4u
+
+#define HDDU_STATUS_IDLE      (1u << HDDU_STATUS_IDLE_BIT)
+#define HDDU_STATUS_BUSY      (1u << HDDU_STATUS_BUSY_BIT)
+#define HDDU_STATUS_DONE      (1u << HDDU_STATUS_DONE_BIT)
+#define HDDU_STATUS_QUIESCED  (1u << HDDU_STATUS_QUIESCED_BIT)
+#define HDDU_STATUS_ERROR     (1u << HDDU_STATUS_ERROR_BIT)
 
 #define NOC_CMD             0x2000u
+#define NOC_STATUS          0x2004u
+
+#define CLUSTER_MODE        0x2100u
+#define CLUSTER_CTRL        0x2104u
+#define CLUSTER_STATUS      0x2108u
+#define CLUSTER_ERROR_CODE  0x210Cu
+#define CLUSTER_SUBSTATE    0x2110u
+
+#define CLUSTER_MODE_DIRECT_DEBUG   0u
+#define CLUSTER_MODE_LAYER_MANAGED  1u
+
+#define CLUSTER_CTRL_START       (1u << 0)
+#define CLUSTER_CTRL_STOP        (1u << 1)
+#define CLUSTER_CTRL_SOFT_RESET  (1u << 2)
+
+#define CLUSTER_STATUS_IDLE      (1u << 0)
+#define CLUSTER_STATUS_BUSY      (1u << 1)
+#define CLUSTER_STATUS_DONE      (1u << 2)
+#define CLUSTER_STATUS_QUIESCED  (1u << 3)
+#define CLUSTER_STATUS_ERROR     (1u << 4)
+
+#define NOC_STATUS_ANY_PE_BUSY_BIT               0u
+#define NOC_STATUS_ALL_ACTIVE_PES_HALTED_BIT     1u
+#define NOC_STATUS_ANY_ROUTER_PENDING_RESP_BIT   2u
+#define NOC_STATUS_ANY_ROUTER_FIFO_NONEMPTY_BIT  3u
+
+#define NOC_STATUS_ANY_PE_BUSY              (1u << NOC_STATUS_ANY_PE_BUSY_BIT)
+#define NOC_STATUS_ALL_ACTIVE_PES_HALTED    (1u << NOC_STATUS_ALL_ACTIVE_PES_HALTED_BIT)
+#define NOC_STATUS_ANY_ROUTER_PENDING_RESP  (1u << NOC_STATUS_ANY_ROUTER_PENDING_RESP_BIT)
+#define NOC_STATUS_ANY_ROUTER_FIFO_NONEMPTY (1u << NOC_STATUS_ANY_ROUTER_FIFO_NONEMPTY_BIT)
 
 /* ── NoC Command IDs ── */
 #define NOC_CMD_RESET           0u
@@ -127,6 +196,18 @@ typedef struct {
 #define NOC_CMD_SCAN_CHAIN      8u
 
 /* ── Helper Inline Functions ── */
+
+#define CSR_MSTATUS         0x300u
+#define CSR_MIE             0x304u
+#define CSR_MCAUSE          0x342u
+
+#define MSTATUS_MIE         (1u << 3)
+#define MIE_MTIE            (1u << 7)
+#define MIE_MEIE            (1u << 11)
+
+#define MCAUSE_INT_BIT      (1u << 31)
+#define MCAUSE_MTI_CODE     7u
+#define MCAUSE_MEI_CODE     11u
 
 static inline void mmio_write32(uint32_t addr, uint32_t val) {
     *(volatile uint32_t*)addr = val;
@@ -140,6 +221,16 @@ static inline void bcast_write32(uint32_t cluster_offset, uint32_t val) {
     mmio_write32(CLUSTER_BCAST_BASE + cluster_offset, val);
 }
 
+static inline uint32_t csr_read(uint32_t csr) {
+    uint32_t val;
+    __asm__ volatile("csrr %0, %1" : "=r"(val) : "i"(csr));
+    return val;
+}
+
+static inline void csr_set_bits(uint32_t csr, uint32_t mask) {
+    __asm__ volatile("csrs %0, %1" :: "i"(csr), "r"(mask));
+}
+
 static inline void unicast_write32(uint32_t cluster_id,
                                    uint32_t cluster_offset,
                                    uint32_t val) {
@@ -151,6 +242,29 @@ static inline void unicast_write32(uint32_t cluster_id,
 static inline void set_cluster_mask(uint32_t mask_lo, uint32_t mask_hi) {
     mmio_write32(LOCAL_CLUSTER_MASK_LO, mask_lo);
     mmio_write32(LOCAL_CLUSTER_MASK_HI, mask_hi);
+}
+
+static inline uint32_t cluster_unicast_read32(uint32_t cluster_id,
+                                              uint32_t cluster_offset) {
+    return mmio_read32(CLUSTER_UNICAST_BASE
+                       + cluster_id * CLUSTER_STRIDE
+                       + cluster_offset);
+}
+
+static inline void cluster_set_mode(uint32_t mode) {
+    bcast_write32(CLUSTER_MODE, mode);
+}
+
+static inline void cluster_start_layer(void) {
+    bcast_write32(CLUSTER_CTRL, CLUSTER_CTRL_START);
+}
+
+static inline void cluster_stop_layer(void) {
+    bcast_write32(CLUSTER_CTRL, CLUSTER_CTRL_STOP);
+}
+
+static inline void cluster_soft_reset_layer(void) {
+    bcast_write32(CLUSTER_CTRL, CLUSTER_CTRL_SOFT_RESET);
 }
 
 static inline uint32_t agu_addr(uint32_t bank, uint32_t reg) {
@@ -220,20 +334,136 @@ static inline void dma_store(uint32_t spm_offset, uint32_t dram_addr,
 }
 
 static inline void dma_wait_done(void) {
-    while (!(mmio_read32(DMA_STATUS) & DMA_STATUS_IDLE)) { /* busy wait */ }
+    while (!(mmio_read32(DMA_STATUS) & DMA_STATUS_IDLE)) {
+    }
 }
 
 static inline int dma_is_done(void) {
     return (mmio_read32(DMA_STATUS) & DMA_STATUS_IDLE) != 0;
 }
 
+static inline void enable_wfi_timer_interrupts(void) {
+    mmio_write32(TIMER_CTRL, 1u);
+    mmio_write32(TIMER_MTIMECMP_LO, 0xFFFFFFFFu);
+    mmio_write32(TIMER_MTIMECMP_HI, 0xFFFFFFFFu);
+    csr_set_bits(CSR_MIE, MIE_MTIE);
+    csr_set_bits(CSR_MSTATUS, MSTATUS_MIE);
+}
+
+static inline void arm_wfi_timer_tick(uint32_t delta_cycles) {
+    uint32_t now_lo = mmio_read32(TIMER_MTIME_LO);
+    mmio_write32(TIMER_MTIMECMP_HI, 0xFFFFFFFFu);
+    mmio_write32(TIMER_MTIMECMP_LO, now_lo + delta_cycles);
+    mmio_write32(TIMER_MTIMECMP_HI, 0u);
+}
+
+static inline void hddu_wait_debug_probe(uint32_t cluster_base) {
+    /* Read diagnostic registers so their values appear in core-debug WB trace. */
+    (void)mmio_read32(cluster_base + HDDU_BASE + HDDU_ERR_CODE);
+    (void)mmio_read32(cluster_base + HDDU_BASE + HDDU_ERR_INFO0);
+    (void)mmio_read32(cluster_base + HDDU_BASE + HDDU_ERR_INFO1);
+    (void)mmio_read32(cluster_base + HDDU_BASE + HDDU_COUNTER_STALL);
+    (void)mmio_read32(cluster_base + agu_addr(AGU_PS,  AGU_REG_STATUS));
+    (void)mmio_read32(cluster_base + agu_addr(AGU_PD,  AGU_REG_STATUS));
+    (void)mmio_read32(cluster_base + agu_addr(AGU_PLI, AGU_REG_STATUS));
+    (void)mmio_read32(cluster_base + agu_addr(AGU_PLO, AGU_REG_STATUS));
+}
+
+static inline void wait_all_clusters_hddu_done(uint32_t num_clusters) {
+    for (uint32_t c = 0; c < num_clusters; c++) {
+        uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
+        uint32_t spin_count = 0;
+        while (1) {
+            uint32_t st = mmio_read32(base + HDDU_BASE + HDDU_STATUS);
+            if ((st & HDDU_STATUS_QUIESCED) && ((spin_count & 0xFFu) == 0u)) {
+                hddu_wait_debug_probe(base);
+            }
+            if (st & HDDU_STATUS_ERROR) return;
+            if (st & HDDU_STATUS_DONE) break;
+            spin_count++;
+            arm_wfi_timer_tick(32u);
+            __asm__ volatile("wfi");
+        }
+    }
+}
+
 static inline void wait_all_clusters_done(uint32_t num_clusters) {
+    /* Temporary compatibility wrapper until all call sites move to hddu_done. */
+    wait_all_clusters_hddu_done(num_clusters);
+}
+
+static inline void wait_all_clusters_agu_idle(uint32_t num_clusters) {
     for (uint32_t c = 0; c < num_clusters; c++) {
         uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
         while (1) {
-            uint32_t st = mmio_read32(base + HDDU_BASE + HDDU_STATUS);
-            if (st & (1u << 4)) return;
-            if (!(st & (1u << 1))) break;
+            uint32_t ps  = mmio_read32(base + agu_addr(AGU_PS,  AGU_REG_STATUS));
+            uint32_t pd  = mmio_read32(base + agu_addr(AGU_PD,  AGU_REG_STATUS));
+            uint32_t pli = mmio_read32(base + agu_addr(AGU_PLI, AGU_REG_STATUS));
+            uint32_t plo = mmio_read32(base + agu_addr(AGU_PLO, AGU_REG_STATUS));
+            if (((ps | pd | pli | plo) & 0x2u) == 0u) {
+                break;
+            }
+            arm_wfi_timer_tick(32u);
+            __asm__ volatile("wfi");
+        }
+    }
+}
+
+static inline void wait_all_clusters_pe_halted(uint32_t num_clusters) {
+    for (uint32_t c = 0; c < num_clusters; c++) {
+        uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
+        while (1) {
+            uint32_t st = mmio_read32(base + NOC_STATUS);
+            if (st & NOC_STATUS_ALL_ACTIVE_PES_HALTED) {
+                break;
+            }
+            arm_wfi_timer_tick(32u);
+            __asm__ volatile("wfi");
+        }
+    }
+}
+
+static inline void wait_all_clusters_noc_quiesced(uint32_t num_clusters) {
+    for (uint32_t c = 0; c < num_clusters; c++) {
+        uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
+        while (1) {
+            uint32_t st = mmio_read32(base + NOC_STATUS);
+            uint32_t required = NOC_STATUS_ALL_ACTIVE_PES_HALTED;
+            uint32_t blocked = NOC_STATUS_ANY_ROUTER_PENDING_RESP
+                             | NOC_STATUS_ANY_ROUTER_FIFO_NONEMPTY;
+            if ((st & required) == required && (st & blocked) == 0u) {
+                break;
+            }
+            arm_wfi_timer_tick(32u);
+            __asm__ volatile("wfi");
+        }
+    }
+}
+
+static inline void wait_all_clusters_cluster_idle(uint32_t num_clusters) {
+    for (uint32_t c = 0; c < num_clusters; c++) {
+        while (1) {
+            uint32_t st = cluster_unicast_read32(c, CLUSTER_STATUS);
+            if (st & CLUSTER_STATUS_ERROR) return;
+            if (st & CLUSTER_STATUS_IDLE) {
+                break;
+            }
+            arm_wfi_timer_tick(32u);
+            __asm__ volatile("wfi");
+        }
+    }
+}
+
+static inline void wait_all_clusters_cluster_quiesced(uint32_t num_clusters) {
+    for (uint32_t c = 0; c < num_clusters; c++) {
+        while (1) {
+            uint32_t st = cluster_unicast_read32(c, CLUSTER_STATUS);
+            if (st & CLUSTER_STATUS_ERROR) return;
+            if (st & CLUSTER_STATUS_QUIESCED) {
+                break;
+            }
+            arm_wfi_timer_tick(32u);
+            __asm__ volatile("wfi");
         }
     }
 }
@@ -279,6 +509,8 @@ typedef struct {
     uint32_t dma_pli_words;
 
     uint8_t ps_reuse_across_spatial;
+
+    uint16_t pd_ic_agu_offset;   /* NHWC-input: PD base_addr += ic * this */
 
     uint32_t bank_depth_bytes;
     uint8_t  parallel_groups;
