@@ -167,7 +167,7 @@ public:
         plo_fifo.push(plo_fifo_push_sig);
         plo_fifo.data_out(plo_fifo_data_out_sig);
         plo_fifo.pop(plo_fifo_pop_sig);
-        plo_fifo.clear(fifo_flush);
+        plo_fifo.clear(plo_fifo_clear_sig);
         plo_fifo.empty(plo_fifo_empty_sig);
         plo_fifo.full(plo_fifo_full_sig);
 
@@ -285,7 +285,8 @@ public:
     // Channel-specific data queues (these are not registers in HDL sense)
     size_t pe_fifo_depth = 4;
 
-    sc_signal<bool> fifo_flush;
+    sc_signal<bool> fifo_flush;          // clears PS/PD/PLI (ingress)
+    sc_signal<bool> plo_fifo_clear_sig;   // clears PLO only (on layer start)
 
     FIFO<uint64_t> ps_fifo;   // PS channel: NoC -> PE (weights)
     asyncFIFO<uint64_t, uint16_t> pd_fifo;   // PD channel: NoC -> PE (activations)
@@ -382,12 +383,16 @@ public:
         // Commands are accepted regardless of FIFO availability.
         // Data is accepted when enabled and PS FIFO is not full.
 
+        // During stop_pending, non-command data is accepted to drain the
+        // upstream pipeline but silently discarded (not pushed to FIFO).
+        const bool draining = stop_pending_reg.read();
         bool ready;
         if(is_cmd){
             ready = enable.read();
         } else {
-            ready = enable.read() && router_running_reg.read() && !stop_pending_reg.read()
-                 && (!ps_fifo_full_sig.read() || ps_fifo_pop_sig.read());
+            ready = enable.read() && router_running_reg.read()
+                 && (draining
+                     || (!ps_fifo_full_sig.read() || ps_fifo_pop_sig.read()));
         }
 
         noc_ps_req_in_if.ready_out.write(ready);
@@ -421,11 +426,12 @@ public:
                 default:
                     break;
             }
-        } else {
+        } else if (!draining) {
             // Data path: push directly into FIFO.
             ps_fifo_data_in_sig.write(req.data);
             ps_fifo_push_sig.write(true);
         }
+        // During stop: data fire is accepted but silently discarded.
     }
 
     // NoC-PD: PD data ingress (direct to FIFO, no extra buffering)
@@ -437,16 +443,21 @@ public:
 
         if (!reset_n.read()) return;
 
-        const bool ready = enable.read() && router_running_reg.read() && !stop_pending_reg.read() && (!pd_fifo_full_sig.read());
+        // During stop_pending: accept to drain upstream, but discard.
+        const bool draining = stop_pending_reg.read();
+        const bool ready = enable.read() && router_running_reg.read()
+            && (draining || !pd_fifo_full_sig.read());
         noc_pd_req_in_if.ready_out.write(ready);
 
         const bool fire = noc_pd_req_in_if.valid_in.read() && ready;
         if (!fire) return;
 
-        const noc_request_t req = noc_pd_req_in_if.data_in.read();
-        pd_fifo_data_in_sig.write(req.data);
-        pd_fifo_mask_in_sig.write(req.mask);
-        pd_fifo_push_sig.write(true);
+        if (!draining) {
+            const noc_request_t req = noc_pd_req_in_if.data_in.read();
+            pd_fifo_data_in_sig.write(req.data);
+            pd_fifo_mask_in_sig.write(req.mask);
+            pd_fifo_push_sig.write(true);
+        }
     }
 
     // NoC-PLI + LN-PLI: PLI ingress with arbitration (direct to FIFO)
@@ -459,10 +470,12 @@ public:
 
         if (!reset_n.read()) return;
 
-        const bool enabled = enable.read() && router_running_reg.read() && !stop_pending_reg.read();
-        const bool fifo_has_space = (!pli_fifo_full_sig.read() || pli_fifo_pop_sig.read());
-        const bool allow_bus = enabled && can_route_to_bus(NOC_CHANNEL_PLI) && fifo_has_space;
-        const bool allow_ln = enabled && can_route_from_ln(NOC_CHANNEL_PLI) && fifo_has_space;
+        // During stop_pending: accept ingress to drain upstream, but discard.
+        const bool draining = stop_pending_reg.read();
+        const bool enabled = enable.read() && router_running_reg.read();
+        const bool fifo_has_space = draining || (!pli_fifo_full_sig.read() || pli_fifo_pop_sig.read());
+        const bool allow_bus = enabled && (draining || can_route_to_bus(NOC_CHANNEL_PLI)) && fifo_has_space;
+        const bool allow_ln = enabled && (draining || can_route_from_ln(NOC_CHANNEL_PLI)) && fifo_has_space;
 
         // Priority: NoC over LN
         const bool noc_ready = allow_bus;
@@ -473,13 +486,15 @@ public:
         const bool ln_fire = ln_pli_in_if.valid_in.read() && ln_ready;
         ln_pli_in_if.ready_out.write(ln_ready);
 
-        if (noc_fire) {
-            const noc_request_t req = noc_pli_req_in_if.data_in.read();
-            pli_fifo_data_in_sig.write(req.data);
-            pli_fifo_push_sig.write(true);
-        } else if (ln_fire) {
-            pli_fifo_data_in_sig.write(ln_pli_in_if.data_in.read());
-            pli_fifo_push_sig.write(true);
+        if (!draining) {
+            if (noc_fire) {
+                const noc_request_t req = noc_pli_req_in_if.data_in.read();
+                pli_fifo_data_in_sig.write(req.data);
+                pli_fifo_push_sig.write(true);
+            } else if (ln_fire) {
+                pli_fifo_data_in_sig.write(ln_pli_in_if.data_in.read());
+                pli_fifo_push_sig.write(true);
+            }
         }
     }
 
@@ -490,7 +505,8 @@ public:
         if (!reset_n.read()) return;
         if (!enable.read()) return;
         if (!router_running_reg.read()) return;
-        if (stop_pending_reg.read()) return;
+        // Allow PLO egress during stop_pending so output data can drain
+        // to NoC before the router declares itself drained.
         bool stage_valid = (state_reg.read() == PErouterState::IDLE);
         if (!stage_valid) return;
         if (!can_route_to_bus(NOC_CHANNEL_PLO)) return;
@@ -676,6 +692,7 @@ public:
     // All registers update here (single clocked process)
     void seq_process() {
         fifo_flush.write(false);
+        plo_fifo_clear_sig.write(false);
         // Reset values
         state_reg.write(PErouterState::IDLE);
         pending_noc_resp_reg.write(false);
@@ -715,10 +732,19 @@ public:
             if (cmd_start_pulse.read()) {
                 next_router_running = true;
                 next_stop_pending = false;
-                // Flush PErouter FIFOs to clear stale data from previous wave.
+                // Flush ALL FIFOs to clear stale data from previous wave.
                 fifo_flush.write(true);
+                plo_fifo_clear_sig.write(true);
+            } else if (next_stop_pending) {
+                // During stop: flush only INGRESS FIFOs (PS/PD/PLI) so
+                // PE-unconsumed residual data drains immediately.
+                // PLO is NOT flushed — it must drain naturally via NoC
+                // egress so output data reaches SPM/DRAM.
+                fifo_flush.write(true);
+                plo_fifo_clear_sig.write(false);
             } else {
                 fifo_flush.write(false);
+                plo_fifo_clear_sig.write(false);
             }
 
             if (cmd_reset_pulse.read()) {

@@ -156,17 +156,24 @@ int sc_main(int argc, char* argv[]) {
     sc_signal<sc_uint<32>>  nlu_cmd_resp_rdata[kNluPorts];
     sc_signal<bool>         nlu_irq[kNluPorts];
 
-    // NLU data requester (stub: inactive)
-    sc_signal<bool>         nlu_data_req_valid("nlu_data_req_valid");
-    sc_signal<bool>         nlu_data_req_write("nlu_data_req_write");
-    sc_signal<sc_uint<32>>  nlu_data_req_cluster_id("nlu_data_req_cluster_id");
-    sc_signal<sc_uint<32>>  nlu_data_req_addr("nlu_data_req_addr");
-    sc_signal<sc_biguint<kClAxiDataWidth>> nlu_data_req_wdata("nlu_data_req_wdata");
-    sc_signal<sc_uint<kClAxiDataWidth / 8>> nlu_data_req_wstrb("nlu_data_req_wstrb");
-    sc_signal<bool>         nlu_data_req_ready("nlu_data_req_ready");
-    sc_signal<bool>         nlu_data_resp_valid("nlu_data_resp_valid");
-    sc_signal<sc_biguint<kClAxiDataWidth>> nlu_data_resp_rdata("nlu_data_resp_rdata");
-    sc_signal<bool>         nlu_data_resp_error("nlu_data_resp_error");
+    // NLU data AXI4-Lite requester (stub: inactive)
+    sc_signal<bool>         nlu_data_axi_aw_valid("nlu_data_axi_aw_valid");
+    sc_signal<bool>         nlu_data_axi_aw_ready("nlu_data_axi_aw_ready");
+    sc_signal<sc_uint<32>>  nlu_data_axi_aw_addr("nlu_data_axi_aw_addr");
+    sc_signal<bool>         nlu_data_axi_w_valid("nlu_data_axi_w_valid");
+    sc_signal<bool>         nlu_data_axi_w_ready("nlu_data_axi_w_ready");
+    sc_signal<sc_biguint<kClAxiDataWidth>> nlu_data_axi_w_data("nlu_data_axi_w_data");
+    sc_signal<sc_uint<kClAxiDataWidth / 8>> nlu_data_axi_w_strb("nlu_data_axi_w_strb");
+    sc_signal<bool>         nlu_data_axi_b_valid("nlu_data_axi_b_valid");
+    sc_signal<bool>         nlu_data_axi_b_ready("nlu_data_axi_b_ready");
+    sc_signal<sc_uint<2>>   nlu_data_axi_b_resp("nlu_data_axi_b_resp");
+    sc_signal<bool>         nlu_data_axi_ar_valid("nlu_data_axi_ar_valid");
+    sc_signal<bool>         nlu_data_axi_ar_ready("nlu_data_axi_ar_ready");
+    sc_signal<sc_uint<32>>  nlu_data_axi_ar_addr("nlu_data_axi_ar_addr");
+    sc_signal<bool>         nlu_data_axi_r_valid("nlu_data_axi_r_valid");
+    sc_signal<bool>         nlu_data_axi_r_ready("nlu_data_axi_r_ready");
+    sc_signal<sc_biguint<kClAxiDataWidth>> nlu_data_axi_r_data("nlu_data_axi_r_data");
+    sc_signal<sc_uint<2>>   nlu_data_axi_r_resp("nlu_data_axi_r_resp");
 
     // ========================================================================
     // DUT: CoreController
@@ -263,17 +270,24 @@ int sc_main(int argc, char* argv[]) {
 
     dut.controller_irq_o(controller_irq);
 
-    // NLU data
-    dut.nlu_data_req_valid_i(nlu_data_req_valid);
-    dut.nlu_data_req_write_i(nlu_data_req_write);
-    dut.nlu_data_req_cluster_id_i(nlu_data_req_cluster_id);
-    dut.nlu_data_req_addr_i(nlu_data_req_addr);
-    dut.nlu_data_req_wdata_i(nlu_data_req_wdata);
-    dut.nlu_data_req_wstrb_i(nlu_data_req_wstrb);
-    dut.nlu_data_req_ready_o(nlu_data_req_ready);
-    dut.nlu_data_resp_valid_o(nlu_data_resp_valid);
-    dut.nlu_data_resp_rdata_o(nlu_data_resp_rdata);
-    dut.nlu_data_resp_error_o(nlu_data_resp_error);
+    // NLU data (AXI4-Lite)
+    dut.nlu_data_axi_aw_valid_i(nlu_data_axi_aw_valid);
+    dut.nlu_data_axi_aw_ready_o(nlu_data_axi_aw_ready);
+    dut.nlu_data_axi_aw_addr_i(nlu_data_axi_aw_addr);
+    dut.nlu_data_axi_w_valid_i(nlu_data_axi_w_valid);
+    dut.nlu_data_axi_w_ready_o(nlu_data_axi_w_ready);
+    dut.nlu_data_axi_w_data_i(nlu_data_axi_w_data);
+    dut.nlu_data_axi_w_strb_i(nlu_data_axi_w_strb);
+    dut.nlu_data_axi_b_valid_o(nlu_data_axi_b_valid);
+    dut.nlu_data_axi_b_ready_i(nlu_data_axi_b_ready);
+    dut.nlu_data_axi_b_resp_o(nlu_data_axi_b_resp);
+    dut.nlu_data_axi_ar_valid_i(nlu_data_axi_ar_valid);
+    dut.nlu_data_axi_ar_ready_o(nlu_data_axi_ar_ready);
+    dut.nlu_data_axi_ar_addr_i(nlu_data_axi_ar_addr);
+    dut.nlu_data_axi_r_valid_o(nlu_data_axi_r_valid);
+    dut.nlu_data_axi_r_ready_i(nlu_data_axi_r_ready);
+    dut.nlu_data_axi_r_data_o(nlu_data_axi_r_data);
+    dut.nlu_data_axi_r_resp_o(nlu_data_axi_r_resp);
 
     // ========================================================================
     // FakeDram

@@ -499,6 +499,26 @@ private:
 		return static_cast<uint32_t>(cmd);
 	}
 
+	static uint32_t debug_cluster_state_code(bool power_on, bool rst_n, bool interrupt_active) {
+		if (!power_on) {
+			return 0u;
+		}
+		if (!rst_n) {
+			return 1u;
+		}
+		return interrupt_active ? 3u : 2u;
+	}
+
+	static const char* debug_cluster_state_name(uint32_t state_code) {
+		switch (state_code) {
+		case 0u: return "POWER_OFF";
+		case 1u: return "RESET";
+		case 2u: return "RUN";
+		case 3u: return "INTERRUPT";
+		default: return "UNKNOWN";
+		}
+	}
+
 	bool noc_is_quiesced() const {
 		return noc.is_quiesced();
 	}
@@ -513,9 +533,7 @@ private:
 		noc_command_mode_sig.write(true);
 
 		const message_command_t cmd = static_cast<message_command_t>(raw_cmd & 0x0Fu);
-		if (cmd == message_command_t::CMD_STOP_PE) {
-			spm_drop_noc_resp_sig.write(true);
-		} else if (cmd == message_command_t::CMD_START_PE
+		if (cmd == message_command_t::CMD_START_PE
 				   || cmd == message_command_t::CMD_RESET
 				   || cmd == message_command_t::CMD_INIT) {
 			spm_drop_noc_resp_sig.write(false);
@@ -611,6 +629,15 @@ private:
 		cluster_ctrl_.reset();
 
 		wait();
+
+		uint32_t prev_debug_state = debug_cluster_state_code(
+			power_enable_i.read(),
+			reset_n.read(),
+			power_enable_i.read() && hddu_interrupt_sig.read());
+		bool prev_interrupt = power_enable_i.read() && hddu_interrupt_sig.read();
+		uint32_t prev_status_word = cluster_status_word();
+		uint32_t prev_mode = static_cast<uint32_t>(cluster_ctrl_.mode());
+		uint32_t prev_substate = static_cast<uint32_t>(cluster_ctrl_.substate());
 
 		while (true) {
 			spm_cfg_update_sig.write(false);
@@ -784,6 +811,47 @@ private:
 					}
 					ahb_rdata_reg.write(read_value);
 				}
+			}
+
+			const bool debug_power_on = power_enable_i.read();
+			const bool debug_reset_n = reset_n.read();
+			const bool debug_interrupt = debug_power_on && hddu_interrupt_sig.read();
+			const uint32_t debug_state = debug_cluster_state_code(
+				debug_power_on,
+				debug_reset_n,
+				debug_interrupt);
+			const uint32_t debug_status_word = cluster_status_word();
+			const uint32_t debug_mode = static_cast<uint32_t>(cluster_ctrl_.mode());
+			const uint32_t debug_substate = static_cast<uint32_t>(cluster_ctrl_.substate());
+
+			if (debug_state != prev_debug_state
+					|| debug_interrupt != prev_interrupt
+					|| debug_status_word != prev_status_word
+					|| debug_mode != prev_mode
+					|| debug_substate != prev_substate) {
+				DEBUG_PRINTF(
+					DEBUG_LEVEL_CLUSTER_TOP,
+					"cluster state %s -> %s irq=%u->%u power=%u reset_n=%u mode=%u substate=%u status=0x%08x noc_quiesced=%u spm_quiesced=%u last_noc_cmd=0x%08x ahb_active=%u addr=0x%08x write=%u\n",
+					debug_cluster_state_name(prev_debug_state),
+					debug_cluster_state_name(debug_state),
+					prev_interrupt ? 1u : 0u,
+					debug_interrupt ? 1u : 0u,
+					debug_power_on ? 1u : 0u,
+					debug_reset_n ? 1u : 0u,
+					debug_mode,
+					debug_substate,
+					debug_status_word,
+					noc_is_quiesced() ? 1u : 0u,
+					spm.spm_quiesced() ? 1u : 0u,
+					noc_last_cmd_reg.to_uint(),
+					ahb_active_reg.read() ? 1u : 0u,
+					ahb_addr_reg.read().to_uint(),
+					ahb_write_reg.read() ? 1u : 0u);
+				prev_debug_state = debug_state;
+				prev_interrupt = debug_interrupt;
+				prev_status_word = debug_status_word;
+				prev_mode = debug_mode;
+				prev_substate = debug_substate;
 			}
 
 			wait();

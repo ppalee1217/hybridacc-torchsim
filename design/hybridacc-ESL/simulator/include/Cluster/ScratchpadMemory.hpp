@@ -308,6 +308,17 @@ SC_MODULE(ScratchpadMemory) {
     sc_signal<sc_uint<64>>              pmu_arb_stall_cnt_reg    {"pmu_arb_stall_cnt_reg"};
     sc_signal<sc_uint<64>>              pmu_credit_stall_cnt_reg {"pmu_credit_stall_cnt_reg"};
 
+    // DMA channel PMU counters (SPM-2 / SPM-3)
+    uint64_t pmu_dma_aw_accept_cnt_reg = 0;
+    uint64_t pmu_dma_w_accept_cnt_reg  = 0;
+    uint64_t pmu_dma_ar_accept_cnt_reg = 0;
+    uint64_t pmu_dma_b_retire_cnt_reg  = 0;
+    uint64_t pmu_dma_r_retire_cnt_reg  = 0;
+    uint64_t pmu_dma_accept_stall_cycles_reg = 0;
+    uint64_t pmu_dma_resp_stall_cycles_reg   = 0;
+    uint8_t  pmu_dma_rd_high_watermark_reg   = 0;
+    uint8_t  pmu_dma_wr_high_watermark_reg   = 0;
+
     // =========================================================================
     // Intermediate combinational signals
     // (wires between comb_* processes and seq_process)
@@ -507,7 +518,7 @@ SC_MODULE(ScratchpadMemory) {
             }
         }
         for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) sensitive << port_resp_fifo_full[p];
-        sensitive << dma_read_resp_fifo_full;
+        sensitive << dma_read_resp_fifo_full << drop_noc_resp_i;
 
         // ---- comb_port_resp_fifo_ctrl: merge wr/rd pushes into port_resp_fifo ----
         SC_METHOD(comb_port_resp_fifo_ctrl);
@@ -543,8 +554,6 @@ SC_MODULE(ScratchpadMemory) {
         // ---- comb_dma_read_resp_fifo_pop: R handshake ----
         SC_METHOD(comb_dma_read_resp_fifo_pop);
         sensitive << dma_read_resp_fifo_empty << s_axi_rready_i;
-
-        sensitive << drop_noc_resp_i;
 
         // ---- comb_bank_resp_ready: accept only when merge will consume ----
         SC_METHOD(comb_bank_resp_ready);
@@ -1221,6 +1230,15 @@ private:
                 pmu_credit_stall_cnt_reg.write(0);
                 for (unsigned p = 0; p < NUM_NOC_PORTS; ++p)
                     pmu_port_txn_cnt_reg[p].write(0);
+                pmu_dma_aw_accept_cnt_reg = 0;
+                pmu_dma_w_accept_cnt_reg  = 0;
+                pmu_dma_ar_accept_cnt_reg = 0;
+                pmu_dma_b_retire_cnt_reg  = 0;
+                pmu_dma_r_retire_cnt_reg  = 0;
+                pmu_dma_accept_stall_cycles_reg = 0;
+                pmu_dma_resp_stall_cycles_reg   = 0;
+                pmu_dma_rd_high_watermark_reg   = 0;
+                pmu_dma_wr_high_watermark_reg   = 0;
             } else {
                 pmu_cycle_cnt_reg.write(pmu_cycle_cnt_reg.read() + 1);
             }
@@ -1312,6 +1330,32 @@ private:
                 pmu_credit_stall_cnt_reg.write(pmu_credit_stall_cnt_reg.read() + 1);
             if (arb_stall_sig.read())
                 pmu_arb_stall_cnt_reg.write(pmu_arb_stall_cnt_reg.read() + 1);
+
+            // -- DMA channel PMU (SPM-2 / SPM-3) --
+            if (dma_aw_fifo_push.read())      ++pmu_dma_aw_accept_cnt_reg;
+            if (dma_w_data_fifo_push.read())  ++pmu_dma_w_accept_cnt_reg;
+            if (dma_read_req_fifo_push.read()) ++pmu_dma_ar_accept_cnt_reg;
+            {
+                const bool b_fire = s_axi_bvalid_o.read() && s_axi_bready_i.read();
+                if (b_fire) ++pmu_dma_b_retire_cnt_reg;
+            }
+            if (dma_read_resp_fifo_pop.read()) ++pmu_dma_r_retire_cnt_reg;
+            // Accept-stall: upstream wants to push but FIFO full
+            if ((s_axi_awvalid_i.read() && dma_aw_fifo_full.read()) ||
+                (s_axi_wvalid_i.read()  && dma_w_data_fifo_full.read()) ||
+                (s_axi_arvalid_i.read() && dma_read_req_fifo_full.read()))
+                ++pmu_dma_accept_stall_cycles_reg;
+            // Resp-stall: response ready but master not accepting
+            if ((s_axi_bvalid_o.read() && !s_axi_bready_i.read()) ||
+                (s_axi_rvalid_o.read() && !s_axi_rready_i.read()))
+                ++pmu_dma_resp_stall_cycles_reg;
+            // High watermarks
+            {
+                uint8_t bp = dma_b_pending_cnt_reg.read().to_uint();
+                uint8_t ri = dma_rd_inflight_cnt_reg.read().to_uint();
+                if (bp > pmu_dma_wr_high_watermark_reg) pmu_dma_wr_high_watermark_reg = bp;
+                if (ri > pmu_dma_rd_high_watermark_reg) pmu_dma_rd_high_watermark_reg = ri;
+            }
 
             // -- DMA B-pending counter --
             {

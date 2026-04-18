@@ -142,17 +142,24 @@ SC_MODULE(CoreController) {
     // --- Runtime debug flag (set before sc_start) ---
     bool core_debug = false;
 
-    // --- NLU data requester interface (into ClusterDataFabric) ---
-    sc_in<bool>          nlu_data_req_valid_i;
-    sc_in<bool>          nlu_data_req_write_i;
-    sc_in<sc_uint<32>>   nlu_data_req_cluster_id_i;
-    sc_in<sc_uint<32>>   nlu_data_req_addr_i;
-    sc_in<sc_biguint<kClAxiDataWidth>>          nlu_data_req_wdata_i;
-    sc_in<sc_uint<kClAxiDataWidth / 8>>         nlu_data_req_wstrb_i;
-    sc_out<bool>         nlu_data_req_ready_o;
-    sc_out<bool>         nlu_data_resp_valid_o;
-    sc_out<sc_biguint<kClAxiDataWidth>>         nlu_data_resp_rdata_o;
-    sc_out<bool>         nlu_data_resp_error_o;
+    // --- NLU data AXI4-Lite requester interface (into ClusterDataFabric) ---
+    sc_in<bool>          nlu_data_axi_aw_valid_i;
+    sc_out<bool>         nlu_data_axi_aw_ready_o;
+    sc_in<sc_uint<32>>   nlu_data_axi_aw_addr_i;
+    sc_in<bool>          nlu_data_axi_w_valid_i;
+    sc_out<bool>         nlu_data_axi_w_ready_o;
+    sc_in<sc_biguint<kClAxiDataWidth>>  nlu_data_axi_w_data_i;
+    sc_in<sc_uint<kClAxiDataWidth / 8>> nlu_data_axi_w_strb_i;
+    sc_out<bool>         nlu_data_axi_b_valid_o;
+    sc_in<bool>          nlu_data_axi_b_ready_i;
+    sc_out<sc_uint<2>>   nlu_data_axi_b_resp_o;
+    sc_in<bool>          nlu_data_axi_ar_valid_i;
+    sc_out<bool>         nlu_data_axi_ar_ready_o;
+    sc_in<sc_uint<32>>   nlu_data_axi_ar_addr_i;
+    sc_out<bool>         nlu_data_axi_r_valid_o;
+    sc_in<bool>          nlu_data_axi_r_ready_i;
+    sc_out<sc_biguint<kClAxiDataWidth>>  nlu_data_axi_r_data_o;
+    sc_out<sc_uint<2>>   nlu_data_axi_r_resp_o;
 
     // ========================================================================
     // Constructor
@@ -203,17 +210,24 @@ SC_MODULE(CoreController) {
           m_mem_axi_r_data_i("m_mem_axi_r_data_i"),
           m_mem_axi_r_resp_i("m_mem_axi_r_resp_i"),
           m_mem_axi_r_last_i("m_mem_axi_r_last_i"),
-          // NLU data requester
-          nlu_data_req_valid_i("nlu_data_req_valid_i"),
-          nlu_data_req_write_i("nlu_data_req_write_i"),
-          nlu_data_req_cluster_id_i("nlu_data_req_cluster_id_i"),
-          nlu_data_req_addr_i("nlu_data_req_addr_i"),
-          nlu_data_req_wdata_i("nlu_data_req_wdata_i"),
-          nlu_data_req_wstrb_i("nlu_data_req_wstrb_i"),
-          nlu_data_req_ready_o("nlu_data_req_ready_o"),
-          nlu_data_resp_valid_o("nlu_data_resp_valid_o"),
-          nlu_data_resp_rdata_o("nlu_data_resp_rdata_o"),
-          nlu_data_resp_error_o("nlu_data_resp_error_o"),
+          // NLU data AXI4-Lite requester
+          nlu_data_axi_aw_valid_i("nlu_data_axi_aw_valid_i"),
+          nlu_data_axi_aw_ready_o("nlu_data_axi_aw_ready_o"),
+          nlu_data_axi_aw_addr_i("nlu_data_axi_aw_addr_i"),
+          nlu_data_axi_w_valid_i("nlu_data_axi_w_valid_i"),
+          nlu_data_axi_w_ready_o("nlu_data_axi_w_ready_o"),
+          nlu_data_axi_w_data_i("nlu_data_axi_w_data_i"),
+          nlu_data_axi_w_strb_i("nlu_data_axi_w_strb_i"),
+          nlu_data_axi_b_valid_o("nlu_data_axi_b_valid_o"),
+          nlu_data_axi_b_ready_i("nlu_data_axi_b_ready_i"),
+          nlu_data_axi_b_resp_o("nlu_data_axi_b_resp_o"),
+          nlu_data_axi_ar_valid_i("nlu_data_axi_ar_valid_i"),
+          nlu_data_axi_ar_ready_o("nlu_data_axi_ar_ready_o"),
+          nlu_data_axi_ar_addr_i("nlu_data_axi_ar_addr_i"),
+          nlu_data_axi_r_valid_o("nlu_data_axi_r_valid_o"),
+          nlu_data_axi_r_ready_i("nlu_data_axi_r_ready_i"),
+          nlu_data_axi_r_data_o("nlu_data_axi_r_data_o"),
+          nlu_data_axi_r_resp_o("nlu_data_axi_r_resp_o"),
           controller_irq_o("controller_irq_o"),
           // Submodule instances
           u_boot_host_if("u_boot_host_if"),
@@ -511,17 +525,24 @@ SC_MODULE(CoreController) {
         u_dma_engine.m_mem_axi_r_data_i(sig_dma_mem_r_data);
         u_dma_engine.m_mem_axi_r_resp_i(sig_dma_mem_r_resp);
         u_dma_engine.m_mem_axi_r_last_i(sig_dma_mem_r_last);
-        // DMA ↔ ClusterDataFabric
-        u_dma_engine.cl_data_req_valid_o(sig_dma_cl_req_valid);
-        u_dma_engine.cl_data_req_write_o(sig_dma_cl_req_write);
-        u_dma_engine.cl_data_req_cluster_id_o(sig_dma_cl_req_cluster_id);
-        u_dma_engine.cl_data_req_addr_o(sig_dma_cl_req_addr);
-        u_dma_engine.cl_data_req_wdata_o(sig_dma_cl_req_wdata);
-        u_dma_engine.cl_data_req_wstrb_o(sig_dma_cl_req_wstrb);
-        u_dma_engine.cl_data_req_ready_i(sig_dma_cl_req_ready);
-        u_dma_engine.cl_data_resp_valid_i(sig_dma_cl_resp_valid);
-        u_dma_engine.cl_data_resp_rdata_i(sig_dma_cl_resp_rdata);
-        u_dma_engine.cl_data_resp_error_i(sig_dma_cl_resp_error);
+        // DMA ↔ ClusterDataFabric (AXI4-Lite)
+        u_dma_engine.m_cl_axi_aw_valid_o(sig_dma_cl_aw_valid);
+        u_dma_engine.m_cl_axi_aw_ready_i(sig_dma_cl_aw_ready);
+        u_dma_engine.m_cl_axi_aw_addr_o(sig_dma_cl_aw_addr);
+        u_dma_engine.m_cl_axi_w_valid_o(sig_dma_cl_w_valid);
+        u_dma_engine.m_cl_axi_w_ready_i(sig_dma_cl_w_ready);
+        u_dma_engine.m_cl_axi_w_data_o(sig_dma_cl_w_data);
+        u_dma_engine.m_cl_axi_w_strb_o(sig_dma_cl_w_strb);
+        u_dma_engine.m_cl_axi_b_valid_i(sig_dma_cl_b_valid);
+        u_dma_engine.m_cl_axi_b_ready_o(sig_dma_cl_b_ready);
+        u_dma_engine.m_cl_axi_b_resp_i(sig_dma_cl_b_resp);
+        u_dma_engine.m_cl_axi_ar_valid_o(sig_dma_cl_ar_valid);
+        u_dma_engine.m_cl_axi_ar_ready_i(sig_dma_cl_ar_ready);
+        u_dma_engine.m_cl_axi_ar_addr_o(sig_dma_cl_ar_addr);
+        u_dma_engine.m_cl_axi_r_valid_i(sig_dma_cl_r_valid);
+        u_dma_engine.m_cl_axi_r_ready_o(sig_dma_cl_r_ready);
+        u_dma_engine.m_cl_axi_r_data_i(sig_dma_cl_r_data);
+        u_dma_engine.m_cl_axi_r_resp_i(sig_dma_cl_r_resp);
         u_dma_engine.dma_irq_o(sig_dma_irq);
 
         // ====================================================================
@@ -529,28 +550,42 @@ SC_MODULE(CoreController) {
         // ====================================================================
         u_cluster_data_fabric.clk(clk);
         u_cluster_data_fabric.reset_n(reset_n);
-        // DMA requester
-        u_cluster_data_fabric.dma_req_valid_i(sig_dma_cl_req_valid);
-        u_cluster_data_fabric.dma_req_write_i(sig_dma_cl_req_write);
-        u_cluster_data_fabric.dma_req_cluster_id_i(sig_dma_cl_req_cluster_id);
-        u_cluster_data_fabric.dma_req_addr_i(sig_dma_cl_req_addr);
-        u_cluster_data_fabric.dma_req_wdata_i(sig_dma_cl_req_wdata);
-        u_cluster_data_fabric.dma_req_wstrb_i(sig_dma_cl_req_wstrb);
-        u_cluster_data_fabric.dma_req_ready_o(sig_dma_cl_req_ready);
-        u_cluster_data_fabric.dma_resp_valid_o(sig_dma_cl_resp_valid);
-        u_cluster_data_fabric.dma_resp_rdata_o(sig_dma_cl_resp_rdata);
-        u_cluster_data_fabric.dma_resp_error_o(sig_dma_cl_resp_error);
-        // NLU requester → external
-        u_cluster_data_fabric.nlu_req_valid_i(nlu_data_req_valid_i);
-        u_cluster_data_fabric.nlu_req_write_i(nlu_data_req_write_i);
-        u_cluster_data_fabric.nlu_req_cluster_id_i(nlu_data_req_cluster_id_i);
-        u_cluster_data_fabric.nlu_req_addr_i(nlu_data_req_addr_i);
-        u_cluster_data_fabric.nlu_req_wdata_i(nlu_data_req_wdata_i);
-        u_cluster_data_fabric.nlu_req_wstrb_i(nlu_data_req_wstrb_i);
-        u_cluster_data_fabric.nlu_req_ready_o(nlu_data_req_ready_o);
-        u_cluster_data_fabric.nlu_resp_valid_o(nlu_data_resp_valid_o);
-        u_cluster_data_fabric.nlu_resp_rdata_o(nlu_data_resp_rdata_o);
-        u_cluster_data_fabric.nlu_resp_error_o(nlu_data_resp_error_o);
+        // DMA requester (AXI4-Lite)
+        u_cluster_data_fabric.s_dma_axi_aw_valid_i(sig_dma_cl_aw_valid);
+        u_cluster_data_fabric.s_dma_axi_aw_ready_o(sig_dma_cl_aw_ready);
+        u_cluster_data_fabric.s_dma_axi_aw_addr_i(sig_dma_cl_aw_addr);
+        u_cluster_data_fabric.s_dma_axi_w_valid_i(sig_dma_cl_w_valid);
+        u_cluster_data_fabric.s_dma_axi_w_ready_o(sig_dma_cl_w_ready);
+        u_cluster_data_fabric.s_dma_axi_w_data_i(sig_dma_cl_w_data);
+        u_cluster_data_fabric.s_dma_axi_w_strb_i(sig_dma_cl_w_strb);
+        u_cluster_data_fabric.s_dma_axi_b_valid_o(sig_dma_cl_b_valid);
+        u_cluster_data_fabric.s_dma_axi_b_ready_i(sig_dma_cl_b_ready);
+        u_cluster_data_fabric.s_dma_axi_b_resp_o(sig_dma_cl_b_resp);
+        u_cluster_data_fabric.s_dma_axi_ar_valid_i(sig_dma_cl_ar_valid);
+        u_cluster_data_fabric.s_dma_axi_ar_ready_o(sig_dma_cl_ar_ready);
+        u_cluster_data_fabric.s_dma_axi_ar_addr_i(sig_dma_cl_ar_addr);
+        u_cluster_data_fabric.s_dma_axi_r_valid_o(sig_dma_cl_r_valid);
+        u_cluster_data_fabric.s_dma_axi_r_ready_i(sig_dma_cl_r_ready);
+        u_cluster_data_fabric.s_dma_axi_r_data_o(sig_dma_cl_r_data);
+        u_cluster_data_fabric.s_dma_axi_r_resp_o(sig_dma_cl_r_resp);
+        // NLU requester → external (AXI4-Lite)
+        u_cluster_data_fabric.s_nlu_axi_aw_valid_i(nlu_data_axi_aw_valid_i);
+        u_cluster_data_fabric.s_nlu_axi_aw_ready_o(nlu_data_axi_aw_ready_o);
+        u_cluster_data_fabric.s_nlu_axi_aw_addr_i(nlu_data_axi_aw_addr_i);
+        u_cluster_data_fabric.s_nlu_axi_w_valid_i(nlu_data_axi_w_valid_i);
+        u_cluster_data_fabric.s_nlu_axi_w_ready_o(nlu_data_axi_w_ready_o);
+        u_cluster_data_fabric.s_nlu_axi_w_data_i(nlu_data_axi_w_data_i);
+        u_cluster_data_fabric.s_nlu_axi_w_strb_i(nlu_data_axi_w_strb_i);
+        u_cluster_data_fabric.s_nlu_axi_b_valid_o(nlu_data_axi_b_valid_o);
+        u_cluster_data_fabric.s_nlu_axi_b_ready_i(nlu_data_axi_b_ready_i);
+        u_cluster_data_fabric.s_nlu_axi_b_resp_o(nlu_data_axi_b_resp_o);
+        u_cluster_data_fabric.s_nlu_axi_ar_valid_i(nlu_data_axi_ar_valid_i);
+        u_cluster_data_fabric.s_nlu_axi_ar_ready_o(nlu_data_axi_ar_ready_o);
+        u_cluster_data_fabric.s_nlu_axi_ar_addr_i(nlu_data_axi_ar_addr_i);
+        u_cluster_data_fabric.s_nlu_axi_r_valid_o(nlu_data_axi_r_valid_o);
+        u_cluster_data_fabric.s_nlu_axi_r_ready_i(nlu_data_axi_r_ready_i);
+        u_cluster_data_fabric.s_nlu_axi_r_data_o(nlu_data_axi_r_data_o);
+        u_cluster_data_fabric.s_nlu_axi_r_resp_o(nlu_data_axi_r_resp_o);
         // Per-cluster AXI4-Lite data → external
         for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
             u_cluster_data_fabric.m_cl_data_aw_valid_o[c](m_cl_data_aw_valid_o[c]);
@@ -807,19 +842,26 @@ private:
     sc_signal<bool>         sig_plic_pending_any{"sig_plic_pending_any"};
 
     // ========================================================================
-    // Internal signals — DmaEngine ↔ ClusterDataFabric
+    // Internal signals — DmaEngine ↔ ClusterDataFabric (AXI4-Lite)
     // ========================================================================
 
-    sc_signal<bool>         sig_dma_cl_req_valid{"sig_dma_cl_req_valid"};
-    sc_signal<bool>         sig_dma_cl_req_write{"sig_dma_cl_req_write"};
-    sc_signal<sc_uint<32>>  sig_dma_cl_req_cluster_id{"sig_dma_cl_req_cluster_id"};
-    sc_signal<sc_uint<32>>  sig_dma_cl_req_addr{"sig_dma_cl_req_addr"};
-    sc_signal<sc_biguint<kClAxiDataWidth>>          sig_dma_cl_req_wdata{"sig_dma_cl_req_wdata"};
-    sc_signal<sc_uint<kClAxiDataWidth / 8>>         sig_dma_cl_req_wstrb{"sig_dma_cl_req_wstrb"};
-    sc_signal<bool>         sig_dma_cl_req_ready{"sig_dma_cl_req_ready"};
-    sc_signal<bool>         sig_dma_cl_resp_valid{"sig_dma_cl_resp_valid"};
-    sc_signal<sc_biguint<kClAxiDataWidth>>          sig_dma_cl_resp_rdata{"sig_dma_cl_resp_rdata"};
-    sc_signal<bool>         sig_dma_cl_resp_error{"sig_dma_cl_resp_error"};
+    sc_signal<bool>         sig_dma_cl_aw_valid{"sig_dma_cl_aw_valid"};
+    sc_signal<bool>         sig_dma_cl_aw_ready{"sig_dma_cl_aw_ready"};
+    sc_signal<sc_uint<32>>  sig_dma_cl_aw_addr{"sig_dma_cl_aw_addr"};
+    sc_signal<bool>         sig_dma_cl_w_valid{"sig_dma_cl_w_valid"};
+    sc_signal<bool>         sig_dma_cl_w_ready{"sig_dma_cl_w_ready"};
+    sc_signal<sc_biguint<kClAxiDataWidth>>          sig_dma_cl_w_data{"sig_dma_cl_w_data"};
+    sc_signal<sc_uint<kClAxiDataWidth / 8>>         sig_dma_cl_w_strb{"sig_dma_cl_w_strb"};
+    sc_signal<bool>         sig_dma_cl_b_valid{"sig_dma_cl_b_valid"};
+    sc_signal<bool>         sig_dma_cl_b_ready{"sig_dma_cl_b_ready"};
+    sc_signal<sc_uint<2>>   sig_dma_cl_b_resp{"sig_dma_cl_b_resp"};
+    sc_signal<bool>         sig_dma_cl_ar_valid{"sig_dma_cl_ar_valid"};
+    sc_signal<bool>         sig_dma_cl_ar_ready{"sig_dma_cl_ar_ready"};
+    sc_signal<sc_uint<32>>  sig_dma_cl_ar_addr{"sig_dma_cl_ar_addr"};
+    sc_signal<bool>         sig_dma_cl_r_valid{"sig_dma_cl_r_valid"};
+    sc_signal<bool>         sig_dma_cl_r_ready{"sig_dma_cl_r_ready"};
+    sc_signal<sc_biguint<kClAxiDataWidth>>          sig_dma_cl_r_data{"sig_dma_cl_r_data"};
+    sc_signal<sc_uint<2>>   sig_dma_cl_r_resp{"sig_dma_cl_r_resp"};
 
     // ========================================================================
     // Internal signals — BootHostIf control / status

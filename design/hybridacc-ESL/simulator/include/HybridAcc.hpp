@@ -159,16 +159,23 @@ SC_MODULE(HybridAcc) {
     sc_signal<bool>         sig_nlu_cmd_resp_valid[kNluPorts];
     sc_signal<sc_uint<32>>  sig_nlu_cmd_resp_rdata[kNluPorts];
     sc_signal<bool>         sig_nlu_irq[kNluPorts];
-    sc_signal<bool>         sig_nlu_data_req_valid;
-    sc_signal<bool>         sig_nlu_data_req_write;
-    sc_signal<sc_uint<32>>  sig_nlu_data_req_cluster_id;
-    sc_signal<sc_uint<32>>  sig_nlu_data_req_addr;
-    sc_signal<sc_biguint<kClAxiDataWidth>> sig_nlu_data_req_wdata;
-    sc_signal<sc_uint<kClAxiDataWidth / 8>> sig_nlu_data_req_wstrb;
-    sc_signal<bool>         sig_nlu_data_req_ready;
-    sc_signal<bool>         sig_nlu_data_resp_valid;
-    sc_signal<sc_biguint<kClAxiDataWidth>> sig_nlu_data_resp_rdata;
-    sc_signal<bool>         sig_nlu_data_resp_error;
+    sc_signal<bool>         sig_nlu_data_axi_aw_valid;
+    sc_signal<bool>         sig_nlu_data_axi_aw_ready;
+    sc_signal<sc_uint<32>>  sig_nlu_data_axi_aw_addr;
+    sc_signal<bool>         sig_nlu_data_axi_w_valid;
+    sc_signal<bool>         sig_nlu_data_axi_w_ready;
+    sc_signal<sc_biguint<kClAxiDataWidth>> sig_nlu_data_axi_w_data;
+    sc_signal<sc_uint<kClAxiDataWidth / 8>> sig_nlu_data_axi_w_strb;
+    sc_signal<bool>         sig_nlu_data_axi_b_valid;
+    sc_signal<bool>         sig_nlu_data_axi_b_ready;
+    sc_signal<sc_uint<2>>   sig_nlu_data_axi_b_resp;
+    sc_signal<bool>         sig_nlu_data_axi_ar_valid;
+    sc_signal<bool>         sig_nlu_data_axi_ar_ready;
+    sc_signal<sc_uint<32>>  sig_nlu_data_axi_ar_addr;
+    sc_signal<bool>         sig_nlu_data_axi_r_valid;
+    sc_signal<bool>         sig_nlu_data_axi_r_ready;
+    sc_signal<sc_biguint<kClAxiDataWidth>> sig_nlu_data_axi_r_data;
+    sc_signal<sc_uint<2>>   sig_nlu_data_axi_r_resp;
 
     // ========================================================================
     // Constructor
@@ -219,16 +226,23 @@ SC_MODULE(HybridAcc) {
           m_mem_axi_r_last_i("m_mem_axi_r_last_i"),
           controller_irq_o("controller_irq_o"),
           core_ctrl("core_ctrl"),
-          sig_nlu_data_req_valid("sig_nlu_data_req_valid"),
-          sig_nlu_data_req_write("sig_nlu_data_req_write"),
-          sig_nlu_data_req_cluster_id("sig_nlu_data_req_cluster_id"),
-          sig_nlu_data_req_addr("sig_nlu_data_req_addr"),
-          sig_nlu_data_req_wdata("sig_nlu_data_req_wdata"),
-          sig_nlu_data_req_wstrb("sig_nlu_data_req_wstrb"),
-          sig_nlu_data_req_ready("sig_nlu_data_req_ready"),
-          sig_nlu_data_resp_valid("sig_nlu_data_resp_valid"),
-          sig_nlu_data_resp_rdata("sig_nlu_data_resp_rdata"),
-          sig_nlu_data_resp_error("sig_nlu_data_resp_error")
+          sig_nlu_data_axi_aw_valid("sig_nlu_data_axi_aw_valid"),
+          sig_nlu_data_axi_aw_ready("sig_nlu_data_axi_aw_ready"),
+          sig_nlu_data_axi_aw_addr("sig_nlu_data_axi_aw_addr"),
+          sig_nlu_data_axi_w_valid("sig_nlu_data_axi_w_valid"),
+          sig_nlu_data_axi_w_ready("sig_nlu_data_axi_w_ready"),
+          sig_nlu_data_axi_w_data("sig_nlu_data_axi_w_data"),
+          sig_nlu_data_axi_w_strb("sig_nlu_data_axi_w_strb"),
+          sig_nlu_data_axi_b_valid("sig_nlu_data_axi_b_valid"),
+          sig_nlu_data_axi_b_ready("sig_nlu_data_axi_b_ready"),
+          sig_nlu_data_axi_b_resp("sig_nlu_data_axi_b_resp"),
+          sig_nlu_data_axi_ar_valid("sig_nlu_data_axi_ar_valid"),
+          sig_nlu_data_axi_ar_ready("sig_nlu_data_axi_ar_ready"),
+          sig_nlu_data_axi_ar_addr("sig_nlu_data_axi_ar_addr"),
+          sig_nlu_data_axi_r_valid("sig_nlu_data_axi_r_valid"),
+          sig_nlu_data_axi_r_ready("sig_nlu_data_axi_r_ready"),
+          sig_nlu_data_axi_r_data("sig_nlu_data_axi_r_data"),
+          sig_nlu_data_axi_r_resp("sig_nlu_data_axi_r_resp")
     {
         // ---- CoreController wiring ----
         core_ctrl.clk(clk);
@@ -289,16 +303,23 @@ SC_MODULE(HybridAcc) {
             core_ctrl.nlu_cmd_resp_rdata_i[n](sig_nlu_cmd_resp_rdata[n]);
             core_ctrl.nlu_irq_i[n](sig_nlu_irq[n]);
         }
-        core_ctrl.nlu_data_req_valid_i(sig_nlu_data_req_valid);
-        core_ctrl.nlu_data_req_write_i(sig_nlu_data_req_write);
-        core_ctrl.nlu_data_req_cluster_id_i(sig_nlu_data_req_cluster_id);
-        core_ctrl.nlu_data_req_addr_i(sig_nlu_data_req_addr);
-        core_ctrl.nlu_data_req_wdata_i(sig_nlu_data_req_wdata);
-        core_ctrl.nlu_data_req_wstrb_i(sig_nlu_data_req_wstrb);
-        core_ctrl.nlu_data_req_ready_o(sig_nlu_data_req_ready);
-        core_ctrl.nlu_data_resp_valid_o(sig_nlu_data_resp_valid);
-        core_ctrl.nlu_data_resp_rdata_o(sig_nlu_data_resp_rdata);
-        core_ctrl.nlu_data_resp_error_o(sig_nlu_data_resp_error);
+        core_ctrl.nlu_data_axi_aw_valid_i(sig_nlu_data_axi_aw_valid);
+        core_ctrl.nlu_data_axi_aw_ready_o(sig_nlu_data_axi_aw_ready);
+        core_ctrl.nlu_data_axi_aw_addr_i(sig_nlu_data_axi_aw_addr);
+        core_ctrl.nlu_data_axi_w_valid_i(sig_nlu_data_axi_w_valid);
+        core_ctrl.nlu_data_axi_w_ready_o(sig_nlu_data_axi_w_ready);
+        core_ctrl.nlu_data_axi_w_data_i(sig_nlu_data_axi_w_data);
+        core_ctrl.nlu_data_axi_w_strb_i(sig_nlu_data_axi_w_strb);
+        core_ctrl.nlu_data_axi_b_valid_o(sig_nlu_data_axi_b_valid);
+        core_ctrl.nlu_data_axi_b_ready_i(sig_nlu_data_axi_b_ready);
+        core_ctrl.nlu_data_axi_b_resp_o(sig_nlu_data_axi_b_resp);
+        core_ctrl.nlu_data_axi_ar_valid_i(sig_nlu_data_axi_ar_valid);
+        core_ctrl.nlu_data_axi_ar_ready_o(sig_nlu_data_axi_ar_ready);
+        core_ctrl.nlu_data_axi_ar_addr_i(sig_nlu_data_axi_ar_addr);
+        core_ctrl.nlu_data_axi_r_valid_o(sig_nlu_data_axi_r_valid);
+        core_ctrl.nlu_data_axi_r_ready_i(sig_nlu_data_axi_r_ready);
+        core_ctrl.nlu_data_axi_r_data_o(sig_nlu_data_axi_r_data);
+        core_ctrl.nlu_data_axi_r_resp_o(sig_nlu_data_axi_r_resp);
 
         // ---- Per-cluster wiring ----
         for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
@@ -442,12 +463,16 @@ private:
             sig_nlu_cmd_resp_rdata[n].write(0);
             sig_nlu_irq[n].write(false);
         }
-        sig_nlu_data_req_valid.write(false);
-        sig_nlu_data_req_write.write(false);
-        sig_nlu_data_req_cluster_id.write(0);
-        sig_nlu_data_req_addr.write(0);
-        sig_nlu_data_req_wdata.write(0);
-        sig_nlu_data_req_wstrb.write(0);
+        // AXI4-Lite NLU data tie-off: no valid requests, accept any responses
+        sig_nlu_data_axi_aw_valid.write(false);
+        sig_nlu_data_axi_aw_addr.write(0);
+        sig_nlu_data_axi_w_valid.write(false);
+        sig_nlu_data_axi_w_data.write(0);
+        sig_nlu_data_axi_w_strb.write(0);
+        sig_nlu_data_axi_b_ready.write(false);
+        sig_nlu_data_axi_ar_valid.write(false);
+        sig_nlu_data_axi_ar_addr.write(0);
+        sig_nlu_data_axi_r_ready.write(false);
     }
 };
 

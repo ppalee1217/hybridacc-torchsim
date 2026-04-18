@@ -2,31 +2,24 @@
 
 /**
  * @file DmaEngine.hpp
- * @brief cc_dma_engine — DMA engine with unified 4D strided copy, dual
- *        internal AGU (source + destination), transfer FIFO for read/write
- *        pipelining, and MMIO staging registers + command FIFO.
+ * @brief cc_dma_engine — 4D strided DMA with bounded-outstanding AXI-Lite
+ *        cluster interface and single-beat DRAM AXI master.
  *
- * Firmware writes staging registers, then commits with @c DMA_CTRL.submit.
- * The engine snapshots the staging set into an internal FIFO and processes
- * commands sequentially, driving DRAM AXI + cluster data fabric as needed.
- *
- * 4D address formula (per beat):
- *   addr = base + d0*stride_d0 + d1*stride_d1 + d2*stride_d2 + d3*stride_d3
- *
- * @par MMIO register map (base = 0x2000_1000)
- *   See Core.md §8.8 for the complete register definition.
- *
- * @par Spec reference
- *   Core.md §8.8  cc_dma_engine
+ * @par Key design decisions (per report §4)
+ *   - DRAM side: single-beat AXI4 (ARLEN/AWLEN=0), bounded outstanding.
+ *   - Cluster side: standard AXI4-Lite 5-channel (AW/W/B/AR/R) master.
+ *   - No cluster_id sideband; cluster routing encoded in AWADDR/ARADDR.
+ *   - Four parallel sub-engines: src_issue, src_retire, dst_issue, dst_retire.
+ *   - Per-direction ticket FIFO + inflight counter + response FIFO.
+ *   - Outstanding limit = 4 (bring-up default).
  */
 
 #include <systemc>
 #include <cstdint>
-#include <array>
-#include <queue>
-#include "Utils/utils.hpp"
-#include "Utils/FIFO.hpp"
+#include <deque>
+#include <cassert>
 #include "Core/Types.hpp"
+#include "Utils/utils.hpp"
 
 namespace hybridacc {
 namespace core {
@@ -37,62 +30,132 @@ using namespace sc_dt;
 SC_MODULE(DmaEngine) {
 
     // ========================================================================
-    // Ports
+    // Compile-time parameters
+    // ========================================================================
+
+    static constexpr unsigned kDmaMaxOutstanding    = 4;
+    static constexpr unsigned kDataBufferDepth      = 8;
+    static constexpr unsigned kTicketFifoDepth      = 4;
+    static constexpr unsigned kRespFifoDepth        = 4;
+
+    // Cluster fabric address encoding: upper bits = cluster_id
+    static constexpr unsigned kClusterAddrBits      = 24; // bits for local addr
+    static constexpr uint32_t kClusterAddrMask      = (1u << kClusterAddrBits) - 1;
+
+    // ========================================================================
+    // External ports
     // ========================================================================
 
     sc_in<bool>  clk;
     sc_in<bool>  reset_n;
 
-    // --- MMIO interface (from cc_cmd_fabric) ---
+    // --- MMIO control interface (from CmdFabric) ---
     sc_in<bool>          mmio_req_valid_i;
     sc_in<bool>          mmio_req_write_i;
-    sc_in<sc_uint<32>>   mmio_req_addr_i;   ///< local offset within DMA window
+    sc_in<sc_uint<32>>   mmio_req_addr_i;
     sc_in<sc_uint<32>>   mmio_req_wdata_i;
     sc_out<bool>         mmio_resp_valid_o;
     sc_out<sc_uint<32>>  mmio_resp_rdata_o;
 
-    // --- DRAM AXI4 master (simplified read/write channels) ---
-    // Write address
+    // --- DRAM AXI4 master (single-beat, ARLEN/AWLEN=0) ---
     sc_out<bool>         m_mem_axi_aw_valid_o;
     sc_in<bool>          m_mem_axi_aw_ready_i;
     sc_out<sc_uint<32>>  m_mem_axi_aw_addr_o;
     sc_out<sc_uint<8>>   m_mem_axi_aw_len_o;
-    // Write data
     sc_out<bool>         m_mem_axi_w_valid_o;
     sc_in<bool>          m_mem_axi_w_ready_i;
     sc_out<sc_biguint<kMemAxiDataWidth>> m_mem_axi_w_data_o;
     sc_out<sc_uint<kMemAxiDataWidth / 8>> m_mem_axi_w_strb_o;
     sc_out<bool>         m_mem_axi_w_last_o;
-    // Write response
     sc_in<bool>          m_mem_axi_b_valid_i;
     sc_out<bool>         m_mem_axi_b_ready_o;
     sc_in<sc_uint<2>>    m_mem_axi_b_resp_i;
-    // Read address
     sc_out<bool>         m_mem_axi_ar_valid_o;
     sc_in<bool>          m_mem_axi_ar_ready_i;
     sc_out<sc_uint<32>>  m_mem_axi_ar_addr_o;
     sc_out<sc_uint<8>>   m_mem_axi_ar_len_o;
-    // Read data
     sc_in<bool>          m_mem_axi_r_valid_i;
     sc_out<bool>         m_mem_axi_r_ready_o;
     sc_in<sc_biguint<kMemAxiDataWidth>> m_mem_axi_r_data_i;
     sc_in<sc_uint<2>>    m_mem_axi_r_resp_i;
     sc_in<bool>          m_mem_axi_r_last_i;
 
-    // --- Cluster data fabric requester ---
-    sc_out<bool>         cl_data_req_valid_o;
-    sc_out<bool>         cl_data_req_write_o;
-    sc_out<sc_uint<32>>  cl_data_req_cluster_id_o;
-    sc_out<sc_uint<32>>  cl_data_req_addr_o;
-    sc_out<sc_biguint<kClAxiDataWidth>>          cl_data_req_wdata_o;
-    sc_out<sc_uint<kClAxiDataWidth / 8>>         cl_data_req_wstrb_o;
-    sc_in<bool>          cl_data_req_ready_i;
-    sc_in<bool>          cl_data_resp_valid_i;
-    sc_in<sc_biguint<kClAxiDataWidth>>           cl_data_resp_rdata_i;
-    sc_in<bool>          cl_data_resp_error_i;
+    // --- Cluster AXI4-Lite master (to ClusterDataFabric) ---
+    sc_out<bool>         m_cl_axi_aw_valid_o;
+    sc_in<bool>          m_cl_axi_aw_ready_i;
+    sc_out<sc_uint<32>>  m_cl_axi_aw_addr_o;
+    sc_out<bool>         m_cl_axi_w_valid_o;
+    sc_in<bool>          m_cl_axi_w_ready_i;
+    sc_out<sc_biguint<kClAxiDataWidth>> m_cl_axi_w_data_o;
+    sc_out<sc_uint<kClAxiDataWidth / 8>> m_cl_axi_w_strb_o;
+    sc_in<bool>          m_cl_axi_b_valid_i;
+    sc_out<bool>         m_cl_axi_b_ready_o;
+    sc_in<sc_uint<2>>    m_cl_axi_b_resp_i;
+    sc_out<bool>         m_cl_axi_ar_valid_o;
+    sc_in<bool>          m_cl_axi_ar_ready_i;
+    sc_out<sc_uint<32>>  m_cl_axi_ar_addr_o;
+    sc_in<bool>          m_cl_axi_r_valid_i;
+    sc_out<bool>         m_cl_axi_r_ready_o;
+    sc_in<sc_biguint<kClAxiDataWidth>> m_cl_axi_r_data_i;
+    sc_in<sc_uint<2>>    m_cl_axi_r_resp_i;
 
     // --- IRQ output ---
     sc_out<bool>         dma_irq_o;
+
+    // ========================================================================
+    // Internal types
+    // ========================================================================
+
+    enum class DmaState : uint8_t {
+        IDLE, LOAD_CMD, VALIDATE, RUN, DRAIN, DONE, ERROR
+    };
+
+    friend std::ostream& operator<<(std::ostream& os, DmaState s) {
+        switch (s) {
+            case DmaState::IDLE:     return os << "IDLE";
+            case DmaState::LOAD_CMD: return os << "LOAD_CMD";
+            case DmaState::VALIDATE: return os << "VALIDATE";
+            case DmaState::RUN:      return os << "RUN";
+            case DmaState::DRAIN:    return os << "DRAIN";
+            case DmaState::DONE:     return os << "DONE";
+            case DmaState::ERROR:    return os << "ERROR";
+            default:                 return os << "??";
+        }
+    }
+
+    static const char* dma_state_name(DmaState state) {
+        switch (state) {
+            case DmaState::IDLE:     return "IDLE";
+            case DmaState::LOAD_CMD: return "LOAD_CMD";
+            case DmaState::VALIDATE: return "VALIDATE";
+            case DmaState::RUN:      return "RUN";
+            case DmaState::DRAIN:    return "DRAIN";
+            case DmaState::DONE:     return "DONE";
+            case DmaState::ERROR:    return "ERROR";
+            default:                 return "??";
+        }
+    }
+
+    struct DataBeat {
+        sc_biguint<kClAxiDataWidth> data{0};
+        uint8_t strb{0};
+        bool operator==(const DataBeat& o) const { return data == o.data && strb == o.strb; }
+    };
+
+    struct DramRdResp {
+        sc_biguint<kMemAxiDataWidth> data{0};
+        uint8_t resp{0};
+        bool operator==(const DramRdResp& o) const { return data == o.data && resp == o.resp; }
+    };
+
+    // ========================================================================
+    // Address helpers
+    // ========================================================================
+
+    /// Encode cluster_id + local_addr into a global fabric address.
+    static uint32_t encode_cluster_fabric_addr(uint32_t cluster_id, uint32_t local_addr) {
+        return (cluster_id << kClusterAddrBits) | (local_addr & kClusterAddrMask);
+    }
 
     // ========================================================================
     // Constructor
@@ -130,229 +193,370 @@ SC_MODULE(DmaEngine) {
           m_mem_axi_r_data_i("m_mem_axi_r_data_i"),
           m_mem_axi_r_resp_i("m_mem_axi_r_resp_i"),
           m_mem_axi_r_last_i("m_mem_axi_r_last_i"),
-          cl_data_req_valid_o("cl_data_req_valid_o"),
-          cl_data_req_write_o("cl_data_req_write_o"),
-          cl_data_req_cluster_id_o("cl_data_req_cluster_id_o"),
-          cl_data_req_addr_o("cl_data_req_addr_o"),
-          cl_data_req_wdata_o("cl_data_req_wdata_o"),
-          cl_data_req_wstrb_o("cl_data_req_wstrb_o"),
-          cl_data_req_ready_i("cl_data_req_ready_i"),
-          cl_data_resp_valid_i("cl_data_resp_valid_i"),
-          cl_data_resp_rdata_i("cl_data_resp_rdata_i"),
-          cl_data_resp_error_i("cl_data_resp_error_i"),
-          dma_irq_o("dma_irq_o"),
-          // Transfer FIFO
-          u_xfer_fifo("u_xfer_fifo", kXferFifoDepth)
+          m_cl_axi_aw_valid_o("m_cl_axi_aw_valid_o"),
+          m_cl_axi_aw_ready_i("m_cl_axi_aw_ready_i"),
+          m_cl_axi_aw_addr_o("m_cl_axi_aw_addr_o"),
+          m_cl_axi_w_valid_o("m_cl_axi_w_valid_o"),
+          m_cl_axi_w_ready_i("m_cl_axi_w_ready_i"),
+          m_cl_axi_w_data_o("m_cl_axi_w_data_o"),
+          m_cl_axi_w_strb_o("m_cl_axi_w_strb_o"),
+          m_cl_axi_b_valid_i("m_cl_axi_b_valid_i"),
+          m_cl_axi_b_ready_o("m_cl_axi_b_ready_o"),
+          m_cl_axi_b_resp_i("m_cl_axi_b_resp_i"),
+          m_cl_axi_ar_valid_o("m_cl_axi_ar_valid_o"),
+          m_cl_axi_ar_ready_i("m_cl_axi_ar_ready_i"),
+          m_cl_axi_ar_addr_o("m_cl_axi_ar_addr_o"),
+          m_cl_axi_r_valid_i("m_cl_axi_r_valid_i"),
+          m_cl_axi_r_ready_o("m_cl_axi_r_ready_o"),
+          m_cl_axi_r_data_i("m_cl_axi_r_data_i"),
+          m_cl_axi_r_resp_i("m_cl_axi_r_resp_i"),
+          dma_irq_o("dma_irq_o")
     {
         SC_CTHREAD(seq_process, clk.pos());
         reset_signal_is(reset_n, false);
-
-        // Wire transfer FIFO
-        u_xfer_fifo.clk(clk);
-        u_xfer_fifo.reset_n(reset_n);
-        u_xfer_fifo.data_in(sig_fifo_data_in);
-        u_xfer_fifo.push(sig_fifo_push);
-        u_xfer_fifo.data_out(sig_fifo_data_out);
-        u_xfer_fifo.pop(sig_fifo_pop);
-        u_xfer_fifo.empty(sig_fifo_empty);
-        u_xfer_fifo.full(sig_fifo_full);
-        u_xfer_fifo.clear(sig_fifo_clear);
     }
 
 private:
     // ========================================================================
-    // Internal types
+    // MMIO staging registers (firmware-visible)
     // ========================================================================
 
-    enum class DmaState : uint32_t {
-        IDLE          = 0,
-        VALIDATE      = 1,
-        // Source read states
-        SRC_READ_ISSUE   = 2,   ///< issue read to source (DRAM AR or cluster)
-        DRAM_AR_WAIT     = 3,   ///< wait for AR handshake
-        DRAM_R_WAIT      = 4,   ///< wait for R channel data, push FIFO
-        CL_RD_REQ_WAIT   = 5,   ///< wait for cluster read ready
-        CL_RD_RESP_WAIT  = 6,   ///< wait for cluster read response
-        // Destination write states
-        DST_WRITE_ISSUE  = 7,   ///< pop FIFO, issue write to dest
-        DRAM_AW_WAIT     = 8,   ///< wait for AW handshake
-        DRAM_W_WAIT      = 9,   ///< wait for W handshake
-        DRAM_B_WAIT      = 10,  ///< wait for B response
-        CL_WR_REQ_WAIT   = 11,  ///< wait for cluster write ready
-        CL_WR_RESP_WAIT  = 12,  ///< wait for cluster write response
-        // Terminal
-        DONE          = 13,
-        ERROR         = 14,
-    };
+    // Command FIFO (staging → active)
+    std::deque<DmaCommand> cmd_fifo_reg;
+
+    // Active command
+    DmaCommand active_cmd_reg;
+    DmaState   state_reg = DmaState::IDLE;
 
     // ========================================================================
-    // 4D AGU — internal address generator (inline logic)
+    // 4D AGU state
     // ========================================================================
 
-    struct Agu4D {
-        uint32_t base_addr;
-        uint32_t count[4];    ///< normalized counts (0→1)
-        uint32_t stride[4];
-        uint32_t idx[4];      ///< current loop indices
-        uint32_t current_addr;
-        bool     done;
-
-        void reset(uint32_t base, const uint32_t cnt[4], const uint32_t str[4]) {
-            base_addr = base;
-            for (int i = 0; i < 4; ++i) {
-                count[i]  = (cnt[i] == 0) ? 1 : cnt[i];
-                stride[i] = str[i];
-                idx[i]    = 0;
-            }
-            current_addr = base;
-            done = false;
-        }
-
-        uint32_t compute_addr() const {
-            uint32_t addr = base_addr;
-            for (int i = 0; i < 4; ++i)
-                addr += idx[i] * stride[i];
-            return addr;
-        }
-
-        /// Advance to next beat. Returns true if more beats remain.
-        bool advance() {
-            if (done) return false;
-            // Innermost d0 first
-            for (int d = 0; d < 4; ++d) {
-                idx[d]++;
-                if (idx[d] < count[d]) {
-                    current_addr = compute_addr();
-                    return true;
-                }
-                idx[d] = 0;
-            }
-            // All dimensions exhausted
-            done = true;
-            return false;
-        }
-    };
+    uint32_t agu_src_addr_reg = 0;
+    uint32_t agu_dst_addr_reg = 0;
+    uint32_t agu_idx_reg[4] = {};       // 4D iteration counters
+    uint32_t beats_src_issued_reg = 0;
+    uint32_t beats_src_retired_reg = 0;
+    uint32_t beats_dst_issued_reg = 0;
+    uint32_t beats_dst_retired_reg = 0;
 
     // ========================================================================
-    // Transfer FIFO: 256-beat deep, cluster-width data
+    // Data buffer FIFO (source retire → destination issue)
     // ========================================================================
 
-    static constexpr unsigned kXferFifoDepth = 256;
-
-    FIFO<sc_biguint<kClAxiDataWidth>> u_xfer_fifo;
-
-    sc_signal<sc_biguint<kClAxiDataWidth>> sig_fifo_data_in;
-    sc_signal<bool> sig_fifo_push;
-    sc_signal<sc_biguint<kClAxiDataWidth>> sig_fifo_data_out;
-    sc_signal<bool> sig_fifo_pop;
-    sc_signal<bool> sig_fifo_empty;
-    sc_signal<bool> sig_fifo_full;
-    sc_signal<bool> sig_fifo_clear;
+    std::deque<DataBeat> data_buffer_reg;
 
     // ========================================================================
-    // Staging registers
+    // DRAM side inflight tracking
     // ========================================================================
 
-    uint32_t stg_src_kind_     = 0;
-    uint32_t stg_dst_kind_     = 0;
-    uint32_t stg_src_addr_lo_  = 0;
-    uint32_t stg_src_addr_hi_  = 0;
-    uint32_t stg_dst_addr_lo_  = 0;
-    uint32_t stg_dst_addr_hi_  = 0;
-    uint32_t stg_src_cluster_  = 0;
-    uint32_t stg_dst_cluster_  = 0;
-    uint32_t stg_count_[4]     = {};
-    uint32_t stg_src_stride_[4]= {};
-    uint32_t stg_dst_stride_[4]= {};
-    uint32_t stg_cmd_tag_      = 0;
+    unsigned dram_rd_inflight_cnt_reg = 0;
+    unsigned dram_wr_inflight_cnt_reg = 0;
+    std::deque<DramRdResp> dram_rd_resp_fifo_reg;
 
     // ========================================================================
-    // Status registers
+    // Cluster AXI side inflight tracking
     // ========================================================================
 
-    uint32_t status_reg_   = 0x01; ///< bit0=idle
-    uint32_t ctrl_reg_     = 0;
-    uint32_t done_tag_     = 0;
-    uint32_t err_code_     = 0;
-    uint32_t err_info_     = 0;
-    uint32_t debug_state_  = 0;
+    unsigned cl_rd_inflight_cnt_reg = 0;
+    unsigned cl_wr_inflight_cnt_reg = 0;
+    std::deque<DataBeat> cl_rd_resp_fifo_reg;
+    unsigned cl_wr_b_pending_reg = 0;
+
+    // Cluster AXI send registers (hold until handshake)
+    bool     cl_aw_send_valid_reg = false;
+    uint32_t cl_aw_send_addr_reg = 0;
+    bool     cl_w_send_valid_reg = false;
+    sc_biguint<kClAxiDataWidth> cl_w_send_data_reg{0};
+    uint8_t  cl_w_send_strb_reg = 0;
+    bool     cl_ar_send_valid_reg = false;
+    uint32_t cl_ar_send_addr_reg = 0;
+
+    // DRAM AXI send registers
+    bool     dram_aw_send_valid_reg = false;
+    uint32_t dram_aw_send_addr_reg = 0;
+    bool     dram_w_send_valid_reg = false;
+    sc_biguint<kMemAxiDataWidth> dram_w_send_data_reg{0};
+    uint8_t  dram_w_send_strb_reg = 0;
+    bool     dram_ar_send_valid_reg = false;
+    uint32_t dram_ar_send_addr_reg = 0;
 
     // ========================================================================
-    // Command FIFO
+    // MMIO register file (DMA configuration)
     // ========================================================================
 
-    std::queue<DmaCommand> cmd_fifo_;
+    uint32_t mmio_src_kind_reg = 0;
+    uint32_t mmio_dst_kind_reg = 0;
+    uint32_t mmio_src_addr_lo_reg = 0;
+    uint32_t mmio_src_addr_hi_reg = 0;
+    uint32_t mmio_dst_addr_lo_reg = 0;
+    uint32_t mmio_dst_addr_hi_reg = 0;
+    uint32_t mmio_src_cluster_id_reg = 0;
+    uint32_t mmio_dst_cluster_id_reg = 0;
+    uint32_t mmio_count_reg[4] = {};
+    uint32_t mmio_src_stride_reg[4] = {};
+    uint32_t mmio_dst_stride_reg[4] = {};
+    uint32_t mmio_cmd_tag_reg = 0;
+    uint32_t mmio_status_reg = 0;  // bit0=IDLE(1), bit1=BUSY(0)
+    uint32_t mmio_error_code_reg = 0;
+    uint32_t mmio_done_tag_reg = 0;
+    bool     mmio_irq_en_reg = false;
 
     // ========================================================================
-    // AXI beat buffer
+    // PMU counters
     // ========================================================================
 
-    static constexpr unsigned kBeatBytes = kMemAxiDataWidth / 8;
-    static constexpr unsigned kClBeatBytes = kClAxiDataWidth / 8;
+    uint64_t pmu_dram_rd_issue_cnt_reg = 0;
+    uint64_t pmu_dram_wr_issue_cnt_reg = 0;
+    uint64_t pmu_cl_aw_issue_cnt_reg = 0;
+    uint64_t pmu_cl_w_issue_cnt_reg = 0;
+    uint64_t pmu_cl_ar_issue_cnt_reg = 0;
+    uint64_t pmu_cl_b_retire_cnt_reg = 0;
+    uint64_t pmu_cl_r_retire_cnt_reg = 0;
+    uint64_t pmu_dram_rd_stall_cnt_reg = 0;
+    uint64_t pmu_dram_wr_stall_cnt_reg = 0;
+    uint64_t pmu_cl_aw_stall_cnt_reg = 0;
+    uint64_t pmu_cl_ar_stall_cnt_reg = 0;
+
+    // Previous-cycle ready tracking (prevents double-process in SC_CTHREAD)
+    bool dram_b_prev_ready_reg = false;
+    bool dram_r_prev_ready_reg = false;
+    bool cl_b_prev_ready_reg = false;
+    bool cl_r_prev_ready_reg = false;
+
+    // Previous-cycle valid tracking for master-side send registers.
+    // In SC_CTHREAD the slave sees our valid one cycle late; clearing the
+    // send register the same cycle we first drive valid would let it
+    // disappear before the slave samples it.  We only clear when
+    // prev_valid (= we drove valid last cycle) AND ready is high now.
+    bool dram_ar_prev_valid_reg = false;
+    bool dram_aw_prev_valid_reg = false;
+    bool dram_w_prev_valid_reg  = false;
+    bool cl_ar_prev_valid_reg   = false;
+    bool cl_aw_prev_valid_reg   = false;
+    bool cl_w_prev_valid_reg    = false;
 
     // ========================================================================
-    // Helpers
+    // Reset helpers
     // ========================================================================
 
-    void reset_axi_outputs() {
+    void reset_all_outputs() {
+        // MMIO
+        mmio_resp_valid_o.write(false);
+        mmio_resp_rdata_o.write(0);
+        // DRAM AXI
         m_mem_axi_aw_valid_o.write(false);
         m_mem_axi_aw_addr_o.write(0);
         m_mem_axi_aw_len_o.write(0);
         m_mem_axi_w_valid_o.write(false);
         m_mem_axi_w_data_o.write(0);
         m_mem_axi_w_strb_o.write(0);
-        m_mem_axi_w_last_o.write(false);
+        m_mem_axi_w_last_o.write(true);  // single-beat: always last
         m_mem_axi_b_ready_o.write(false);
         m_mem_axi_ar_valid_o.write(false);
         m_mem_axi_ar_addr_o.write(0);
         m_mem_axi_ar_len_o.write(0);
         m_mem_axi_r_ready_o.write(false);
+        // Cluster AXI-Lite
+        m_cl_axi_aw_valid_o.write(false);
+        m_cl_axi_aw_addr_o.write(0);
+        m_cl_axi_w_valid_o.write(false);
+        m_cl_axi_w_data_o.write(0);
+        m_cl_axi_w_strb_o.write(0);
+        m_cl_axi_b_ready_o.write(false);
+        m_cl_axi_ar_valid_o.write(false);
+        m_cl_axi_ar_addr_o.write(0);
+        m_cl_axi_r_ready_o.write(false);
+        // IRQ
+        dma_irq_o.write(false);
     }
 
-    void reset_cl_outputs() {
-        cl_data_req_valid_o.write(false);
-        cl_data_req_write_o.write(false);
-        cl_data_req_cluster_id_o.write(0);
-        cl_data_req_addr_o.write(0);
-        cl_data_req_wdata_o.write(0);
-        cl_data_req_wstrb_o.write(0);
+    void reset_internal_state() {
+        cmd_fifo_reg.clear();
+        active_cmd_reg = DmaCommand{};
+        state_reg = DmaState::IDLE;
+        for (auto& v : agu_idx_reg) v = 0;
+        agu_src_addr_reg = 0;
+        agu_dst_addr_reg = 0;
+        beats_src_issued_reg = 0;
+        beats_src_retired_reg = 0;
+        beats_dst_issued_reg = 0;
+        beats_dst_retired_reg = 0;
+        data_buffer_reg.clear();
+        dram_rd_inflight_cnt_reg = 0;
+        dram_wr_inflight_cnt_reg = 0;
+        dram_rd_resp_fifo_reg.clear();
+        cl_rd_inflight_cnt_reg = 0;
+        cl_wr_inflight_cnt_reg = 0;
+        cl_rd_resp_fifo_reg.clear();
+        cl_wr_b_pending_reg = 0;
+        cl_aw_send_valid_reg = false;
+        cl_w_send_valid_reg = false;
+        cl_ar_send_valid_reg = false;
+        dram_aw_send_valid_reg = false;
+        dram_w_send_valid_reg = false;
+        dram_ar_send_valid_reg = false;
+        dram_b_prev_ready_reg = false;
+        dram_r_prev_ready_reg = false;
+        cl_b_prev_ready_reg = false;
+        cl_r_prev_ready_reg = false;
+        dram_ar_prev_valid_reg = false;
+        dram_aw_prev_valid_reg = false;
+        dram_w_prev_valid_reg  = false;
+        cl_ar_prev_valid_reg   = false;
+        cl_aw_prev_valid_reg   = false;
+        cl_w_prev_valid_reg    = false;
+        mmio_status_reg = 0x1; // IDLE
+        mmio_error_code_reg = 0;
     }
 
-    uint32_t make_status(DmaState st, bool fifo_full) const {
-        uint32_t s = 0;
-        if (st == DmaState::IDLE && cmd_fifo_.empty()) s |= 0x01; // idle
-        if (st != DmaState::IDLE || !cmd_fifo_.empty()) s |= 0x02; // busy
-        if (fifo_full) s |= 0x04;
-        if (done_tag_ != 0) s |= 0x08; // done_pending (simplified)
-        if (err_code_ != 0) s |= 0x10; // err_pending
-        return s;
+    // ========================================================================
+    // 4D AGU: advance source address
+    // ========================================================================
+
+    uint32_t compute_src_addr() const {
+        uint32_t addr = active_cmd_reg.src_addr_lo;
+        for (int d = 0; d < 4; ++d)
+            addr += agu_idx_reg[d] * active_cmd_reg.src_stride[d];
+        return addr;
     }
 
-    uint32_t validate_cmd(const DmaCommand& cmd) const {
-        if (static_cast<uint32_t>(cmd.src_kind) > 1 ||
-            static_cast<uint32_t>(cmd.dst_kind) > 1)
-            return static_cast<uint32_t>(DmaError::DMA_ERR_BAD_ENDPOINT);
-        if (cmd.total_beats() == 0)
-            return static_cast<uint32_t>(DmaError::DMA_ERR_ZERO_LENGTH);
-        if ((cmd.src_addr_lo & 0x3) || (cmd.dst_addr_lo & 0x3))
-            return static_cast<uint32_t>(DmaError::DMA_ERR_ADDR_ALIGN);
-        return static_cast<uint32_t>(DmaError::DMA_ERR_NONE);
+    uint32_t compute_dst_addr() const {
+        uint32_t addr = active_cmd_reg.dst_addr_lo;
+        for (int d = 0; d < 4; ++d)
+            addr += agu_idx_reg[d] * active_cmd_reg.dst_stride[d];
+        return addr;
     }
 
-    /// Narrow DRAM-width data to cluster-width (low bytes)
-    static sc_biguint<kClAxiDataWidth> dram_to_cl(const sc_biguint<kMemAxiDataWidth>& d) {
-        sc_biguint<kClAxiDataWidth> cl = 0;
-        for (unsigned b = 0; b < kClBeatBytes; ++b)
-            cl.range(b*8+7, b*8) = d.range(b*8+7, b*8);
-        return cl;
+    void advance_src_agu() {
+        for (int d = 0; d < 4; ++d) {
+            uint32_t lim = (active_cmd_reg.count[d] == 0) ? 1 : active_cmd_reg.count[d];
+            agu_idx_reg[d]++;
+            if (agu_idx_reg[d] < lim) return;
+            agu_idx_reg[d] = 0;
+        }
     }
 
-    /// Widen cluster-width data to DRAM-width (zero-extended)
-    static sc_biguint<kMemAxiDataWidth> cl_to_dram(const sc_biguint<kClAxiDataWidth>& c) {
-        sc_biguint<kMemAxiDataWidth> d = 0;
-        for (unsigned b = 0; b < kClBeatBytes; ++b)
-            d.range(b*8+7, b*8) = c.range(b*8+7, b*8);
-        return d;
+    // Separate dst AGU index (re-uses same 4D loop, but tracks dst beats)
+    uint32_t dst_agu_idx_reg[4] = {};
+
+    uint32_t compute_dst_addr_from_dst_agu() const {
+        uint32_t addr = active_cmd_reg.dst_addr_lo;
+        for (int d = 0; d < 4; ++d)
+            addr += dst_agu_idx_reg[d] * active_cmd_reg.dst_stride[d];
+        return addr;
+    }
+
+    void advance_dst_agu() {
+        for (int d = 0; d < 4; ++d) {
+            uint32_t lim = (active_cmd_reg.count[d] == 0) ? 1 : active_cmd_reg.count[d];
+            dst_agu_idx_reg[d]++;
+            if (dst_agu_idx_reg[d] < lim) return;
+            dst_agu_idx_reg[d] = 0;
+        }
+    }
+
+    // ========================================================================
+    // MMIO handler
+    // ========================================================================
+
+    void handle_mmio() {
+        mmio_resp_valid_o.write(false);
+        mmio_resp_rdata_o.write(0);
+
+        if (!mmio_req_valid_i.read()) return;
+
+        const uint32_t offset = mmio_req_addr_i.read().to_uint() & 0x7FF;
+        const bool is_write = mmio_req_write_i.read();
+        const uint32_t wdata = mmio_req_wdata_i.read().to_uint();
+
+        mmio_resp_valid_o.write(true);
+
+        if (is_write) {
+            switch (offset) {
+                // 0x000: CAP0 (RO, ignore write)
+                // 0x004: STATUS (RO, ignore write)
+                case 0x008: { // DMA_CTRL — bit0=SUBMIT, bit3=IRQ_EN
+                    mmio_irq_en_reg = (wdata & 0x8) != 0;
+                    if (wdata & 0x1) { // SUBMIT
+                        if (cmd_fifo_reg.size() < kDmaCmdFifoDepth) {
+                            DmaCommand cmd{};
+                            cmd.src_kind = static_cast<DmaEndpoint>(mmio_src_kind_reg);
+                            cmd.dst_kind = static_cast<DmaEndpoint>(mmio_dst_kind_reg);
+                            cmd.src_addr_lo = mmio_src_addr_lo_reg;
+                            cmd.src_addr_hi = mmio_src_addr_hi_reg;
+                            cmd.dst_addr_lo = mmio_dst_addr_lo_reg;
+                            cmd.dst_addr_hi = mmio_dst_addr_hi_reg;
+                            cmd.src_cluster_id = mmio_src_cluster_id_reg;
+                            cmd.dst_cluster_id = mmio_dst_cluster_id_reg;
+                            for (int i = 0; i < 4; ++i) {
+                                cmd.count[i] = mmio_count_reg[i];
+                                cmd.src_stride[i] = mmio_src_stride_reg[i];
+                                cmd.dst_stride[i] = mmio_dst_stride_reg[i];
+                            }
+                            cmd.cmd_tag = mmio_cmd_tag_reg;
+                            cmd_fifo_reg.push_back(cmd);
+                        }
+                    }
+                    break;
+                }
+                case 0x00C: mmio_src_kind_reg = wdata; break;
+                case 0x010: mmio_dst_kind_reg = wdata; break;
+                case 0x014: mmio_src_addr_lo_reg = wdata; break;
+                case 0x018: mmio_src_addr_hi_reg = wdata; break;
+                case 0x01C: mmio_dst_addr_lo_reg = wdata; break;
+                case 0x020: mmio_dst_addr_hi_reg = wdata; break;
+                case 0x024: mmio_src_cluster_id_reg = wdata; break;
+                case 0x028: mmio_dst_cluster_id_reg = wdata; break;
+                case 0x02C: mmio_count_reg[0] = wdata; break;
+                case 0x030: mmio_count_reg[1] = wdata; break;
+                case 0x034: mmio_count_reg[2] = wdata; break;
+                case 0x038: mmio_count_reg[3] = wdata; break;
+                case 0x03C: mmio_src_stride_reg[0] = wdata; break;
+                case 0x040: mmio_src_stride_reg[1] = wdata; break;
+                case 0x044: mmio_src_stride_reg[2] = wdata; break;
+                case 0x048: mmio_src_stride_reg[3] = wdata; break;
+                case 0x04C: mmio_dst_stride_reg[0] = wdata; break;
+                case 0x050: mmio_dst_stride_reg[1] = wdata; break;
+                case 0x054: mmio_dst_stride_reg[2] = wdata; break;
+                case 0x058: mmio_dst_stride_reg[3] = wdata; break;
+                case 0x05C: mmio_cmd_tag_reg = wdata; break;
+                default: break;
+            }
+        } else {
+            // Read
+            switch (offset) {
+                case 0x000: mmio_resp_rdata_o.write(0x444D4100); break; // DMA_CAP0 magic
+                case 0x004: mmio_resp_rdata_o.write(mmio_status_reg); break;
+                case 0x00C: mmio_resp_rdata_o.write(mmio_src_kind_reg); break;
+                case 0x010: mmio_resp_rdata_o.write(mmio_dst_kind_reg); break;
+                case 0x014: mmio_resp_rdata_o.write(mmio_src_addr_lo_reg); break;
+                case 0x018: mmio_resp_rdata_o.write(mmio_src_addr_hi_reg); break;
+                case 0x01C: mmio_resp_rdata_o.write(mmio_dst_addr_lo_reg); break;
+                case 0x020: mmio_resp_rdata_o.write(mmio_dst_addr_hi_reg); break;
+                case 0x024: mmio_resp_rdata_o.write(mmio_src_cluster_id_reg); break;
+                case 0x028: mmio_resp_rdata_o.write(mmio_dst_cluster_id_reg); break;
+                case 0x02C: mmio_resp_rdata_o.write(mmio_count_reg[0]); break;
+                case 0x030: mmio_resp_rdata_o.write(mmio_count_reg[1]); break;
+                case 0x034: mmio_resp_rdata_o.write(mmio_count_reg[2]); break;
+                case 0x038: mmio_resp_rdata_o.write(mmio_count_reg[3]); break;
+                case 0x03C: mmio_resp_rdata_o.write(mmio_src_stride_reg[0]); break;
+                case 0x040: mmio_resp_rdata_o.write(mmio_src_stride_reg[1]); break;
+                case 0x044: mmio_resp_rdata_o.write(mmio_src_stride_reg[2]); break;
+                case 0x048: mmio_resp_rdata_o.write(mmio_src_stride_reg[3]); break;
+                case 0x04C: mmio_resp_rdata_o.write(mmio_dst_stride_reg[0]); break;
+                case 0x050: mmio_resp_rdata_o.write(mmio_dst_stride_reg[1]); break;
+                case 0x054: mmio_resp_rdata_o.write(mmio_dst_stride_reg[2]); break;
+                case 0x058: mmio_resp_rdata_o.write(mmio_dst_stride_reg[3]); break;
+                case 0x05C: mmio_resp_rdata_o.write(mmio_cmd_tag_reg); break;
+                case 0x060: mmio_resp_rdata_o.write(mmio_done_tag_reg); break;
+                case 0x064: mmio_resp_rdata_o.write(mmio_error_code_reg); break;
+                case 0x068: mmio_resp_rdata_o.write(0); break; // ERR_INFO
+                case 0x06C: mmio_resp_rdata_o.write(
+                    static_cast<uint32_t>(state_reg)); break; // DEBUG_STATE
+                default: mmio_resp_rdata_o.write(0); break;
+            }
+        }
     }
 
     // ========================================================================
@@ -360,468 +564,430 @@ private:
     // ========================================================================
 
     void seq_process() {
-        // ---- Reset ----
-        mmio_resp_valid_o.write(false);
-        mmio_resp_rdata_o.write(0);
-        dma_irq_o.write(false);
-        reset_axi_outputs();
-        reset_cl_outputs();
-        sig_fifo_push.write(false);
-        sig_fifo_pop.write(false);
-        sig_fifo_clear.write(true);
-        sig_fifo_data_in.write(0);
-        status_reg_ = 0x01;
-        ctrl_reg_ = 0;
-        err_code_ = 0;
-        err_info_ = 0;
-        done_tag_ = 0;
-        debug_state_ = 0;
-        stg_src_kind_ = 0; stg_dst_kind_ = 0;
-        stg_src_addr_lo_ = 0; stg_src_addr_hi_ = 0;
-        stg_dst_addr_lo_ = 0; stg_dst_addr_hi_ = 0;
-        stg_src_cluster_ = 0; stg_dst_cluster_ = 0;
-        for (int i = 0; i < 4; ++i) {
-            stg_count_[i] = 1;
-            stg_src_stride_[i] = 0;
-            stg_dst_stride_[i] = 0;
-        }
-        stg_cmd_tag_ = 0;
-        while (!cmd_fifo_.empty()) cmd_fifo_.pop();
+        // --- Reset ---
+        reset_all_outputs();
+        reset_internal_state();
+        for (auto& v : dst_agu_idx_reg) v = 0;
         wait();
 
-        // Release FIFO clear after first cycle
-        sig_fifo_clear.write(false);
-        wait();
-
-        DmaState fsm_state = DmaState::IDLE;
-        DmaCommand active_cmd{};
-        Agu4D src_agu{};
-        Agu4D dst_agu{};
-        uint32_t beats_read = 0;
-        uint32_t beats_written = 0;
-        uint32_t total_beats = 0;
-        bool irq_en = false;
-
-        // Buffered DRAM write data (survive across reset_axi_outputs)
-        sc_biguint<kMemAxiDataWidth> dram_wr_data = 0;
-        uint32_t dram_wr_addr = 0;
-        uint32_t dram_wr_strb = 0;
-
+        // --- Main loop ---
+        DmaState prev_state = state_reg;
         while (true) {
-            mmio_resp_valid_o.write(false);
-            reset_axi_outputs();
-            reset_cl_outputs();
-            sig_fifo_push.write(false);
-            sig_fifo_pop.write(false);
-            sig_fifo_clear.write(false);
+            // Default output values each cycle
+            reset_all_outputs();
 
-            // ================================================================
-            // MMIO register access
-            // ================================================================
+            // Always service MMIO
+            handle_mmio();
 
-            if (mmio_req_valid_i.read()) {
-                const uint32_t off   = mmio_req_addr_i.read().to_uint();
-                const uint32_t wdata = mmio_req_wdata_i.read().to_uint();
-                const bool     wr    = mmio_req_write_i.read();
-                uint32_t rdata = 0;
-
-                bool do_submit = false;
-                bool do_abort  = false;
-
-                if (!wr) {
-                    // ---------- READ ----------
-                    switch (off) {
-                        case kDmaCap0:         rdata = 0x04; break; // 4D copy
-                        case kDmaStatus:       rdata = make_status(fsm_state, cmd_fifo_.size() >= kDmaCmdFifoDepth); break;
-                        case kDmaCtrl:         rdata = ctrl_reg_; break;
-                        case kDmaSrcKind:      rdata = stg_src_kind_; break;
-                        case kDmaDstKind:      rdata = stg_dst_kind_; break;
-                        case kDmaSrcAddrLo:    rdata = stg_src_addr_lo_; break;
-                        case kDmaSrcAddrHi:    rdata = stg_src_addr_hi_; break;
-                        case kDmaDstAddrLo:    rdata = stg_dst_addr_lo_; break;
-                        case kDmaDstAddrHi:    rdata = stg_dst_addr_hi_; break;
-                        case kDmaSrcClusterId: rdata = stg_src_cluster_; break;
-                        case kDmaDstClusterId: rdata = stg_dst_cluster_; break;
-                        case kDmaCountD0:      rdata = stg_count_[0]; break;
-                        case kDmaCountD1:      rdata = stg_count_[1]; break;
-                        case kDmaCountD2:      rdata = stg_count_[2]; break;
-                        case kDmaCountD3:      rdata = stg_count_[3]; break;
-                        case kDmaSrcStrideD0:  rdata = stg_src_stride_[0]; break;
-                        case kDmaSrcStrideD1:  rdata = stg_src_stride_[1]; break;
-                        case kDmaSrcStrideD2:  rdata = stg_src_stride_[2]; break;
-                        case kDmaSrcStrideD3:  rdata = stg_src_stride_[3]; break;
-                        case kDmaDstStrideD0:  rdata = stg_dst_stride_[0]; break;
-                        case kDmaDstStrideD1:  rdata = stg_dst_stride_[1]; break;
-                        case kDmaDstStrideD2:  rdata = stg_dst_stride_[2]; break;
-                        case kDmaDstStrideD3:  rdata = stg_dst_stride_[3]; break;
-                        case kDmaCmdTag:       rdata = stg_cmd_tag_; break;
-                        case kDmaDoneTag:      rdata = done_tag_; break;
-                        case kDmaErrCode:      rdata = err_code_; break;
-                        case kDmaErrInfo:      rdata = err_info_; break;
-                        case kDmaDebugState:   rdata = static_cast<uint32_t>(fsm_state); break;
-                        default: break;
-                    }
-                } else {
-                    // ---------- WRITE ----------
-                    switch (off) {
-                        case kDmaCtrl: {
-                            ctrl_reg_ = wdata;
-                            if (wdata & 0x01) do_submit = true;
-                            if (wdata & 0x02) do_abort  = true;
-                            irq_en = (wdata >> 3) & 1;
-                            break;
-                        }
-                        case kDmaSrcKind:      stg_src_kind_       = wdata; break;
-                        case kDmaDstKind:      stg_dst_kind_       = wdata; break;
-                        case kDmaSrcAddrLo:    stg_src_addr_lo_    = wdata; break;
-                        case kDmaSrcAddrHi:    stg_src_addr_hi_    = wdata; break;
-                        case kDmaDstAddrLo:    stg_dst_addr_lo_    = wdata; break;
-                        case kDmaDstAddrHi:    stg_dst_addr_hi_    = wdata; break;
-                        case kDmaSrcClusterId: stg_src_cluster_    = wdata; break;
-                        case kDmaDstClusterId: stg_dst_cluster_    = wdata; break;
-                        case kDmaCountD0:      stg_count_[0]       = wdata; break;
-                        case kDmaCountD1:      stg_count_[1]       = wdata; break;
-                        case kDmaCountD2:      stg_count_[2]       = wdata; break;
-                        case kDmaCountD3:      stg_count_[3]       = wdata; break;
-                        case kDmaSrcStrideD0:  stg_src_stride_[0]  = wdata; break;
-                        case kDmaSrcStrideD1:  stg_src_stride_[1]  = wdata; break;
-                        case kDmaSrcStrideD2:  stg_src_stride_[2]  = wdata; break;
-                        case kDmaSrcStrideD3:  stg_src_stride_[3]  = wdata; break;
-                        case kDmaDstStrideD0:  stg_dst_stride_[0]  = wdata; break;
-                        case kDmaDstStrideD1:  stg_dst_stride_[1]  = wdata; break;
-                        case kDmaDstStrideD2:  stg_dst_stride_[2]  = wdata; break;
-                        case kDmaDstStrideD3:  stg_dst_stride_[3]  = wdata; break;
-                        case kDmaCmdTag:       stg_cmd_tag_        = wdata; break;
-                        case kDmaErrCode:
-                            err_code_ &= ~wdata; // W1C
-                            break;
-                        default: break;
-                    }
-                }
-
-                // Submit: atomic snapshot to FIFO
-                if (do_submit) {
-                    if (cmd_fifo_.size() >= kDmaCmdFifoDepth) {
-                        err_code_ = static_cast<uint32_t>(DmaError::DMA_ERR_SUBMIT_WHEN_FULL);
-                        err_info_ = stg_cmd_tag_;
-                        if (irq_en) dma_irq_o.write(true);
-                    } else {
-                        DmaCommand cmd;
-                        cmd.src_kind      = static_cast<DmaEndpoint>(stg_src_kind_);
-                        cmd.dst_kind      = static_cast<DmaEndpoint>(stg_dst_kind_);
-                        cmd.src_addr_lo   = stg_src_addr_lo_;
-                        cmd.src_addr_hi   = stg_src_addr_hi_;
-                        cmd.dst_addr_lo   = stg_dst_addr_lo_;
-                        cmd.dst_addr_hi   = stg_dst_addr_hi_;
-                        cmd.src_cluster_id= stg_src_cluster_;
-                        cmd.dst_cluster_id= stg_dst_cluster_;
-                        for (int i = 0; i < 4; ++i) {
-                            cmd.count[i]      = stg_count_[i];
-                            cmd.src_stride[i] = stg_src_stride_[i];
-                            cmd.dst_stride[i] = stg_dst_stride_[i];
-                        }
-                        cmd.cmd_tag       = stg_cmd_tag_;
-                        cmd_fifo_.push(cmd);
-                        DEBUG_MSG("DmaEngine: submit tag=" << cmd.cmd_tag
-                                  << " beats=" << cmd.total_beats(),
-                                  DEBUG_LEVEL_CORE_COMPONENTS);
-                    }
-                }
-
-                if (do_abort && fsm_state != DmaState::IDLE) {
-                    fsm_state = DmaState::ERROR;
-                    err_code_ = static_cast<uint32_t>(DmaError::DMA_ERR_ABORTED);
-                }
-
-                mmio_resp_valid_o.write(true);
-                mmio_resp_rdata_o.write(rdata);
-            }
-
-            // ================================================================
-            // FSM
-            // ================================================================
-
-            switch (fsm_state) {
-            // ----------------------------------------------------------------
+            switch (state_reg) {
             case DmaState::IDLE: {
-                dma_irq_o.write(false);
-                if (!cmd_fifo_.empty()) {
-                    active_cmd = cmd_fifo_.front();
-                    cmd_fifo_.pop();
-                    fsm_state = DmaState::VALIDATE;
+                mmio_status_reg = 0x1; // bit0=IDLE
+                if (!cmd_fifo_reg.empty()) {
+                    active_cmd_reg = cmd_fifo_reg.front();
+                    cmd_fifo_reg.pop_front();
+                    state_reg = DmaState::VALIDATE;
                 }
                 break;
             }
-            // ----------------------------------------------------------------
+
             case DmaState::VALIDATE: {
-                uint32_t ve = validate_cmd(active_cmd);
-                if (ve != 0) {
-                    err_code_ = ve;
-                    err_info_ = active_cmd.cmd_tag;
-                    fsm_state = DmaState::ERROR;
-                } else {
-                    // Initialize dual AGUs
-                    src_agu.reset(active_cmd.src_addr_lo,
-                                  active_cmd.count, active_cmd.src_stride);
-                    dst_agu.reset(active_cmd.dst_addr_lo,
-                                  active_cmd.count, active_cmd.dst_stride);
-                    total_beats = active_cmd.total_beats();
-                    beats_read = 0;
-                    beats_written = 0;
+                // Basic validation
+                const uint32_t total = active_cmd_reg.total_beats();
+                if (total == 0) {
+                    mmio_error_code_reg = static_cast<uint32_t>(DmaError::DMA_ERR_ZERO_LENGTH);
+                    state_reg = DmaState::ERROR;
+                    break;
+                }
+                // Initialize AGU
+                for (auto& v : agu_idx_reg) v = 0;
+                for (auto& v : dst_agu_idx_reg) v = 0;
+                beats_src_issued_reg = 0;
+                beats_src_retired_reg = 0;
+                beats_dst_issued_reg = 0;
+                beats_dst_retired_reg = 0;
+                data_buffer_reg.clear();
+                dram_rd_resp_fifo_reg.clear();
+                cl_rd_resp_fifo_reg.clear();
+                dram_rd_inflight_cnt_reg = 0;
+                dram_wr_inflight_cnt_reg = 0;
+                cl_rd_inflight_cnt_reg = 0;
+                cl_wr_inflight_cnt_reg = 0;
+                cl_wr_b_pending_reg = 0;
+                cl_aw_send_valid_reg = false;
+                cl_w_send_valid_reg = false;
+                cl_ar_send_valid_reg = false;
+                dram_aw_send_valid_reg = false;
+                dram_w_send_valid_reg = false;
+                dram_ar_send_valid_reg = false;
+                mmio_status_reg = 0x2; // bit1=BUSY
+                state_reg = DmaState::RUN;
+                break;
+            }
 
-                    // Clear transfer FIFO
-                    sig_fifo_clear.write(true);
+            case DmaState::RUN: {
+                const uint32_t total = active_cmd_reg.total_beats();
+                bool src_is_dram = (active_cmd_reg.src_kind == DmaEndpoint::DRAM);
+                bool dst_is_dram = (active_cmd_reg.dst_kind == DmaEndpoint::DRAM);
 
-                    TRACE_EVENT("dma_transfer", "DMA", TRACE_BEGIN, 0, 1, "{}");
-                    // Start reading from source
-                    fsm_state = DmaState::SRC_READ_ISSUE;
-                }
-                break;
-            }
-            // ================================================================
-            // Source read phase: read one beat, push into FIFO
-            // ================================================================
-            case DmaState::SRC_READ_ISSUE: {
-                if (beats_read >= total_beats) {
-                    // All source beats read, switch to drain mode
-                    fsm_state = DmaState::DST_WRITE_ISSUE;
-                } else if ((beats_read - beats_written) >= kXferFifoDepth) {
-                    // FIFO full (counter-based, no signal delay)
-                    fsm_state = DmaState::DST_WRITE_ISSUE;
-                } else {
-                    uint32_t addr = src_agu.current_addr;
-                    if (active_cmd.src_kind == DmaEndpoint::DRAM) {
-                        m_mem_axi_ar_valid_o.write(true);
-                        m_mem_axi_ar_addr_o.write(addr);
-                        m_mem_axi_ar_len_o.write(0); // single beat
-                        m_mem_axi_r_ready_o.write(true);
-                        fsm_state = DmaState::DRAM_AR_WAIT;
+                // === Source issue engine ===
+                if (beats_src_issued_reg < total) {
+                    if (src_is_dram) {
+                        run_src_issue_dram();
                     } else {
-                        // Cluster SPM read
-                        cl_data_req_valid_o.write(true);
-                        cl_data_req_write_o.write(false);
-                        cl_data_req_cluster_id_o.write(active_cmd.src_cluster_id);
-                        cl_data_req_addr_o.write(addr);
-                        fsm_state = DmaState::CL_RD_REQ_WAIT;
+                        run_src_issue_cluster();
                     }
                 }
-                break;
-            }
-            case DmaState::DRAM_AR_WAIT: {
-                m_mem_axi_ar_valid_o.write(true);
-                m_mem_axi_ar_addr_o.write(src_agu.current_addr);
-                m_mem_axi_ar_len_o.write(0);
-                m_mem_axi_r_ready_o.write(true);
-                if (m_mem_axi_ar_ready_i.read()) {
-                    fsm_state = DmaState::DRAM_R_WAIT;
-                }
-                break;
-            }
-            case DmaState::DRAM_R_WAIT: {
-                m_mem_axi_r_ready_o.write(true);
-                if (m_mem_axi_r_valid_i.read()) {
-                    if (m_mem_axi_r_resp_i.read().to_uint() != 0) {
-                        err_code_ = static_cast<uint32_t>(DmaError::DMA_ERR_DRAM_AXI);
-                        err_info_ = src_agu.current_addr;
-                        fsm_state = DmaState::ERROR;
-                    } else {
-                        // Push data into transfer FIFO
-                        sc_biguint<kClAxiDataWidth> cl_data = dram_to_cl(m_mem_axi_r_data_i.read());
-                        sig_fifo_data_in.write(cl_data);
-                        sig_fifo_push.write(true);
-                        src_agu.advance();
-                        beats_read++;
-                        // Continue reading or switch to write
-                        if (beats_read >= total_beats || (beats_read - beats_written) >= kXferFifoDepth) {
-                            fsm_state = DmaState::DST_WRITE_ISSUE;
-                        } else {
-                            fsm_state = DmaState::SRC_READ_ISSUE;
-                        }
-                    }
-                }
-                break;
-            }
-            case DmaState::CL_RD_REQ_WAIT: {
-                if (cl_data_req_ready_i.read()) {
-                    fsm_state = DmaState::CL_RD_RESP_WAIT;
-                }
-                break;
-            }
-            case DmaState::CL_RD_RESP_WAIT: {
-                if (cl_data_resp_valid_i.read()) {
-                    if (cl_data_resp_error_i.read()) {
-                        err_code_ = static_cast<uint32_t>(DmaError::DMA_ERR_CLUSTER_RESP);
-                        err_info_ = src_agu.current_addr;
-                        fsm_state = DmaState::ERROR;
-                    } else {
-                        // Push cluster data into FIFO
-                        sig_fifo_data_in.write(cl_data_resp_rdata_i.read());
-                        sig_fifo_push.write(true);
-                        src_agu.advance();
-                        beats_read++;
-                        if (beats_read >= total_beats || (beats_read - beats_written) >= kXferFifoDepth) {
-                            fsm_state = DmaState::DST_WRITE_ISSUE;
-                        } else {
-                            fsm_state = DmaState::SRC_READ_ISSUE;
-                        }
-                    }
-                }
-                break;
-            }
-            // ================================================================
-            // Destination write phase: pop FIFO, write one beat
-            // ================================================================
-            case DmaState::DST_WRITE_ISSUE: {
-                if (beats_written >= total_beats) {
-                    fsm_state = DmaState::DONE;
-                } else if (sig_fifo_empty.read()) {
-                    // FIFO empty: go back to reading
-                    if (beats_read < total_beats) {
-                        fsm_state = DmaState::SRC_READ_ISSUE;
-                    }
-                    // else: wait for FIFO data (should not happen in correct flow)
-                } else {
-                    // Pop from FIFO
-                    sc_biguint<kClAxiDataWidth> data = sig_fifo_data_out.read();
-                    sig_fifo_pop.write(true);
 
-                    uint32_t addr = dst_agu.current_addr;
-                    if (active_cmd.dst_kind == DmaEndpoint::DRAM) {
-                        dram_wr_addr = addr;
-                        dram_wr_data = cl_to_dram(data);
-                        dram_wr_strb = (1u << kBeatBytes) - 1;
-                        m_mem_axi_aw_valid_o.write(true);
-                        m_mem_axi_aw_addr_o.write(dram_wr_addr);
-                        m_mem_axi_aw_len_o.write(0);
-                        m_mem_axi_w_valid_o.write(true);
-                        m_mem_axi_w_data_o.write(dram_wr_data);
-                        m_mem_axi_w_strb_o.write(dram_wr_strb);
-                        m_mem_axi_w_last_o.write(true);
-                        fsm_state = DmaState::DRAM_AW_WAIT;
+                // === Source retire engine ===
+                if (src_is_dram) {
+                    run_src_retire_dram();
+                } else {
+                    run_src_retire_cluster();
+                }
+
+                // === Destination issue engine ===
+                if (beats_dst_issued_reg < total) {
+                    if (dst_is_dram) {
+                        run_dst_issue_dram();
                     } else {
-                        // Cluster SPM write
-                        cl_data_req_valid_o.write(true);
-                        cl_data_req_write_o.write(true);
-                        cl_data_req_cluster_id_o.write(active_cmd.dst_cluster_id);
-                        cl_data_req_addr_o.write(addr);
-                        cl_data_req_wdata_o.write(data);
-                        cl_data_req_wstrb_o.write((1u << kClBeatBytes) - 1);
-                        fsm_state = DmaState::CL_WR_REQ_WAIT;
+                        run_dst_issue_cluster();
                     }
                 }
-                break;
-            }
-            // ----------------------------------------------------------------
-            // DRAM write path
-            // ----------------------------------------------------------------
-            case DmaState::DRAM_AW_WAIT: {
-                m_mem_axi_aw_valid_o.write(true);
-                m_mem_axi_aw_addr_o.write(dram_wr_addr);
-                m_mem_axi_aw_len_o.write(0);
-                if (m_mem_axi_aw_ready_i.read()) {
-                    fsm_state = DmaState::DRAM_W_WAIT;
+
+                // === Destination retire engine ===
+                if (dst_is_dram) {
+                    run_dst_retire_dram();
+                } else {
+                    run_dst_retire_cluster();
+                }
+
+                // === Drive AXI outputs from send registers ===
+                drive_dram_axi_outputs();
+                drive_cluster_axi_outputs();
+
+                // === Check completion ===
+                if (beats_dst_retired_reg >= total &&
+                    dram_rd_inflight_cnt_reg == 0 &&
+                    dram_wr_inflight_cnt_reg == 0 &&
+                    cl_rd_inflight_cnt_reg == 0 &&
+                    cl_wr_inflight_cnt_reg == 0 &&
+                    data_buffer_reg.empty() &&
+                    dram_rd_resp_fifo_reg.empty() &&
+                    cl_rd_resp_fifo_reg.empty()) {
+                    state_reg = DmaState::DONE;
                 }
                 break;
             }
-            case DmaState::DRAM_W_WAIT: {
-                m_mem_axi_w_valid_o.write(true);
-                m_mem_axi_w_data_o.write(dram_wr_data);
-                m_mem_axi_w_strb_o.write(dram_wr_strb);
-                m_mem_axi_w_last_o.write(true);
-                if (m_mem_axi_w_ready_i.read()) {
-                    m_mem_axi_b_ready_o.write(true);
-                    fsm_state = DmaState::DRAM_B_WAIT;
+
+            case DmaState::DRAIN: {
+                // Wait for all inflight to retire
+                drive_dram_axi_outputs();
+                drive_cluster_axi_outputs();
+
+                bool src_is_dram = (active_cmd_reg.src_kind == DmaEndpoint::DRAM);
+                bool dst_is_dram = (active_cmd_reg.dst_kind == DmaEndpoint::DRAM);
+                if (src_is_dram) run_src_retire_dram();
+                else             run_src_retire_cluster();
+                if (dst_is_dram) run_dst_retire_dram();
+                else             run_dst_retire_cluster();
+
+                if (dram_rd_inflight_cnt_reg == 0 &&
+                    dram_wr_inflight_cnt_reg == 0 &&
+                    cl_rd_inflight_cnt_reg == 0 &&
+                    cl_wr_inflight_cnt_reg == 0) {
+                    state_reg = DmaState::DONE;
                 }
                 break;
             }
-            case DmaState::DRAM_B_WAIT: {
-                m_mem_axi_b_ready_o.write(true);
-                if (m_mem_axi_b_valid_i.read()) {
-                    if (m_mem_axi_b_resp_i.read().to_uint() != 0) {
-                        err_code_ = static_cast<uint32_t>(DmaError::DMA_ERR_DRAM_AXI);
-                        err_info_ = dram_wr_addr;
-                        fsm_state = DmaState::ERROR;
-                    } else {
-                        dst_agu.advance();
-                        beats_written++;
-                        if (beats_written >= total_beats) {
-                            fsm_state = DmaState::DONE;
-                        } else if (!sig_fifo_empty.read()) {
-                            fsm_state = DmaState::DST_WRITE_ISSUE;
-                        } else if (beats_read < total_beats) {
-                            fsm_state = DmaState::SRC_READ_ISSUE;
-                        } else {
-                            fsm_state = DmaState::DST_WRITE_ISSUE;
-                        }
-                    }
-                }
-                break;
-            }
-            // ----------------------------------------------------------------
-            // Cluster write path
-            // ----------------------------------------------------------------
-            case DmaState::CL_WR_REQ_WAIT: {
-                if (cl_data_req_ready_i.read()) {
-                    fsm_state = DmaState::CL_WR_RESP_WAIT;
-                }
-                break;
-            }
-            case DmaState::CL_WR_RESP_WAIT: {
-                if (cl_data_resp_valid_i.read()) {
-                    if (cl_data_resp_error_i.read()) {
-                        err_code_ = static_cast<uint32_t>(DmaError::DMA_ERR_CLUSTER_RESP);
-                        err_info_ = dst_agu.current_addr;
-                        fsm_state = DmaState::ERROR;
-                    } else {
-                        dst_agu.advance();
-                        beats_written++;
-                        if (beats_written >= total_beats) {
-                            fsm_state = DmaState::DONE;
-                        } else if (!sig_fifo_empty.read()) {
-                            fsm_state = DmaState::DST_WRITE_ISSUE;
-                        } else if (beats_read < total_beats) {
-                            fsm_state = DmaState::SRC_READ_ISSUE;
-                        } else {
-                            fsm_state = DmaState::DST_WRITE_ISSUE;
-                        }
-                    }
-                }
-                break;
-            }
-            // ----------------------------------------------------------------
-            // Terminal states
-            // ----------------------------------------------------------------
+
             case DmaState::DONE: {
-                done_tag_ = active_cmd.cmd_tag;
-                DEBUG_MSG("DmaEngine: done tag=" << active_cmd.cmd_tag,
-                          DEBUG_LEVEL_CORE_COMPONENTS);
-                TRACE_EVENT("dma_transfer", "DMA", TRACE_END, 0, 1, "{}");
-                if (irq_en) dma_irq_o.write(true);
-                fsm_state = DmaState::IDLE;
+                mmio_done_tag_reg = active_cmd_reg.cmd_tag;
+                mmio_status_reg = 0x1; // back to IDLE
+                mmio_error_code_reg = 0;
+                if (mmio_irq_en_reg) dma_irq_o.write(true);
+                state_reg = DmaState::IDLE;
                 break;
             }
-            case DmaState::ERROR: {
-                done_tag_ = active_cmd.cmd_tag;
-                DEBUG_MSG("DmaEngine: error code=" << err_code_ << " tag=" << active_cmd.cmd_tag,
-                          DEBUG_LEVEL_CORE_COMPONENTS);
-                TRACE_EVENT("dma_transfer", "DMA", TRACE_END, 0, 1, "{}");
-                if (irq_en) dma_irq_o.write(true);
-                // Drain FIFO on fatal
-                sig_fifo_clear.write(true);
-                while (!cmd_fifo_.empty()) cmd_fifo_.pop();
-                fsm_state = DmaState::IDLE;
-                break;
-            }
-            default:
-                fsm_state = DmaState::IDLE;
-                break;
-            } // switch
 
-            debug_state_ = static_cast<uint32_t>(fsm_state);
-            status_reg_ = make_status(fsm_state, cmd_fifo_.size() >= kDmaCmdFifoDepth);
+            case DmaState::ERROR: {
+                mmio_done_tag_reg = active_cmd_reg.cmd_tag;
+                mmio_status_reg = 0x1; // back to IDLE (with error)
+                if (mmio_irq_en_reg) dma_irq_o.write(true);
+                state_reg = DmaState::IDLE;
+                break;
+            }
+
+            default:
+                state_reg = DmaState::IDLE;
+                break;
+            }
+
+            if (state_reg != prev_state) {
+                DEBUG_PRINTF(
+                    DEBUG_LEVEL_CORE_COMPONENTS,
+                    "DMA state %s -> %s tag=0x%08x total=%u src_kind=%u dst_kind=%u src_cl=%u dst_cl=%u src_iss=%u src_ret=%u dst_iss=%u dst_ret=%u inflight(dram_r=%u dram_w=%u cl_r=%u cl_w=%u) databuf=%llu err=0x%08x\n",
+                    dma_state_name(prev_state),
+                    dma_state_name(state_reg),
+                    active_cmd_reg.cmd_tag,
+                    active_cmd_reg.total_beats(),
+                    static_cast<unsigned>(active_cmd_reg.src_kind),
+                    static_cast<unsigned>(active_cmd_reg.dst_kind),
+                    active_cmd_reg.src_cluster_id,
+                    active_cmd_reg.dst_cluster_id,
+                    beats_src_issued_reg,
+                    beats_src_retired_reg,
+                    beats_dst_issued_reg,
+                    beats_dst_retired_reg,
+                    dram_rd_inflight_cnt_reg,
+                    dram_wr_inflight_cnt_reg,
+                    cl_rd_inflight_cnt_reg,
+                    cl_wr_inflight_cnt_reg,
+                    static_cast<unsigned long long>(data_buffer_reg.size()),
+                    mmio_error_code_reg);
+                prev_state = state_reg;
+            }
 
             wait();
-        } // while
+        }
+    }
+
+    // ========================================================================
+    // Sub-engines
+    // ========================================================================
+
+    /// Source issue: DRAM read path — issue AR to DRAM.
+    void run_src_issue_dram() {
+        if (dram_ar_send_valid_reg) return; // waiting for handshake
+        if (dram_rd_inflight_cnt_reg >= kDmaMaxOutstanding) {
+            pmu_dram_rd_stall_cnt_reg++;
+            return;
+        }
+        if (data_buffer_reg.size() + dram_rd_inflight_cnt_reg >= kDataBufferDepth) return;
+
+        uint32_t addr = compute_src_addr();
+        dram_ar_send_valid_reg = true;
+        dram_ar_send_addr_reg = addr;
+        dram_rd_inflight_cnt_reg++;
+        beats_src_issued_reg++;
+        advance_src_agu();
+        pmu_dram_rd_issue_cnt_reg++;
+    }
+
+    /// Source issue: cluster read path — issue AR to fabric.
+    void run_src_issue_cluster() {
+        if (cl_ar_send_valid_reg) return;
+        if (cl_rd_inflight_cnt_reg >= kDmaMaxOutstanding) {
+            pmu_cl_ar_stall_cnt_reg++;
+            return;
+        }
+        if (data_buffer_reg.size() + cl_rd_inflight_cnt_reg >= kDataBufferDepth) return;
+
+        uint32_t local_addr = compute_src_addr();
+        uint32_t global_addr = encode_cluster_fabric_addr(
+            active_cmd_reg.src_cluster_id, local_addr);
+        cl_ar_send_valid_reg = true;
+        cl_ar_send_addr_reg = global_addr;
+        cl_rd_inflight_cnt_reg++;
+        beats_src_issued_reg++;
+        advance_src_agu();
+        pmu_cl_ar_issue_cnt_reg++;
+    }
+
+    /// Source retire: DRAM R capture → data_buffer.
+    void run_src_retire_dram() {
+        // Pre-assert r_ready when can accept
+        bool can_accept = (dram_rd_inflight_cnt_reg > 0) &&
+                          (dram_rd_resp_fifo_reg.size() < kRespFifoDepth);
+        if (can_accept) m_mem_axi_r_ready_o.write(true);
+        // Only process when valid AND we previously advertised ready
+        if (m_mem_axi_r_valid_i.read() && dram_r_prev_ready_reg) {
+            DramRdResp resp;
+            resp.data = m_mem_axi_r_data_i.read();
+            resp.resp = m_mem_axi_r_resp_i.read().to_uint();
+            dram_rd_resp_fifo_reg.push_back(resp);
+            dram_rd_inflight_cnt_reg--;
+        }
+        dram_r_prev_ready_reg = can_accept;
+        // Move from resp FIFO to data buffer
+        if (!dram_rd_resp_fifo_reg.empty() && data_buffer_reg.size() < kDataBufferDepth) {
+            auto& front = dram_rd_resp_fifo_reg.front();
+            DataBeat beat;
+            beat.data = sc_biguint<kClAxiDataWidth>(front.data.to_uint64());
+            beat.strb = 0xFF; // full strobe
+            data_buffer_reg.push_back(beat);
+            dram_rd_resp_fifo_reg.pop_front();
+            beats_src_retired_reg++;
+        }
+    }
+
+    /// Source retire: cluster R capture → data_buffer.
+    void run_src_retire_cluster() {
+        bool can_accept = (cl_rd_inflight_cnt_reg > 0) &&
+                          (cl_rd_resp_fifo_reg.size() < kRespFifoDepth);
+        if (can_accept) m_cl_axi_r_ready_o.write(true);
+        if (m_cl_axi_r_valid_i.read() && cl_r_prev_ready_reg) {
+            DataBeat beat;
+            beat.data = m_cl_axi_r_data_i.read();
+            beat.strb = 0xFF;
+            cl_rd_resp_fifo_reg.push_back(beat);
+            cl_rd_inflight_cnt_reg--;
+            pmu_cl_r_retire_cnt_reg++;
+        }
+        cl_r_prev_ready_reg = can_accept;
+        // Move from resp FIFO to data buffer
+        if (!cl_rd_resp_fifo_reg.empty() && data_buffer_reg.size() < kDataBufferDepth) {
+            auto& front = cl_rd_resp_fifo_reg.front();
+            data_buffer_reg.push_back(front);
+            cl_rd_resp_fifo_reg.pop_front();
+            beats_src_retired_reg++;
+        }
+    }
+
+    /// Destination issue: DRAM write path — issue AW/W.
+    void run_dst_issue_dram() {
+        if (dram_aw_send_valid_reg || dram_w_send_valid_reg) return;
+        if (dram_wr_inflight_cnt_reg >= kDmaMaxOutstanding) {
+            pmu_dram_wr_stall_cnt_reg++;
+            return;
+        }
+        if (data_buffer_reg.empty()) return;
+
+        uint32_t addr = compute_dst_addr_from_dst_agu();
+        auto beat = data_buffer_reg.front();
+        data_buffer_reg.pop_front();
+
+        dram_aw_send_valid_reg = true;
+        dram_aw_send_addr_reg = addr;
+        dram_w_send_valid_reg = true;
+        dram_w_send_data_reg = sc_biguint<kMemAxiDataWidth>(beat.data.to_uint64());
+        dram_w_send_strb_reg = beat.strb;
+        dram_wr_inflight_cnt_reg++;
+        beats_dst_issued_reg++;
+        advance_dst_agu();
+        pmu_dram_wr_issue_cnt_reg++;
+    }
+
+    /// Destination issue: cluster write path — issue AW/W.
+    void run_dst_issue_cluster() {
+        if (cl_aw_send_valid_reg || cl_w_send_valid_reg) return;
+        if (cl_wr_inflight_cnt_reg >= kDmaMaxOutstanding) {
+            pmu_cl_aw_stall_cnt_reg++;
+            return;
+        }
+        if (data_buffer_reg.empty()) return;
+
+        uint32_t local_addr = compute_dst_addr_from_dst_agu();
+        uint32_t global_addr = encode_cluster_fabric_addr(
+            active_cmd_reg.dst_cluster_id, local_addr);
+        auto beat = data_buffer_reg.front();
+        data_buffer_reg.pop_front();
+
+        cl_aw_send_valid_reg = true;
+        cl_aw_send_addr_reg = global_addr;
+        cl_w_send_valid_reg = true;
+        cl_w_send_data_reg = beat.data;
+        cl_w_send_strb_reg = beat.strb;
+        cl_wr_inflight_cnt_reg++;
+        beats_dst_issued_reg++;
+        advance_dst_agu();
+        pmu_cl_aw_issue_cnt_reg++;
+        pmu_cl_w_issue_cnt_reg++;
+    }
+
+    /// Destination retire: DRAM B capture.
+    void run_dst_retire_dram() {
+        bool can_accept = (dram_wr_inflight_cnt_reg > 0);
+        if (can_accept) m_mem_axi_b_ready_o.write(true);
+        if (m_mem_axi_b_valid_i.read() && dram_b_prev_ready_reg) {
+            dram_wr_inflight_cnt_reg--;
+            beats_dst_retired_reg++;
+        }
+        dram_b_prev_ready_reg = can_accept;
+    }
+
+    /// Destination retire: cluster B capture.
+    void run_dst_retire_cluster() {
+        bool can_accept = (cl_wr_inflight_cnt_reg > 0);
+        if (can_accept) m_cl_axi_b_ready_o.write(true);
+        if (m_cl_axi_b_valid_i.read() && cl_b_prev_ready_reg) {
+            cl_wr_inflight_cnt_reg--;
+            beats_dst_retired_reg++;
+            pmu_cl_b_retire_cnt_reg++;
+        }
+        cl_b_prev_ready_reg = can_accept;
+    }
+
+    // ========================================================================
+    // AXI output drivers (from send registers)
+    // ========================================================================
+
+    void drive_dram_axi_outputs() {
+        // AR channel — clear only when slave has had a cycle to see valid
+        if (dram_ar_prev_valid_reg && m_mem_axi_ar_ready_i.read()) {
+            dram_ar_send_valid_reg = false;
+        }
+        if (dram_ar_send_valid_reg) {
+            m_mem_axi_ar_valid_o.write(true);
+            m_mem_axi_ar_addr_o.write(dram_ar_send_addr_reg);
+            m_mem_axi_ar_len_o.write(0); // single-beat
+        }
+        dram_ar_prev_valid_reg = dram_ar_send_valid_reg;
+
+        // AW channel
+        if (dram_aw_prev_valid_reg && m_mem_axi_aw_ready_i.read()) {
+            dram_aw_send_valid_reg = false;
+        }
+        if (dram_aw_send_valid_reg) {
+            m_mem_axi_aw_valid_o.write(true);
+            m_mem_axi_aw_addr_o.write(dram_aw_send_addr_reg);
+            m_mem_axi_aw_len_o.write(0);
+        }
+        dram_aw_prev_valid_reg = dram_aw_send_valid_reg;
+
+        // W channel
+        if (dram_w_prev_valid_reg && m_mem_axi_w_ready_i.read()) {
+            dram_w_send_valid_reg = false;
+        }
+        if (dram_w_send_valid_reg) {
+            m_mem_axi_w_valid_o.write(true);
+            m_mem_axi_w_data_o.write(dram_w_send_data_reg);
+            m_mem_axi_w_strb_o.write(dram_w_send_strb_reg);
+            m_mem_axi_w_last_o.write(true);
+        }
+        dram_w_prev_valid_reg = dram_w_send_valid_reg;
+    }
+
+    void drive_cluster_axi_outputs() {
+        // AR channel
+        if (cl_ar_prev_valid_reg && m_cl_axi_ar_ready_i.read()) {
+            cl_ar_send_valid_reg = false;
+        }
+        if (cl_ar_send_valid_reg) {
+            m_cl_axi_ar_valid_o.write(true);
+            m_cl_axi_ar_addr_o.write(cl_ar_send_addr_reg);
+        }
+        cl_ar_prev_valid_reg = cl_ar_send_valid_reg;
+
+        // AW channel
+        if (cl_aw_prev_valid_reg && m_cl_axi_aw_ready_i.read()) {
+            cl_aw_send_valid_reg = false;
+        }
+        if (cl_aw_send_valid_reg) {
+            m_cl_axi_aw_valid_o.write(true);
+            m_cl_axi_aw_addr_o.write(cl_aw_send_addr_reg);
+        }
+        cl_aw_prev_valid_reg = cl_aw_send_valid_reg;
+
+        // W channel
+        if (cl_w_prev_valid_reg && m_cl_axi_w_ready_i.read()) {
+            cl_w_send_valid_reg = false;
+        }
+        if (cl_w_send_valid_reg) {
+            m_cl_axi_w_valid_o.write(true);
+            m_cl_axi_w_data_o.write(cl_w_send_data_reg);
+            m_cl_axi_w_strb_o.write(cl_w_send_strb_reg);
+        }
+        cl_w_prev_valid_reg = cl_w_send_valid_reg;
     }
 };
 

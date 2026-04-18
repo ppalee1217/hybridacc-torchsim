@@ -2,25 +2,25 @@
 
 /**
  * @file ClusterDataFabric.hpp
- * @brief cc_cluster_data_fabric — Arbitrates DMA and NLU data requests
- *        to per-cluster AXI4-Lite data master ports.
+ * @brief cc_cluster_data_fabric — Dual AXI4-Lite ingress (DMA + NLU) with
+ *        per-direction RR arbiter, per-requester per-direction ROB, and
+ *        per-cluster AXI4-Lite master egress.
  *
- * Round-robin arbiter, non-preemptive, single outstanding transaction.
- * Routes by @c cluster_id to the appropriate AXI4-Lite data master.
- * Encodes AXI resp != OKAY as @c error.
- *
- * @par FSM
- *   IDLE → GRANT → ADDR_PHASE → DATA_PHASE (write) / WAIT_RESP (read) →
- *   WAIT_RESP → COMPLETE → IDLE
- *
- * @par Spec reference
- *   Core.md §8.9  cc_cluster_data_fabric
+ * @par Key design decisions (per report §5)
+ *   - DMA and NLU ingress are both standard AXI4-Lite slave (AW/W/B/AR/R).
+ *   - Two per-direction strict RR arbiters (write / read).
+ *   - Per-requester, per-direction ROB for in-order retire.
+ *   - Per-cluster issue queue and inflight counter.
+ *   - Outstanding limit = 4 (bring-up default).
+ *   - No cluster_id sideband; cluster selection via address decode.
  */
 
 #include <systemc>
 #include <cstdint>
-#include "Utils/utils.hpp"
+#include <deque>
+#include <cassert>
 #include "Core/Types.hpp"
+#include "Utils/utils.hpp"
 
 namespace hybridacc {
 namespace core {
@@ -32,59 +32,114 @@ template <unsigned NUM_CLUSTERS = 1>
 SC_MODULE(ClusterDataFabric) {
 
     // ========================================================================
-    // Ports
+    // Compile-time parameters
+    // ========================================================================
+
+    static constexpr unsigned kMaxOutstanding   = 4;
+    static constexpr unsigned kIngressDepth     = 4;
+    static constexpr unsigned kRobDepth         = 4;
+    static constexpr unsigned kClusterAddrBits  = 24;
+    static constexpr uint32_t kClusterAddrMask  = (1u << kClusterAddrBits) - 1;
+
+    // ========================================================================
+    // External ports
     // ========================================================================
 
     sc_in<bool>  clk;
     sc_in<bool>  reset_n;
 
-    // --- DMA requester interface ---
-    sc_in<bool>          dma_req_valid_i;
-    sc_in<bool>          dma_req_write_i;
-    sc_in<sc_uint<32>>   dma_req_cluster_id_i;
-    sc_in<sc_uint<32>>   dma_req_addr_i;
-    sc_in<sc_biguint<kClAxiDataWidth>>          dma_req_wdata_i;
-    sc_in<sc_uint<kClAxiDataWidth / 8>>         dma_req_wstrb_i;
-    sc_out<bool>         dma_req_ready_o;
-    sc_out<bool>         dma_resp_valid_o;
-    sc_out<sc_biguint<kClAxiDataWidth>>         dma_resp_rdata_o;
-    sc_out<bool>         dma_resp_error_o;
+    // --- DMA AXI4-Lite slave ingress ---
+    sc_in<bool>          s_dma_axi_aw_valid_i;
+    sc_out<bool>         s_dma_axi_aw_ready_o;
+    sc_in<sc_uint<32>>   s_dma_axi_aw_addr_i;
+    sc_in<bool>          s_dma_axi_w_valid_i;
+    sc_out<bool>         s_dma_axi_w_ready_o;
+    sc_in<sc_biguint<kClAxiDataWidth>>  s_dma_axi_w_data_i;
+    sc_in<sc_uint<kClAxiDataWidth / 8>> s_dma_axi_w_strb_i;
+    sc_out<bool>         s_dma_axi_b_valid_o;
+    sc_in<bool>          s_dma_axi_b_ready_i;
+    sc_out<sc_uint<2>>   s_dma_axi_b_resp_o;
+    sc_in<bool>          s_dma_axi_ar_valid_i;
+    sc_out<bool>         s_dma_axi_ar_ready_o;
+    sc_in<sc_uint<32>>   s_dma_axi_ar_addr_i;
+    sc_out<bool>         s_dma_axi_r_valid_o;
+    sc_in<bool>          s_dma_axi_r_ready_i;
+    sc_out<sc_biguint<kClAxiDataWidth>>  s_dma_axi_r_data_o;
+    sc_out<sc_uint<2>>   s_dma_axi_r_resp_o;
 
-    // --- NLU requester interface ---
-    sc_in<bool>          nlu_req_valid_i;
-    sc_in<bool>          nlu_req_write_i;
-    sc_in<sc_uint<32>>   nlu_req_cluster_id_i;
-    sc_in<sc_uint<32>>   nlu_req_addr_i;
-    sc_in<sc_biguint<kClAxiDataWidth>>          nlu_req_wdata_i;
-    sc_in<sc_uint<kClAxiDataWidth / 8>>         nlu_req_wstrb_i;
-    sc_out<bool>         nlu_req_ready_o;
-    sc_out<bool>         nlu_resp_valid_o;
-    sc_out<sc_biguint<kClAxiDataWidth>>         nlu_resp_rdata_o;
-    sc_out<bool>         nlu_resp_error_o;
+    // --- NLU AXI4-Lite slave ingress ---
+    sc_in<bool>          s_nlu_axi_aw_valid_i;
+    sc_out<bool>         s_nlu_axi_aw_ready_o;
+    sc_in<sc_uint<32>>   s_nlu_axi_aw_addr_i;
+    sc_in<bool>          s_nlu_axi_w_valid_i;
+    sc_out<bool>         s_nlu_axi_w_ready_o;
+    sc_in<sc_biguint<kClAxiDataWidth>>  s_nlu_axi_w_data_i;
+    sc_in<sc_uint<kClAxiDataWidth / 8>> s_nlu_axi_w_strb_i;
+    sc_out<bool>         s_nlu_axi_b_valid_o;
+    sc_in<bool>          s_nlu_axi_b_ready_i;
+    sc_out<sc_uint<2>>   s_nlu_axi_b_resp_o;
+    sc_in<bool>          s_nlu_axi_ar_valid_i;
+    sc_out<bool>         s_nlu_axi_ar_ready_o;
+    sc_in<sc_uint<32>>   s_nlu_axi_ar_addr_i;
+    sc_out<bool>         s_nlu_axi_r_valid_o;
+    sc_in<bool>          s_nlu_axi_r_ready_i;
+    sc_out<sc_biguint<kClAxiDataWidth>>  s_nlu_axi_r_data_o;
+    sc_out<sc_uint<2>>   s_nlu_axi_r_resp_o;
 
-    // --- Per-cluster AXI4-Lite data master (×NUM_CLUSTERS) ---
-    // Write address channel
+    // --- Per-cluster AXI4-Lite master egress ---
     sc_out<bool>         m_cl_data_aw_valid_o[NUM_CLUSTERS];
     sc_in<bool>          m_cl_data_aw_ready_i[NUM_CLUSTERS];
     sc_out<sc_uint<32>>  m_cl_data_aw_addr_o[NUM_CLUSTERS];
-    // Write data channel
     sc_out<bool>         m_cl_data_w_valid_o[NUM_CLUSTERS];
     sc_in<bool>          m_cl_data_w_ready_i[NUM_CLUSTERS];
     sc_out<sc_biguint<kClAxiDataWidth>>         m_cl_data_w_data_o[NUM_CLUSTERS];
     sc_out<sc_uint<kClAxiDataWidth / 8>>        m_cl_data_w_strb_o[NUM_CLUSTERS];
-    // Write response channel
     sc_in<bool>          m_cl_data_b_valid_i[NUM_CLUSTERS];
     sc_out<bool>         m_cl_data_b_ready_o[NUM_CLUSTERS];
     sc_in<sc_uint<2>>    m_cl_data_b_resp_i[NUM_CLUSTERS];
-    // Read address channel
     sc_out<bool>         m_cl_data_ar_valid_o[NUM_CLUSTERS];
     sc_in<bool>          m_cl_data_ar_ready_i[NUM_CLUSTERS];
     sc_out<sc_uint<32>>  m_cl_data_ar_addr_o[NUM_CLUSTERS];
-    // Read data channel
     sc_in<bool>          m_cl_data_r_valid_i[NUM_CLUSTERS];
     sc_out<bool>         m_cl_data_r_ready_o[NUM_CLUSTERS];
     sc_in<sc_biguint<kClAxiDataWidth>>          m_cl_data_r_data_i[NUM_CLUSTERS];
     sc_in<sc_uint<2>>    m_cl_data_r_resp_i[NUM_CLUSTERS];
+
+    // ========================================================================
+    // Internal types
+    // ========================================================================
+
+    enum class Requester : uint8_t { DMA = 0, NLU = 1 };
+
+    struct InternalReq {
+        Requester owner = Requester::DMA;
+        bool      write = false;
+        unsigned  cluster_id = 0;
+        uint32_t  local_addr = 0;
+        sc_biguint<kClAxiDataWidth> data{0};
+        uint8_t   strb = 0;
+        uint32_t  seq = 0;
+    };
+
+    struct RobEntry {
+        bool     valid = false;
+        bool     complete = false;
+        sc_biguint<kClAxiDataWidth> data{0};
+        uint8_t  resp = 0;
+    };
+
+    // ========================================================================
+    // Address decode
+    // ========================================================================
+
+    static unsigned decode_cluster_id(uint32_t global_addr) {
+        unsigned cid = global_addr >> kClusterAddrBits;
+        return (cid < NUM_CLUSTERS) ? cid : 0;
+    }
+
+    static uint32_t decode_local_addr(uint32_t global_addr) {
+        return global_addr & kClusterAddrMask;
+    }
 
     // ========================================================================
     // Constructor
@@ -95,26 +150,42 @@ SC_MODULE(ClusterDataFabric) {
     ClusterDataFabric(sc_module_name name)
         : sc_module(name),
           clk("clk"), reset_n("reset_n"),
-          dma_req_valid_i("dma_req_valid_i"),
-          dma_req_write_i("dma_req_write_i"),
-          dma_req_cluster_id_i("dma_req_cluster_id_i"),
-          dma_req_addr_i("dma_req_addr_i"),
-          dma_req_wdata_i("dma_req_wdata_i"),
-          dma_req_wstrb_i("dma_req_wstrb_i"),
-          dma_req_ready_o("dma_req_ready_o"),
-          dma_resp_valid_o("dma_resp_valid_o"),
-          dma_resp_rdata_o("dma_resp_rdata_o"),
-          dma_resp_error_o("dma_resp_error_o"),
-          nlu_req_valid_i("nlu_req_valid_i"),
-          nlu_req_write_i("nlu_req_write_i"),
-          nlu_req_cluster_id_i("nlu_req_cluster_id_i"),
-          nlu_req_addr_i("nlu_req_addr_i"),
-          nlu_req_wdata_i("nlu_req_wdata_i"),
-          nlu_req_wstrb_i("nlu_req_wstrb_i"),
-          nlu_req_ready_o("nlu_req_ready_o"),
-          nlu_resp_valid_o("nlu_resp_valid_o"),
-          nlu_resp_rdata_o("nlu_resp_rdata_o"),
-          nlu_resp_error_o("nlu_resp_error_o")
+          // DMA slave
+          s_dma_axi_aw_valid_i("s_dma_axi_aw_valid_i"),
+          s_dma_axi_aw_ready_o("s_dma_axi_aw_ready_o"),
+          s_dma_axi_aw_addr_i("s_dma_axi_aw_addr_i"),
+          s_dma_axi_w_valid_i("s_dma_axi_w_valid_i"),
+          s_dma_axi_w_ready_o("s_dma_axi_w_ready_o"),
+          s_dma_axi_w_data_i("s_dma_axi_w_data_i"),
+          s_dma_axi_w_strb_i("s_dma_axi_w_strb_i"),
+          s_dma_axi_b_valid_o("s_dma_axi_b_valid_o"),
+          s_dma_axi_b_ready_i("s_dma_axi_b_ready_i"),
+          s_dma_axi_b_resp_o("s_dma_axi_b_resp_o"),
+          s_dma_axi_ar_valid_i("s_dma_axi_ar_valid_i"),
+          s_dma_axi_ar_ready_o("s_dma_axi_ar_ready_o"),
+          s_dma_axi_ar_addr_i("s_dma_axi_ar_addr_i"),
+          s_dma_axi_r_valid_o("s_dma_axi_r_valid_o"),
+          s_dma_axi_r_ready_i("s_dma_axi_r_ready_i"),
+          s_dma_axi_r_data_o("s_dma_axi_r_data_o"),
+          s_dma_axi_r_resp_o("s_dma_axi_r_resp_o"),
+          // NLU slave
+          s_nlu_axi_aw_valid_i("s_nlu_axi_aw_valid_i"),
+          s_nlu_axi_aw_ready_o("s_nlu_axi_aw_ready_o"),
+          s_nlu_axi_aw_addr_i("s_nlu_axi_aw_addr_i"),
+          s_nlu_axi_w_valid_i("s_nlu_axi_w_valid_i"),
+          s_nlu_axi_w_ready_o("s_nlu_axi_w_ready_o"),
+          s_nlu_axi_w_data_i("s_nlu_axi_w_data_i"),
+          s_nlu_axi_w_strb_i("s_nlu_axi_w_strb_i"),
+          s_nlu_axi_b_valid_o("s_nlu_axi_b_valid_o"),
+          s_nlu_axi_b_ready_i("s_nlu_axi_b_ready_i"),
+          s_nlu_axi_b_resp_o("s_nlu_axi_b_resp_o"),
+          s_nlu_axi_ar_valid_i("s_nlu_axi_ar_valid_i"),
+          s_nlu_axi_ar_ready_o("s_nlu_axi_ar_ready_o"),
+          s_nlu_axi_ar_addr_i("s_nlu_axi_ar_addr_i"),
+          s_nlu_axi_r_valid_o("s_nlu_axi_r_valid_o"),
+          s_nlu_axi_r_ready_i("s_nlu_axi_r_ready_i"),
+          s_nlu_axi_r_data_o("s_nlu_axi_r_data_o"),
+          s_nlu_axi_r_resp_o("s_nlu_axi_r_resp_o")
     {
         SC_CTHREAD(seq_process, clk.pos());
         reset_signal_is(reset_n, false);
@@ -122,54 +193,161 @@ SC_MODULE(ClusterDataFabric) {
 
 private:
     // ========================================================================
-    // FSM states
+    // DMA ingress FIFOs (after AXI capture)
     // ========================================================================
 
-    enum class FabState : uint32_t {
-        IDLE       = 0,
-        GRANT      = 1,
-        ADDR_PHASE = 2,
-        DATA_PHASE = 3,  ///< write data channel (writes only)
-        WAIT_RESP  = 4,  ///< wait for B (write) or R (read)
-        COMPLETE   = 5,
+    struct AwEntry { uint32_t addr; };
+    struct WEntry  { sc_biguint<kClAxiDataWidth> data; uint8_t strb; };
+    struct ArEntry { uint32_t addr; };
+
+    std::deque<AwEntry> dma_aw_fifo_reg;
+    std::deque<WEntry>  dma_w_fifo_reg;
+    std::deque<ArEntry> dma_ar_fifo_reg;
+
+    // DMA merged request queues
+    std::deque<InternalReq> dma_wr_req_fifo_reg;
+    std::deque<InternalReq> dma_rd_req_fifo_reg;
+
+    // ========================================================================
+    // NLU ingress FIFOs
+    // ========================================================================
+
+    std::deque<AwEntry> nlu_aw_fifo_reg;
+    std::deque<WEntry>  nlu_w_fifo_reg;
+    std::deque<ArEntry> nlu_ar_fifo_reg;
+
+    std::deque<InternalReq> nlu_wr_req_fifo_reg;
+    std::deque<InternalReq> nlu_rd_req_fifo_reg;
+
+    // ========================================================================
+    // Per-requester, per-direction ROB
+    // ========================================================================
+
+    std::deque<RobEntry> dma_wr_rob_reg;
+    uint32_t dma_wr_seq_reg = 0;
+    uint32_t dma_wr_retire_head_seq_reg = 0;
+
+    std::deque<RobEntry> dma_rd_rob_reg;
+    uint32_t dma_rd_seq_reg = 0;
+    uint32_t dma_rd_retire_head_seq_reg = 0;
+
+    std::deque<RobEntry> nlu_wr_rob_reg;
+    uint32_t nlu_wr_seq_reg = 0;
+    uint32_t nlu_wr_retire_head_seq_reg = 0;
+
+    std::deque<RobEntry> nlu_rd_rob_reg;
+    uint32_t nlu_rd_seq_reg = 0;
+    uint32_t nlu_rd_retire_head_seq_reg = 0;
+
+    // ========================================================================
+    // RR arbiter state
+    // ========================================================================
+
+    Requester wr_rr_last_grant_reg = Requester::NLU; // start with NLU so DMA gets first
+    Requester rd_rr_last_grant_reg = Requester::NLU;
+
+    // ========================================================================
+    // Per-cluster issue/inflight queues
+    // ========================================================================
+
+    struct ClusterInflight {
+        Requester owner;
+        bool      write;
+        uint32_t  rob_seq;
     };
 
+    std::deque<InternalReq> cluster_wr_issue_fifo_reg[NUM_CLUSTERS];
+    std::deque<InternalReq> cluster_rd_issue_fifo_reg[NUM_CLUSTERS];
+    std::deque<ClusterInflight> cluster_wr_inflight_reg[NUM_CLUSTERS];
+    std::deque<ClusterInflight> cluster_rd_inflight_reg[NUM_CLUSTERS];
+    unsigned cl_wr_inflight_cnt_reg[NUM_CLUSTERS] = {};
+    unsigned cl_rd_inflight_cnt_reg[NUM_CLUSTERS] = {};
+
+    // Cluster AXI send registers
+    bool     cl_aw_send_valid_reg[NUM_CLUSTERS] = {};
+    uint32_t cl_aw_send_addr_reg[NUM_CLUSTERS] = {};
+    bool     cl_w_send_valid_reg[NUM_CLUSTERS] = {};
+    sc_biguint<kClAxiDataWidth> cl_w_send_data_reg[NUM_CLUSTERS];
+    uint8_t  cl_w_send_strb_reg[NUM_CLUSTERS] = {};
+    bool     cl_ar_send_valid_reg[NUM_CLUSTERS] = {};
+    uint32_t cl_ar_send_addr_reg[NUM_CLUSTERS] = {};
+
+    // Previous-cycle ready tracking (prevents double-capture in SC_CTHREAD)
+    bool dma_aw_prev_ready_reg = false;
+    bool dma_w_prev_ready_reg = false;
+    bool dma_ar_prev_ready_reg = false;
+    bool nlu_aw_prev_ready_reg = false;
+    bool nlu_w_prev_ready_reg = false;
+    bool nlu_ar_prev_ready_reg = false;
+
+    // Per-cluster B/R prev_ready (for response collection from clusters)
+    bool cl_b_prev_ready_reg[NUM_CLUSTERS] = {};
+    bool cl_r_prev_ready_reg[NUM_CLUSTERS] = {};
+
+    // Per-cluster prev_valid tracking for master-side send registers.
+    // Same SC_CTHREAD timing issue as DmaEngine: the slave (FakeClusterSpm)
+    // pre-asserts ready in its idle loop; clearing the send register on
+    // the first cycle we drive valid would let the request vanish before
+    // the slave samples it.  We only clear when prev_valid AND ready.
+    bool cl_aw_prev_valid_reg[NUM_CLUSTERS] = {};
+    bool cl_w_prev_valid_reg[NUM_CLUSTERS] = {};
+    bool cl_ar_prev_valid_reg[NUM_CLUSTERS] = {};
+
+    // B/R retire send registers (driving responses back to DMA/NLU)
+    bool    dma_b_send_valid_reg = false;
+    uint8_t dma_b_send_resp_reg = 0;
+    bool    dma_r_send_valid_reg = false;
+    sc_biguint<kClAxiDataWidth> dma_r_send_data_reg{0};
+    uint8_t dma_r_send_resp_reg = 0;
+    bool    nlu_b_send_valid_reg = false;
+    uint8_t nlu_b_send_resp_reg = 0;
+    bool    nlu_r_send_valid_reg = false;
+    sc_biguint<kClAxiDataWidth> nlu_r_send_data_reg{0};
+    uint8_t nlu_r_send_resp_reg = 0;
+
     // ========================================================================
-    // Requester tag
+    // PMU counters
     // ========================================================================
 
-    enum class Requester : uint8_t {
-        NONE = 0,
-        DMA  = 1,
-        NLU  = 2,
-    };
+    uint64_t pmu_dma_aw_accept_cnt_reg = 0;
+    uint64_t pmu_dma_w_accept_cnt_reg = 0;
+    uint64_t pmu_dma_ar_accept_cnt_reg = 0;
+    uint64_t pmu_dma_b_retire_cnt_reg = 0;
+    uint64_t pmu_dma_r_retire_cnt_reg = 0;
+    uint64_t pmu_nlu_aw_accept_cnt_reg = 0;
+    uint64_t pmu_nlu_w_accept_cnt_reg = 0;
+    uint64_t pmu_nlu_ar_accept_cnt_reg = 0;
+    uint64_t pmu_nlu_b_retire_cnt_reg = 0;
+    uint64_t pmu_nlu_r_retire_cnt_reg = 0;
+    uint64_t pmu_wr_rr_grant_dma_cnt_reg = 0;
+    uint64_t pmu_wr_rr_grant_nlu_cnt_reg = 0;
+    uint64_t pmu_rd_rr_grant_dma_cnt_reg = 0;
+    uint64_t pmu_rd_rr_grant_nlu_cnt_reg = 0;
 
     // ========================================================================
-    // Captured transaction context
-    // ========================================================================
-
-    struct TxnCtx {
-        Requester owner     = Requester::NONE;
-        bool      write     = false;
-        uint32_t  cluster_id= 0;
-        uint32_t  addr      = 0;
-        sc_biguint<kClAxiDataWidth> wdata;
-        sc_uint<kClAxiDataWidth / 8> wstrb;
-    };
-
-    // ========================================================================
-    // Port reset helpers
+    // Reset helper
     // ========================================================================
 
     void reset_all_outputs() {
-        dma_req_ready_o.write(false);
-        dma_resp_valid_o.write(false);
-        dma_resp_rdata_o.write(0);
-        dma_resp_error_o.write(false);
-        nlu_req_ready_o.write(false);
-        nlu_resp_valid_o.write(false);
-        nlu_resp_rdata_o.write(0);
-        nlu_resp_error_o.write(false);
+        // DMA slave
+        s_dma_axi_aw_ready_o.write(false);
+        s_dma_axi_w_ready_o.write(false);
+        s_dma_axi_b_valid_o.write(false);
+        s_dma_axi_b_resp_o.write(0);
+        s_dma_axi_ar_ready_o.write(false);
+        s_dma_axi_r_valid_o.write(false);
+        s_dma_axi_r_data_o.write(0);
+        s_dma_axi_r_resp_o.write(0);
+        // NLU slave
+        s_nlu_axi_aw_ready_o.write(false);
+        s_nlu_axi_w_ready_o.write(false);
+        s_nlu_axi_b_valid_o.write(false);
+        s_nlu_axi_b_resp_o.write(0);
+        s_nlu_axi_ar_ready_o.write(false);
+        s_nlu_axi_r_valid_o.write(false);
+        s_nlu_axi_r_data_o.write(0);
+        s_nlu_axi_r_resp_o.write(0);
+        // Per-cluster egress
         for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
             m_cl_data_aw_valid_o[c].write(false);
             m_cl_data_aw_addr_o[c].write(0);
@@ -183,14 +361,59 @@ private:
         }
     }
 
-    void deassert_cluster_ports() {
+    void reset_internal_state() {
+        dma_aw_fifo_reg.clear();
+        dma_w_fifo_reg.clear();
+        dma_ar_fifo_reg.clear();
+        dma_wr_req_fifo_reg.clear();
+        dma_rd_req_fifo_reg.clear();
+        nlu_aw_fifo_reg.clear();
+        nlu_w_fifo_reg.clear();
+        nlu_ar_fifo_reg.clear();
+        nlu_wr_req_fifo_reg.clear();
+        nlu_rd_req_fifo_reg.clear();
+        dma_wr_rob_reg.clear();
+        dma_rd_rob_reg.clear();
+        nlu_wr_rob_reg.clear();
+        nlu_rd_rob_reg.clear();
+        dma_wr_seq_reg = 0;
+        dma_wr_retire_head_seq_reg = 0;
+        dma_rd_seq_reg = 0;
+        dma_rd_retire_head_seq_reg = 0;
+        nlu_wr_seq_reg = 0;
+        nlu_wr_retire_head_seq_reg = 0;
+        nlu_rd_seq_reg = 0;
+        nlu_rd_retire_head_seq_reg = 0;
+        wr_rr_last_grant_reg = Requester::NLU;
+        rd_rr_last_grant_reg = Requester::NLU;
         for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
-            m_cl_data_aw_valid_o[c].write(false);
-            m_cl_data_w_valid_o[c].write(false);
-            m_cl_data_b_ready_o[c].write(false);
-            m_cl_data_ar_valid_o[c].write(false);
-            m_cl_data_r_ready_o[c].write(false);
+            cluster_wr_issue_fifo_reg[c].clear();
+            cluster_rd_issue_fifo_reg[c].clear();
+            cluster_wr_inflight_reg[c].clear();
+            cluster_rd_inflight_reg[c].clear();
+            cl_wr_inflight_cnt_reg[c] = 0;
+            cl_rd_inflight_cnt_reg[c] = 0;
+            cl_aw_send_valid_reg[c] = false;
+            cl_w_send_valid_reg[c] = false;
+            cl_ar_send_valid_reg[c] = false;
         }
+        dma_aw_prev_ready_reg = false;
+        dma_w_prev_ready_reg = false;
+        dma_ar_prev_ready_reg = false;
+        nlu_aw_prev_ready_reg = false;
+        nlu_w_prev_ready_reg = false;
+        nlu_ar_prev_ready_reg = false;
+        for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
+            cl_b_prev_ready_reg[c] = false;
+            cl_r_prev_ready_reg[c] = false;
+            cl_aw_prev_valid_reg[c] = false;
+            cl_w_prev_valid_reg[c] = false;
+            cl_ar_prev_valid_reg[c] = false;
+        }
+        dma_b_send_valid_reg = false;
+        dma_r_send_valid_reg = false;
+        nlu_b_send_valid_reg = false;
+        nlu_r_send_valid_reg = false;
     }
 
     // ========================================================================
@@ -198,162 +421,541 @@ private:
     // ========================================================================
 
     void seq_process() {
-        // ---- Reset ----
+        // --- Reset ---
         reset_all_outputs();
+        reset_internal_state();
         wait();
 
-        FabState  state = FabState::IDLE;
-        Requester rr_last_winner = Requester::NONE; ///< round-robin pointer
-        TxnCtx    txn;
-
+        // --- Main loop ---
         while (true) {
-            // Default: deassert response valids each cycle
-            dma_req_ready_o.write(false);
-            dma_resp_valid_o.write(false);
-            dma_resp_rdata_o.write(0);
-            dma_resp_error_o.write(false);
-            nlu_req_ready_o.write(false);
-            nlu_resp_valid_o.write(false);
-            nlu_resp_rdata_o.write(0);
-            nlu_resp_error_o.write(false);
-            deassert_cluster_ports();
+            reset_all_outputs();
 
-            switch (state) {
-            // ----------------------------------------------------------------
-            case FabState::IDLE: {
-                const bool dma_v = dma_req_valid_i.read();
-                const bool nlu_v = nlu_req_valid_i.read();
-                if (!dma_v && !nlu_v) break;
+            // ================================================================
+            // Block 1: DMA AXI ingress capture
+            // ================================================================
+            capture_dma_ingress();
 
-                // Round-robin: if last winner was DMA, prefer NLU this time.
-                Requester winner = Requester::NONE;
-                if (dma_v && !nlu_v)       winner = Requester::DMA;
-                else if (!dma_v && nlu_v)  winner = Requester::NLU;
-                else {
-                    // Both requesting — round-robin
-                    winner = (rr_last_winner == Requester::DMA)
-                                 ? Requester::NLU : Requester::DMA;
-                }
+            // ================================================================
+            // Block 2: NLU AXI ingress capture
+            // ================================================================
+            capture_nlu_ingress();
 
-                rr_last_winner = winner;
-                state = FabState::GRANT;
+            // ================================================================
+            // Block 1.5 / 2.5: AW+W merge for both requesters
+            // ================================================================
+            merge_dma_aw_w();
+            merge_nlu_aw_w();
 
-                // Capture transaction
-                if (winner == Requester::DMA) {
-                    txn.owner      = Requester::DMA;
-                    txn.write      = dma_req_write_i.read();
-                    txn.cluster_id = dma_req_cluster_id_i.read().to_uint();
-                    txn.addr       = dma_req_addr_i.read().to_uint();
-                    txn.wdata      = dma_req_wdata_i.read();
-                    txn.wstrb      = dma_req_wstrb_i.read();
-                    dma_req_ready_o.write(true);
-                } else {
-                    txn.owner      = Requester::NLU;
-                    txn.write      = nlu_req_write_i.read();
-                    txn.cluster_id = nlu_req_cluster_id_i.read().to_uint();
-                    txn.addr       = nlu_req_addr_i.read().to_uint();
-                    txn.wdata      = nlu_req_wdata_i.read();
-                    txn.wstrb      = nlu_req_wstrb_i.read();
-                    nlu_req_ready_o.write(true);
-                }
-                break;
+            // ================================================================
+            // Block 3: RR requester arbitration → classify + issue queue
+            // ================================================================
+            rr_arbitrate_write();
+            rr_arbitrate_read();
+
+            // ================================================================
+            // Block 4: Per-cluster AXI issue
+            // ================================================================
+            for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
+                issue_cluster_write(c);
+                issue_cluster_read(c);
             }
-            // ----------------------------------------------------------------
-            case FabState::GRANT: {
-                // Validate cluster_id range
-                if (txn.cluster_id >= NUM_CLUSTERS) {
-                    // Immediate error — no external transaction
-                    deliver_error_resp(txn);
-                    state = FabState::IDLE;
-                    DEBUG_MSG("ClusterDataFabric: cluster_id " << txn.cluster_id
-                              << " out of range", DEBUG_LEVEL_CORE_COMPONENTS);
-                    break;
-                }
-                state = FabState::ADDR_PHASE;
-                break;
+
+            // ================================================================
+            // Block 5: Drive cluster AXI outputs from send registers
+            // ================================================================
+            drive_cluster_outputs();
+
+            // ================================================================
+            // Block 6: Response collect + requester retire
+            // ================================================================
+            for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
+                collect_cluster_write_resp(c);
+                collect_cluster_read_resp(c);
             }
-            // ----------------------------------------------------------------
-            case FabState::ADDR_PHASE: {
-                const unsigned ci = txn.cluster_id;
-                if (txn.write) {
-                    m_cl_data_aw_valid_o[ci].write(true);
-                    m_cl_data_aw_addr_o[ci].write(txn.addr);
-                    if (m_cl_data_aw_ready_i[ci].read()) {
-                        state = FabState::DATA_PHASE;
-                    }
-                } else {
-                    m_cl_data_ar_valid_o[ci].write(true);
-                    m_cl_data_ar_addr_o[ci].write(txn.addr);
-                    if (m_cl_data_ar_ready_i[ci].read()) {
-                        state = FabState::WAIT_RESP;
-                    }
-                }
-                break;
-            }
-            // ----------------------------------------------------------------
-            case FabState::DATA_PHASE: {
-                const unsigned ci = txn.cluster_id;
-                m_cl_data_w_valid_o[ci].write(true);
-                m_cl_data_w_data_o[ci].write(txn.wdata);
-                m_cl_data_w_strb_o[ci].write(txn.wstrb);
-                if (m_cl_data_w_ready_i[ci].read()) {
-                    m_cl_data_b_ready_o[ci].write(true);
-                    state = FabState::WAIT_RESP;
-                }
-                break;
-            }
-            // ----------------------------------------------------------------
-            case FabState::WAIT_RESP: {
-                const unsigned ci = txn.cluster_id;
-                if (txn.write) {
-                    m_cl_data_b_ready_o[ci].write(true);
-                    if (m_cl_data_b_valid_i[ci].read()) {
-                        bool err = (m_cl_data_b_resp_i[ci].read().to_uint() != 0);
-                        deliver_resp(txn, 0, err);
-                        state = FabState::COMPLETE;
-                    }
-                } else {
-                    m_cl_data_r_ready_o[ci].write(true);
-                    if (m_cl_data_r_valid_i[ci].read()) {
-                        bool err = (m_cl_data_r_resp_i[ci].read().to_uint() != 0);
-                        deliver_resp(txn, m_cl_data_r_data_i[ci].read(), err);
-                        state = FabState::COMPLETE;
-                    }
-                }
-                break;
-            }
-            // ----------------------------------------------------------------
-            case FabState::COMPLETE: {
-                state = FabState::IDLE;
-                break;
-            }
-            default:
-                state = FabState::IDLE;
-                break;
-            } // switch
+            retire_dma_write_resp();
+            retire_dma_read_resp();
+            retire_nlu_write_resp();
+            retire_nlu_read_resp();
 
             wait();
-        } // while
-    }
-
-    // ========================================================================
-    // Response delivery helpers
-    // ========================================================================
-
-    void deliver_resp(const TxnCtx& txn, sc_biguint<kClAxiDataWidth> rdata, bool err) {
-        if (txn.owner == Requester::DMA) {
-            dma_resp_valid_o.write(true);
-            dma_resp_rdata_o.write(rdata);
-            dma_resp_error_o.write(err);
-        } else {
-            nlu_resp_valid_o.write(true);
-            nlu_resp_rdata_o.write(rdata);
-            nlu_resp_error_o.write(err);
         }
     }
 
-    void deliver_error_resp(const TxnCtx& txn) {
-        deliver_resp(txn, 0, true);
+    // ========================================================================
+    // Block 1: DMA AXI ingress capture
+    // ========================================================================
+
+    void capture_dma_ingress() {
+        // AW capture — only commit when valid AND we previously advertised ready
+        bool aw_can_accept = dma_aw_fifo_reg.size() < kIngressDepth;
+        if (s_dma_axi_aw_valid_i.read() && dma_aw_prev_ready_reg) {
+            dma_aw_fifo_reg.push_back({s_dma_axi_aw_addr_i.read().to_uint()});
+            pmu_dma_aw_accept_cnt_reg++;
+        }
+        s_dma_axi_aw_ready_o.write(aw_can_accept);
+        dma_aw_prev_ready_reg = aw_can_accept;
+
+        // W capture
+        bool w_can_accept = dma_w_fifo_reg.size() < kIngressDepth;
+        if (s_dma_axi_w_valid_i.read() && dma_w_prev_ready_reg) {
+            dma_w_fifo_reg.push_back({s_dma_axi_w_data_i.read(),
+                                      static_cast<uint8_t>(s_dma_axi_w_strb_i.read().to_uint())});
+            pmu_dma_w_accept_cnt_reg++;
+        }
+        s_dma_axi_w_ready_o.write(w_can_accept);
+        dma_w_prev_ready_reg = w_can_accept;
+
+        // AR capture
+        bool ar_can_accept = dma_ar_fifo_reg.size() < kIngressDepth;
+        if (s_dma_axi_ar_valid_i.read() && dma_ar_prev_ready_reg) {
+            dma_ar_fifo_reg.push_back({s_dma_axi_ar_addr_i.read().to_uint()});
+            pmu_dma_ar_accept_cnt_reg++;
+        }
+        s_dma_axi_ar_ready_o.write(ar_can_accept);
+        dma_ar_prev_ready_reg = ar_can_accept;
+    }
+
+    // ========================================================================
+    // Block 2: NLU AXI ingress capture
+    // ========================================================================
+
+    void capture_nlu_ingress() {
+        bool aw_can_accept = nlu_aw_fifo_reg.size() < kIngressDepth;
+        if (s_nlu_axi_aw_valid_i.read() && nlu_aw_prev_ready_reg) {
+            nlu_aw_fifo_reg.push_back({s_nlu_axi_aw_addr_i.read().to_uint()});
+            pmu_nlu_aw_accept_cnt_reg++;
+        }
+        s_nlu_axi_aw_ready_o.write(aw_can_accept);
+        nlu_aw_prev_ready_reg = aw_can_accept;
+
+        bool w_can_accept = nlu_w_fifo_reg.size() < kIngressDepth;
+        if (s_nlu_axi_w_valid_i.read() && nlu_w_prev_ready_reg) {
+            nlu_w_fifo_reg.push_back({s_nlu_axi_w_data_i.read(),
+                                      static_cast<uint8_t>(s_nlu_axi_w_strb_i.read().to_uint())});
+            pmu_nlu_w_accept_cnt_reg++;
+        }
+        s_nlu_axi_w_ready_o.write(w_can_accept);
+        nlu_w_prev_ready_reg = w_can_accept;
+
+        bool ar_can_accept = nlu_ar_fifo_reg.size() < kIngressDepth;
+        if (s_nlu_axi_ar_valid_i.read() && nlu_ar_prev_ready_reg) {
+            nlu_ar_fifo_reg.push_back({s_nlu_axi_ar_addr_i.read().to_uint()});
+            pmu_nlu_ar_accept_cnt_reg++;
+        }
+        s_nlu_axi_ar_ready_o.write(ar_can_accept);
+        nlu_ar_prev_ready_reg = ar_can_accept;
+    }
+
+    // ========================================================================
+    // AW+W merge
+    // ========================================================================
+
+    void merge_dma_aw_w() {
+        if (!dma_aw_fifo_reg.empty() && !dma_w_fifo_reg.empty() &&
+            dma_wr_req_fifo_reg.size() < kIngressDepth) {
+            auto& aw = dma_aw_fifo_reg.front();
+            auto& w  = dma_w_fifo_reg.front();
+            InternalReq req;
+            req.owner = Requester::DMA;
+            req.write = true;
+            req.cluster_id = decode_cluster_id(aw.addr);
+            req.local_addr = decode_local_addr(aw.addr);
+            req.data = w.data;
+            req.strb = w.strb;
+            req.seq = dma_wr_seq_reg++;
+            dma_wr_req_fifo_reg.push_back(req);
+            // Allocate ROB entry
+            dma_wr_rob_reg.push_back({true, false, sc_biguint<kClAxiDataWidth>(0), 0});
+            dma_aw_fifo_reg.pop_front();
+            dma_w_fifo_reg.pop_front();
+        }
+
+        // DMA read merge (AR only)
+        if (!dma_ar_fifo_reg.empty() && dma_rd_req_fifo_reg.size() < kIngressDepth) {
+            auto& ar = dma_ar_fifo_reg.front();
+            InternalReq req;
+            req.owner = Requester::DMA;
+            req.write = false;
+            req.cluster_id = decode_cluster_id(ar.addr);
+            req.local_addr = decode_local_addr(ar.addr);
+            req.seq = dma_rd_seq_reg++;
+            dma_rd_req_fifo_reg.push_back(req);
+            dma_rd_rob_reg.push_back({true, false, sc_biguint<kClAxiDataWidth>(0), 0});
+            dma_ar_fifo_reg.pop_front();
+        }
+    }
+
+    void merge_nlu_aw_w() {
+        if (!nlu_aw_fifo_reg.empty() && !nlu_w_fifo_reg.empty() &&
+            nlu_wr_req_fifo_reg.size() < kIngressDepth) {
+            auto& aw = nlu_aw_fifo_reg.front();
+            auto& w  = nlu_w_fifo_reg.front();
+            InternalReq req;
+            req.owner = Requester::NLU;
+            req.write = true;
+            req.cluster_id = decode_cluster_id(aw.addr);
+            req.local_addr = decode_local_addr(aw.addr);
+            req.data = w.data;
+            req.strb = w.strb;
+            req.seq = nlu_wr_seq_reg++;
+            nlu_wr_req_fifo_reg.push_back(req);
+            nlu_wr_rob_reg.push_back({true, false, sc_biguint<kClAxiDataWidth>(0), 0});
+            nlu_aw_fifo_reg.pop_front();
+            nlu_w_fifo_reg.pop_front();
+        }
+
+        if (!nlu_ar_fifo_reg.empty() && nlu_rd_req_fifo_reg.size() < kIngressDepth) {
+            auto& ar = nlu_ar_fifo_reg.front();
+            InternalReq req;
+            req.owner = Requester::NLU;
+            req.write = false;
+            req.cluster_id = decode_cluster_id(ar.addr);
+            req.local_addr = decode_local_addr(ar.addr);
+            req.seq = nlu_rd_seq_reg++;
+            nlu_rd_req_fifo_reg.push_back(req);
+            nlu_rd_rob_reg.push_back({true, false, sc_biguint<kClAxiDataWidth>(0), 0});
+            nlu_ar_fifo_reg.pop_front();
+        }
+    }
+
+    // ========================================================================
+    // Block 3: RR arbitration
+    // ========================================================================
+
+    void rr_arbitrate_write() {
+        bool dma_has = !dma_wr_req_fifo_reg.empty();
+        bool nlu_has = !nlu_wr_req_fifo_reg.empty();
+        if (!dma_has && !nlu_has) return;
+
+        Requester preferred = (wr_rr_last_grant_reg == Requester::DMA) ?
+                              Requester::NLU : Requester::DMA;
+
+        InternalReq* winner = nullptr;
+        std::deque<InternalReq>* winner_fifo = nullptr;
+        Requester winner_id = Requester::DMA;
+
+        // Try preferred first
+        if (preferred == Requester::DMA && dma_has) {
+            auto& req = dma_wr_req_fifo_reg.front();
+            if (cluster_wr_issue_fifo_reg[req.cluster_id].size() < kIngressDepth) {
+                winner = &req;
+                winner_fifo = &dma_wr_req_fifo_reg;
+                winner_id = Requester::DMA;
+            }
+        } else if (preferred == Requester::NLU && nlu_has) {
+            auto& req = nlu_wr_req_fifo_reg.front();
+            if (cluster_wr_issue_fifo_reg[req.cluster_id].size() < kIngressDepth) {
+                winner = &req;
+                winner_fifo = &nlu_wr_req_fifo_reg;
+                winner_id = Requester::NLU;
+            }
+        }
+
+        // If preferred couldn't go, try other
+        if (!winner) {
+            if (preferred != Requester::DMA && dma_has) {
+                auto& req = dma_wr_req_fifo_reg.front();
+                if (cluster_wr_issue_fifo_reg[req.cluster_id].size() < kIngressDepth) {
+                    winner = &req;
+                    winner_fifo = &dma_wr_req_fifo_reg;
+                    winner_id = Requester::DMA;
+                }
+            }
+            if (!winner && preferred != Requester::NLU && nlu_has) {
+                auto& req = nlu_wr_req_fifo_reg.front();
+                if (cluster_wr_issue_fifo_reg[req.cluster_id].size() < kIngressDepth) {
+                    winner = &req;
+                    winner_fifo = &nlu_wr_req_fifo_reg;
+                    winner_id = Requester::NLU;
+                }
+            }
+        }
+
+        if (winner) {
+            cluster_wr_issue_fifo_reg[winner->cluster_id].push_back(*winner);
+            winner_fifo->pop_front();
+            wr_rr_last_grant_reg = winner_id;
+            if (winner_id == Requester::DMA) pmu_wr_rr_grant_dma_cnt_reg++;
+            else                              pmu_wr_rr_grant_nlu_cnt_reg++;
+        }
+    }
+
+    void rr_arbitrate_read() {
+        bool dma_has = !dma_rd_req_fifo_reg.empty();
+        bool nlu_has = !nlu_rd_req_fifo_reg.empty();
+        if (!dma_has && !nlu_has) return;
+
+        Requester preferred = (rd_rr_last_grant_reg == Requester::DMA) ?
+                              Requester::NLU : Requester::DMA;
+
+        InternalReq* winner = nullptr;
+        std::deque<InternalReq>* winner_fifo = nullptr;
+        Requester winner_id = Requester::DMA;
+
+        if (preferred == Requester::DMA && dma_has) {
+            auto& req = dma_rd_req_fifo_reg.front();
+            if (cluster_rd_issue_fifo_reg[req.cluster_id].size() < kIngressDepth) {
+                winner = &req;
+                winner_fifo = &dma_rd_req_fifo_reg;
+                winner_id = Requester::DMA;
+            }
+        } else if (preferred == Requester::NLU && nlu_has) {
+            auto& req = nlu_rd_req_fifo_reg.front();
+            if (cluster_rd_issue_fifo_reg[req.cluster_id].size() < kIngressDepth) {
+                winner = &req;
+                winner_fifo = &nlu_rd_req_fifo_reg;
+                winner_id = Requester::NLU;
+            }
+        }
+
+        if (!winner) {
+            if (preferred != Requester::DMA && dma_has) {
+                auto& req = dma_rd_req_fifo_reg.front();
+                if (cluster_rd_issue_fifo_reg[req.cluster_id].size() < kIngressDepth) {
+                    winner = &req;
+                    winner_fifo = &dma_rd_req_fifo_reg;
+                    winner_id = Requester::DMA;
+                }
+            }
+            if (!winner && preferred != Requester::NLU && nlu_has) {
+                auto& req = nlu_rd_req_fifo_reg.front();
+                if (cluster_rd_issue_fifo_reg[req.cluster_id].size() < kIngressDepth) {
+                    winner = &req;
+                    winner_fifo = &nlu_rd_req_fifo_reg;
+                    winner_id = Requester::NLU;
+                }
+            }
+        }
+
+        if (winner) {
+            cluster_rd_issue_fifo_reg[winner->cluster_id].push_back(*winner);
+            winner_fifo->pop_front();
+            rd_rr_last_grant_reg = winner_id;
+            if (winner_id == Requester::DMA) pmu_rd_rr_grant_dma_cnt_reg++;
+            else                              pmu_rd_rr_grant_nlu_cnt_reg++;
+        }
+    }
+
+    // ========================================================================
+    // Block 4: Per-cluster AXI issue
+    // ========================================================================
+
+    void issue_cluster_write(unsigned c) {
+        if (cl_aw_send_valid_reg[c] || cl_w_send_valid_reg[c]) return;
+        if (cluster_wr_issue_fifo_reg[c].empty()) return;
+        if (cl_wr_inflight_cnt_reg[c] >= kMaxOutstanding) return;
+
+        auto& req = cluster_wr_issue_fifo_reg[c].front();
+        cl_aw_send_valid_reg[c] = true;
+        cl_aw_send_addr_reg[c] = req.local_addr;
+        cl_w_send_valid_reg[c] = true;
+        cl_w_send_data_reg[c] = req.data;
+        cl_w_send_strb_reg[c] = req.strb;
+
+        ClusterInflight inf;
+        inf.owner = req.owner;
+        inf.write = true;
+        inf.rob_seq = req.seq;
+        cluster_wr_inflight_reg[c].push_back(inf);
+        cl_wr_inflight_cnt_reg[c]++;
+        cluster_wr_issue_fifo_reg[c].pop_front();
+    }
+
+    void issue_cluster_read(unsigned c) {
+        if (cl_ar_send_valid_reg[c]) return;
+        if (cluster_rd_issue_fifo_reg[c].empty()) return;
+        if (cl_rd_inflight_cnt_reg[c] >= kMaxOutstanding) return;
+
+        auto& req = cluster_rd_issue_fifo_reg[c].front();
+        cl_ar_send_valid_reg[c] = true;
+        cl_ar_send_addr_reg[c] = req.local_addr;
+
+        ClusterInflight inf;
+        inf.owner = req.owner;
+        inf.write = false;
+        inf.rob_seq = req.seq;
+        cluster_rd_inflight_reg[c].push_back(inf);
+        cl_rd_inflight_cnt_reg[c]++;
+        cluster_rd_issue_fifo_reg[c].pop_front();
+    }
+
+    // ========================================================================
+    // Block 5: Drive cluster AXI outputs
+    // ========================================================================
+
+    void drive_cluster_outputs() {
+        for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
+            // AW — clear only when slave had a cycle to see valid
+            if (cl_aw_prev_valid_reg[c] && m_cl_data_aw_ready_i[c].read()) {
+                cl_aw_send_valid_reg[c] = false;
+            }
+            if (cl_aw_send_valid_reg[c]) {
+                m_cl_data_aw_valid_o[c].write(true);
+                m_cl_data_aw_addr_o[c].write(cl_aw_send_addr_reg[c]);
+            }
+            cl_aw_prev_valid_reg[c] = cl_aw_send_valid_reg[c];
+
+            // W
+            if (cl_w_prev_valid_reg[c] && m_cl_data_w_ready_i[c].read()) {
+                cl_w_send_valid_reg[c] = false;
+            }
+            if (cl_w_send_valid_reg[c]) {
+                m_cl_data_w_valid_o[c].write(true);
+                m_cl_data_w_data_o[c].write(cl_w_send_data_reg[c]);
+                m_cl_data_w_strb_o[c].write(cl_w_send_strb_reg[c]);
+            }
+            cl_w_prev_valid_reg[c] = cl_w_send_valid_reg[c];
+
+            // AR
+            if (cl_ar_prev_valid_reg[c] && m_cl_data_ar_ready_i[c].read()) {
+                cl_ar_send_valid_reg[c] = false;
+            }
+            if (cl_ar_send_valid_reg[c]) {
+                m_cl_data_ar_valid_o[c].write(true);
+                m_cl_data_ar_addr_o[c].write(cl_ar_send_addr_reg[c]);
+            }
+            cl_ar_prev_valid_reg[c] = cl_ar_send_valid_reg[c];
+        }
+    }
+
+    // ========================================================================
+    // Block 6: Response collect + requester retire
+    // ========================================================================
+
+    void collect_cluster_write_resp(unsigned c) {
+        bool can_accept = !cluster_wr_inflight_reg[c].empty();
+        if (can_accept) m_cl_data_b_ready_o[c].write(true);
+        if (m_cl_data_b_valid_i[c].read() && cl_b_prev_ready_reg[c]) {
+            auto& inf = cluster_wr_inflight_reg[c].front();
+            uint8_t resp = m_cl_data_b_resp_i[c].read().to_uint();
+            if (inf.owner == Requester::DMA) {
+                unsigned idx = inf.rob_seq - dma_wr_retire_head_seq_reg;
+                if (idx < dma_wr_rob_reg.size()) {
+                    dma_wr_rob_reg[idx].complete = true;
+                    dma_wr_rob_reg[idx].resp = resp;
+                }
+            } else {
+                unsigned idx = inf.rob_seq - nlu_wr_retire_head_seq_reg;
+                if (idx < nlu_wr_rob_reg.size()) {
+                    nlu_wr_rob_reg[idx].complete = true;
+                    nlu_wr_rob_reg[idx].resp = resp;
+                }
+            }
+            cluster_wr_inflight_reg[c].pop_front();
+            cl_wr_inflight_cnt_reg[c]--;
+        }
+        cl_b_prev_ready_reg[c] = can_accept;
+    }
+
+    void collect_cluster_read_resp(unsigned c) {
+        bool can_accept = !cluster_rd_inflight_reg[c].empty();
+        if (can_accept) m_cl_data_r_ready_o[c].write(true);
+        if (m_cl_data_r_valid_i[c].read() && cl_r_prev_ready_reg[c]) {
+            auto& inf = cluster_rd_inflight_reg[c].front();
+            auto rdata = m_cl_data_r_data_i[c].read();
+            uint8_t resp = m_cl_data_r_resp_i[c].read().to_uint();
+            if (inf.owner == Requester::DMA) {
+                unsigned idx = inf.rob_seq - dma_rd_retire_head_seq_reg;
+                if (idx < dma_rd_rob_reg.size()) {
+                    dma_rd_rob_reg[idx].complete = true;
+                    dma_rd_rob_reg[idx].data = rdata;
+                    dma_rd_rob_reg[idx].resp = resp;
+                }
+            } else {
+                unsigned idx = inf.rob_seq - nlu_rd_retire_head_seq_reg;
+                if (idx < nlu_rd_rob_reg.size()) {
+                    nlu_rd_rob_reg[idx].complete = true;
+                    nlu_rd_rob_reg[idx].data = rdata;
+                    nlu_rd_rob_reg[idx].resp = resp;
+                }
+            }
+            cluster_rd_inflight_reg[c].pop_front();
+            cl_rd_inflight_cnt_reg[c]--;
+        }
+        cl_r_prev_ready_reg[c] = can_accept;
+    }
+
+    // --- DMA B retire (send register pattern) ---
+    void retire_dma_write_resp() {
+        // Check if previous B was accepted
+        if (dma_b_send_valid_reg && s_dma_axi_b_ready_i.read()) {
+            dma_b_send_valid_reg = false;
+            dma_wr_rob_reg.pop_front();
+            dma_wr_retire_head_seq_reg++;
+            pmu_dma_b_retire_cnt_reg++;
+        }
+        // Load next B into send register
+        if (!dma_b_send_valid_reg && !dma_wr_rob_reg.empty() &&
+            dma_wr_rob_reg.front().complete) {
+            dma_b_send_valid_reg = true;
+            dma_b_send_resp_reg = dma_wr_rob_reg.front().resp;
+        }
+        // Drive
+        if (dma_b_send_valid_reg) {
+            s_dma_axi_b_valid_o.write(true);
+            s_dma_axi_b_resp_o.write(dma_b_send_resp_reg);
+        }
+    }
+
+    // --- DMA R retire (send register pattern) ---
+    void retire_dma_read_resp() {
+        if (dma_r_send_valid_reg && s_dma_axi_r_ready_i.read()) {
+            dma_r_send_valid_reg = false;
+            dma_rd_rob_reg.pop_front();
+            dma_rd_retire_head_seq_reg++;
+            pmu_dma_r_retire_cnt_reg++;
+        }
+        if (!dma_r_send_valid_reg && !dma_rd_rob_reg.empty() &&
+            dma_rd_rob_reg.front().complete) {
+            dma_r_send_valid_reg = true;
+            dma_r_send_data_reg = dma_rd_rob_reg.front().data;
+            dma_r_send_resp_reg = dma_rd_rob_reg.front().resp;
+        }
+        if (dma_r_send_valid_reg) {
+            s_dma_axi_r_valid_o.write(true);
+            s_dma_axi_r_data_o.write(dma_r_send_data_reg);
+            s_dma_axi_r_resp_o.write(dma_r_send_resp_reg);
+        }
+    }
+
+    // --- NLU B retire (send register pattern) ---
+    void retire_nlu_write_resp() {
+        if (nlu_b_send_valid_reg && s_nlu_axi_b_ready_i.read()) {
+            nlu_b_send_valid_reg = false;
+            nlu_wr_rob_reg.pop_front();
+            nlu_wr_retire_head_seq_reg++;
+            pmu_nlu_b_retire_cnt_reg++;
+        }
+        if (!nlu_b_send_valid_reg && !nlu_wr_rob_reg.empty() &&
+            nlu_wr_rob_reg.front().complete) {
+            nlu_b_send_valid_reg = true;
+            nlu_b_send_resp_reg = nlu_wr_rob_reg.front().resp;
+        }
+        if (nlu_b_send_valid_reg) {
+            s_nlu_axi_b_valid_o.write(true);
+            s_nlu_axi_b_resp_o.write(nlu_b_send_resp_reg);
+        }
+    }
+
+    // --- NLU R retire (send register pattern) ---
+    void retire_nlu_read_resp() {
+        if (nlu_r_send_valid_reg && s_nlu_axi_r_ready_i.read()) {
+            nlu_r_send_valid_reg = false;
+            nlu_rd_rob_reg.pop_front();
+            nlu_rd_retire_head_seq_reg++;
+            pmu_nlu_r_retire_cnt_reg++;
+        }
+        if (!nlu_r_send_valid_reg && !nlu_rd_rob_reg.empty() &&
+            nlu_rd_rob_reg.front().complete) {
+            nlu_r_send_valid_reg = true;
+            nlu_r_send_data_reg = nlu_rd_rob_reg.front().data;
+            nlu_r_send_resp_reg = nlu_rd_rob_reg.front().resp;
+        }
+        if (nlu_r_send_valid_reg) {
+            s_nlu_axi_r_valid_o.write(true);
+            s_nlu_axi_r_data_o.write(nlu_r_send_data_reg);
+            s_nlu_axi_r_resp_o.write(nlu_r_send_resp_reg);
+        }
     }
 };
 
