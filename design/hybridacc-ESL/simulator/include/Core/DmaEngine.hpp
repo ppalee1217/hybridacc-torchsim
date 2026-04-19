@@ -33,10 +33,10 @@ SC_MODULE(DmaEngine) {
     // Compile-time parameters
     // ========================================================================
 
-    static constexpr unsigned kDmaMaxOutstanding    = 4;
-    static constexpr unsigned kDataBufferDepth      = 8;
-    static constexpr unsigned kTicketFifoDepth      = 4;
-    static constexpr unsigned kRespFifoDepth        = 4;
+    static constexpr unsigned kDmaMaxOutstanding    = 16;
+    static constexpr unsigned kDataBufferDepth      = 16;
+    static constexpr unsigned kTicketFifoDepth      = 16;
+    static constexpr unsigned kRespFifoDepth        = 16;
 
     // Cluster fabric address encoding: upper bits = cluster_id
     static constexpr unsigned kClusterAddrBits      = 24; // bits for local addr
@@ -317,6 +317,10 @@ private:
     uint64_t pmu_dram_wr_stall_cnt_reg = 0;
     uint64_t pmu_cl_aw_stall_cnt_reg = 0;
     uint64_t pmu_cl_ar_stall_cnt_reg = 0;
+    uint64_t pmu_cl_wr_refill_cnt_reg = 0;
+    uint64_t pmu_cl_wr_data_empty_stall_cnt_reg = 0;
+    uint64_t pmu_cl_wr_slot_busy_cnt_reg = 0;
+    uint64_t pmu_cl_wr_inflight_hwm_reg = 0;
 
     // Previous-cycle ready tracking (prevents double-process in SC_CTHREAD)
     bool dram_b_prev_ready_reg = false;
@@ -332,7 +336,6 @@ private:
     bool dram_ar_prev_valid_reg = false;
     bool dram_aw_prev_valid_reg = false;
     bool dram_w_prev_valid_reg  = false;
-    bool cl_ar_prev_valid_reg   = false;
     bool cl_aw_prev_valid_reg   = false;
     bool cl_w_prev_valid_reg    = false;
 
@@ -403,9 +406,12 @@ private:
         dram_ar_prev_valid_reg = false;
         dram_aw_prev_valid_reg = false;
         dram_w_prev_valid_reg  = false;
-        cl_ar_prev_valid_reg   = false;
         cl_aw_prev_valid_reg   = false;
         cl_w_prev_valid_reg    = false;
+        pmu_cl_wr_refill_cnt_reg = 0;
+        pmu_cl_wr_data_empty_stall_cnt_reg = 0;
+        pmu_cl_wr_slot_busy_cnt_reg = 0;
+        pmu_cl_wr_inflight_hwm_reg = 0;
         mmio_status_reg = 0x1; // IDLE
         mmio_error_code_reg = 0;
     }
@@ -619,6 +625,7 @@ private:
                 dram_aw_send_valid_reg = false;
                 dram_w_send_valid_reg = false;
                 dram_ar_send_valid_reg = false;
+                pmu_cl_wr_data_empty_stall_cnt_reg = 0;
                 mmio_status_reg = 0x2; // bit1=BUSY
                 state_reg = DmaState::RUN;
                 break;
@@ -629,29 +636,11 @@ private:
                 bool src_is_dram = (active_cmd_reg.src_kind == DmaEndpoint::DRAM);
                 bool dst_is_dram = (active_cmd_reg.dst_kind == DmaEndpoint::DRAM);
 
-                // === Source issue engine ===
-                if (beats_src_issued_reg < total) {
-                    if (src_is_dram) {
-                        run_src_issue_dram();
-                    } else {
-                        run_src_issue_cluster();
-                    }
-                }
-
                 // === Source retire engine ===
                 if (src_is_dram) {
                     run_src_retire_dram();
                 } else {
                     run_src_retire_cluster();
-                }
-
-                // === Destination issue engine ===
-                if (beats_dst_issued_reg < total) {
-                    if (dst_is_dram) {
-                        run_dst_issue_dram();
-                    } else {
-                        run_dst_issue_cluster();
-                    }
                 }
 
                 // === Destination retire engine ===
@@ -661,8 +650,25 @@ private:
                     run_dst_retire_cluster();
                 }
 
-                // === Drive AXI outputs from send registers ===
+                // === Drive DRAM outputs ===
                 drive_dram_axi_outputs();
+
+                // === Source issue engine ===
+                if (src_is_dram) {
+                    run_src_issue_dram(beats_src_issued_reg < total);
+                } else if (beats_src_issued_reg < total) {
+                    run_src_issue_cluster(true);
+                }
+
+                // === Destination issue engine ===
+                if (dst_is_dram) {
+                    if (beats_dst_issued_reg < total) {
+                        run_dst_issue_dram();
+                    }
+                } else {
+                    run_dst_issue_cluster(beats_dst_issued_reg < total);
+                }
+
                 drive_cluster_axi_outputs();
 
                 // === Check completion ===
@@ -682,10 +688,18 @@ private:
             case DmaState::DRAIN: {
                 // Wait for all inflight to retire
                 drive_dram_axi_outputs();
-                drive_cluster_axi_outputs();
 
                 bool src_is_dram = (active_cmd_reg.src_kind == DmaEndpoint::DRAM);
                 bool dst_is_dram = (active_cmd_reg.dst_kind == DmaEndpoint::DRAM);
+                if (src_is_dram) {
+                    run_src_issue_dram(false);
+                } else {
+                    run_src_issue_cluster(false);
+                }
+                if (!dst_is_dram) {
+                    run_dst_issue_cluster(false);
+                }
+                drive_cluster_axi_outputs();
                 if (src_is_dram) run_src_retire_dram();
                 else             run_src_retire_cluster();
                 if (dst_is_dram) run_dst_retire_dram();
@@ -725,7 +739,7 @@ private:
             if (state_reg != prev_state) {
                 DEBUG_PRINTF(
                     DEBUG_LEVEL_CORE_COMPONENTS,
-                    "DMA state %s -> %s tag=0x%08x total=%u src_kind=%u dst_kind=%u src_cl=%u dst_cl=%u src_iss=%u src_ret=%u dst_iss=%u dst_ret=%u inflight(dram_r=%u dram_w=%u cl_r=%u cl_w=%u) databuf=%llu err=0x%08x\n",
+                    "DMA state %s -> %s tag=0x%08x total=%u src_kind=%u dst_kind=%u src_cl=%u dst_cl=%u src_iss=%u src_ret=%u dst_iss=%u dst_ret=%u inflight(dram_r=%u dram_w=%u cl_r=%u cl_w=%u) databuf=%llu cl_wr_refill=%llu cl_wr_empty=%llu cl_wr_busy=%llu err=0x%08x\n",
                     dma_state_name(prev_state),
                     dma_state_name(state_reg),
                     active_cmd_reg.cmd_tag,
@@ -743,6 +757,9 @@ private:
                     cl_rd_inflight_cnt_reg,
                     cl_wr_inflight_cnt_reg,
                     static_cast<unsigned long long>(data_buffer_reg.size()),
+                    static_cast<unsigned long long>(pmu_cl_wr_refill_cnt_reg),
+                    static_cast<unsigned long long>(pmu_cl_wr_data_empty_stall_cnt_reg),
+                    static_cast<unsigned long long>(pmu_cl_wr_slot_busy_cnt_reg),
                     mmio_error_code_reg);
                 prev_state = state_reg;
             }
@@ -755,42 +772,67 @@ private:
     // Sub-engines
     // ========================================================================
 
-    /// Source issue: DRAM read path — issue AR to DRAM.
-    void run_src_issue_dram() {
-        if (dram_ar_send_valid_reg) return; // waiting for handshake
-        if (dram_rd_inflight_cnt_reg >= kDmaMaxOutstanding) {
-            pmu_dram_rd_stall_cnt_reg++;
-            return;
-        }
-        if (data_buffer_reg.size() + dram_rd_inflight_cnt_reg >= kDataBufferDepth) return;
+    /// Source DRAM read service: issue AR.
+    void run_src_issue_dram(bool allow_issue) {
+        const bool cur_valid = dram_ar_send_valid_reg;
+        const bool ar_done = cur_valid && m_mem_axi_ar_ready_i.read();
 
-        uint32_t addr = compute_src_addr();
-        dram_ar_send_valid_reg = true;
-        dram_ar_send_addr_reg = addr;
-        dram_rd_inflight_cnt_reg++;
-        beats_src_issued_reg++;
-        advance_src_agu();
-        pmu_dram_rd_issue_cnt_reg++;
+        bool next_valid = cur_valid && !ar_done;
+        uint32_t next_addr = dram_ar_send_addr_reg;
+
+        const bool buffer_full =
+            (data_buffer_reg.size() + dram_rd_inflight_cnt_reg) >= kDataBufferDepth;
+
+        if (allow_issue && !next_valid) {
+            if (dram_rd_inflight_cnt_reg < kDmaMaxOutstanding && !buffer_full) {
+                next_valid = true;
+                next_addr = compute_src_addr();
+                dram_rd_inflight_cnt_reg++;
+                beats_src_issued_reg++;
+                advance_src_agu();
+                pmu_dram_rd_issue_cnt_reg++;
+            }
+        }
+
+        dram_ar_send_valid_reg = next_valid;
+        dram_ar_send_addr_reg = next_addr;
+
+        // Drive outputs immediately
+        m_mem_axi_ar_valid_o.write(next_valid);
+        m_mem_axi_ar_addr_o.write(next_addr);
+        m_mem_axi_ar_len_o.write(0);
     }
 
-    /// Source issue: cluster read path — issue AR to fabric.
-    void run_src_issue_cluster() {
-        if (cl_ar_send_valid_reg) return;
-        if (cl_rd_inflight_cnt_reg >= kDmaMaxOutstanding) {
-            pmu_cl_ar_stall_cnt_reg++;
-            return;
-        }
-        if (data_buffer_reg.size() + cl_rd_inflight_cnt_reg >= kDataBufferDepth) return;
+    /// Source cluster read service: issue AR.
+    void run_src_issue_cluster(bool allow_issue) {
+        const bool cur_valid = cl_ar_send_valid_reg;
+        const bool ar_done = cur_valid && m_cl_axi_ar_ready_i.read();
 
-        uint32_t local_addr = compute_src_addr();
-        uint32_t global_addr = encode_cluster_fabric_addr(
-            active_cmd_reg.src_cluster_id, local_addr);
-        cl_ar_send_valid_reg = true;
-        cl_ar_send_addr_reg = global_addr;
-        cl_rd_inflight_cnt_reg++;
-        beats_src_issued_reg++;
-        advance_src_agu();
-        pmu_cl_ar_issue_cnt_reg++;
+        bool next_valid = cur_valid && !ar_done;
+        uint32_t next_addr = cl_ar_send_addr_reg;
+
+        const bool buffer_full =
+            (data_buffer_reg.size() + cl_rd_inflight_cnt_reg) >= kDataBufferDepth;
+
+        if (allow_issue && !next_valid) {
+            if (cl_rd_inflight_cnt_reg < kDmaMaxOutstanding && !buffer_full) {
+                const uint32_t local_addr = compute_src_addr();
+                next_valid = true;
+                next_addr = encode_cluster_fabric_addr(
+                    active_cmd_reg.src_cluster_id, local_addr);
+                cl_rd_inflight_cnt_reg++;
+                beats_src_issued_reg++;
+                advance_src_agu();
+                pmu_cl_ar_issue_cnt_reg++;
+            }
+        }
+
+        cl_ar_send_valid_reg = next_valid;
+        cl_ar_send_addr_reg = next_addr;
+
+        // Drive outputs immediately
+        m_cl_axi_ar_valid_o.write(next_valid);
+        m_cl_axi_ar_addr_o.write(next_addr);
     }
 
     /// Source retire: DRAM R capture → data_buffer.
@@ -843,55 +885,128 @@ private:
         }
     }
 
-    /// Destination issue: DRAM write path — issue AW/W.
+    /// Destination DRAM write service: issue AW/W.
     void run_dst_issue_dram() {
-        if (dram_aw_send_valid_reg || dram_w_send_valid_reg) return;
-        if (dram_wr_inflight_cnt_reg >= kDmaMaxOutstanding) {
-            pmu_dram_wr_stall_cnt_reg++;
-            return;
+        // 1. Handshake detection for currently pending transfers
+        if (dram_aw_send_valid_reg && m_mem_axi_aw_ready_i.read()) {
+            dram_aw_send_valid_reg = false;
         }
-        if (data_buffer_reg.empty()) return;
+        if (dram_w_send_valid_reg && m_mem_axi_w_ready_i.read()) {
+            dram_w_send_valid_reg = false;
+        }
 
-        uint32_t addr = compute_dst_addr_from_dst_agu();
-        auto beat = data_buffer_reg.front();
-        data_buffer_reg.pop_front();
+        // 2. Only issue NEXT beat if both channels have finished previous handshake
+        const bool busy = dram_aw_send_valid_reg || dram_w_send_valid_reg;
 
-        dram_aw_send_valid_reg = true;
-        dram_aw_send_addr_reg = addr;
-        dram_w_send_valid_reg = true;
-        dram_w_send_data_reg = sc_biguint<kMemAxiDataWidth>(beat.data.to_uint64());
-        dram_w_send_strb_reg = beat.strb;
-        dram_wr_inflight_cnt_reg++;
-        beats_dst_issued_reg++;
-        advance_dst_agu();
-        pmu_dram_wr_issue_cnt_reg++;
+        if (!busy && (beats_dst_issued_reg < active_cmd_reg.total_beats())) {
+            if (dram_wr_inflight_cnt_reg < kDmaMaxOutstanding && !data_buffer_reg.empty()) {
+                const uint32_t addr = compute_dst_addr_from_dst_agu();
+                const auto beat = data_buffer_reg.front();
+                data_buffer_reg.pop_front();
+
+                dram_aw_send_valid_reg = true;
+                dram_aw_send_addr_reg = addr;
+                dram_w_send_valid_reg = true;
+                dram_w_send_data_reg = sc_biguint<kMemAxiDataWidth>(beat.data.to_uint64());
+                dram_w_send_strb_reg = beat.strb;
+
+                dram_wr_inflight_cnt_reg++;
+                beats_dst_issued_reg++;
+                advance_dst_agu();
+                pmu_dram_wr_issue_cnt_reg++;
+            }
+        }
+
+        // 3. Drive outputs immediately (combinational path for 1-cycle latency)
+        m_mem_axi_aw_valid_o.write(dram_aw_send_valid_reg);
+        m_mem_axi_aw_addr_o.write(dram_aw_send_addr_reg);
+        m_mem_axi_aw_len_o.write(0);
+
+        m_mem_axi_w_valid_o.write(dram_w_send_valid_reg);
+        m_mem_axi_w_data_o.write(dram_w_send_data_reg);
+        m_mem_axi_w_strb_o.write(dram_w_send_strb_reg);
+        m_mem_axi_w_last_o.write(dram_w_send_valid_reg);
     }
 
-    /// Destination issue: cluster write path — issue AW/W.
-    void run_dst_issue_cluster() {
-        if (cl_aw_send_valid_reg || cl_w_send_valid_reg) return;
-        if (cl_wr_inflight_cnt_reg >= kDmaMaxOutstanding) {
-            pmu_cl_aw_stall_cnt_reg++;
-            return;
+    /// Destination cluster write service: retire current AW/W slots and refill.
+    void run_dst_issue_cluster(bool allow_refill) {
+        const bool cur_aw_valid = cl_aw_send_valid_reg;
+        const uint32_t cur_aw_addr = cl_aw_send_addr_reg;
+        const bool cur_w_valid = cl_w_send_valid_reg;
+        const sc_biguint<kClAxiDataWidth> cur_w_data = cl_w_send_data_reg;
+        const uint8_t cur_w_strb = cl_w_send_strb_reg;
+
+        const bool aw_done = cl_aw_prev_valid_reg && m_cl_axi_aw_ready_i.read();
+        const bool w_done = cl_w_prev_valid_reg && m_cl_axi_w_ready_i.read();
+
+        bool next_aw_valid = cur_aw_valid && !aw_done;
+        uint32_t next_aw_addr = cur_aw_addr;
+        bool next_w_valid = cur_w_valid && !w_done;
+        sc_biguint<kClAxiDataWidth> next_w_data = cur_w_data;
+        uint8_t next_w_strb = cur_w_strb;
+
+        const bool slots_busy = next_aw_valid || next_w_valid;
+        const bool has_issue_data = !data_buffer_reg.empty();
+
+        if (allow_refill && has_issue_data) {
+            if (cl_wr_inflight_cnt_reg >= kDmaMaxOutstanding) {
+                pmu_cl_aw_stall_cnt_reg++;
+            } else if (slots_busy) {
+                pmu_cl_wr_slot_busy_cnt_reg++;
+            }
+        } else if (allow_refill &&
+                   !has_issue_data &&
+                   !slots_busy &&
+                   (cl_wr_inflight_cnt_reg < kDmaMaxOutstanding)) {
+            pmu_cl_wr_data_empty_stall_cnt_reg++;
         }
-        if (data_buffer_reg.empty()) return;
 
-        uint32_t local_addr = compute_dst_addr_from_dst_agu();
-        uint32_t global_addr = encode_cluster_fabric_addr(
-            active_cmd_reg.dst_cluster_id, local_addr);
-        auto beat = data_buffer_reg.front();
-        data_buffer_reg.pop_front();
+        const bool can_refill = allow_refill &&
+                                has_issue_data &&
+                                !slots_busy &&
+                                (cl_wr_inflight_cnt_reg < kDmaMaxOutstanding);
 
-        cl_aw_send_valid_reg = true;
-        cl_aw_send_addr_reg = global_addr;
-        cl_w_send_valid_reg = true;
-        cl_w_send_data_reg = beat.data;
-        cl_w_send_strb_reg = beat.strb;
-        cl_wr_inflight_cnt_reg++;
-        beats_dst_issued_reg++;
-        advance_dst_agu();
-        pmu_cl_aw_issue_cnt_reg++;
-        pmu_cl_w_issue_cnt_reg++;
+        if (can_refill) {
+            const uint32_t local_addr = compute_dst_addr_from_dst_agu();
+            const uint32_t global_addr = encode_cluster_fabric_addr(
+                active_cmd_reg.dst_cluster_id, local_addr);
+            const DataBeat beat = data_buffer_reg.front();
+            data_buffer_reg.pop_front();
+
+            next_aw_valid = true;
+            next_aw_addr = global_addr;
+            next_w_valid = true;
+            next_w_data = beat.data;
+            next_w_strb = beat.strb;
+
+            cl_wr_inflight_cnt_reg++;
+            beats_dst_issued_reg++;
+            advance_dst_agu();
+            pmu_cl_aw_issue_cnt_reg++;
+            pmu_cl_w_issue_cnt_reg++;
+            pmu_cl_wr_refill_cnt_reg++;
+            if (cl_wr_inflight_cnt_reg > pmu_cl_wr_inflight_hwm_reg) {
+                pmu_cl_wr_inflight_hwm_reg = cl_wr_inflight_cnt_reg;
+            }
+        }
+
+        cl_aw_send_valid_reg = next_aw_valid;
+        cl_aw_send_addr_reg = next_aw_addr;
+        cl_w_send_valid_reg = next_w_valid;
+        cl_w_send_data_reg = next_w_data;
+        cl_w_send_strb_reg = next_w_strb;
+        cl_aw_prev_valid_reg = next_aw_valid;
+        cl_w_prev_valid_reg = next_w_valid;
+
+        if (next_aw_valid) {
+            m_cl_axi_aw_valid_o.write(true);
+            m_cl_axi_aw_addr_o.write(next_aw_addr);
+        }
+        if (next_w_valid) {
+            m_cl_axi_w_valid_o.write(true);
+            m_cl_axi_w_data_o.write(next_w_data);
+            m_cl_axi_w_strb_o.write(next_w_strb);
+        }
     }
 
     /// Destination retire: DRAM B capture.
@@ -922,17 +1037,6 @@ private:
     // ========================================================================
 
     void drive_dram_axi_outputs() {
-        // AR channel — clear only when slave has had a cycle to see valid
-        if (dram_ar_prev_valid_reg && m_mem_axi_ar_ready_i.read()) {
-            dram_ar_send_valid_reg = false;
-        }
-        if (dram_ar_send_valid_reg) {
-            m_mem_axi_ar_valid_o.write(true);
-            m_mem_axi_ar_addr_o.write(dram_ar_send_addr_reg);
-            m_mem_axi_ar_len_o.write(0); // single-beat
-        }
-        dram_ar_prev_valid_reg = dram_ar_send_valid_reg;
-
         // AW channel
         if (dram_aw_prev_valid_reg && m_mem_axi_aw_ready_i.read()) {
             dram_aw_send_valid_reg = false;
@@ -958,36 +1062,7 @@ private:
     }
 
     void drive_cluster_axi_outputs() {
-        // AR channel
-        if (cl_ar_prev_valid_reg && m_cl_axi_ar_ready_i.read()) {
-            cl_ar_send_valid_reg = false;
-        }
-        if (cl_ar_send_valid_reg) {
-            m_cl_axi_ar_valid_o.write(true);
-            m_cl_axi_ar_addr_o.write(cl_ar_send_addr_reg);
-        }
-        cl_ar_prev_valid_reg = cl_ar_send_valid_reg;
-
-        // AW channel
-        if (cl_aw_prev_valid_reg && m_cl_axi_aw_ready_i.read()) {
-            cl_aw_send_valid_reg = false;
-        }
-        if (cl_aw_send_valid_reg) {
-            m_cl_axi_aw_valid_o.write(true);
-            m_cl_axi_aw_addr_o.write(cl_aw_send_addr_reg);
-        }
-        cl_aw_prev_valid_reg = cl_aw_send_valid_reg;
-
-        // W channel
-        if (cl_w_prev_valid_reg && m_cl_axi_w_ready_i.read()) {
-            cl_w_send_valid_reg = false;
-        }
-        if (cl_w_send_valid_reg) {
-            m_cl_axi_w_valid_o.write(true);
-            m_cl_axi_w_data_o.write(cl_w_send_data_reg);
-            m_cl_axi_w_strb_o.write(cl_w_send_strb_reg);
-        }
-        cl_w_prev_valid_reg = cl_w_send_valid_reg;
+        // Cluster AR is serviced in run_src_issue_cluster().
     }
 };
 

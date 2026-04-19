@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -241,8 +242,37 @@ public:
 
 private:
     static constexpr unsigned kBeatBytes = kMemAxiDataWidth / 8;
+    static constexpr unsigned kReadReqQueueDepth = 16;
+    static constexpr unsigned kWriteReqQueueDepth = 16;
+    static constexpr unsigned kWBeatQueueDepth = 64;
+
+    struct ReadReq {
+        uint32_t addr = 0;
+        unsigned len = 0;
+    };
+
+    struct WriteReq {
+        uint32_t addr = 0;
+        unsigned len = 0;
+    };
+
+    struct WBeat {
+        sc_biguint<kMemAxiDataWidth> data;
+        sc_uint<kMemAxiDataWidth / 8> strb;
+        bool last;
+    };
 
     void read_proc() {
+        std::deque<ReadReq> read_req_fifo_reg;
+        ReadReq active_req_reg{};
+        unsigned active_req_beat_reg = 0;
+        bool active_req_valid_reg = false;
+        bool ar_prev_ready_reg = false;
+        bool r_send_valid_reg = false;
+        sc_biguint<kMemAxiDataWidth> r_send_data_reg = 0;
+        sc_uint<2> r_send_resp_reg = 0;
+        bool r_send_last_reg = false;
+
         ar_ready.write(false);
         r_valid.write(false);
         r_data.write(0);
@@ -251,38 +281,71 @@ private:
         wait();
 
         while (true) {
-            ar_ready.write(true);
-            r_valid.write(false);
-            r_last.write(false);
-            wait();
+            const bool r_done = r_send_valid_reg && r_ready.read();
+            if (r_done) {
+                if (active_req_valid_reg && active_req_beat_reg < active_req_reg.len) {
+                    active_req_beat_reg++;
+                    r_send_data_reg = read_beat(active_req_reg.addr + active_req_beat_reg * kBeatBytes);
+                    r_send_resp_reg = 0;
+                    r_send_last_reg = (active_req_beat_reg == active_req_reg.len);
+                    r_send_valid_reg = true;
+                } else {
+                    active_req_valid_reg = false;
+                    r_send_valid_reg = false;
+                }
+            }
 
-            if (ar_valid.read()) {
-                uint32_t addr = ar_addr.read().to_uint();
-                unsigned len  = ar_len.read().to_uint();
-                ar_ready.write(false);
+            if (!active_req_valid_reg && !read_req_fifo_reg.empty()) {
+                active_req_reg = read_req_fifo_reg.front();
+                read_req_fifo_reg.pop_front();
+                active_req_beat_reg = 0;
+                active_req_valid_reg = true;
+                r_send_data_reg = read_beat(active_req_reg.addr);
+                r_send_resp_reg = 0;
+                r_send_last_reg = (active_req_reg.len == 0);
+                r_send_valid_reg = true;
+            }
 
+            const bool can_accept_ar = read_req_fifo_reg.size() < kReadReqQueueDepth;
+            ar_ready.write(can_accept_ar);
+            if (ar_valid.read() && ar_prev_ready_reg) {
+                const uint32_t addr = ar_addr.read().to_uint();
+                const unsigned len = ar_len.read().to_uint();
                 if (dram_size_ && ((uint64_t)addr < dram_base_ || (uint64_t)addr + (uint64_t)(len + 1) * kBeatBytes > dram_base_ + dram_size_)) {
                     if (oob_read_count_++ < 10)
                         std::cerr << "[DRAM] OOB AXI READ  addr=0x" << std::hex << addr
                                   << " len=" << std::dec << len
                                   << " @ " << sc_time_stamp() << std::endl;
                 }
-
-                for (unsigned i = 0; i <= len; ++i) {
-                    r_valid.write(true);
-                    r_data.write(read_beat(addr + i * kBeatBytes));
-                    r_resp.write(0);
-                    r_last.write(i == len);
-                    wait();
-                    while (!r_ready.read()) wait();
-                }
-                r_valid.write(false);
-                r_last.write(false);
+                read_req_fifo_reg.push_back(ReadReq{addr, len});
             }
+            ar_prev_ready_reg = can_accept_ar;
+
+            r_valid.write(r_send_valid_reg);
+            r_data.write(r_send_data_reg);
+            r_resp.write(r_send_resp_reg);
+            r_last.write(r_send_valid_reg && r_send_last_reg);
+
+            wait();
         }
     }
 
     void write_proc() {
+        std::deque<WriteReq> aw_fifo_reg;
+        std::deque<WBeat> w_fifo_reg;
+        
+        WriteReq active_aw_reg;
+        bool active_aw_valid_reg = false;
+        unsigned active_aw_beat_reg = 0;
+
+        bool aw_prev_ready_reg = false;
+        bool w_prev_ready_reg = false;
+        
+        unsigned b_pending_cnt_reg = 0;
+        bool b_send_valid_reg = false;
+        sc_uint<2> b_send_resp_reg = 0;
+        bool b_prev_valid_reg = false;
+
         aw_ready.write(false);
         w_ready.write(false);
         b_valid.write(false);
@@ -290,49 +353,77 @@ private:
         wait();
 
         while (true) {
-            aw_ready.write(true);
-            w_ready.write(false);
-            b_valid.write(false);
-            wait();
+            // 1. B Channel Response Logic
+            const bool b_done = b_prev_valid_reg && b_ready.read();
+            if (b_done && b_pending_cnt_reg > 0) {
+                b_send_valid_reg = false;
+                --b_pending_cnt_reg;
+            }
+            if (!b_send_valid_reg && b_pending_cnt_reg > 0) {
+                b_send_valid_reg = true;
+                b_send_resp_reg = 0;
+            }
 
-            if (aw_valid.read()) {
-                uint32_t addr = aw_addr.read().to_uint();
-                unsigned len  = aw_len.read().to_uint();
-                aw_ready.write(false);
-
-                if (dram_size_ && ((uint64_t)addr < dram_base_ || (uint64_t)addr + (uint64_t)(len + 1) * kBeatBytes > dram_base_ + dram_size_)) {
+            // 2. AW Acceptance (Decoupled)
+            const bool can_accept_aw = aw_fifo_reg.size() < kWriteReqQueueDepth;
+            aw_ready.write(can_accept_aw);
+            if (aw_valid.read() && aw_prev_ready_reg) {
+                const uint32_t addr = aw_addr.read().to_uint();
+                const unsigned len = aw_len.read().to_uint();
+                if (dram_size_ && ((uint64_t)addr < dram_base_ ||
+                    (uint64_t)addr + (uint64_t)(len + 1) * kBeatBytes > dram_base_ + dram_size_)) {
                     if (oob_write_count_++ < 10)
                         std::cerr << "[DRAM] OOB AXI WRITE addr=0x" << std::hex << addr
                                   << " len=" << std::dec << len
                                   << " @ " << sc_time_stamp() << std::endl;
                 }
+                aw_fifo_reg.push_back(WriteReq{addr, len});
+            }
+            aw_prev_ready_reg = can_accept_aw;
 
-                for (unsigned i = 0; i <= len; ++i) {
-                    w_ready.write(true);
-                    wait();
-                    while (!w_valid.read()) {
-                        w_ready.write(true);
-                        wait();
+            // 3. W Acceptance (Decoupled)
+            const bool can_accept_w = w_fifo_reg.size() < kWBeatQueueDepth;
+            w_ready.write(can_accept_w);
+            if (w_valid.read() && w_prev_ready_reg) {
+                w_fifo_reg.push_back(WBeat{w_data.read(), w_strb.read().to_uint(), w_last.read()});
+            }
+            w_prev_ready_reg = can_accept_w;
+
+            // 4. Execution Logic: Match AW with W beats
+            if (!active_aw_valid_reg && !aw_fifo_reg.empty()) {
+                active_aw_reg = aw_fifo_reg.front();
+                aw_fifo_reg.pop_front();
+                active_aw_beat_reg = 0;
+                active_aw_valid_reg = true;
+            }
+
+            if (active_aw_valid_reg && !w_fifo_reg.empty()) {
+                WBeat beat = w_fifo_reg.front();
+                w_fifo_reg.pop_front();
+
+                uint32_t beat_addr = active_aw_reg.addr + active_aw_beat_reg * kBeatBytes;
+                for (unsigned b = 0; b < kBeatBytes; ++b) {
+                    if (beat.strb & (1u << b)) {
+                        uint8_t byte_val = static_cast<uint8_t>(
+                            beat.data.range(b * 8 + 7, b * 8).to_uint());
+                        mem_[beat_addr + b] = byte_val;
                     }
-                    sc_biguint<kMemAxiDataWidth> wdata = w_data.read();
-                    uint32_t strb = w_strb.read().to_uint();
-                    uint32_t beat_addr = addr + i * kBeatBytes;
-                    for (unsigned b = 0; b < kBeatBytes; ++b) {
-                        if (strb & (1u << b)) {
-                            uint8_t byte_val = static_cast<uint8_t>(
-                                wdata.range(b * 8 + 7, b * 8).to_uint());
-                            mem_[beat_addr + b] = byte_val;
-                        }
-                    }
-                    w_ready.write(false);
                 }
 
-                b_valid.write(true);
-                b_resp.write(0);
-                wait();
-                while (!b_ready.read()) wait();
-                b_valid.write(false);
+                if (active_aw_beat_reg < active_aw_reg.len) {
+                    ++active_aw_beat_reg;
+                } else {
+                    active_aw_valid_reg = false;
+                    ++b_pending_cnt_reg;
+                }
             }
+
+            // 5. Output Update
+            b_valid.write(b_send_valid_reg);
+            b_resp.write(b_send_resp_reg);
+            b_prev_valid_reg = b_send_valid_reg;
+
+            wait();
         }
     }
 };

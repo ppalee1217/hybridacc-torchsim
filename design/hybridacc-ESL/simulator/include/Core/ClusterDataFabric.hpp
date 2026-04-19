@@ -35,9 +35,9 @@ SC_MODULE(ClusterDataFabric) {
     // Compile-time parameters
     // ========================================================================
 
-    static constexpr unsigned kMaxOutstanding   = 4;
-    static constexpr unsigned kIngressDepth     = 4;
-    static constexpr unsigned kRobDepth         = 4;
+    static constexpr unsigned kMaxOutstanding   = 8;
+    static constexpr unsigned kIngressDepth     = 8;
+    static constexpr unsigned kRobDepth         = 8;
     static constexpr unsigned kClusterAddrBits  = 24;
     static constexpr uint32_t kClusterAddrMask  = (1u << kClusterAddrBits) - 1;
 
@@ -323,6 +323,12 @@ private:
     uint64_t pmu_wr_rr_grant_nlu_cnt_reg = 0;
     uint64_t pmu_rd_rr_grant_dma_cnt_reg = 0;
     uint64_t pmu_rd_rr_grant_nlu_cnt_reg = 0;
+    uint64_t pmu_cl_wr_refill_cnt_reg[NUM_CLUSTERS] = {};
+    uint64_t pmu_cl_wr_slot_busy_cnt_reg[NUM_CLUSTERS] = {};
+    uint64_t pmu_cl_wr_inflight_hwm_reg[NUM_CLUSTERS] = {};
+    uint64_t pmu_cl_rd_refill_cnt_reg[NUM_CLUSTERS] = {};
+    uint64_t pmu_cl_rd_slot_busy_cnt_reg[NUM_CLUSTERS] = {};
+    uint64_t pmu_cl_rd_inflight_hwm_reg[NUM_CLUSTERS] = {};
 
     // ========================================================================
     // Reset helper
@@ -396,6 +402,12 @@ private:
             cl_aw_send_valid_reg[c] = false;
             cl_w_send_valid_reg[c] = false;
             cl_ar_send_valid_reg[c] = false;
+            pmu_cl_wr_refill_cnt_reg[c] = 0;
+            pmu_cl_wr_slot_busy_cnt_reg[c] = 0;
+            pmu_cl_wr_inflight_hwm_reg[c] = 0;
+            pmu_cl_rd_refill_cnt_reg[c] = 0;
+            pmu_cl_rd_slot_busy_cnt_reg[c] = 0;
+            pmu_cl_rd_inflight_hwm_reg[c] = 0;
         }
         dma_aw_prev_ready_reg = false;
         dma_w_prev_ready_reg = false;
@@ -453,25 +465,27 @@ private:
             rr_arbitrate_read();
 
             // ================================================================
-            // Block 4: Per-cluster AXI issue
-            // ================================================================
-            for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
-                issue_cluster_write(c);
-                issue_cluster_read(c);
-            }
-
-            // ================================================================
-            // Block 5: Drive cluster AXI outputs from send registers
-            // ================================================================
-            drive_cluster_outputs();
-
-            // ================================================================
-            // Block 6: Response collect + requester retire
+            // Block 4: Collect cluster responses first so issue sees the
+            // newest inflight counters in the same clock edge.
             // ================================================================
             for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
                 collect_cluster_write_resp(c);
                 collect_cluster_read_resp(c);
             }
+
+            // ================================================================
+            // Block 5: Per-cluster AXI service
+            // ================================================================
+            for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
+                issue_cluster_write(c);
+                issue_cluster_read(c, true);
+            }
+
+            drive_cluster_outputs();
+
+            // ================================================================
+            // Block 6: Requester retire
+            // ================================================================
             retire_dma_write_resp();
             retire_dma_read_resp();
             retire_nlu_write_resp();
@@ -741,42 +755,118 @@ private:
     // ========================================================================
 
     void issue_cluster_write(unsigned c) {
-        if (cl_aw_send_valid_reg[c] || cl_w_send_valid_reg[c]) return;
-        if (cluster_wr_issue_fifo_reg[c].empty()) return;
-        if (cl_wr_inflight_cnt_reg[c] >= kMaxOutstanding) return;
+        const bool cur_aw_valid = cl_aw_send_valid_reg[c];
+        const uint32_t cur_aw_addr = cl_aw_send_addr_reg[c];
+        const bool cur_w_valid = cl_w_send_valid_reg[c];
+        const sc_biguint<kClAxiDataWidth> cur_w_data = cl_w_send_data_reg[c];
+        const uint8_t cur_w_strb = cl_w_send_strb_reg[c];
 
-        auto& req = cluster_wr_issue_fifo_reg[c].front();
-        cl_aw_send_valid_reg[c] = true;
-        cl_aw_send_addr_reg[c] = req.local_addr;
-        cl_w_send_valid_reg[c] = true;
-        cl_w_send_data_reg[c] = req.data;
-        cl_w_send_strb_reg[c] = req.strb;
+        const bool aw_done = cl_aw_prev_valid_reg[c] && m_cl_data_aw_ready_i[c].read();
+        const bool w_done = cl_w_prev_valid_reg[c] && m_cl_data_w_ready_i[c].read();
 
-        ClusterInflight inf;
-        inf.owner = req.owner;
-        inf.write = true;
-        inf.rob_seq = req.seq;
-        cluster_wr_inflight_reg[c].push_back(inf);
-        cl_wr_inflight_cnt_reg[c]++;
-        cluster_wr_issue_fifo_reg[c].pop_front();
+        bool next_aw_valid = cur_aw_valid && !aw_done;
+        uint32_t next_aw_addr = cur_aw_addr;
+        bool next_w_valid = cur_w_valid && !w_done;
+        sc_biguint<kClAxiDataWidth> next_w_data = cur_w_data;
+        uint8_t next_w_strb = cur_w_strb;
+
+        const bool slots_busy = next_aw_valid || next_w_valid;
+        const bool has_issue_req = !cluster_wr_issue_fifo_reg[c].empty();
+
+        if (has_issue_req && (cl_wr_inflight_cnt_reg[c] < kMaxOutstanding) && slots_busy) {
+            pmu_cl_wr_slot_busy_cnt_reg[c]++;
+        }
+
+        const bool can_refill = has_issue_req &&
+                                !slots_busy &&
+                                (cl_wr_inflight_cnt_reg[c] < kMaxOutstanding);
+
+        if (can_refill) {
+            const InternalReq req = cluster_wr_issue_fifo_reg[c].front();
+            next_aw_valid = true;
+            next_aw_addr = req.local_addr;
+            next_w_valid = true;
+            next_w_data = req.data;
+            next_w_strb = req.strb;
+
+            ClusterInflight inf;
+            inf.owner = req.owner;
+            inf.write = true;
+            inf.rob_seq = req.seq;
+            cluster_wr_inflight_reg[c].push_back(inf);
+            cl_wr_inflight_cnt_reg[c]++;
+            cluster_wr_issue_fifo_reg[c].pop_front();
+            pmu_cl_wr_refill_cnt_reg[c]++;
+            if (cl_wr_inflight_cnt_reg[c] > pmu_cl_wr_inflight_hwm_reg[c]) {
+                pmu_cl_wr_inflight_hwm_reg[c] = cl_wr_inflight_cnt_reg[c];
+            }
+        }
+
+        cl_aw_send_valid_reg[c] = next_aw_valid;
+        cl_aw_send_addr_reg[c] = next_aw_addr;
+        cl_w_send_valid_reg[c] = next_w_valid;
+        cl_w_send_data_reg[c] = next_w_data;
+        cl_w_send_strb_reg[c] = next_w_strb;
+        cl_aw_prev_valid_reg[c] = next_aw_valid;
+        cl_w_prev_valid_reg[c] = next_w_valid;
+
+        if (next_aw_valid) {
+            m_cl_data_aw_valid_o[c].write(true);
+            m_cl_data_aw_addr_o[c].write(next_aw_addr);
+        }
+        if (next_w_valid) {
+            m_cl_data_w_valid_o[c].write(true);
+            m_cl_data_w_data_o[c].write(next_w_data);
+            m_cl_data_w_strb_o[c].write(next_w_strb);
+        }
     }
 
-    void issue_cluster_read(unsigned c) {
-        if (cl_ar_send_valid_reg[c]) return;
-        if (cluster_rd_issue_fifo_reg[c].empty()) return;
-        if (cl_rd_inflight_cnt_reg[c] >= kMaxOutstanding) return;
+    void issue_cluster_read(unsigned c, bool allow_refill) {
+        const bool cur_ar_valid = cl_ar_send_valid_reg[c];
+        const uint32_t cur_ar_addr = cl_ar_send_addr_reg[c];
+        const bool ar_done = cl_ar_prev_valid_reg[c] && m_cl_data_ar_ready_i[c].read();
 
-        auto& req = cluster_rd_issue_fifo_reg[c].front();
-        cl_ar_send_valid_reg[c] = true;
-        cl_ar_send_addr_reg[c] = req.local_addr;
+        bool next_ar_valid = cur_ar_valid && !ar_done;
+        uint32_t next_ar_addr = cur_ar_addr;
 
-        ClusterInflight inf;
-        inf.owner = req.owner;
-        inf.write = false;
-        inf.rob_seq = req.seq;
-        cluster_rd_inflight_reg[c].push_back(inf);
-        cl_rd_inflight_cnt_reg[c]++;
-        cluster_rd_issue_fifo_reg[c].pop_front();
+        const bool has_issue_req = !cluster_rd_issue_fifo_reg[c].empty();
+
+        if (allow_refill && has_issue_req &&
+            (cl_rd_inflight_cnt_reg[c] < kMaxOutstanding) && next_ar_valid) {
+            pmu_cl_rd_slot_busy_cnt_reg[c]++;
+        }
+
+        const bool can_refill = allow_refill &&
+                                has_issue_req &&
+                                !next_ar_valid &&
+                                (cl_rd_inflight_cnt_reg[c] < kMaxOutstanding);
+
+        if (can_refill) {
+            const InternalReq req = cluster_rd_issue_fifo_reg[c].front();
+            next_ar_valid = true;
+            next_ar_addr = req.local_addr;
+
+            ClusterInflight inf;
+            inf.owner = req.owner;
+            inf.write = false;
+            inf.rob_seq = req.seq;
+            cluster_rd_inflight_reg[c].push_back(inf);
+            cl_rd_inflight_cnt_reg[c]++;
+            cluster_rd_issue_fifo_reg[c].pop_front();
+            pmu_cl_rd_refill_cnt_reg[c]++;
+            if (cl_rd_inflight_cnt_reg[c] > pmu_cl_rd_inflight_hwm_reg[c]) {
+                pmu_cl_rd_inflight_hwm_reg[c] = cl_rd_inflight_cnt_reg[c];
+            }
+        }
+
+        cl_ar_send_valid_reg[c] = next_ar_valid;
+        cl_ar_send_addr_reg[c] = next_ar_addr;
+        cl_ar_prev_valid_reg[c] = next_ar_valid;
+
+        if (next_ar_valid) {
+            m_cl_data_ar_valid_o[c].write(true);
+            m_cl_data_ar_addr_o[c].write(next_ar_addr);
+        }
     }
 
     // ========================================================================
@@ -784,38 +874,7 @@ private:
     // ========================================================================
 
     void drive_cluster_outputs() {
-        for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
-            // AW — clear only when slave had a cycle to see valid
-            if (cl_aw_prev_valid_reg[c] && m_cl_data_aw_ready_i[c].read()) {
-                cl_aw_send_valid_reg[c] = false;
-            }
-            if (cl_aw_send_valid_reg[c]) {
-                m_cl_data_aw_valid_o[c].write(true);
-                m_cl_data_aw_addr_o[c].write(cl_aw_send_addr_reg[c]);
-            }
-            cl_aw_prev_valid_reg[c] = cl_aw_send_valid_reg[c];
-
-            // W
-            if (cl_w_prev_valid_reg[c] && m_cl_data_w_ready_i[c].read()) {
-                cl_w_send_valid_reg[c] = false;
-            }
-            if (cl_w_send_valid_reg[c]) {
-                m_cl_data_w_valid_o[c].write(true);
-                m_cl_data_w_data_o[c].write(cl_w_send_data_reg[c]);
-                m_cl_data_w_strb_o[c].write(cl_w_send_strb_reg[c]);
-            }
-            cl_w_prev_valid_reg[c] = cl_w_send_valid_reg[c];
-
-            // AR
-            if (cl_ar_prev_valid_reg[c] && m_cl_data_ar_ready_i[c].read()) {
-                cl_ar_send_valid_reg[c] = false;
-            }
-            if (cl_ar_send_valid_reg[c]) {
-                m_cl_data_ar_valid_o[c].write(true);
-                m_cl_data_ar_addr_o[c].write(cl_ar_send_addr_reg[c]);
-            }
-            cl_ar_prev_valid_reg[c] = cl_ar_send_valid_reg[c];
-        }
+        // Cluster AR is serviced in issue_cluster_read().
     }
 
     // ========================================================================
