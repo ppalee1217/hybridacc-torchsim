@@ -4,24 +4,24 @@
 name: conv2d_1x1_example
 
 hardware:
-  num_clusters: 4
-  num_pes: 64
-  num_bus: 4
+  num_clusters: 3
+  num_pes: 48
+  num_bus: 3
   spm_banks_per_group: 3
-  spm_bank_depth: 4096
+  spm_bank_depth: 8192
   dram_base: 0x80000000
 
 tensors:
   input:
-    shape: [1, 14, 14, 48]
+    shape: [1, 48, 16, 12]
     dtype: fp16
     layout: NHWC
   weight:
-    shape: [16, 1, 1, 48]
+    shape: [16, 1, 1, 12]
     dtype: fp16
     layout: OIHW
   output:
-    shape: [1, 14, 14, 16]
+    shape: [1, 48, 16, 16]
     dtype: fp16
     layout: NHWC
 

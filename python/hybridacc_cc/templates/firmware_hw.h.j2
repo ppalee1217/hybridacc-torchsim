@@ -307,9 +307,9 @@ static inline void dma_init_linear(void) {
     mmio_write32(DMA_CMD_TAG,         0);
 }
 
-/* ── DMA load: DRAM → Cluster SPM (blocking) ── */
+/* ── DMA load: DRAM → Cluster SPM ── */
 static inline void dma_load(uint32_t dram_addr, uint32_t spm_offset,
-                            uint32_t cluster_id, uint32_t beat_count) {
+                            uint32_t cluster_id, uint32_t beat_count, uint32_t tag) {
     mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_DRAM);
     mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
     mmio_write32(DMA_SRC_ADDR_LO,    dram_addr);
@@ -317,12 +317,53 @@ static inline void dma_load(uint32_t dram_addr, uint32_t spm_offset,
     mmio_write32(DMA_SRC_CLUSTER_ID, 0);
     mmio_write32(DMA_DST_CLUSTER_ID, cluster_id);
     mmio_write32(DMA_COUNT_D0,       beat_count);
+    mmio_write32(DMA_COUNT_D1,       1);
+    mmio_write32(DMA_COUNT_D2,       1);
+    mmio_write32(DMA_COUNT_D3,       1);
+    mmio_write32(DMA_SRC_STRIDE_D0,  BEAT_BYTES);
+    mmio_write32(DMA_SRC_STRIDE_D1,  0);
+    mmio_write32(DMA_SRC_STRIDE_D2,  0);
+    mmio_write32(DMA_SRC_STRIDE_D3,  0);
+    mmio_write32(DMA_DST_STRIDE_D0,  BEAT_BYTES);
+    mmio_write32(DMA_DST_STRIDE_D1,  0);
+    mmio_write32(DMA_DST_STRIDE_D2,  0);
+    mmio_write32(DMA_DST_STRIDE_D3,  0);
+    mmio_write32(DMA_CMD_TAG,         tag);
     mmio_write32(DMA_CTRL,           DMA_CTRL_SUBMIT);
 }
 
-/* ── DMA store: Cluster SPM → DRAM (blocking) ── */
+static inline void dma_load_2d(uint32_t dram_addr, uint32_t spm_offset,
+                               uint32_t cluster_id,
+                               uint32_t row_beats,
+                               uint32_t row_count,
+                               uint32_t src_row_stride,
+                               uint32_t dst_row_stride,
+                               uint32_t tag) {
+    mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_DRAM);
+    mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
+    mmio_write32(DMA_SRC_ADDR_LO,    dram_addr);
+    mmio_write32(DMA_DST_ADDR_LO,    spm_offset);
+    mmio_write32(DMA_SRC_CLUSTER_ID, 0);
+    mmio_write32(DMA_DST_CLUSTER_ID, cluster_id);
+    mmio_write32(DMA_COUNT_D0,       row_beats);
+    mmio_write32(DMA_COUNT_D1,       row_count);
+    mmio_write32(DMA_COUNT_D2,       1);
+    mmio_write32(DMA_COUNT_D3,       1);
+    mmio_write32(DMA_SRC_STRIDE_D0,  BEAT_BYTES);
+    mmio_write32(DMA_SRC_STRIDE_D1,  src_row_stride);
+    mmio_write32(DMA_SRC_STRIDE_D2,  0);
+    mmio_write32(DMA_SRC_STRIDE_D3,  0);
+    mmio_write32(DMA_DST_STRIDE_D0,  BEAT_BYTES);
+    mmio_write32(DMA_DST_STRIDE_D1,  dst_row_stride);
+    mmio_write32(DMA_DST_STRIDE_D2,  0);
+    mmio_write32(DMA_DST_STRIDE_D3,  0);
+    mmio_write32(DMA_CMD_TAG,         tag);
+    mmio_write32(DMA_CTRL,           DMA_CTRL_SUBMIT);
+}
+
+/* ── DMA store: Cluster SPM → DRAM ── */
 static inline void dma_store(uint32_t spm_offset, uint32_t dram_addr,
-                             uint32_t cluster_id, uint32_t beat_count) {
+                             uint32_t cluster_id, uint32_t beat_count, uint32_t tag) {
     mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
     mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_DRAM);
     mmio_write32(DMA_SRC_ADDR_LO,    spm_offset);
@@ -330,11 +371,58 @@ static inline void dma_store(uint32_t spm_offset, uint32_t dram_addr,
     mmio_write32(DMA_SRC_CLUSTER_ID, cluster_id);
     mmio_write32(DMA_DST_CLUSTER_ID, 0);
     mmio_write32(DMA_COUNT_D0,       beat_count);
+    mmio_write32(DMA_COUNT_D1,       1);
+    mmio_write32(DMA_COUNT_D2,       1);
+    mmio_write32(DMA_COUNT_D3,       1);
+    mmio_write32(DMA_SRC_STRIDE_D0,  BEAT_BYTES);
+    mmio_write32(DMA_SRC_STRIDE_D1,  0);
+    mmio_write32(DMA_SRC_STRIDE_D2,  0);
+    mmio_write32(DMA_SRC_STRIDE_D3,  0);
+    mmio_write32(DMA_DST_STRIDE_D0,  BEAT_BYTES);
+    mmio_write32(DMA_DST_STRIDE_D1,  0);
+    mmio_write32(DMA_DST_STRIDE_D2,  0);
+    mmio_write32(DMA_DST_STRIDE_D3,  0);
+    mmio_write32(DMA_CMD_TAG,         tag);
+    mmio_write32(DMA_CTRL,           DMA_CTRL_SUBMIT);
+}
+
+static inline void dma_store_2d(uint32_t spm_offset, uint32_t dram_addr,
+                                uint32_t cluster_id,
+                                uint32_t row_beats,
+                                uint32_t row_count,
+                                uint32_t src_row_stride,
+                                uint32_t dst_row_stride,
+                                uint32_t tag) {
+    mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
+    mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_DRAM);
+    mmio_write32(DMA_SRC_ADDR_LO,    spm_offset);
+    mmio_write32(DMA_DST_ADDR_LO,    dram_addr);
+    mmio_write32(DMA_SRC_CLUSTER_ID, cluster_id);
+    mmio_write32(DMA_DST_CLUSTER_ID, 0);
+    mmio_write32(DMA_COUNT_D0,       row_beats);
+    mmio_write32(DMA_COUNT_D1,       row_count);
+    mmio_write32(DMA_COUNT_D2,       1);
+    mmio_write32(DMA_COUNT_D3,       1);
+    mmio_write32(DMA_SRC_STRIDE_D0,  BEAT_BYTES);
+    mmio_write32(DMA_SRC_STRIDE_D1,  src_row_stride);
+    mmio_write32(DMA_SRC_STRIDE_D2,  0);
+    mmio_write32(DMA_SRC_STRIDE_D3,  0);
+    mmio_write32(DMA_DST_STRIDE_D0,  BEAT_BYTES);
+    mmio_write32(DMA_DST_STRIDE_D1,  dst_row_stride);
+    mmio_write32(DMA_DST_STRIDE_D2,  0);
+    mmio_write32(DMA_DST_STRIDE_D3,  0);
+    mmio_write32(DMA_CMD_TAG,         tag);
     mmio_write32(DMA_CTRL,           DMA_CTRL_SUBMIT);
 }
 
 static inline void dma_wait_done(void) {
     while (!(mmio_read32(DMA_STATUS) & DMA_STATUS_IDLE)) {
+    }
+}
+
+static inline void dma_wait_tag(uint32_t tag) {
+    /* Use signed subtraction to handle "already past" tags and wrap-around */
+    while ((int32_t)(mmio_read32(DMA_DONE_TAG) - tag) < 0) {
     }
 }
 
@@ -480,6 +568,13 @@ typedef struct {
     uint16_t num_w_tiles;
     uint16_t num_ic_tiles;
 
+    uint16_t tile_h_out;
+    uint16_t tile_w_out;
+    uint16_t tile_h_in;
+    uint16_t tile_w_in;
+    uint16_t last_h_out;
+    uint16_t last_w_out;
+
     uint32_t spm_ping[4];
     uint32_t spm_pong[4];
     uint32_t agu_ping[4];
@@ -509,6 +604,7 @@ typedef struct {
     uint32_t dma_pli_words;
 
     uint8_t ps_reuse_across_spatial;
+    uint8_t spatial_2d_dma;
 
     uint16_t pd_ic_agu_offset;   /* NHWC-input: PD base_addr += ic * this */
 

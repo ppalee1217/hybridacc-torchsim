@@ -154,6 +154,11 @@ def compute_scan_chain_ultra(
     return entries
 
 
+def _pes_per_bus(hw: HardwareDesc) -> int:
+    """Return the number of output lanes available per bus."""
+    return hw.num_pes // hw.num_bus
+
+
 # ===================================================================
 # Cluster mapping
 # ===================================================================
@@ -243,6 +248,7 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
 
     half_cap = hw.half_group_capacity
     halo = KH - 1  # = 2
+    pes_per_bus = _pes_per_bus(hw)
 
     # -- Tiling search --
     num_ic_tiles = C_in // tile_ic
@@ -253,7 +259,9 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
         raise TilingFailed(f"{op.name}: weight tile {ps_wave}B > half_cap {half_cap}B")
 
     tile_h_out = tile_w_out = None
-    for th in range(H_out, 0, -1):
+    # Conv2D normal mode maps one output row per PE within a bus.
+    # Any tile taller than pes_per_bus would leave rows with no consumer.
+    for th in range(min(H_out, pes_per_bus), 0, -1):
         th_in = th + halo
         for tw in range(W_out, 0, -1):
             tw_in = tw + halo
@@ -273,6 +281,8 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
     tile_w_in = tile_w_out + halo
     num_h_tiles = math.ceil(H_out / tile_h_out)
     num_w_tiles = math.ceil(W_out / tile_w_out)
+    last_h_out = H_out - (num_h_tiles - 1) * tile_h_out
+    last_w_out = W_out - (num_w_tiles - 1) * tile_w_out
 
     pd_wave = tile_h_in * tile_w_in * in_ch_pack * PKT_SIZE
     pli_wave = tile_h_out * tile_w_out * out_ch_pack * PKT_SIZE
@@ -461,6 +471,12 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
         num_h_tiles=num_h_tiles,
         num_w_tiles=num_w_tiles,
         num_ic_tiles=num_ic_tiles,
+        tile_h_out=tile_h_out,
+        tile_w_out=tile_w_out,
+        tile_h_in=tile_h_in,
+        tile_w_in=tile_w_in,
+        last_h_out=last_h_out,
+        last_w_out=last_w_out,
         # DMA SPM addresses (with group bases) — bytes for DMA engine
         # PS/PD: ping/pong for double-buffering within their group
         # PLI/PLO: ping = even-ic group, pong = odd-ic group (bank swap)
@@ -489,7 +505,8 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
         dma_plo_words=pli_wave // PKT_SIZE,
         dram_bias_base=dram_bias_base,
         dma_pli_words=dma_pli_words,
-        ps_reuse_across_spatial=True,  # weight depends on (oc, ic) only
+        ps_reuse_across_spatial=False,  # disabled to ensure correct prefetching with double-buffering
+        spatial_2d_dma=True,
         pd_ic_agu_offset=pd_ic_agu_offset,
         bank_depth_bytes=hw.bank_depth_bytes,
         parallel_groups=0x0,  # no parallel groups for 3x3
@@ -538,6 +555,7 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     half_cap = hw.half_group_capacity
     pp = hw.parallel_ping_base
     ppong = hw.parallel_pong_base
+    pes_per_bus = _pes_per_bus(hw)
 
     num_ic_tiles = C_in // tile_ic
     num_oc_tiles = math.ceil(OC / tile_oc)
@@ -549,6 +567,8 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     tile_h = tile_w = None
     for th in range(H_in, 0, -1):
         for tw in range(W_in, 0, -1):
+            if th * tw > pes_per_bus:
+                continue
             pd = th * tw * in_ch_pack * PKT_SIZE
             pli = th * tw * out_ch_pack * PKT_SIZE
             if pd <= half_cap and pli <= half_cap and ps_wave <= half_cap:
@@ -563,6 +583,8 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
 
     num_h_tiles = math.ceil(H_out / tile_h)
     num_w_tiles = math.ceil(W_out / tile_w)
+    last_h_out = H_out - (num_h_tiles - 1) * tile_h
+    last_w_out = W_out - (num_w_tiles - 1) * tile_w
 
     pd_wave = tile_h * tile_w * in_ch_pack * PKT_SIZE
     pli_wave = tile_h * tile_w * out_ch_pack * PKT_SIZE
@@ -693,6 +715,12 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     tiling_params = TilingParams(
         num_oc_tiles=num_oc_tiles, num_h_tiles=num_h_tiles,
         num_w_tiles=num_w_tiles, num_ic_tiles=num_ic_tiles,
+        tile_h_out=tile_h,
+        tile_w_out=tile_w,
+        tile_h_in=tile_h,
+        tile_w_in=tile_w,
+        last_h_out=last_h_out,
+        last_w_out=last_w_out,
         spm_ping=[g0_dma + pp, g1_dma,            g2_dma + pp, g3_dma + pp],
         spm_pong=[g0_dma + ppong, g1_dma + half_cap, g3_dma + pp, g2_dma + pp],
         agu_ping=[pp_w, 0, pp_w, pp_w],
@@ -714,7 +742,8 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
         dma_plo_words=pli_wave // PKT_SIZE,
         dram_bias_base=dram_bias_base,
         dma_pli_words=dma_pli_words,
-        ps_reuse_across_spatial=True,
+        ps_reuse_across_spatial=False,
+        spatial_2d_dma=True,
         pd_ic_agu_offset=0,
         bank_depth_bytes=bdb,
         parallel_groups=0xD,  # PS, PLI, PLO (groups 0, 2, 3)
@@ -907,6 +936,12 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
         num_h_tiles=num_n_tiles,
         num_w_tiles=1,
         num_ic_tiles=num_k_tiles,
+        tile_h_out=1,
+        tile_w_out=1,
+        tile_h_in=1,
+        tile_w_in=1,
+        last_h_out=1,
+        last_w_out=1,
         spm_ping=[g0_dma + pp, g1_dma,            g2_dma + pp, g3_dma + pp],
         spm_pong=[g0_dma + ppong, g1_dma + half_cap, g3_dma + pp, g2_dma + pp],
         agu_ping=[pp_w, 0, pp_w, pp_w],
@@ -929,6 +964,7 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
         dram_bias_base=dram_bias_base,
         dma_pli_words=dma_pli_words,
         ps_reuse_across_spatial=False,
+        spatial_2d_dma=False,
         pd_ic_agu_offset=0,
         bank_depth_bytes=bdb,
         parallel_groups=0xD,  # PS, PLI, PLO

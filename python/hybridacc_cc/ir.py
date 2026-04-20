@@ -229,6 +229,14 @@ class TilingParams:
     num_w_tiles: int   # GEMM: 1
     num_ic_tiles: int  # Conv2D: IC, GEMM: K (reduction dim)
 
+    # Full wave tile geometry and last spatial tile extents
+    tile_h_out: int
+    tile_w_out: int
+    tile_h_in: int
+    tile_w_in: int
+    last_h_out: int
+    last_w_out: int
+
     # SPM ping/pong base per group [PS, PD, PLI, PLO]
     spm_ping: List[int]
     spm_pong: List[int]
@@ -267,6 +275,9 @@ class TilingParams:
 
     # Weight reuse
     ps_reuse_across_spatial: bool
+
+    # Runtime should use 2D spatial DMA helpers for PD/PLO
+    spatial_2d_dma: bool
 
     # PD IC-tile AGU offset (for NHWC-input multi-IC-tile layers)
     # When > 0, firmware adds ic * pd_ic_agu_offset to PD base_addr each wave
