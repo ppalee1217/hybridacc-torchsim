@@ -1220,10 +1220,6 @@ private:
 			status[(int)HdduStatusBit::IDLE] = !run_active_latched && !any_busy && !done_latched && (err_code_reg.read() == 0);
 
 			const uint32_t plane_en = plane_en_reg.read().to_uint();
-			const bool plane_on_ps = ((plane_en >> PLANE_PS) & 0x1u) != 0;
-			const bool plane_on_pd = ((plane_en >> PLANE_PD) & 0x1u) != 0;
-			const bool plane_on_pli = ((plane_en >> PLANE_PLI) & 0x1u) != 0;
-			const bool plane_on_plo = ((plane_en >> PLANE_PLO) & 0x1u) != 0;
 
 			unsigned stall_inc = 0;
 			unsigned tx_pkt_inc = 0;

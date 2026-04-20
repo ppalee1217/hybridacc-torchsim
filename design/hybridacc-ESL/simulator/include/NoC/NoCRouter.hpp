@@ -651,14 +651,14 @@ private:
         bool all_valid = true;
         sc_biguint<NUM_PORTS*PORT_WIDTH_BITS> collected_data = 0;
         uint64_t valid_rx = 0;
-        bool error_flag = false;
+        // bool error_flag = false;
 
         for (size_t i = 0; i < num_ports; ++i) {
             if(bus_to_noc_plo_resp[i].valid_in.read()) {
                 valid_rx |= (1ULL << i);
-                if ( bus_to_noc_plo_resp[i].data_in.read().status == NOC_RESPONSE_STATUS::NOC_ERROR) {
-                    error_flag = true;
-                }
+                // if ( bus_to_noc_plo_resp[i].data_in.read().status == NOC_RESPONSE_STATUS::NOC_ERROR) {
+                //     error_flag = true;
+                // }
             }
         }
 
@@ -676,10 +676,10 @@ private:
             bool resp_received = false;
             for (size_t i = 0; i < num_ports; ++i) {
                 if (valid_rx & (1ULL << i)) {
-                    if (resp_received) {
-                        // More than one response received -> error
-                        error_flag = true;
-                    }
+                    // if (resp_received) {
+                    //     // More than one response received -> error
+                    //     error_flag = true;
+                    // }
                     resp_received = true;
                     collected_data.range(63, 0) = bus_to_noc_plo_resp[i].data_in.read().data;
                 }

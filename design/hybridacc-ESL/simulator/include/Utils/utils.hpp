@@ -41,6 +41,7 @@ enum DebugLevel {
                 std::cout << "[Debug] Time: " << sc_time_stamp()      \
                           << " [" << this->name() << "] "          \
                           << msg << std::endl;                        \
+                std::cout.flush(); \
             }                                                         \
         } while (0)
 
@@ -48,6 +49,7 @@ enum DebugLevel {
         do { \
             if ((level) <= DEBUG_LEVEL_MAX && (level) >= DEBUG_LEVEL_MIN) { \
                 std::printf("[Debug] Time: %s [%s] " fmt, sc_time_stamp().to_string().c_str(), this->name(), ##__VA_ARGS__);\
+                fflush(stdout); \
             } \
         } while (0)
 #else
