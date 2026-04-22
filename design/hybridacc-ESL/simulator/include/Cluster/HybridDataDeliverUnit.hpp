@@ -837,6 +837,8 @@ private:
 		switch (a) {
 			case MMIO_GLOBAL_CTRL: {
 				global_ctrl_reg.write(wdata);
+				const uint32_t active_plane_mask = plane_en_reg.read().to_uint() & DEFAULT_PLANE_EN;
+				const bool has_active_plane = active_plane_mask != 0u;
 				if (wdata[(int)HdduCtrlBit::SOFT_RESET]) { // Global soft-reset bit
 					err_code_reg.write(0);
 					err_info0_reg.write(0);
@@ -852,15 +854,19 @@ private:
 				}
 				if (wdata[(int)HdduCtrlBit::START]) { // Global start bit
 					for (int i = 0; i < NUM_AGU; ++i) {
-						agu_start_sig[i].write(true);
+						if (((active_plane_mask >> i) & 0x1u) != 0u) {
+							agu_start_sig[i].write(true);
+						}
 					}
-					// Immediately reflect BUSY in status so firmware polling
-					// doesn't race with the 1-cycle AGU startup delay.
-					sc_uint<32> status = global_status_reg.read();
-					status[(int)HdduStatusBit::BUSY] = true;
-					status[(int)HdduStatusBit::IDLE] = false;
-					global_status_reg.write(status);
-					start_pending_ = true;  // visible to comb_mmio_read immediately
+					if (has_active_plane) {
+						// Immediately reflect BUSY in status so firmware polling
+						// doesn't race with the 1-cycle AGU startup delay.
+						sc_uint<32> status = global_status_reg.read();
+						status[(int)HdduStatusBit::BUSY] = true;
+						status[(int)HdduStatusBit::IDLE] = false;
+						global_status_reg.write(status);
+						start_pending_ = true;  // visible to comb_mmio_read immediately
+					}
 				}
 				if (wdata[(int)HdduCtrlBit::STOP]) { // Global stop bit
 					for (int i = 0; i < NUM_AGU; ++i) {
@@ -1188,6 +1194,8 @@ private:
 			const bool global_reset_cmd = global_ctrl_write && ctrl_wdata[(int)HdduCtrlBit::SOFT_RESET];
 			const bool global_start_cmd = global_ctrl_write && ctrl_wdata[(int)HdduCtrlBit::START];
 			const bool global_stop_cmd = global_ctrl_write && ctrl_wdata[(int)HdduCtrlBit::STOP];
+			const bool global_start_has_enabled_plane =
+				global_start_cmd && ((plane_en_reg.read().to_uint() & DEFAULT_PLANE_EN) != 0u);
 
 			if (global_reset_cmd) {
 				run_active_latched = false;
@@ -1195,7 +1203,7 @@ private:
 				prev_any_busy_latched = false;
 			}
 			if (global_start_cmd) {
-				run_active_latched = true;
+				run_active_latched = global_start_has_enabled_plane;
 				done_latched = false;
 				prev_any_busy_latched = false;
 			}

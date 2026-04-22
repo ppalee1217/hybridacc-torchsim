@@ -126,9 +126,9 @@ fp16_t fp16_mul(fp16_t a, fp16_t b);
 
 template<typename DATA_TYPE, typename ADDR_TYPE>
 struct request_t {
-    DATA_TYPE data; // 64 bits
-    ADDR_TYPE addr; // 9 bits
-    size_t mask; // for async FIFO
+    DATA_TYPE data{}; // 64 bits
+    ADDR_TYPE addr{}; // 9 bits
+    size_t mask = 0; // for async FIFO
 
     // 相等運算符，SystemC 需要
     bool operator==(const request_t& other) const {
@@ -219,8 +219,8 @@ inline void sc_trace(sc_core::sc_trace_file* tf, const NOC_RESPONSE_STATUS& stat
 
 template<typename DATA_TYPE>
 struct response_t {
-    DATA_TYPE data; // 64 bits
-    NOC_RESPONSE_STATUS status; // response status
+    DATA_TYPE data{}; // 64 bits
+    NOC_RESPONSE_STATUS status = NOC_RESPONSE_STATUS::NOC_NOP; // response status
 
     // 相等運算符，SystemC 需要
     bool operator==(const response_t& other) const {
@@ -263,9 +263,9 @@ inline void sc_trace(sc_core::sc_trace_file* tf, const SPM_RESPONSE_CODE& code, 
 
 template<int ADDR_BITS, int DATA_BITS>
 struct spm_request_t {
-    sc_dt::sc_uint<ADDR_BITS> addr;
-    sc_dt::sc_biguint<DATA_BITS> wdata;
-    bool wen;
+    sc_dt::sc_uint<ADDR_BITS> addr = 0;
+    sc_dt::sc_biguint<DATA_BITS> wdata = 0;
+    bool wen = false;
 
     bool operator==(const spm_request_t& other) const {
         return addr == other.addr && wdata == other.wdata && wen == other.wen;
@@ -287,8 +287,8 @@ struct spm_request_t {
 
 template<int DATA_BITS>
 struct spm_response_t {
-    sc_dt::sc_biguint<DATA_BITS> rdata;
-    SPM_RESPONSE_CODE code;
+    sc_dt::sc_biguint<DATA_BITS> rdata = 0;
+    SPM_RESPONSE_CODE code = SPM_RESPONSE_CODE::SPM_OK;
 
     bool operator==(const spm_response_t& other) const {
         return rdata == other.rdata && code == other.code;
@@ -308,60 +308,60 @@ struct spm_response_t {
 
 // -----------------------------------------------------------------------------
 struct pe_decode_signals_t {
-    uint16_t inst;
+    uint16_t inst = 0;
     // --- Stage IF/ID --- //
-    bool halt;
-    bool nop;
-    int func3;
-    uint16_t imm; // stride/addr/len/kernel immediate
+    bool halt = false;
+    bool nop = false;
+    int func3 = 0;
+    uint16_t imm = 0; // stride/addr/len/kernel immediate
     // Loop control signals
-    bool loop_in;
-    bool loop_end;
+    bool loop_in = false;
+    bool loop_end = false;
     // Swap Control
-    bool is_swap;
+    bool is_swap = false;
 
     // SYS.CTRL flags
-    bool sys_sdma_act;
-    bool sys_sdma_rst;
-    bool sys_ldma_act;
-    bool sys_ldma_rst;
-    bool sys_rst_pid;
-    bool sys_rst_tid;
+    bool sys_sdma_act = false;
+    bool sys_sdma_rst = false;
+    bool sys_ldma_act = false;
+    bool sys_ldma_rst = false;
+    bool sys_rst_pid = false;
+    bool sys_rst_tid = false;
 
     // --- Stage EXE/M --- //
     // DL control signals
-    bool DMA_setaddr;
-    bool DMA_setlen;
-    bool DMA_setloop;
-    bool DMA_setmode; // func3
-    bool LDMA_next;
-    bool DMA_is_sdma;
+    bool DMA_setaddr = false;
+    bool DMA_setlen = false;
+    bool DMA_setloop = false;
+    bool DMA_setmode = false; // func3
+    bool LDMA_next = false;
+    bool DMA_is_sdma = false;
     // TR control signals
-    int rid3;
-    int rid5;
-    bool pd_load;
-    bool pd_load_v;
-    bool tr_en;
-    bool tr_write;
-    bool tr_write_v;
-    bool tr_shift;
-    bool tr_clear_regs;
-    bool tr_use_vcounter;
-    bool tr_incr_vcounter;
+    int rid3 = 0;
+    int rid5 = 0;
+    bool pd_load = false;
+    bool pd_load_v = false;
+    bool tr_en = false;
+    bool tr_write = false;
+    bool tr_write_v = false;
+    bool tr_shift = false;
+    bool tr_clear_regs = false;
+    bool tr_use_vcounter = false;
+    bool tr_incr_vcounter = false;
 
     // --- Stage EXE/A --- //
     // port
-    bool pli_plo_operation;
+    bool pli_plo_operation = false;
     // PR control signals
-    bool pr_en;
-    bool pr_write;
-    bool pr_mode; // 0: scalar, 1: vector 64-bit
-    bool pr_clear_regs;
-    bool pr_use_vcounter;
-    bool pr_incr_vcounter;
+    bool pr_en = false;
+    bool pr_write = false;
+    bool pr_mode = false; // 0: scalar, 1: vector 64-bit
+    bool pr_clear_regs = false;
+    bool pr_use_vcounter = false;
+    bool pr_incr_vcounter = false;
     // VADDU control signals
-    bool vaddu_en;
-    int vaddu_mode;
+    bool vaddu_en = false;
+    int vaddu_mode = 0;
 };
 
 
@@ -413,7 +413,46 @@ inline std::ostream& operator<<(std::ostream& os, const pe_decode_signals_t& sig
 
 // == for pe_decode_signals_t
 inline bool operator==(const pe_decode_signals_t& a, const pe_decode_signals_t& b) {
-    return std::memcmp(&a, &b, sizeof(pe_decode_signals_t)) == 0;
+    return a.inst == b.inst &&
+           a.halt == b.halt &&
+           a.nop == b.nop &&
+           a.func3 == b.func3 &&
+           a.imm == b.imm &&
+           a.loop_in == b.loop_in &&
+           a.loop_end == b.loop_end &&
+           a.is_swap == b.is_swap &&
+           a.sys_sdma_act == b.sys_sdma_act &&
+           a.sys_sdma_rst == b.sys_sdma_rst &&
+           a.sys_ldma_act == b.sys_ldma_act &&
+           a.sys_ldma_rst == b.sys_ldma_rst &&
+           a.sys_rst_pid == b.sys_rst_pid &&
+           a.sys_rst_tid == b.sys_rst_tid &&
+           a.DMA_setaddr == b.DMA_setaddr &&
+           a.DMA_setlen == b.DMA_setlen &&
+           a.DMA_setloop == b.DMA_setloop &&
+           a.DMA_setmode == b.DMA_setmode &&
+           a.LDMA_next == b.LDMA_next &&
+           a.DMA_is_sdma == b.DMA_is_sdma &&
+           a.rid3 == b.rid3 &&
+           a.rid5 == b.rid5 &&
+           a.pd_load == b.pd_load &&
+           a.pd_load_v == b.pd_load_v &&
+           a.tr_en == b.tr_en &&
+           a.tr_write == b.tr_write &&
+           a.tr_write_v == b.tr_write_v &&
+           a.tr_shift == b.tr_shift &&
+           a.tr_clear_regs == b.tr_clear_regs &&
+           a.tr_use_vcounter == b.tr_use_vcounter &&
+           a.tr_incr_vcounter == b.tr_incr_vcounter &&
+           a.pli_plo_operation == b.pli_plo_operation &&
+           a.pr_en == b.pr_en &&
+           a.pr_write == b.pr_write &&
+           a.pr_mode == b.pr_mode &&
+           a.pr_clear_regs == b.pr_clear_regs &&
+           a.pr_use_vcounter == b.pr_use_vcounter &&
+           a.pr_incr_vcounter == b.pr_incr_vcounter &&
+           a.vaddu_en == b.vaddu_en &&
+           a.vaddu_mode == b.vaddu_mode;
 }
 
 // sc_trace for pe_decode_signals_t
@@ -590,12 +629,12 @@ inline void sc_trace(sc_core::sc_trace_file* tf, const message_command_t& comman
 
 // scan-chain utilities
 struct ScanChainFormat{
-    uint8_t ps_id;
-    uint8_t pd_id;
-    uint8_t pli_id;
-    uint8_t plo_id;
-    PERouterMode route_mode;
-    bool enable;
+    uint8_t ps_id = 0;
+    uint8_t pd_id = 0;
+    uint8_t pli_id = 0;
+    uint8_t plo_id = 0;
+    PERouterMode route_mode = PERouterMode::PLI_FROM_LN_PLO_TO_LN;
+    bool enable = false;
 
     // Add equality operator for SystemC signals
     bool operator==(const ScanChainFormat& other) const {
@@ -631,7 +670,7 @@ struct ScanChainFormat{
 
 // parse scan-chain data from uint32_t
 inline ScanChainFormat parse_scan_chain_data(uint32_t data) {
-    ScanChainFormat format;
+    ScanChainFormat format{};
     format.ps_id = (data >> 4) & 0x3F;
     format.pd_id = (data >> 10) & 0x3F;
     format.pli_id = (data >> 16) & 0x3F;

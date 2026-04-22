@@ -623,7 +623,13 @@ int sc_main(int argc, char* argv[]) {
 
     // Summary
     std::cout << "\n[SIM] === OVERALL ===" << std::endl;
-    bool all_pass = fw_ok && dram_ok;
+    bool driver_ok = driver.run_passed && !driver.run_timed_out;
+    if (!driver_ok) {
+        std::cout << "[SIM] Boot/EBREAK run status: FAIL"
+                  << (driver.run_timed_out ? " (timeout)" : "")
+                  << std::endl;
+    }
+    bool all_pass = driver_ok && fw_ok && dram_ok;
     std::cout << "[SIM] " << (all_pass ? "ALL TESTS PASSED" : "SOME TESTS FAILED")
               << std::endl;
 

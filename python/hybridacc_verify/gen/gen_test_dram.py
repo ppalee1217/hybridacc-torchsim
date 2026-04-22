@@ -175,6 +175,263 @@ def _tile_input_ic(inp: np.ndarray, num_ic_tiles: int, tile_ic: int) -> bytes:
     return x.astype(np.float16).tobytes()
 
 
+def _pack_gemm_a_pd(A: np.ndarray, layer: dict) -> bytes:
+    """Pack GEMM A[M, K] into the PD DMA-visible packed wave layout."""
+    if A.ndim != 2:
+        raise ValueError(f"GEMM activation must be rank-2, got shape {A.shape}")
+
+    tp = layer["tiling_params"]
+    meta = _gemm_wave_meta(layer)
+    tp = layer["tiling_params"]
+    M, K = A.shape
+
+    tile_bytes = int(tp.get("dma_pd_words", 0)) * 8
+    if tile_bytes <= 0:
+        raise ValueError("Invalid GEMM dma_pd_words=0")
+
+    packed_region = bytearray(
+        _gemm_region_size(
+            int(tp.get("num_oc_tiles", 1)),
+            int(tp.get("dram_pd_oc_stride", 0)),
+            int(tp.get("num_ic_tiles", 1)),
+            int(tp.get("dram_pd_ic_stride", 0)),
+            tile_bytes,
+        )
+    )
+
+    for m_wave in range(int(tp.get("num_oc_tiles", 1))):
+        m_tile_start, m_tiles_active = _gemm_wave_tile_range(
+            m_wave, int(meta["grid_m_per_wave"]), int(meta["grid_m"])
+        )
+        for k_wave in range(int(tp.get("num_ic_tiles", 1))):
+            k_stage_start, k_stages_active = _gemm_wave_tile_range(
+                k_wave, int(meta["grid_k_per_wave"]), int(meta["grid_k"])
+            )
+            packed_tile = np.zeros(
+                (
+                    int(meta["k_tile_dim"]),
+                    int(meta["grid_m_per_wave"]),
+                    int(meta["tile_d_words"]),
+                    int(meta["rows_per_word"]),
+                ),
+                dtype=np.float16,
+            )
+            active_k = min(int(meta["k_tile_dim"]), k_stages_active * int(meta["pe_k"]))
+            for local_k in range(active_k):
+                k_global = k_stage_start * int(meta["pe_k"]) + local_k
+                if k_global >= K:
+                    continue
+                for local_m_tile in range(m_tiles_active):
+                    m_global_tile = m_tile_start + local_m_tile
+                    row_base = m_global_tile * int(meta["pe_m"])
+                    for row_word in range(int(meta["tile_d_words"])):
+                        row_word_base = row_base + row_word * int(meta["rows_per_word"])
+                        for lane in range(int(meta["rows_per_word"])):
+                            m_global = row_word_base + lane
+                            if m_global >= M:
+                                continue
+                            packed_tile[local_k, local_m_tile, row_word, lane] = A[m_global, k_global]
+
+            offset = (
+                m_wave * int(tp.get("dram_pd_oc_stride", 0))
+                + k_wave * int(tp.get("dram_pd_ic_stride", 0))
+            )
+            packed_region[offset:offset + tile_bytes] = np.ascontiguousarray(packed_tile).tobytes()
+
+    return bytes(packed_region)
+
+
+def _gemm_wave_meta(layer: dict) -> dict[str, int]:
+    pe_params = layer.get("pe_program", {}).get("params", {})
+    tp = layer.get("tiling_params", {})
+    agu_ps = layer.get("agu_ps", {})
+    agu_pd = layer.get("agu_pd", {})
+    rows_per_word = 4
+    grid_m = max(1, int(pe_params.get("GRID_M", 1)))
+    grid_n = max(1, int(pe_params.get("GRID_N", 1)))
+    grid_k = max(1, int(pe_params.get("GRID_K", 1)))
+    grid_m_per_wave = max(1, int(pe_params.get("GRID_M_PER_WAVE", grid_m)))
+    grid_n_per_wave = max(1, int(pe_params.get("GRID_N_PER_WAVE", grid_n)))
+    grid_k_per_wave = max(1, int(pe_params.get("GRID_K_PER_WAVE", grid_k)))
+    tile_d_words = max(1, int(agu_pd.get("iter0", 1)))
+    tile_w_words = max(1, int(agu_ps.get("iter0", 1)))
+    pe_m = tile_d_words * rows_per_word
+    pe_n = max(1, int(pe_params.get("OUTPUT_DIM", tile_w_words * rows_per_word)))
+    pe_k = max(1, int(pe_params.get("K_TILE_DIM", pe_params.get("INPUT_DIM", 1))))
+    ps_words = max(0, int(tp.get("dma_ps_words", 0)))
+    ps_words_per_k = max(1, tile_w_words * grid_n_per_wave)
+    pd_words = max(0, int(tp.get("dma_pd_words", 0)))
+    pd_words_per_k = max(1, tile_d_words * grid_m_per_wave)
+    k_tile_dim = max(
+        1,
+        ps_words // ps_words_per_k,
+        pd_words // pd_words_per_k,
+        pe_k * grid_k_per_wave,
+    )
+    return {
+        "grid_m": grid_m,
+        "grid_n": grid_n,
+        "grid_k": grid_k,
+        "grid_m_per_wave": grid_m_per_wave,
+        "grid_n_per_wave": grid_n_per_wave,
+        "grid_k_per_wave": grid_k_per_wave,
+        "tile_d_words": tile_d_words,
+        "tile_w_words": tile_w_words,
+        "rows_per_word": rows_per_word,
+        "pe_m": pe_m,
+        "pe_n": pe_n,
+        "pe_k": pe_k,
+        "k_tile_dim": k_tile_dim,
+    }
+
+
+def _gemm_wave_tile_range(wave_idx: int, tiles_per_wave: int, total_tiles: int) -> tuple[int, int]:
+    start = wave_idx * tiles_per_wave
+    end = min(total_tiles, start + tiles_per_wave)
+    return start, max(0, end - start)
+
+
+def _gemm_region_size(count_outer: int, outer_stride: int, count_inner: int,
+                      inner_stride: int, tile_bytes: int) -> int:
+    last_offset = 0
+    if count_outer > 0:
+        last_offset += (count_outer - 1) * outer_stride
+    if count_inner > 0:
+        last_offset += (count_inner - 1) * inner_stride
+    return last_offset + tile_bytes
+
+
+def _pack_gemm_b_ps(B: np.ndarray, layer: dict) -> bytes:
+    """Pack GEMM B[K, N] into the PS DMA-visible packed wave layout."""
+    if B.ndim != 2:
+        raise ValueError(f"GEMM weight must be rank-2, got shape {B.shape}")
+
+    tp = layer["tiling_params"]
+    meta = _gemm_wave_meta(layer)
+    K, N = B.shape
+    tile_bytes = int(tp.get("dma_ps_words", 0)) * 8
+    if tile_bytes <= 0:
+        raise ValueError("Invalid GEMM dma_ps_words=0")
+
+    packed_region = bytearray(
+        _gemm_region_size(
+            int(tp.get("num_h_tiles", 1)),
+            int(tp.get("dram_ps_h_stride", 0)),
+            int(tp.get("num_ic_tiles", 1)),
+            int(tp.get("dram_ps_ic_stride", 0)),
+            tile_bytes,
+        )
+    )
+
+    for n_wave in range(int(tp.get("num_h_tiles", 1))):
+        n_tile_start, n_tiles_active = _gemm_wave_tile_range(
+            n_wave, int(meta["grid_n_per_wave"]), int(meta["grid_n"])
+        )
+        for k_wave in range(int(tp.get("num_ic_tiles", 1))):
+            k_stage_start, k_stages_active = _gemm_wave_tile_range(
+                k_wave, int(meta["grid_k_per_wave"]), int(meta["grid_k"])
+            )
+            packed_tile = np.zeros(
+                (
+                    int(meta["k_tile_dim"]),
+                    int(meta["grid_n_per_wave"]),
+                    int(meta["tile_w_words"]),
+                    int(meta["rows_per_word"]),
+                ),
+                dtype=np.float16,
+            )
+            active_k = min(int(meta["k_tile_dim"]), k_stages_active * int(meta["pe_k"]))
+            for local_k in range(active_k):
+                k_global = k_stage_start * int(meta["pe_k"]) + local_k
+                if k_global >= K:
+                    continue
+                for local_n_tile in range(n_tiles_active):
+                    n_global_tile = n_tile_start + local_n_tile
+                    col_base = n_global_tile * int(meta["pe_n"])
+                    for word_idx in range(int(meta["tile_w_words"])):
+                        word_base = col_base + word_idx * int(meta["rows_per_word"])
+                        for lane in range(int(meta["rows_per_word"])):
+                            n_global = word_base + lane
+                            if n_global >= N:
+                                continue
+                            packed_tile[local_k, local_n_tile, word_idx, lane] = B[k_global, n_global]
+
+            offset = (
+                n_wave * int(tp.get("dram_ps_h_stride", 0))
+                + k_wave * int(tp.get("dram_ps_ic_stride", 0))
+            )
+            packed_region[offset:offset + tile_bytes] = np.ascontiguousarray(packed_tile).tobytes()
+
+    return bytes(packed_region)
+
+
+def _pack_gemm_c_output(C: np.ndarray, layer: dict) -> bytes:
+    """Pack GEMM C[M, N] into the PLO DMA-visible packed wave layout."""
+    if C.ndim != 2:
+        raise ValueError(f"GEMM output must be rank-2, got shape {C.shape}")
+
+    tp = layer["tiling_params"]
+    meta = _gemm_wave_meta(layer)
+    M, N = C.shape
+    tile_bytes = int(tp.get("dma_plo_words", 0)) * 8
+    if tile_bytes <= 0:
+        raise ValueError("Invalid GEMM dma_plo_words=0")
+
+    packed_region = bytearray(
+        _gemm_region_size(
+            int(tp.get("num_oc_tiles", 1)),
+            int(tp.get("dram_out_oc_stride", 0)),
+            int(tp.get("num_h_tiles", 1)),
+            int(tp.get("dram_out_h_stride", 0)),
+            tile_bytes,
+        )
+    )
+
+    for m_wave in range(int(tp.get("num_oc_tiles", 1))):
+        m_tile_start, m_tiles_active = _gemm_wave_tile_range(
+            m_wave, int(meta["grid_m_per_wave"]), int(meta["grid_m"])
+        )
+        for n_wave in range(int(tp.get("num_h_tiles", 1))):
+            n_tile_start, n_tiles_active = _gemm_wave_tile_range(
+                n_wave, int(meta["grid_n_per_wave"]), int(meta["grid_n"])
+            )
+            packed_tile = np.zeros(
+                (
+                    int(meta["grid_m_per_wave"]),
+                    int(meta["grid_n_per_wave"]),
+                    int(meta["pe_n"]),
+                    int(meta["tile_d_words"]),
+                    int(meta["rows_per_word"]),
+                ),
+                dtype=np.float16,
+            )
+            for local_m_tile in range(m_tiles_active):
+                m_global_tile = m_tile_start + local_m_tile
+                row_base = m_global_tile * int(meta["pe_m"])
+                for local_n_tile in range(n_tiles_active):
+                    n_global_tile = n_tile_start + local_n_tile
+                    col_base = n_global_tile * int(meta["pe_n"])
+                    for n_local in range(int(meta["pe_n"])):
+                        n_global = col_base + n_local
+                        if n_global >= N:
+                            continue
+                        for row_word in range(int(meta["tile_d_words"])):
+                            row_word_base = row_base + row_word * int(meta["rows_per_word"])
+                            for lane in range(int(meta["rows_per_word"])):
+                                m_global = row_word_base + lane
+                                if m_global >= M:
+                                    continue
+                                packed_tile[local_m_tile, local_n_tile, n_local, row_word, lane] = C[m_global, n_global]
+
+            offset = (
+                m_wave * int(tp.get("dram_out_oc_stride", 0))
+                + n_wave * int(tp.get("dram_out_h_stride", 0))
+            )
+            packed_region[offset:offset + tile_bytes] = np.ascontiguousarray(packed_tile).tobytes()
+
+    return bytes(packed_region)
+
+
 def _tile_output(output: np.ndarray, layer: dict) -> bytes:
     """Rearrange NHWC output into the firmware's tile-packed DRAM layout.
 
@@ -184,14 +441,13 @@ def _tile_output(output: np.ndarray, layer: dict) -> bytes:
     writes back a fixed-size tile for every (oc, h, w) wave.
     """
     tp = layer["tiling_params"]
-    agu_plo = layer["agu_plo"]
     pe_params = layer["pe_program"]["params"]
 
     num_oc_tiles = tp["num_oc_tiles"]
     num_h_tiles = tp["num_h_tiles"]
     num_w_tiles = tp["num_w_tiles"]
-    tile_h = agu_plo["iter1"]
-    tile_w = agu_plo["iter2"]
+    tile_h = tp["tile_h_out"]
+    tile_w = tp["tile_w_out"]
     tile_oc = pe_params["KERNEL_COUNT"]
 
     expected_tile_bytes = tp["dram_out_w_stride"]
@@ -219,11 +475,44 @@ def _tile_output(output: np.ndarray, layer: dict) -> bytes:
                        :w_end - w_start,
                        :oc_end - oc_start] = output[:, h_start:h_end, w_start:w_end, oc_start:oc_end]
 
-    expected_total_bytes = num_oc_tiles * num_h_tiles * num_w_tiles * tp["dma_plo_words"] * 8
+    expected_total_bytes = N * num_oc_tiles * num_h_tiles * num_w_tiles * tp["dram_out_w_stride"]
     output_bytes = np.ascontiguousarray(packed).tobytes()
     assert len(output_bytes) == expected_total_bytes, \
         f"Packed output size mismatch: {len(output_bytes)} vs expected {expected_total_bytes}"
     return output_bytes
+
+
+def _parallel_bank_span(tp: dict, plane: str) -> int:
+    plane_bit = {"ps": 0, "pd": 1, "pli": 2, "plo": 3}[plane]
+    if (tp.get("parallel_groups", 0) & (1 << plane_bit)) == 0:
+        return 1
+
+    rows_key = {
+        "pd": "dma_pd_rows_per_bank",
+        "pli": "dma_pli_rows_per_bank",
+        "plo": "dma_plo_rows_per_bank",
+    }.get(plane)
+    total_rows_key = "tile_h_in" if plane == "pd" else "tile_h_out"
+
+    if rows_key is None:
+        return 1
+
+    rows_per_bank = tp.get(rows_key, 0)
+    total_rows = tp.get(total_rows_key, 0)
+    if rows_per_bank <= 0 or total_rows <= 0:
+        return 1
+    return max(1, (total_rows + rows_per_bank - 1) // rows_per_bank)
+
+
+def _bias_region_size(tp: dict) -> int:
+    last_offset = 0
+    num_oc = int(tp.get("num_oc_tiles", 1))
+    num_h = int(tp.get("num_h_tiles", 1))
+    if num_oc > 0:
+        last_offset += (num_oc - 1) * int(tp.get("dram_bias_oc_stride", 0))
+    if num_h > 0:
+        last_offset += (num_h - 1) * int(tp.get("dram_bias_h_stride", 0))
+    return last_offset + int(tp.get("dma_pli_words", 0)) * 8
 
 
 def main():
@@ -328,12 +617,12 @@ def main():
         elif op["type"] == "gemm":
             a_name = op["inputs"][0]
             b_name = op["inputs"][1]
-            a_offset = tp["dram_weight_base"] - dram_base  # A mapped to weight slot
-            b_offset = tp["dram_input_base"] - dram_base   # B mapped to input slot
+            a_offset = tp["dram_input_base"] - dram_base   # A mapped to PD/input slot
+            b_offset = tp["dram_weight_base"] - dram_base  # B mapped to PS/weight slot
             if i == 0 or a_name not in output_tensor_names:
-                dram_regions.append((a_offset, _get_tensor_bytes(tensors_data[a_name])))
+                dram_regions.append((a_offset, _pack_gemm_a_pd(tensors_data[a_name], layer)))
             if i == 0 or b_name not in output_tensor_names:
-                dram_regions.append((b_offset, _get_tensor_bytes(tensors_data[b_name])))
+                dram_regions.append((b_offset, _pack_gemm_b_ps(tensors_data[b_name], layer)))
 
     # Compute total DRAM size
     # Golden output in tile-packed layout matching firmware DMA writeback order
@@ -341,7 +630,9 @@ def main():
     num_oc_tiles_final = final_tp.get("num_oc_tiles", 1)
     num_h_tiles_final = final_tp.get("num_h_tiles", 1)
     num_w_tiles_final = final_tp.get("num_w_tiles", 1)
-    if final_golden.ndim == 4 and (num_oc_tiles_final > 1 or num_h_tiles_final > 1 or num_w_tiles_final > 1):
+    if final_op["type"] == "gemm":
+        output_bytes = _pack_gemm_c_output(final_golden, layers[-1])
+    elif final_golden.ndim == 4 and (num_oc_tiles_final > 1 or num_h_tiles_final > 1 or num_w_tiles_final > 1):
         output_bytes = _tile_output(final_golden, layers[-1])
     else:
         output_bytes = _get_tensor_bytes(final_golden)
@@ -359,10 +650,8 @@ def main():
     for layer in layers:
         tp = layer["tiling_params"]
         bias_base = tp.get("dram_bias_base", 0)
-        pli_words = tp.get("dma_pli_words", 0)
-        num_oc = tp.get("num_oc_tiles", 1)
-        if bias_base > dram_base and pli_words > 0:
-            bias_end = (bias_base - dram_base) + num_oc * pli_words * 8
+        if bias_base > dram_base and tp.get("dma_pli_words", 0) > 0:
+            bias_end = (bias_base - dram_base) + _bias_region_size(tp)
             if bias_end + 256 > dram_size:
                 dram_size = bias_end + 256
 

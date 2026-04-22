@@ -333,14 +333,14 @@ private:
     void write_proc() {
         std::deque<WriteReq> aw_fifo_reg;
         std::deque<WBeat> w_fifo_reg;
-        
+
         WriteReq active_aw_reg;
         bool active_aw_valid_reg = false;
         unsigned active_aw_beat_reg = 0;
 
         bool aw_prev_ready_reg = false;
         bool w_prev_ready_reg = false;
-        
+
         unsigned b_pending_cnt_reg = 0;
         bool b_send_valid_reg = false;
         sc_uint<2> b_send_resp_reg = 0;
@@ -739,6 +739,8 @@ public:
     uint32_t manifest_num_entries = 0;
     uint32_t boot_addr = 0;
     uint32_t max_cycles = 500000;
+    bool run_passed = false;
+    bool run_timed_out = false;
 
     SC_HAS_PROCESS(BootTestDriver);
 
@@ -803,6 +805,9 @@ private:
     }
 
     void main_proc() {
+        run_passed = false;
+        run_timed_out = false;
+
         aw_valid_o.write(false); aw_addr_o.write(0);
         w_valid_o.write(false); w_data_o.write(0); w_strb_o.write(0);
         b_ready_o.write(false);
@@ -831,6 +836,7 @@ private:
         }
         if (cycle >= max_cycles) {
             std::cerr << "[TB] ERROR: Timeout waiting for loader IRQ" << std::endl;
+            run_timed_out = true;
             sc_stop(); return;
         }
 
@@ -860,12 +866,14 @@ private:
             irq = axi_read(kIrqSummary);
             std::cerr << "[TB] Final IRQ_SUMMARY=0x" << std::hex << irq
                       << std::dec << std::endl;
+            run_timed_out = true;
             sc_stop(); return;
         }
 
         std::cout << "[TB] === Simulation complete ===" << std::endl;
         std::cout << "[TB] EBREAK at cycle " << cycle
                   << ", IRQ_SUMMARY=0x" << std::hex << irq << std::dec << std::endl;
+        run_passed = true;
         TRACE_EVENT("core_running", "Core", TRACE_END, 0, 0, "{}");
         sc_stop();
     }
