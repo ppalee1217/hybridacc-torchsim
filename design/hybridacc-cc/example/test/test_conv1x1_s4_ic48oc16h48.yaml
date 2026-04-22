@@ -1,8 +1,5 @@
-# HybridAcc-CC Workload: Conv2D 1x1 Example
-# Usage: hacc-compile conv2d_1x1_example.yaml -o build/
-
-name: conv2d_1x1_example
-
+# T-1x1-S4: Conv1x1 Multi Wave + Multi Bus — IC tiling with 3-bank transport
+name: test_conv1x1_s4_ic48oc16h48
 hardware:
   num_clusters: 1
   num_pes: 48
@@ -10,21 +7,19 @@ hardware:
   spm_banks_per_group: 3
   spm_bank_depth: 8192
   dram_base: 0x80000000
-
 tensors:
   input:
-    shape: [1, 48, 16, 12]
+    shape: [1, 48, 10, 48]
     dtype: fp16
     layout: NHWC
   weight:
-    shape: [16, 1, 1, 12]
+    shape: [16, 1, 1, 48]
     dtype: fp16
     layout: OIHW
   output:
-    shape: [1, 48, 16, 16]
+    shape: [1, 48, 10, 16]
     dtype: fp16
     layout: NHWC
-
 ops:
   - name: conv1x1
     type: conv2d_1x1

@@ -80,8 +80,8 @@ ha-package --help
 # workload.yaml
 hardware:
   num_clusters: 4
-  pes_per_cluster: 64
-  spm_size_kb: 32
+  pes_per_cluster: 48
+  spm_size_kb: 64
   isram_size_kb: 16
   dsram_size_kb: 64
 
@@ -257,7 +257,7 @@ output_dir/
 hardware:
   num_clusters: 1
   pes_per_cluster: 16
-  spm_size_kb: 32
+  spm_size_kb: 64
   isram_size_kb: 16
   dsram_size_kb: 64
 
@@ -330,8 +330,8 @@ riscv32-unknown-elf-size build/firmware.elf
 # mixed_network.yaml
 hardware:
   num_clusters: 4
-  pes_per_cluster: 64
-  spm_size_kb: 32
+  pes_per_cluster: 48
+  spm_size_kb: 64
   isram_size_kb: 16
   dsram_size_kb: 64
 
@@ -395,8 +395,8 @@ void main(void) {
 {
   "hardware": {
     "num_clusters": 4,
-    "pes_per_cluster": 64,
-    "spm_size_kb": 32,
+    "pes_per_cluster": 48,
+    "spm_size_kb": 64,
     "isram_size_kb": 16,
     "dsram_size_kb": 64
   },
@@ -536,7 +536,7 @@ void main(void) {
 #### E005：SPM Overflow
 
 ```
-[ERROR] E005: conv1: SPM required 34816 B exceeds cluster SPM 32768 B
+[ERROR] E005: conv1: SPM required 34816 B exceeds cluster SPM 65536 B
 ```
 
 **原因**：此 layer 的 weight + activation + partial sum + output 總量超出 SPM 容量。
@@ -569,7 +569,7 @@ void main(void) {
 [ERROR] E009: conv1x1: group PS has spm_mode=linear but AGU ultra=True
 ```
 
-**原因**：SPM parallel mode 與 AGU ultra mode 必須同時啟用或同時關閉。Conv2D 1×1 和 GEMM 的 PS/PLI/PLO 須為 Parallel + Ultra，PD 須為 Linear + Normal；Conv2D 3×3 全部 Linear + Normal。
+**原因**：SPM parallel mode 與 AGU ultra mode 必須同時啟用或同時關閉。Conv2D 1×1 和 GEMM 的 PS/PLI/PLO 須為 Parallel + Ultra，PD 須為 Linear + Normal；Conv2D 3×3 全部 Linear + Normal。注意：Conv2D 1×1 normal path 與 ultra path 都是這個組合；path 區分只決定 scan-chain 拓樸與 H tiling，並不切換 SPM/AGU mode。詳見 [01_CompilationPipeline.md §2.4.1](01_CompilationPipeline.md)。
 **修正**：確認 operator template 正確匹配 SPM/AGU 模式（見 [02_OperatorLowering.md §7](02_OperatorLowering.md)）。
 
 #### E010：I-SRAM Overflow

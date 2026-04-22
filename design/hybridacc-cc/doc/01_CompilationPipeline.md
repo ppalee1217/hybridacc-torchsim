@@ -61,11 +61,11 @@ name: "resnet_block_1"
 
 hardware:
   num_clusters: 4
-  num_pes: 64              # per cluster
-  num_bus: 4                # per cluster
+  num_pes: 48              # per cluster
+  num_bus: 3                # per cluster
   spm_banks_per_group: 3   # SPM banks per group（參照 SPM.md）
-  spm_bank_depth: 4096     # words per bank（每 word = 8 bytes）
-  # 衍生值：group_capacity = 3 × 4096 × 8 = 96 KB/group
+  spm_bank_depth: 8192     # words per bank（每 word = 8 bytes）
+  # 衍生值：group_capacity = 3 × 8192 × 8 = 192 KB/group
   dram_base: 0x80000000
 
 ops:
@@ -136,10 +136,10 @@ ops:
 | 欄位 | 型別 | 必填 | 預設值 | 驗證規則 |
 |------|------|------|--------|---------|
 | `num_clusters` | int | 是 | — | 1 ≤ n ≤ 16 |
-| `num_pes` | int | 否 | 64 | 1 ≤ n ≤ 256，必須為 2 的冪 |
-| `num_bus` | int | 否 | 4 | 1 ≤ n ≤ 16 |
+| `num_pes` | int | 否 | 48 | 1 ≤ n ≤ 256，必須能被 num_bus 整除 |
+| `num_bus` | int | 否 | 3 | 1 ≤ n ≤ 16 |
 | `spm_banks_per_group` | int | 否 | 3 | 1 ≤ n ≤ 8，SPM 每 Group 的 bank 數（參照 SPM.md） |
-| `spm_bank_depth` | int | 否 | 4096 | ≥ 1024，必須為 2 的冪，每 bank 的 word 數 |
+| `spm_bank_depth` | int | 否 | 8192 | ≥ 1024，必須為 2 的冪，每 bank 的 word 數 |
 | `dram_base` | int | 否 | 0x80000000 | 4KB 對齊 |
 
 #### 每個 `ops[]` 項目
@@ -183,7 +183,52 @@ Frontend 除了 schema 驗證外，還必須執行以下語意檢查：
 3. **輸出形狀**：`H_out = (H_in + 2*padding - KH) / stride + 1`，必須為正整數。
 4. **GEMM 維度**：`A.shape[1]` 必須等於 `B.shape[0]`；`C.shape = [A.shape[0], B.shape[1]]`。
 5. **SPM 容量（強制 ping-pong 檢查）**：各 layer 經 tiling 後的 wave tile，其 PS/PD/PLI/PLO 各自的 buffer size 不得超過 SPM Group 的半容量（`half_group_capacity = spm_banks_per_group × spm_bank_depth × 8 / 2`）。所有 Group 強制使用 ping-pong 雙緩衝，不存在降級模式。檢查失敗為 hard error（`E_SPM_HALF_CAP_OVERFLOW`）。
-6. **SPM/AGU 模式一致性**：Conv2D 1×1 與 GEMM 的 PS/PLI/PLO 必須使用 SPM Parallel Mode + AGU ultra mode（`CTRL.bit3=1`），PD 必須使用 Linear Mode + Normal mode。Conv2D 3×3 全部使用 Linear + Normal。不匹配為 hard error（`E_SPM_ULTRA_MODE_MISMATCH`）。
+6. **SPM/AGU 模式一致性**：
+   - Conv2D 3×3：所有 group 一律使用 SPM Linear Mode + AGU Normal Mode（`CTRL.bit3=0`）。
+   - Conv2D 1×1：PS/PLI/PLO 一律使用 SPM Parallel Mode + AGU Ultra Mode（`CTRL.bit3=1`），PD 一律使用 SPM Linear Mode + AGU Normal Mode。SPM/AGU 模式並不依「normal vs ultra path」而切換；該 path 區分只影響 scan-chain 拓樸與 tiling，詳見 §3.2。
+   - GEMM：同 Conv2D 1×1（PS/PLI/PLO Parallel + Ultra，PD Linear + Normal）。
+   不匹配為 hard error（`E_SPM_ULTRA_MODE_MISMATCH`）。
+
+### 2.4.1 Conv2D 1×1 Path 選擇與 Scan-chain Truth Table
+
+Conv2D 1×1 的 PE-lane 對應到 local output H row，而非 `H × W` flatten；W 維由 PE template 內部 `OUTPUT_WINDOW_CNT_MINUS_ONE` 全程 temporal 處理。Lowering 依 `H_out` 與 PE budget 自動選 path：
+
+| 條件 | path | active_buses | 每 bus active row | 單列 Scan-chain `route_mode` |
+| --- | --- | --- | --- | --- |
+| `H_out ≤ pes_per_bus` | normal | 1 | `H_out` | `(IB, OB)` = `PLI_FROM_BUS_PLO_TO_BUS` (3) |
+| `pes_per_bus < H_out ≤ num_pes` | ultra | `ceil(H_out / pes_per_bus)` | `pes_per_bus` | `(IB, OB)` (3) |
+| `H_out > num_pes` | ultra（多 wave） | `num_bus` | `pes_per_bus` | `(IB, OB)` (3) |
+
+對 conv2d_1x1，scan-chain `route_mode` 永遠是 `(IB, OB)`：每個 active PE 直接從 MBUS 取 PLI/初值，計算完直接寫回 MBUS，沒有跨列 LN 累積（因為 kernel height = 1）。
+
+**Single-row 開放問題決議**：當 conv non-ultra 出現 `split_kh = 1` 時，唯一那一列同時是「first row」與「last row」。其唯一語意自洽的 `route_mode` 即 `(IB, OB)`，因為此時既沒有上游 LN 鄰居能提供 PLI，也沒有下游 LN 鄰居能接 PLO。compiler 與 verification (`noc_gen.get_route_mode`) 都採此規則。
+
+### 2.4.2 GEMM Plane 對應與 K-chain
+
+| 平面 | DRAM 對應 | AGU group |
+| --- | --- | --- |
+| PS  | B `[K, N]` | Group 0（Parallel + Ultra） |
+| PD  | A `[M, K]` | Group 1（Linear  + Normal） |
+| PLI | C `[M, N]`（讀回作 partial sum） | Group 2（Parallel + Ultra） |
+| PLO | C `[M, N]`（寫回 final sum） | Group 3（Parallel + Ultra） |
+
+GEMM scan-chain 為 K-chain 拓樸：bus `i` 承擔 K-stage `i`。`grid_k_per_wave = min(grid_k, num_bus)`：
+
+| 階段 | `route_mode` |
+| --- | --- |
+| `grid_k_per_wave == 1`（single K-stage） | `(IB, OB)` (3) |
+| 第一 K-stage（multi-stage） | `(IB, OL)` (1) |
+| 中間 K-stage | `(IL, OL)` (0) |
+| 最後 K-stage | `(IL, OB)` (2) |
+
+ID 規則（與 `noc_gen.generate_gemm_test` 對齊）：
+
+- ultra：`ps_id = n_idx`，`pd_id = m_idx`（tag 在 K-stage 間共用）。
+- normal：`ps_id = k_idx * grid_n + n_idx`，`pd_id = k_idx * grid_m + m_idx`。
+- `pli_id` 僅在第一 K-stage 有效，其餘為 63；`plo_id` 僅在最後 K-stage 有效，其餘為 63。
+- `grid_k_per_wave == 1` 時，bus 0 既是 first 也是 last，`pli_id` / `plo_id` 都有效。
+
+PE-grid metadata 會以 `GRID_M / GRID_N / GRID_K / GRID_M_PER_WAVE / GRID_N_PER_WAVE / GRID_K_PER_WAVE` 等 key 寫入 `pe_program.params`，可從 `hardware_ir.json` 直接驗證。
 
 ### 2.5 輸出
 

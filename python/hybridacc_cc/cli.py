@@ -17,6 +17,7 @@ from .frontend import parse_workload
 from .lowering import lower_workload
 from .codegen import generate_firmware
 from .elf_builder import DEFAULT_MARCH, build_gcc_command, compile_firmware, validate_elf
+from .visualize import dump_hardware_visualization
 
 
 def _dump_ir(obj, path: Path) -> None:
@@ -61,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dump-ir",
         action="store_true",
-        help="Dump intermediate IR (WorkloadIR, HardwareIR) as JSON",
+        help="Dump intermediate IR as JSON and generate hardware_viz.html",
     )
     parser.add_argument(
         "--no-compile",
@@ -88,9 +89,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--opt-level",
         type=str,
-        choices=["0", "1", "2", "s"],
+        choices=["0", "1", "2", "3", "s"],
         default="2",
         help="GCC optimization level (default: 2)",
+    )
+    parser.add_argument(
+        "--mmio-opt-level",
+        type=str,
+        choices=["0", "1", "2", "3", "s"],
+        default=None,
+        help="Optional GCC optimization level for MMIO helper/wait functions only",
     )
     parser.add_argument(
         "--march",
@@ -135,8 +143,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.dump_ir:
         ir_path = args.output / "hardware_ir.json"
         _dump_ir(hardware_ir, ir_path)
+        viz_path = args.output / "hardware_viz.html"
+        dump_hardware_visualization(hardware_ir, viz_path)
         if args.verbose:
             print(f"  → {ir_path}")
+            print(f"  → {viz_path}")
 
     # Stage 2 + 3: Code Generation (includes PE payload)
     if args.verbose:
@@ -157,16 +168,25 @@ def main(argv: list[str] | None = None) -> int:
     do_compile = not args.no_compile
     if do_compile or args.dry_run:
         opt = f"-O{args.opt_level}"
+        mmio_opt = None if args.mmio_opt_level is None else f"O{args.mmio_opt_level}"
         if args.dry_run:
             cmd = build_gcc_command(
-                args.output, gcc=args.gcc, march=args.march, opt_level=opt,
+                args.output,
+                gcc=args.gcc,
+                march=args.march,
+                opt_level=opt,
+                mmio_opt_level=mmio_opt,
             )
             print(" ".join(cmd))
         else:
             if args.verbose:
                 print("[Stage 4] Compiling firmware ELF")
             elf_path = compile_firmware(
-                args.output, gcc=args.gcc, march=args.march, opt_level=opt,
+                args.output,
+                gcc=args.gcc,
+                march=args.march,
+                opt_level=opt,
+                mmio_opt_level=mmio_opt,
             )
             print(f"ELF: {elf_path}")
 
@@ -184,7 +204,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"Generated {len(generated)} files in {args.output}/")
         if args.verbose:
-            cmd = build_gcc_command(args.output, gcc=args.gcc, march=args.march)
+            mmio_opt = None if args.mmio_opt_level is None else f"O{args.mmio_opt_level}"
+            cmd = build_gcc_command(
+                args.output,
+                gcc=args.gcc,
+                march=args.march,
+                mmio_opt_level=mmio_opt,
+            )
             print(f"To compile: {' '.join(cmd)}")
 
     return 0

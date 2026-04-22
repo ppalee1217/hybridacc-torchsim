@@ -273,7 +273,7 @@ hacc-compile <workload.yaml> -o <output_dir> [options]
 | 選項 | 說明 |
 |------|------|
 | `-o DIR` | 輸出目錄 (預設: `build/`) |
-| `--dump-ir` | 輸出 WorkloadIR 與 HardwareIR JSON |
+| `--dump-ir` | 輸出 WorkloadIR / HardwareIR JSON，並額外產生 `hardware_viz.html` 視覺化頁面 |
 | `--no-compile` | 僅產生 C 原始碼，不執行 GCC |
 | `--dry-run` | 印出 GCC 指令但不執行 |
 | `--opt-level {0,1,2,s}` | 最佳化等級 (預設: 2) |
@@ -290,10 +290,16 @@ output_dir/
 ├── firmware_payload.h    # PE 二進位 payload
 ├── linker.ld             # 連結腳本
 ├── workload_ir.json      # (--dump-ir) 前端 IR
-└── hardware_ir.json      # (--dump-ir) 後端 IR，包含 tiling_params
+├── hardware_ir.json      # (--dump-ir) 後端 IR，包含 tiling_params
+└── hardware_viz.html     # (--dump-ir) 視覺化頁面：scan-chain / SPM mapping / 4D AGU iter,stride
 ```
 
 `hardware_ir.json` 中的 `tiling_params` 包含 DRAM layout 資訊，是產生測試資料的關鍵輸入。
+
+`hardware_viz.html` 可直接在瀏覽器或 VS Code 內建預覽中開啟，用來檢查：
+- scan-chain 拓撲與 route mode
+- SPM ping/pong 視窗與 mapping register
+- 四組 AGU 的 4D iter/stride 配置
 
 ---
 

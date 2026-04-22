@@ -1,0 +1,24 @@
+# T-GEMM-S4: GEMM Multi Wave across M/N/K simultaneously
+name: test_gemm_s4_m60k128n80
+hardware:
+  num_clusters: 1
+  num_pes: 48
+  num_bus: 3
+  spm_banks_per_group: 3
+  spm_bank_depth: 8192
+  dram_base: 0x80000000
+tensors:
+  A:
+    shape: [60, 128]
+    dtype: fp16
+  B:
+    shape: [128, 80]
+    dtype: fp16
+  C:
+    shape: [60, 80]
+    dtype: fp16
+ops:
+  - name: gemm1
+    type: gemm
+    inputs: [A, B]
+    outputs: [C]

@@ -193,7 +193,7 @@ for ((idx=0; idx<TOTAL; idx++)); do
         if [[ $DRY_RUN -eq 1 ]]; then
             echo "  [DRY-RUN] hacc-compile $YAML -o $BUILD_DIR --dump-ir"
         else
-            if uv run hacc-compile "$YAML" -o "$BUILD_DIR" --dump-ir 2>&1 | \
+            if uv run hacc-compile "$YAML" -o "$BUILD_DIR" --dump-ir 2>&1 --opt-level s | \
                { if [[ $VERBOSE -eq 1 ]]; then cat; else tail -3; fi; }; then
                 succ "  Compilation done."
             else

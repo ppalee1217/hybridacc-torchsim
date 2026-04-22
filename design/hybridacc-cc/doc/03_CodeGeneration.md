@@ -328,8 +328,8 @@ Compile 階段使用 Python 的 `encode_scan_chain()` 將每個 PE 的 scan chai
  * 同一 topology 的 layer 可共用同一份 scan chain。
  * ═══════════════════════════════════════════════════════ */
 
-/* topology: 64 PEs, 3 ports (conv/gemm standard chain) */
-static const uint32_t noc_scan_chain_64pe[] = {
+/* topology: 48 PEs, 3 ports (conv/gemm standard chain) */
+static const uint32_t noc_scan_chain_48pe[] = {
     /* PE 63 (bus 3, last): PLI_FROM_LN_PLO_TO_BUS, route_mode=2 */
     0x480FFFF8u,
     /* PE 62: PLI_FROM_LN_PLO_TO_LN, route_mode=0 */
@@ -658,11 +658,11 @@ typedef struct {
  *   Loop bounds: num_oc_tiles=1, num_h_tiles=2, num_w_tiles=1, num_ic_tiles=3
  *   Total waves = 1 × 2 × 1 × 3 = 6
  *
- *   SPM layout (Linear mode, half_group_capacity = 49152 = 0xC000):
- *     g0 (PS/weight):  PING=0x0000_0000, PONG=0x0000_C000
- *     g1 (PD/act):     PING=0x0000_1200, PONG=0x0000_D200 (offset within group)
- *     g2 (PLI):        PING=0x0000_2A80, PONG=0x0000_DA80
- *     g3 (PLO):        PING=0x0000_4300, PONG=0x0000_F300
+ *   SPM layout (Linear mode, half_group_capacity = 98304 = 0x18000):
+ *     g0 (PS/weight):  PING=0x0000_0000, PONG=0x0001_8000
+ *     g1 (PD/act):     PING=0x0000_1200, PONG=0x0001_9200 (offset within group)
+ *     g2 (PLI):        PING=0x0000_2A80, PONG=0x0001_AA80
+ *     g3 (PLO):        PING=0x0000_4300, PONG=0x0001_C300
  *
  *   AGU base = SPM base（Linear mode，AGU 直接讀 SPM 地址）
  *
@@ -1170,7 +1170,7 @@ GEMM 使用同一個 `run_loop_tiling()` 函式。Compiler 將 GEMM 的 3 層 lo
 | `need_ps_dma` check | 3 | `or` + `seqz` + `and` |
 | **Total per-wave overhead** | **~40** | **< 50 cycles on single-issue RV32I** |
 
-> Compute phase 通常 > 1000 cycles（HDDU × 64 PEs），runtime overhead 佔比 < 5%。
+> Compute phase 通常 > 1000 cycles（HDDU × 48 PEs），runtime overhead 佔比 < 5%。
 
 ### 6.9 `run_layer()` — 完整 Layer 執行
 
@@ -1524,7 +1524,7 @@ Data-driven + Compile-time/Runtime 協同計算架構下，I-SRAM 的 code size 
 | `LayerConfig`（含 `TilingParams`） | ~280 | O(layers) | 4 × AguRegs(60B each) + pointers + TilingParams(~128B) |
 | `PePatchEntry` | ~3 per entry | O(layers) | offset + encoded_val |
 | PE template（shared） | ~72 per unique template | O(unique_templates) | 36 instructions × 2 bytes |
-| Scan chain（shared） | ~256 per unique topology | O(unique_topologies) | 64 PEs × 4 bytes |
+| Scan chain（shared） | ~192 per unique topology | O(unique_topologies) | 48 PEs × 4 bytes |
 
 > **不再存在**：`WaveConfig[]`（28B×waves）、`DmaTransferDesc[]`（16B×descriptors）— 已由 runtime 計算取代。
 
