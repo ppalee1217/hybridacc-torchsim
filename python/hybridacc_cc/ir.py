@@ -35,10 +35,10 @@ class OpDesc:
 @dataclass
 class HardwareDesc:
     num_clusters: int  # 1..16
-    num_pes: int  # per cluster (default 64)
-    num_bus: int  # per cluster (default 4)
+    num_pes: int  # per cluster (default 48)
+    num_bus: int  # per cluster (default 3)
     spm_banks_per_group: int  # (default 3)
-    spm_bank_depth: int  # words per bank, each word = 8 bytes (default 4096)
+    spm_bank_depth: int  # words per bank, each word = 8 bytes (default 8192)
     dram_base: int  # external DRAM base (default 0x80000000)
 
     @property
@@ -256,7 +256,9 @@ class TilingParams:
 
     # DRAM strides (per tile index increment)
     dram_ps_oc_stride: int
+    dram_ps_h_stride: int
     dram_ps_ic_stride: int
+    dram_pd_oc_stride: int
     dram_pd_h_stride: int
     dram_pd_w_stride: int
     dram_pd_ic_stride: int
@@ -271,6 +273,8 @@ class TilingParams:
 
     # Bias (PLI initial partial sum)
     dram_bias_base: int    # DRAM address of pre-expanded bias (0 = no bias)
+    dram_bias_oc_stride: int
+    dram_bias_h_stride: int
     dma_pli_words: int     # DMA beats for one OC tile bias load (0 = no bias)
 
     # Weight reuse
@@ -286,8 +290,16 @@ class TilingParams:
     # Parallel-mode DMA params
     bank_depth_bytes: int
     parallel_groups: int   # bitmask
+    dma_pd_rows_per_bank: int
+    dma_pli_rows_per_bank: int
+    dma_plo_rows_per_bank: int
     dma_ps_words_per_bank: int
+    dma_pd_words_per_bank: int
     dma_plo_words_per_bank: int
+
+    # GEMM resident-slab mode
+    gemm_resident_m_tiles: int = 0
+    gemm_resident_n_tiles: int = 0
 
 
 @dataclass

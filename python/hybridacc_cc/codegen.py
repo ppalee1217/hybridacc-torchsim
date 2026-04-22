@@ -36,6 +36,17 @@ def _format_hex(val: int, width: int = 8) -> str:
     return f"0x{val & 0xFFFFFFFF:0{width}X}u"
 
 
+def _layer_runner_name(op_type: str) -> str:
+    """Return the generated firmware runner symbol for an op type."""
+    if op_type == "conv2d_3x3":
+        return "run_layer_conv2d_3x3"
+    if op_type == "conv2d_1x1":
+        return "run_layer_conv2d_1x1"
+    if op_type == "gemm":
+        return "run_layer_gemm"
+    raise ValueError(f"Unsupported op type for firmware runner: {op_type}")
+
+
 def prepare_template_context(hw_ir: HardwareIR,
                              kernel_json_dir: Path | None = None,
                              stack_size: int = 4096,
@@ -45,13 +56,19 @@ def prepare_template_context(hw_ir: HardwareIR,
     payload = collect_payload_context(hw_ir.layers, kernel_json_dir)
 
     layers_ctx: List[Dict[str, Any]] = []
+    used_runners: List[str] = []
     for i, layer in enumerate(hw_ir.layers):
         lp = payload["layer_payloads"][i]
         tp = layer.tiling_params
+        runner = _layer_runner_name(layer.op_type)
+        if runner not in used_runners:
+            used_runners.append(runner)
 
         layers_ctx.append({
             "name": layer.name,
             "index": i,
+            "op_type": layer.op_type,
+            "runner": runner,
             "cluster_mask_lo": layer.target_cluster_mask & 0xFFFFFFFF,
             "cluster_mask_hi": (layer.target_cluster_mask >> 32) & 0xFFFFFFFF,
             "num_clusters": layer.cluster_mapping.active_clusters,
@@ -89,7 +106,9 @@ def prepare_template_context(hw_ir: HardwareIR,
                 "dram_input_base": tp.dram_input_base,
                 "dram_output_base": tp.dram_output_base,
                 "dram_ps_oc_stride": tp.dram_ps_oc_stride,
+                "dram_ps_h_stride": tp.dram_ps_h_stride,
                 "dram_ps_ic_stride": tp.dram_ps_ic_stride,
+                "dram_pd_oc_stride": tp.dram_pd_oc_stride,
                 "dram_pd_h_stride": tp.dram_pd_h_stride,
                 "dram_pd_w_stride": tp.dram_pd_w_stride,
                 "dram_pd_ic_stride": tp.dram_pd_ic_stride,
@@ -100,14 +119,22 @@ def prepare_template_context(hw_ir: HardwareIR,
                 "dma_pd_words": tp.dma_pd_words,
                 "dma_plo_words": tp.dma_plo_words,
                 "dram_bias_base": tp.dram_bias_base,
+                "dram_bias_oc_stride": tp.dram_bias_oc_stride,
+                "dram_bias_h_stride": tp.dram_bias_h_stride,
                 "dma_pli_words": tp.dma_pli_words,
                 "ps_reuse_across_spatial": 1 if tp.ps_reuse_across_spatial else 0,
                 "spatial_2d_dma": 1 if tp.spatial_2d_dma else 0,
                 "pd_ic_agu_offset": tp.pd_ic_agu_offset,
                 "bank_depth_bytes": tp.bank_depth_bytes,
                 "parallel_groups": tp.parallel_groups,
+                "dma_pd_rows_per_bank": tp.dma_pd_rows_per_bank,
+                "dma_pli_rows_per_bank": tp.dma_pli_rows_per_bank,
+                "dma_plo_rows_per_bank": tp.dma_plo_rows_per_bank,
                 "dma_ps_words_per_bank": tp.dma_ps_words_per_bank,
+                "dma_pd_words_per_bank": tp.dma_pd_words_per_bank,
                 "dma_plo_words_per_bank": tp.dma_plo_words_per_bank,
+                "gemm_resident_m_tiles": tp.gemm_resident_m_tiles,
+                "gemm_resident_n_tiles": tp.gemm_resident_n_tiles,
             },
         })
 
@@ -121,6 +148,7 @@ def prepare_template_context(hw_ir: HardwareIR,
         "templates": payload["templates"],
         "scan_chains": payload["scan_chains"],
         "layers": layers_ctx,
+        "used_runners": used_runners,
         "hex": _format_hex,
     }
 

@@ -14,7 +14,7 @@
 #
 # INPUT_DIM             | int     | Input dimension size                 | 32
 #
-# OUTPUT_DIM            | int     | Output dimension size                | 8
+# OUTPUT_DIM_MINUS_ONE  | int     | Output dimension size minus one      | 7
 #
 # PSUM_COUNT            | int     | Number of partial sums to compute    | 24
 #
@@ -28,7 +28,7 @@
 ##############################################################################
 
 .template
-gemm_template(KERNEL_DMA_STORE_LEN=64, KERNEL_DMA_LOAD_LEN=256, INPUT_DIM=32, OUTPUT_DIM=8, PSUM_COUNT=24, NUM_OF_KERNEL_SETS=32, NUM_OF_N_TILES=2, NUM_OF_M_TILES=2, K_TILE_DIM=32):
+gemm_template(KERNEL_DMA_STORE_LEN=64, KERNEL_DMA_LOAD_LEN=256, INPUT_DIM=32, OUTPUT_DIM_MINUS_ONE=7, PSUM_COUNT=24, NUM_OF_KERNEL_SETS=32, NUM_OF_N_TILES=2, NUM_OF_M_TILES=2, K_TILE_DIM=32):
     # Initialize vector registers for partial sums
     SYS.CTRL (CLEAR.P)
 
@@ -62,11 +62,14 @@ load_ab_tile:
             VTSTORE vt2
 
         compute_outer:
-            LOOPIN $(NUM_OF_N_TILES)  # N dimension within tile
-                VMULR 1, 1
+            LOOPIN $(OUTPUT_DIM_MINUS_ONE)  # PE-local output columns within tile
+                    VMULR 1, 1
                 VMULR 1, 1
                 VMULRN 1, VTRST # reset vector register id
             LOOPEND # compute_outer
+            VMULR 1, 1
+            VMULR 1, 1
+            VMULRN PRST, VTRST # reset vector register id
         LOOPEND # loop_k_dim
 
     accumulate_c:

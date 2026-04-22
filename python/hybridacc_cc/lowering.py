@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Tuple
 
+from .frontend import CompilationError
 from .ir import (
     AguBankConfig,
     ClusterMapping,
@@ -33,6 +34,132 @@ DRAM_BOOT_RESERVED = 0x100000  # 1 MB reserved for manifest + ELF payload
 
 class TilingFailed(Exception):
     pass
+
+
+# ---------------------------------------------------------------------------
+# Lowering-stage validators
+# ---------------------------------------------------------------------------
+
+# op_type -> per-plane expected SPM mode.
+_SPM_MODE_EXPECTED: Dict[str, Dict[str, str]] = {
+    "conv2d_3x3": {
+        "ps":  "linear",
+        "pd":  "linear",
+        "pli": "linear",
+        "plo": "linear",
+    },
+}
+
+
+def _has_duplicate_enabled_ids(scan_chain: List[ScanChainEntry], field_name: str) -> bool:
+    seen = set()
+    for entry in scan_chain:
+        if not entry.enable:
+            continue
+        value = getattr(entry, field_name)
+        if value in seen:
+            return True
+        seen.add(value)
+    return False
+
+
+def _conv1x1_multi_bus(layer: LayerHwConfig) -> bool:
+    return _has_duplicate_enabled_ids(layer.scan_chain, "pli_id")
+
+
+def _expected_spm_modes(layer: LayerHwConfig) -> Dict[str, str]:
+    if layer.op_type == "conv2d_1x1":
+        multi_bus = _conv1x1_multi_bus(layer)
+        return {
+            "ps": "linear",
+            "pd": "parallel" if multi_bus else "linear",
+            "pli": "parallel" if multi_bus else "linear",
+            "plo": "parallel" if multi_bus else "linear",
+        }
+    if layer.op_type == "gemm":
+        grid_k_per_wave = layer.pe_program.params.get("GRID_K_PER_WAVE", 1)
+        use_ultra = grid_k_per_wave > 1
+        return {
+            "ps": "parallel" if use_ultra else "linear",
+            "pd": "parallel" if use_ultra else "linear",
+            "pli": "linear",
+            "plo": "linear",
+        }
+
+    return _SPM_MODE_EXPECTED.get(layer.op_type, {})
+
+
+def _expected_agu_ultra(layer: LayerHwConfig) -> Dict[str, bool]:
+    if layer.op_type == "conv2d_3x3":
+        use_ultra = False
+    elif layer.op_type == "conv2d_1x1":
+        use_ultra = _conv1x1_multi_bus(layer)
+        return {
+            "ps": False,
+            "pd": use_ultra,
+            "pli": use_ultra,
+            "plo": use_ultra,
+        }
+    elif layer.op_type == "gemm":
+        use_ultra = layer.pe_program.params.get("GRID_K_PER_WAVE", 1) > 1
+    else:
+        return {}
+
+    return {
+        "ps": use_ultra,
+        "pd": use_ultra,
+        "pli": False,
+        "plo": False,
+    }
+
+
+def _assert_spm_agu_consistency(layer: LayerHwConfig) -> None:
+    """E009: SPM mode and AGU ultra mode must match the lowered transport path.
+
+    Conv2D 3x3 is always linear/normal. Conv2D 1x1 infers multi-bus ultra
+    transport from scan-chain ID reuse. GEMM K-chain keeps PS/PD on the
+    ultra/parallel path, but PLI/PLO stay linear/non-ultra because reduction
+    partial sums flow through the PE-local accumulation path rather than a
+    per-bus ultra broadcast.
+
+    Raises CompilationError with code E009 on mismatch.
+    """
+    expected_modes = _expected_spm_modes(layer)
+    expected_ultra = _expected_agu_ultra(layer)
+    if expected_modes is None or not expected_ultra:
+        return  # unknown op type — leave to other validators
+
+    planes = (
+        ("ps",  layer.spm_layout.ps,  layer.agu_ps),
+        ("pd",  layer.spm_layout.pd,  layer.agu_pd),
+        ("pli", layer.spm_layout.pli, layer.agu_pli),
+        ("plo", layer.spm_layout.plo, layer.agu_plo),
+    )
+    # Planes disabled in HDDU (plane_en bit 0) cannot run their AGU and thus
+    # have no observable SPM/AGU coupling — skip them.
+    plane_en = layer.hddu.plane_en
+    plane_bit = {"ps": 0, "pd": 1, "pli": 2, "plo": 3}
+    mismatches: List[str] = []
+    for name, spm, agu in planes:
+        if ((plane_en >> plane_bit[name]) & 0x1) == 0:
+            continue
+        want_mode = expected_modes[name]
+        want_ultra = expected_ultra[name]
+        got_mode = spm.spm_mode
+        got_ultra = bool(agu.ctrl & 0x8)
+        if got_mode != want_mode or got_ultra != want_ultra:
+            mismatches.append(
+                f"{name.upper()}: spm_mode={got_mode}/agu_ultra={got_ultra}"
+                f" (want spm_mode={want_mode}/agu_ultra={want_ultra})"
+            )
+    if mismatches:
+        raise CompilationError(
+            "validation",
+            layer.name,
+            "E009: SPM/AGU mode mismatch ("
+            + f"op_type={layer.op_type}; " + "; ".join(mismatches)
+            + ")",
+        )
 
 
 # ===================================================================
@@ -150,6 +277,134 @@ def compute_scan_chain_ultra(
                 pli_id=pli_id, plo_id=plo_id,
                 route_mode=route_mode, enable=active,
             ))
+
+    return entries
+
+
+def compute_scan_chain_conv1x1(
+    num_pes: int,
+    num_bus: int,
+    tile_h_per_bus: int,
+    active_buses: int,
+    stride: int = 1,
+) -> List[ScanChainEntry]:
+    """Conv2D 1×1 scan-chain (H-lane + W-time model).
+
+    Each active PE owns one output H row. PLI/PLO always go through MBUS
+    (route_mode=3 == PLI_FROM_BUS_PLO_TO_BUS) regardless of normal vs
+    ultra path, because conv1x1 has no kernel-height accumulation across
+    rows: each row is an independent reduction over IC.
+
+    - normal path: only bus 0 active (active_buses=1, single H-stripe).
+    - ultra path: first `active_buses` buses active in parallel, each
+      handling its own H-stripe of `tile_h_per_bus` rows.
+
+    For both paths, single-row case (tile_h_per_bus * active_buses == 1)
+    naturally lands on (IB, OB) per the open-issue-1 resolution.
+    """
+    entries: List[ScanChainEntry] = []
+    pes_per_bus = num_pes // num_bus
+
+    for bus_idx in range(num_bus):
+        bus_active = bus_idx < active_buses
+        for pe_local in range(pes_per_bus):
+            active = bus_active and pe_local < tile_h_per_bus
+
+            if active:
+                ps_id = 0
+                pd_id = pe_local * stride
+                pli_id = pe_local
+                plo_id = pe_local
+                route_mode = 3  # PLI_FROM_BUS_PLO_TO_BUS (IB, OB)
+            else:
+                ps_id = 63
+                pd_id = 63
+                pli_id = 63
+                plo_id = 63
+                route_mode = 3
+
+            entries.append(ScanChainEntry(
+                ps_id=ps_id, pd_id=pd_id,
+                pli_id=pli_id, plo_id=plo_id,
+                route_mode=route_mode, enable=active,
+            ))
+
+    return entries
+
+
+def compute_scan_chain_gemm(
+    num_pes: int,
+    num_bus: int,
+    grid_m: int,
+    grid_n: int,
+    grid_k: int,
+    use_ultra: bool,
+) -> List[ScanChainEntry]:
+    """GEMM K-chain scan-chain aligned with noc_gen.generate_gemm_test.
+
+    Each bus represents one K-stage. Within a bus, PE j maps to
+    (m_idx = j // grid_n, n_idx = j % grid_n).
+
+    Route mode (single-row resolution: grid_k==1 → (IB, OB)):
+    - first stage = 1 (IB, OL)
+    - middle      = 0 (IL, OL)
+    - last        = 2 (IL, OB)
+    - single (grid_k==1) = 3 (IB, OB)
+
+    ID rules:
+    - ultra: ps_id = n_idx, pd_id = m_idx (tags reused across buses)
+    - normal: ps_id = k_idx*grid_n + n_idx, pd_id = k_idx*grid_m + m_idx
+    - pli_id valid only on first stage (or single)
+    - plo_id valid only on last stage (or single)
+    """
+    entries: List[ScanChainEntry] = []
+    pes_per_bus = num_pes // num_bus
+
+    def route_mode(k_idx: int, k_total: int) -> int:
+        if k_total == 1:
+            return 3  # PLI_FROM_BUS_PLO_TO_BUS
+        if k_idx == 0:
+            return 1  # PLI_FROM_BUS_PLO_TO_LN
+        if k_idx == k_total - 1:
+            return 2  # PLI_FROM_LN_PLO_TO_BUS
+        return 0      # PLI_FROM_LN_PLO_TO_LN
+
+    for bus_idx in range(num_bus):
+        k_idx = bus_idx
+        bus_active_k = k_idx < grid_k
+        rmode = route_mode(k_idx, grid_k) if bus_active_k else 3
+
+        for pe_local in range(pes_per_bus):
+            if not bus_active_k:
+                entries.append(ScanChainEntry(
+                    ps_id=63, pd_id=63, pli_id=63, plo_id=63,
+                    route_mode=rmode, enable=False,
+                ))
+                continue
+
+            m_idx = pe_local // grid_n
+            n_idx = pe_local % grid_n
+            active = (m_idx < grid_m)
+
+            if active:
+                if use_ultra:
+                    ps_id = n_idx
+                    pd_id = m_idx
+                else:
+                    ps_id = k_idx * grid_n + n_idx
+                    pd_id = k_idx * grid_m + m_idx
+                pli_id = (m_idx * grid_n + n_idx) if k_idx == 0 else 63
+                plo_id = (m_idx * grid_n + n_idx) if k_idx == grid_k - 1 else 63
+                entries.append(ScanChainEntry(
+                    ps_id=ps_id, pd_id=pd_id,
+                    pli_id=pli_id, plo_id=plo_id,
+                    route_mode=rmode, enable=True,
+                ))
+            else:
+                entries.append(ScanChainEntry(
+                    ps_id=63, pd_id=63, pli_id=63, plo_id=63,
+                    route_mode=rmode, enable=False,
+                ))
 
     return entries
 
@@ -493,7 +748,9 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
         dram_input_base=dram_input_base,
         dram_output_base=dram_output_base,
         dram_ps_oc_stride=dram_ps_oc_stride,
+        dram_ps_h_stride=0,
         dram_ps_ic_stride=dram_ps_ic_stride,
+        dram_pd_oc_stride=0,
         dram_pd_h_stride=dram_pd_h_stride,
         dram_pd_w_stride=dram_pd_w_stride,
         dram_pd_ic_stride=dram_pd_ic_stride,
@@ -504,13 +761,19 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
         dma_pd_words=pd_wave // PKT_SIZE,
         dma_plo_words=pli_wave // PKT_SIZE,
         dram_bias_base=dram_bias_base,
+        dram_bias_oc_stride=dma_pli_words * PKT_SIZE,
+        dram_bias_h_stride=0,
         dma_pli_words=dma_pli_words,
         ps_reuse_across_spatial=False,  # disabled to ensure correct prefetching with double-buffering
         spatial_2d_dma=True,
         pd_ic_agu_offset=pd_ic_agu_offset,
         bank_depth_bytes=hw.bank_depth_bytes,
         parallel_groups=0x0,  # no parallel groups for 3x3
+        dma_pd_rows_per_bank=0,
+        dma_pli_rows_per_bank=0,
+        dma_plo_rows_per_bank=0,
         dma_ps_words_per_bank=0,
+        dma_pd_words_per_bank=0,
         dma_plo_words_per_bank=0,
     )
 
@@ -549,45 +812,66 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
 
     tile_ic = 12
     tile_oc = min(OC, 16)
-    in_ch_pack = tile_ic // 12  # = 1
+    ic_words_per_pe = tile_ic // 4  # 12 fp16 per PE -> 3 word64 packets
     out_ch_pack = tile_oc // 4
 
     half_cap = hw.half_group_capacity
     pp = hw.parallel_ping_base
     ppong = hw.parallel_pong_base
     pes_per_bus = _pes_per_bus(hw)
+    num_bus = hw.num_bus
 
     num_ic_tiles = C_in // tile_ic
     num_oc_tiles = math.ceil(OC / tile_oc)
 
-    ps_wave = tile_oc * in_ch_pack * PKT_SIZE
+    ps_wave = tile_oc * ic_words_per_pe * PKT_SIZE
     if ps_wave > half_cap:
         raise TilingFailed(f"{op.name}: weight tile exceeds half_cap")
 
-    tile_h = tile_w = None
-    for th in range(H_in, 0, -1):
-        for tw in range(W_in, 0, -1):
-            if th * tw > pes_per_bus:
-                continue
-            pd = th * tw * in_ch_pack * PKT_SIZE
-            pli = th * tw * out_ch_pack * PKT_SIZE
-            if pd <= half_cap and pli <= half_cap and ps_wave <= half_cap:
-                tile_h = th
-                tile_w = tw
-                break
-        if tile_h is not None:
-            break
+    # ----------------------------------------------------------------
+    # H-lane + W-time tiling model.
+    # - Each active PE owns ONE local output H row.
+    # - Within one wave, W is temporal inside the PE via
+    #   OUTPUT_WINDOW_CNT_MINUS_ONE = tile_w_out - 1.
+    # - If the per-bank PD/PLI footprint would overflow, the compiler
+    #   splits W across multiple waves (num_w_tiles > 1).
+    # - "normal path" (use_ultra=False): only bus 0 is active, so up
+    #   to pes_per_bus rows fit per wave.
+    # - "ultra path"  (use_ultra=True ): multiple buses are active in
+    #   parallel; each bus carries up to pes_per_bus rows.
+    # ----------------------------------------------------------------
+    use_ultra = H_out > pes_per_bus
 
-    if tile_h is None:
-        raise TilingFailed(f"{op.name}: cannot tile conv2d_1x1")
+    if use_ultra:
+        active_buses = min(num_bus, math.ceil(H_out / pes_per_bus))
+        tile_h_per_bus = pes_per_bus
+    else:
+        active_buses = 1
+        tile_h_per_bus = min(H_out, pes_per_bus)
+
+    rows_per_wave = tile_h_per_bus * active_buses
+    tile_h = rows_per_wave        # wave-level "logical" H rows
+
+    per_bank_cap = hw.half_parallel if use_ultra else half_cap
+    pd_bytes_per_w = tile_h_per_bus * ic_words_per_pe * PKT_SIZE
+    pli_bytes_per_w = tile_h_per_bus * out_ch_pack * PKT_SIZE
+    max_tile_w_pd = per_bank_cap // pd_bytes_per_w if pd_bytes_per_w > 0 else 0
+    max_tile_w_pli = per_bank_cap // pli_bytes_per_w if pli_bytes_per_w > 0 else 0
+    tile_w = min(W_out, max_tile_w_pd, max_tile_w_pli)
+    if tile_w <= 0:
+        overflow_kind = "bank half_cap" if use_ultra else "half_cap"
+        raise TilingFailed(
+            f"{op.name}: conv1x1 cannot fit even tile_w=1 "
+            f"(PD bytes/step={pd_bytes_per_w}, PLI bytes/step={pli_bytes_per_w}, {overflow_kind}={per_bank_cap})"
+        )
+
+    pd_wave = tile_h_per_bus * tile_w * ic_words_per_pe * PKT_SIZE
+    pli_wave = tile_h_per_bus * tile_w * out_ch_pack * PKT_SIZE
 
     num_h_tiles = math.ceil(H_out / tile_h)
     num_w_tiles = math.ceil(W_out / tile_w)
     last_h_out = H_out - (num_h_tiles - 1) * tile_h
     last_w_out = W_out - (num_w_tiles - 1) * tile_w
-
-    pd_wave = tile_h * tile_w * in_ch_pack * PKT_SIZE
-    pli_wave = tile_h * tile_w * out_ch_pack * PKT_SIZE
     total_waves = num_oc_tiles * num_h_tiles * num_w_tiles * num_ic_tiles
 
     tiling = TilingResult(
@@ -600,75 +884,94 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
         reduction_dims=["ic_tile"],
     )
 
-    # SPM layout: PS/PLI/PLO = Parallel, PD = Linear
+    # SPM layout follows the cluster_gen conv1x1 policy:
+    # - PS is shared across buses -> group/linear + normal mode.
+    # - PD/PLI/PLO become bank/parallel only when multiple buses are active.
+    pd_pli_plo_mode = "parallel" if use_ultra else "linear"
+    pd_pli_plo_ping = pp if use_ultra else 0
+    pd_pli_plo_pong = ppong if use_ultra else half_cap
+    ultra_ctrl = 0x8 if use_ultra else 0x0
+
     spm_layout = SpmPerGroupLayout(
-        ps=SpmGroupLayout(ping_base=pp, pong_base=ppong, size=ps_wave, spm_mode="parallel"),
-        pd=SpmGroupLayout(ping_base=0, pong_base=half_cap, size=pd_wave, spm_mode="linear"),
-        pli=SpmGroupLayout(ping_base=pp, pong_base=ppong, size=pli_wave, spm_mode="parallel"),
-        plo=SpmGroupLayout(ping_base=pp, pong_base=ppong, size=pli_wave, spm_mode="parallel"),
+        ps=SpmGroupLayout(ping_base=0, pong_base=half_cap, size=ps_wave, spm_mode="linear"),
+        pd=SpmGroupLayout(ping_base=pd_pli_plo_ping, pong_base=pd_pli_plo_pong, size=pd_wave, spm_mode=pd_pli_plo_mode),
+        pli=SpmGroupLayout(ping_base=pd_pli_plo_ping, pong_base=pd_pli_plo_pong, size=pli_wave, spm_mode=pd_pli_plo_mode),
+        plo=SpmGroupLayout(ping_base=pd_pli_plo_ping, pong_base=pd_pli_plo_pong, size=pli_wave, spm_mode=pd_pli_plo_mode),
     )
 
-    # AGU - PS: Parallel/Ultra — all strides in word64 units
+    # AGU - PS: shared weight broadcast, always normal/linear.
     pp_w = hw.parallel_ping_words
     ppong_w = hw.parallel_pong_words
     half_words = hw.half_group_words
 
     agu_ps = AguBankConfig(
-        base_addr=pp_w, base_addr_h=0,
-        iter0=in_ch_pack, iter1=1, iter2=1, iter3=tile_oc,
-        stride0=1, stride1=0, stride2=0,
-        stride3=in_ch_pack,
-        ctrl=0x8, lane_cfg=0,  # ultra mode
-        tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=0,
-        mask_cfg=0xF,
-    )
-    # AGU - PD: Linear/Normal
-    agu_pd = AguBankConfig(
         base_addr=0, base_addr_h=0,
-        iter0=in_ch_pack, iter1=tile_h, iter2=tile_w, iter3=1,
-        stride0=1,
-        stride1=tile_w * in_ch_pack,
-        stride2=in_ch_pack,
-        stride3=0,
+        iter0=ic_words_per_pe, iter1=1, iter2=1, iter3=tile_oc,
+        stride0=1, stride1=0, stride2=0,
+        stride3=ic_words_per_pe,
         ctrl=0x0, lane_cfg=0,
+        tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=2,
+        mask_cfg=0xF,
+    )
+    # AGU - PD: Linear/Normal — per-bus row addressing.
+    # iter1 walks rows that the bus's PEs own (tile_h_per_bus). When ultra
+    # is enabled the per-bus PD bank still only carries its own H stripe,
+    # so we use tile_h_per_bus, not the wave-level tile_h.
+    agu_pd = AguBankConfig(
+        base_addr=pp_w if use_ultra else 0, base_addr_h=0,
+        iter0=ic_words_per_pe, iter1=tile_h_per_bus, iter2=tile_w, iter3=1,
+        stride0=1,
+        stride1=tile_w * ic_words_per_pe,
+        stride2=ic_words_per_pe,
+        stride3=0,
+        ctrl=ultra_ctrl, lane_cfg=0,
         tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=1,
         mask_cfg=0xF,
     )
-    # AGU - PLI: Parallel/Ultra
+    # AGU - PLI: Parallel; ultra only when multiple buses are active.
     agu_pli = AguBankConfig(
-        base_addr=pp_w, base_addr_h=0,
-        iter0=out_ch_pack, iter1=tile_h, iter2=tile_w, iter3=1,
+        base_addr=pp_w if use_ultra else 0, base_addr_h=0,
+        iter0=out_ch_pack, iter1=tile_h_per_bus, iter2=tile_w, iter3=1,
         stride0=1,
         stride1=tile_w * out_ch_pack,
         stride2=out_ch_pack,
         stride3=0,
-        ctrl=0x8, lane_cfg=0,
+        ctrl=ultra_ctrl, lane_cfg=0,
         tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=1,
         mask_cfg=0xF,
     )
-    # AGU - PLO: Parallel/Ultra
+    # AGU - PLO: Parallel; ultra only when multiple buses are active.
     agu_plo = AguBankConfig(
-        base_addr=pp_w, base_addr_h=0,
-        iter0=out_ch_pack, iter1=tile_h, iter2=tile_w, iter3=1,
+        base_addr=pp_w if use_ultra else 0, base_addr_h=0,
+        iter0=out_ch_pack, iter1=tile_h_per_bus, iter2=tile_w, iter3=1,
         stride0=1,
         stride1=tile_w * out_ch_pack,
         stride2=out_ch_pack,
         stride3=0,
-        ctrl=0x8, lane_cfg=0,
+        ctrl=ultra_ctrl, lane_cfg=0,
         tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=1,
         mask_cfg=0xF,
     )
 
+    # PE template params (W is fully temporal).
     pe_params = {
-        "KERNEL_DMA_LEN": tile_oc * in_ch_pack,
-        "OUTPUT_WINDOW_CNT_MINUS_ONE": tile_h * tile_w - 1,
+        "KERNEL_DMA_LEN": tile_oc * ic_words_per_pe,
+        "OUTPUT_WINDOW_CNT_MINUS_ONE": tile_w - 1,
         "KERNEL_COUNT": tile_oc,
         "KERNEL_LOOP_INNER": num_ic_tiles,
         "KERNEL_LOOP_OUTER": num_oc_tiles * num_h_tiles * num_w_tiles,
     }
     pe_prog = PeProgramRef(template_name="conv1d_k1c12s1_template", params=pe_params)
     hddu = HdduConfig(plane_en=0xF, plane_mode=0x1)
-    scan_chain = compute_scan_chain_ultra(hw.num_pes, hw.num_bus, out_h=tile_h * tile_w)
+    # H-lane scan-chain: normal path activates only bus 0; ultra path
+    # activates active_buses buses in parallel. Single-row case naturally
+    # uses (IB, OB) per the open-issue-1 resolution.
+    scan_chain = compute_scan_chain_conv1x1(
+        hw.num_pes, hw.num_bus,
+        tile_h_per_bus=tile_h_per_bus,
+        active_buses=active_buses,
+        stride=op.attrs.get("stride", 1),
+    )
     cluster_map = compute_cluster_mapping(hw.num_clusters, tiling, op.op_type)
 
     stride_v = op.attrs.get("stride", 1)
@@ -721,16 +1024,18 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
         tile_w_in=tile_w,
         last_h_out=last_h_out,
         last_w_out=last_w_out,
-        spm_ping=[g0_dma + pp, g1_dma,            g2_dma + pp, g3_dma + pp],
-        spm_pong=[g0_dma + ppong, g1_dma + half_cap, g3_dma + pp, g2_dma + pp],
-        agu_ping=[pp_w, 0, pp_w, pp_w],
-        agu_pong=[ppong_w, half_words, pp_w, pp_w],
+        spm_ping=[g0_dma,            g1_dma,                          g2_dma,                          g3_dma],
+        spm_pong=[g0_dma + half_cap, g1_dma + (hw.half_parallel if use_ultra else half_cap), g3_dma, g2_dma],
+        agu_ping=[0,                 pp_w if use_ultra else 0,        pp_w if use_ultra else 0,        pp_w if use_ultra else 0],
+        agu_pong=[half_words,        ppong_w if use_ultra else half_words, pp_w if use_ultra else 0,  pp_w if use_ultra else 0],
         spm_map_even=_SPM_MAP_EVEN, spm_map_odd=_SPM_MAP_ODD,
-        dram_weight_base=tensor_base,
-        dram_input_base=tensor_base + W_size,
-        dram_output_base=tensor_base + W_size + I_size,
+        dram_weight_base=dram_weight_base,
+        dram_input_base=dram_input_base,
+        dram_output_base=dram_output_base,
         dram_ps_oc_stride=dram_ps_oc_stride,
+        dram_ps_h_stride=0,
         dram_ps_ic_stride=dram_ps_ic_stride,
+        dram_pd_oc_stride=0,
         dram_pd_h_stride=dram_pd_h_stride,
         dram_pd_w_stride=dram_pd_w_stride,
         dram_pd_ic_stride=dram_pd_ic_stride,
@@ -741,13 +1046,19 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
         dma_pd_words=pd_wave // PKT_SIZE,
         dma_plo_words=pli_wave // PKT_SIZE,
         dram_bias_base=dram_bias_base,
+        dram_bias_oc_stride=dma_pli_words * PKT_SIZE,
+        dram_bias_h_stride=0,
         dma_pli_words=dma_pli_words,
         ps_reuse_across_spatial=False,
         spatial_2d_dma=True,
         pd_ic_agu_offset=0,
         bank_depth_bytes=bdb,
-        parallel_groups=0xD,  # PS, PLI, PLO (groups 0, 2, 3)
-        dma_ps_words_per_bank=ps_wave // PKT_SIZE,  # per-bank for parallel DMA
+        parallel_groups=0xE if use_ultra else 0x0,  # PD, PLI, PLO (groups 1, 2, 3)
+        dma_pd_rows_per_bank=tile_h_per_bus if use_ultra else 0,
+        dma_pli_rows_per_bank=tile_h_per_bus if use_ultra else 0,
+        dma_plo_rows_per_bank=tile_h_per_bus if use_ultra else 0,
+        dma_ps_words_per_bank=0,
+        dma_pd_words_per_bank=0,
         dma_plo_words_per_bank=pli_wave // PKT_SIZE,
     )
 
@@ -780,46 +1091,125 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
     _, N = B.shape
     ep = 4  # elements per packet
 
+    # PE capability per noc_gen.generate_gemm_test:
+    # - Each PE handles a (PE_M × PE_N) output sub-tile, reducing PE_K K-elements per pass.
+    # - The (M, N) output is tiled onto a PE grid (grid_m × grid_n) inside one bus,
+    #   with the K dimension chained across buses (grid_k stages).
+    PE_M, PE_N, PE_K = 12, 8, 32
+
     half_cap = hw.half_group_capacity
     pp = hw.parallel_ping_base
     ppong = hw.parallel_pong_base
     pp_w = hw.parallel_ping_words
     ppong_w = hw.parallel_pong_words
     half_words = hw.half_group_words
+    pes_per_bus = _pes_per_bus(hw)
+    num_bus = hw.num_bus
 
-    # Tiling search
-    M_tile = N_tile = K_tile = None
-    for mt in range(min(M, 32), 0, -8):
-        if mt <= 0:
-            continue
-        for nt in range(min(N, 48), 0, -12):
-            if nt <= 0:
-                continue
-            for kt in range(min(K, 96), 0, -32):
-                if kt <= 0:
-                    continue
-                ps = (mt * kt // ep) * PKT_SIZE
-                pd = (kt * nt // ep) * PKT_SIZE
-                pli = (mt * nt // ep) * PKT_SIZE
-                if ps <= half_cap and pd <= half_cap and pli <= half_cap:
-                    M_tile, N_tile, K_tile = mt, nt, kt
-                    break
-            if M_tile is not None:
-                break
-        if M_tile is not None:
-            break
+    grid_m = math.ceil(M / PE_M)
+    grid_n = math.ceil(N / PE_N)
+    grid_k = math.ceil(K / PE_K)
 
-    if M_tile is None:
-        raise TilingFailed(f"{op.name}: cannot tile GEMM")
+    # ----------------------------------------------------------------
+    # Spatial tile selection:
+    # Each bus carries one K-stage (up to num_bus stages chain together).
+    # Within a bus we must fit grid_m_per_wave * grid_n_per_wave PEs into
+    # pes_per_bus slots; if grid_m * grid_n exceeds that budget we tile
+    # M/N temporally (wave_m, wave_n waves).
+    # ----------------------------------------------------------------
+    def _choose_mn_tiles(gm: int, gn: int, budget: int):
+        best = None
+        for mt in range(min(gm, budget), 0, -1):
+            max_nt = min(gn, budget // mt)
+            for nt in range(max_nt, 0, -1):
+                wm = math.ceil(gm / mt)
+                wn = math.ceil(gn / nt)
+                waves = wm * wn
+                area = mt * nt
+                aspect = abs((gm / max(gn, 1)) - (mt / max(nt, 1)))
+                balance = abs(wm - wn)
+                # Prefer square-ish temporal tiling when multiple M/N factorizations
+                # have the same total wave count. This keeps the per-wave PE grid
+                # balanced across M/N instead of collapsing all waves into one axis.
+                score = (waves, balance, aspect, -area, -min(mt, nt), -max(mt, nt))
+                if best is None or score < best[0]:
+                    best = (score, mt, nt, wm, wn)
+        if best is None:
+            return 1, 1, gm, gn
+        _, mt, nt, wm, wn = best
+        return mt, nt, wm, wn
 
-    num_m_tiles = math.ceil(M / M_tile)
-    num_n_tiles = math.ceil(N / N_tile)
-    num_k_tiles = math.ceil(K / K_tile)
+    grid_m_per_wave, grid_n_per_wave, wave_m, wave_n = _choose_mn_tiles(
+        grid_m, grid_n, pes_per_bus
+    )
 
-    ps_wave = (M_tile * K_tile // ep) * PKT_SIZE
-    pd_wave = (K_tile * N_tile // ep) * PKT_SIZE
-    pli_wave = (M_tile * N_tile // ep) * PKT_SIZE
-    total_waves = num_n_tiles * num_m_tiles * num_k_tiles
+    # K parallelism: one K-stage per bus. If grid_k > num_bus, run multiple
+    # K-waves; each K-wave consumes up to num_bus stages.
+    grid_k_per_wave = min(grid_k, num_bus)
+    wave_k = math.ceil(grid_k / grid_k_per_wave)
+
+    # Per-wave logical tile sizes (in elements).
+    M_tile = grid_m_per_wave * PE_M
+    N_tile = grid_n_per_wave * PE_N
+    K_tile = grid_k_per_wave * PE_K
+    M_tile_eff = min(M_tile, M)
+    N_tile_eff = min(N_tile, N)
+    K_tile_eff = min(K_tile, K)
+    pe_k_eff = min(PE_K, K_tile_eff)
+
+    # SPM wave footprints (bytes).
+    # GEMM planes are DMA-visible as one packed wave tile per relevant wave
+    # coordinate pair, not as raw row-major tensor slices.
+    tile_w_words = PE_N // ep
+    tile_d_words = math.ceil(PE_M / ep)
+    ps_row_words = grid_n_per_wave * tile_w_words
+
+    ps_wave = K_tile_eff * ps_row_words * PKT_SIZE      # PS = B[K_tile, N_wave]
+    # When the wave covers multiple M tiles in parallel (grid_m_per_wave > 1)
+    # the SPM PD region must hold one A-slice per active m_idx PE so that
+    # tagged AGU emissions can feed every (m_idx, n_idx) PE in the bus.
+    pd_wave = (grid_m_per_wave * tile_d_words * K_tile_eff) * PKT_SIZE
+    pli_wave = (grid_m_per_wave * grid_n_per_wave * PE_N * tile_d_words) * PKT_SIZE  # padded C[grid_m*PE_M, N_wave]
+
+    if max(ps_wave, pd_wave, pli_wave) > half_cap:
+        raise TilingFailed(
+            f"{op.name}: GEMM PE-tile footprint exceeds half_cap "
+            f"(ps={ps_wave}, pd={pd_wave}, pli={pli_wave}, half_cap={half_cap})"
+        )
+
+    # Loop bounds — keep generic 4D names so codegen/runtime are unchanged:
+    #   oc_tile ↔ wave_m   (M waves)
+    #   h_tile  ↔ wave_n   (N waves)
+    #   w_tile  ↔ 1         (GEMM has no W dim)
+    #   ic_tile ↔ wave_k   (K waves; reduction)
+    num_m_tiles = wave_m
+    num_n_tiles = wave_n
+    num_k_tiles = wave_k
+    total_waves = num_m_tiles * num_n_tiles * num_k_tiles
+
+    def _choose_full_n_resident_tiles() -> tuple[int, int]:
+        if num_k_tiles != 1 or num_n_tiles == 0 or num_m_tiles == 0:
+            return 0, 0
+
+        resident_n = num_n_tiles
+        ps_resident_bytes = resident_n * ps_wave
+        out_row_resident_bytes = resident_n * pli_wave
+        if ps_resident_bytes > half_cap or out_row_resident_bytes > half_cap:
+            return 0, 0
+
+        resident_m = min(
+            num_m_tiles,
+            half_cap // max(pd_wave, 1),
+            half_cap // max(out_row_resident_bytes, 1),
+        )
+        if resident_m != num_m_tiles:
+            return 0, 0
+        return resident_m, resident_n
+
+    resident_m_tiles, resident_n_tiles = _choose_full_n_resident_tiles()
+    ps_spm_bytes = resident_n_tiles * ps_wave if resident_n_tiles else ps_wave
+    pd_spm_bytes = resident_m_tiles * pd_wave if resident_m_tiles else pd_wave
+    out_spm_bytes = resident_m_tiles * resident_n_tiles * pli_wave if resident_m_tiles and resident_n_tiles else pli_wave
 
     # Map GEMM dims to generic 4D loop: oc→M, h→N, w=1, ic→K
     tiling = TilingResult(
@@ -837,99 +1227,187 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
         reduction_dims=["k_tile"],
     )
 
+    # K-chain ultra mode is only needed when one wave spans multiple K stages
+    # across buses. Single-stage GEMM follows the normal/linear path.
+    use_ultra = grid_k_per_wave > 1
+
     spm_layout = SpmPerGroupLayout(
-        ps=SpmGroupLayout(ping_base=pp, pong_base=ppong, size=ps_wave, spm_mode="parallel"),
-        pd=SpmGroupLayout(ping_base=0, pong_base=half_cap, size=pd_wave, spm_mode="linear"),
-        pli=SpmGroupLayout(ping_base=pp, pong_base=ppong, size=pli_wave, spm_mode="parallel"),
-        plo=SpmGroupLayout(ping_base=pp, pong_base=ppong, size=pli_wave, spm_mode="parallel"),
+        ps=SpmGroupLayout(
+            ping_base=pp if use_ultra else 0,
+            pong_base=ppong if use_ultra else half_cap,
+            size=ps_spm_bytes,
+            spm_mode="parallel" if use_ultra else "linear",
+        ),
+        pd=SpmGroupLayout(
+            ping_base=pp if use_ultra else 0,
+            pong_base=ppong if use_ultra else half_cap,
+            size=pd_spm_bytes,
+            spm_mode="parallel" if use_ultra else "linear",
+        ),
+        pli=SpmGroupLayout(
+            ping_base=0,
+            pong_base=half_cap,
+            size=out_spm_bytes,
+            spm_mode="linear",
+        ),
+        plo=SpmGroupLayout(
+            ping_base=0,
+            pong_base=half_cap,
+            size=out_spm_bytes,
+            spm_mode="linear",
+        ),
     )
 
-    # AGU PS: Parallel/Ultra — A tile [M_tile, K_tile], strides in word64
+    # GEMM plane mapping (matches noc_gen / test_noc_sim):
+    # Plane mapping (matches noc_gen / test_noc_sim):
+    #   PS  = B  (weights)
+    #   PD  = A  (input activations)
+    #   PLI/PLO = C  (partial sums)
+
+    # AGU PS (B): one wave contains grid_n_per_wave tagged N slices.
+    # In K-chain ultra mode each bus consumes only its local K stage, so the
+    # AGU K iterator is PE-local even though the DMA-visible wave footprint
+    # still spans all K stages in the wave.
     agu_ps = AguBankConfig(
-        base_addr=pp_w, base_addr_h=0,
-        iter0=M_tile // ep, iter1=K_tile // ep,
-        iter2=1, iter3=1,
+        base_addr=pp_w if use_ultra else 0, base_addr_h=0,
+        iter0=tile_w_words, iter1=pe_k_eff, iter2=grid_n_per_wave, iter3=1,
         stride0=1,
-        stride1=M_tile // ep,
-        stride2=0, stride3=0,
-        ctrl=0x8, lane_cfg=0,
-        tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
+        stride1=ps_row_words,
+        stride2=tile_w_words, stride3=0,
+        ctrl=0x8 if use_ultra else 0x0, lane_cfg=0,
+        # tag_base/tag_stride per ultra rule: ps_id == n_idx for the active
+        # PE within its bus.  Cluster_gen is the actual per-cluster owner of
+        # tag_base; this default reflects the single-cluster ultra case.
+        tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=2,
         mask_cfg=0xF,
     )
-    # AGU PD: Linear/Normal — B tile [K_tile, N_tile], strides in word64
     agu_pd = AguBankConfig(
         base_addr=0, base_addr_h=0,
-        iter0=K_tile // ep, iter1=N_tile // ep,
-        iter2=1, iter3=1,
+        iter0=tile_d_words,
+        iter1=grid_m_per_wave,
+        iter2=pe_k_eff,
+        iter3=1,
         stride0=1,
-        stride1=K_tile // ep,
-        stride2=0, stride3=0,
-        ctrl=0x0, lane_cfg=0,
-        tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
+        stride1=tile_d_words,
+        stride2=grid_m_per_wave * tile_d_words,
+        stride3=tile_d_words,
+        ctrl=0x8 if use_ultra else 0x0, lane_cfg=0,
+        tag_base=0,
+        tag_stride0=0,
+        tag_stride1=1,
+        tag_ctrl=1,
         mask_cfg=0xF,
     )
-    # AGU PLI: Parallel/Ultra — C tile [M_tile, N_tile], strides in word64
+    # AGU PLI/PLO (C): one wave contains grid_m_per_wave * grid_n_per_wave
+    # tagged C slices, where pli_id == m_idx * grid_n_per_wave + n_idx (see
+    # compute_scan_chain_gemm). Even in K-chain mode these partial sums remain
+    # wave-local linear data because the top/mid/bottom buses reduce through
+    # the PE accumulation path instead of consuming an ultra fanout.
+    pe_per_wave = grid_m_per_wave * grid_n_per_wave
     agu_pli = AguBankConfig(
-        base_addr=pp_w, base_addr_h=0,
-        iter0=M_tile // ep, iter1=N_tile // ep,
-        iter2=1, iter3=1,
+        base_addr=0, base_addr_h=0,
+        iter0=tile_d_words, iter1=PE_N, iter2=pe_per_wave, iter3=1,
         stride0=1,
-        stride1=M_tile // ep,
-        stride2=0, stride3=0,
-        ctrl=0x8, lane_cfg=0,
-        tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
+        stride1=tile_d_words,
+        stride2=PE_N * tile_d_words, stride3=0,
+        ctrl=0x0, lane_cfg=0,
+        tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=2,
         mask_cfg=0xF,
     )
-    # AGU PLO: Parallel/Ultra, strides in word64
     agu_plo = AguBankConfig(
-        base_addr=pp_w, base_addr_h=0,
-        iter0=M_tile // ep, iter1=N_tile // ep,
-        iter2=1, iter3=1,
+        base_addr=0, base_addr_h=0,
+        iter0=tile_d_words, iter1=PE_N, iter2=pe_per_wave, iter3=1,
         stride0=1,
-        stride1=M_tile // ep,
-        stride2=0, stride3=0,
-        ctrl=0x8, lane_cfg=0,
-        tag_base=0, tag_stride0=1, tag_stride1=0, tag_ctrl=1,
+        stride1=tile_d_words,
+        stride2=PE_N * tile_d_words, stride3=0,
+        ctrl=0x0, lane_cfg=0,
+        tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=2,
         mask_cfg=0xF,
     )
 
+    # gemm_template.json patches the PE-local PS DMA contract:
+    # - SDMA preloads one PE-local K-stage of the PS/B tile into PE DM.
+    # - LDMA.LHB then walks the same DM image as fp16 broadcasts.
+    # - VPSUMR reduces one PE-local C tile [PE_M, N_wave].
+    #
+    # The PE program is shared by all buses in a K-chain, so its K-loop bounds
+    # must be per-bus/per-PE rather than the full K-span of the wave.
+    pe_ps_words = pe_k_eff * tile_w_words
+
     pe_params = {
-        "KERNEL_DMA_STORE_LEN": M_tile * N_tile // ep,
-        "KERNEL_DMA_LOAD_LEN": K_tile * max(N_tile, M_tile) // ep,
-        "INPUT_DIM": K_tile,
-        "OUTPUT_DIM": M_tile,
-        "PSUM_COUNT": M_tile * N_tile // ep,
-        "NUM_OF_KERNEL_SETS": num_k_tiles,
+        "KERNEL_DMA_STORE_LEN": pe_ps_words,
+        "KERNEL_DMA_LOAD_LEN": pe_ps_words * ep,
+        "INPUT_DIM": pe_k_eff,
+        "OUTPUT_DIM_MINUS_ONE": min(PE_N, N_tile_eff) - 1,
+        "PSUM_COUNT": (PE_M * PE_N) // ep,
+        "NUM_OF_KERNEL_SETS": num_k_tiles*num_n_tiles,  # total K*N tiles across which we iterate
         "NUM_OF_N_TILES": num_n_tiles,
         "NUM_OF_M_TILES": num_m_tiles,
-        "K_TILE_DIM": K_tile,
+        "K_TILE_DIM": pe_k_eff,
+        # GEMM PE-grid metadata (inspectable from IR for verification)
+        "GRID_M": grid_m,
+        "GRID_N": grid_n,
+        "GRID_K": grid_k,
+        "GRID_M_PER_WAVE": grid_m_per_wave,
+        "GRID_N_PER_WAVE": grid_n_per_wave,
+        "GRID_K_PER_WAVE": grid_k_per_wave,
     }
     pe_prog = PeProgramRef(template_name="gemm_template", params=pe_params)
-    hddu = HdduConfig(plane_en=0xB, plane_mode=0x2)
-    scan_chain = compute_scan_chain_ultra(hw.num_pes, hw.num_bus, out_h=M_tile * N_tile // ep)
+    # The GEMM PE template always finishes with VPSUMR, which consumes PLI
+    # even when the logical input partial sum is all zeros.
+    hddu = HdduConfig(plane_en=0xF, plane_mode=0x2)
+    # K-chain scan-chain: bus i carries K-stage i.  When grid_k_per_wave==1
+    # the lone bus naturally takes route_mode=3 (IB, OB) per the open-issue-1
+    # resolution. PLI valid only on first stage; PLO valid only on last.
+    scan_chain = compute_scan_chain_gemm(
+        hw.num_pes, hw.num_bus,
+        grid_m=grid_m_per_wave,
+        grid_n=grid_n_per_wave,
+        grid_k=grid_k_per_wave,
+        use_ultra=use_ultra,
+    )
     cluster_map = compute_cluster_mapping(hw.num_clusters, tiling, op.op_type)
 
     dram_base = hw.dram_base
     if tensor_base == 0:
         tensor_base = dram_base + DRAM_BOOT_RESERVED
-    # A[M, K] contiguous, B[K, N] after A, C[M, N] after B
-    a_bytes = M * K * 2
-    b_bytes = K * N * 2
-    c_bytes = M * N * 2
+    # Reserve DRAM regions using the actual DMA-visible footprint, not only the
+    # logical tensor byte size. GEMM uses padded PE-local tiles for PD/PLI/PLO,
+    # so small edge tiles (for example M < PE_M) can be larger on DRAM than the
+    # raw tensor itself. Using the raw size here causes adjacent regions to
+    # overlap once gen_test_dram writes the packed DMA image.
+    a_bytes = num_m_tiles * num_k_tiles * pd_wave
+    b_bytes = num_n_tiles * num_k_tiles * ps_wave
+    c_bytes = num_m_tiles * num_n_tiles * pli_wave
     bdb = hw.bank_depth_bytes
 
-    has_bias = len(op.inputs) >= 3
-    if has_bias:
-        dram_bias_base = tensor_base + a_bytes + b_bytes + c_bytes
-        dma_pli_words = pli_wave // PKT_SIZE
-    else:
-        dram_bias_base = 0
-        dma_pli_words = 0
+    # GEMM always needs a PLI source because gemv_template issues VPSUMR.
+    # When the workload has no explicit input partial sum tensor, gen_test_dram
+    # leaves this region zero-filled so the first reduction starts from zero.
+    dram_bias_base = tensor_base + a_bytes + b_bytes + c_bytes
+    dma_pli_words = pli_wave // PKT_SIZE
 
     g0_dma = hw.spm_dma_group_base(0)
     g1_dma = hw.spm_dma_group_base(1)
     g2_dma = hw.spm_dma_group_base(2)
     g3_dma = hw.spm_dma_group_base(3)
+
+    # Plane mapping: PS=B, PD=A, output=C.
+    # GEMM uses packed per-wave DMA-visible tiles. Each wave tile is placed in
+    # a rectangular region indexed only by the wave coordinates the plane
+    # logically depends on:
+    #   PS  [n_wave, k_wave]
+    #   PD  [m_wave, k_wave]
+    #   PLI [m_wave, n_wave]
+    #   PLO [m_wave, n_wave]
+    dram_input_base = tensor_base                           # A
+    dram_weight_base = tensor_base + a_bytes                # B
+    dram_output_base = tensor_base + a_bytes + b_bytes      # C
+
+    ps_tile_bytes = ps_wave
+    pd_tile_bytes = pd_wave
+    pli_tile_bytes = pli_wave
+    plo_tile_bytes = pli_wave
 
     tiling_params = TilingParams(
         num_oc_tiles=num_m_tiles,
@@ -942,34 +1420,48 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
         tile_w_in=1,
         last_h_out=1,
         last_w_out=1,
-        spm_ping=[g0_dma + pp, g1_dma,            g2_dma + pp, g3_dma + pp],
-        spm_pong=[g0_dma + ppong, g1_dma + half_cap, g3_dma + pp, g2_dma + pp],
-        agu_ping=[pp_w, 0, pp_w, pp_w],
-        agu_pong=[ppong_w, half_words, pp_w, pp_w],
+        spm_ping=[g0_dma,            g1_dma,            g2_dma,            g3_dma],
+        spm_pong=[g0_dma + (hw.half_parallel if use_ultra else half_cap),
+              g1_dma + (hw.half_parallel if use_ultra else half_cap),
+              g2_dma + half_cap,
+              g3_dma + half_cap],
+                    agu_ping=[pp_w if use_ultra else 0, pp_w if use_ultra else 0, 0, 0],
+                    agu_pong=[ppong_w if use_ultra else half_words, ppong_w if use_ultra else half_words,
+              half_words, half_words],
         spm_map_even=_SPM_MAP_EVEN, spm_map_odd=_SPM_MAP_ODD,
-        dram_weight_base=tensor_base,           # A matrix
-        dram_input_base=tensor_base + a_bytes,  # B matrix
-        dram_output_base=tensor_base + a_bytes + b_bytes,  # C matrix
-        dram_ps_oc_stride=M_tile * K * 2,     # stride in M dim
-        dram_ps_ic_stride=K_tile * 2,         # stride in K dim
-        dram_pd_h_stride=K * N_tile * 2,      # B: stride in N dim (row of columns)
+        dram_weight_base=dram_weight_base,                  # PS = B
+        dram_input_base=dram_input_base,                    # PD = A
+        dram_output_base=dram_output_base,                  # PLO = C
+        dram_ps_oc_stride=0,                                # B not dep on M
+        dram_ps_h_stride=ps_tile_bytes,                     # B N-wave step
+        dram_ps_ic_stride=num_n_tiles * ps_tile_bytes,      # B K-wave step
+        dram_pd_oc_stride=num_k_tiles * pd_tile_bytes,      # A M-wave step
+        dram_pd_h_stride=0,                                 # A not dep on N
         dram_pd_w_stride=0,
-        dram_pd_ic_stride=K_tile * N * 2,     # B: stride in K dim
-        dram_out_oc_stride=M_tile * N * 2,    # C: stride in M dim
-        dram_out_h_stride=N_tile * 2,         # C: stride in N dim
+        dram_pd_ic_stride=pd_tile_bytes,                    # A K-wave step
+        dram_out_oc_stride=num_n_tiles * plo_tile_bytes,    # C M-wave step
+        dram_out_h_stride=plo_tile_bytes,                   # C N-wave step
         dram_out_w_stride=0,
         dma_ps_words=ps_wave // PKT_SIZE,
         dma_pd_words=pd_wave // PKT_SIZE,
         dma_plo_words=pli_wave // PKT_SIZE,
         dram_bias_base=dram_bias_base,
+        dram_bias_oc_stride=num_n_tiles * pli_tile_bytes,
+        dram_bias_h_stride=pli_tile_bytes,
         dma_pli_words=dma_pli_words,
         ps_reuse_across_spatial=False,
         spatial_2d_dma=False,
         pd_ic_agu_offset=0,
         bank_depth_bytes=bdb,
-        parallel_groups=0xD,  # PS, PLI, PLO
-        dma_ps_words_per_bank=ps_wave // (PKT_SIZE * 3) if ps_wave > 0 else 0,
-        dma_plo_words_per_bank=pli_wave // (PKT_SIZE * 3) if pli_wave > 0 else 0,
+        parallel_groups=0x3 if use_ultra else 0x0,  # PS, PD
+        dma_pd_rows_per_bank=0,
+        dma_pli_rows_per_bank=0,
+        dma_plo_rows_per_bank=0,
+        dma_ps_words_per_bank=ps_row_words * pe_k_eff if use_ultra and ps_wave > 0 else 0,
+        dma_pd_words_per_bank=grid_m_per_wave * tile_d_words * pe_k_eff if use_ultra and pd_wave > 0 else 0,
+        dma_plo_words_per_bank=0,
+        gemm_resident_m_tiles=resident_m_tiles,
+        gemm_resident_n_tiles=resident_n_tiles,
     )
 
     return LayerHwConfig(
@@ -1064,6 +1556,9 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
 
         layers.append(layer)
 
+        # E009: SPM/AGU mode consistency.
+        _assert_spm_agu_consistency(layer)
+
         # Advance cursor past this layer's last allocation
         tp = layer.tiling_params
         end_candidates = [
@@ -1083,9 +1578,21 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
 
 def _output_total_bytes(tp: TilingParams) -> int:
     """Total output region size from tile-packed layout."""
-    return tp.num_oc_tiles * tp.num_h_tiles * tp.num_w_tiles * tp.dma_plo_words * PKT_SIZE
+    last_offset = 0
+    if tp.num_oc_tiles > 0:
+        last_offset += (tp.num_oc_tiles - 1) * tp.dram_out_oc_stride
+    if tp.num_h_tiles > 0:
+        last_offset += (tp.num_h_tiles - 1) * tp.dram_out_h_stride
+    if tp.num_w_tiles > 0:
+        last_offset += (tp.num_w_tiles - 1) * tp.dram_out_w_stride
+    return last_offset + tp.dma_plo_words * PKT_SIZE
 
 
 def _bias_total_bytes(tp: TilingParams) -> int:
     """Total bias/zero region size."""
-    return tp.num_oc_tiles * tp.dma_pli_words * PKT_SIZE
+    last_offset = 0
+    if tp.num_oc_tiles > 0:
+        last_offset += (tp.num_oc_tiles - 1) * tp.dram_bias_oc_stride
+    if tp.num_h_tiles > 0:
+        last_offset += (tp.num_h_tiles - 1) * tp.dram_bias_h_stride
+    return last_offset + tp.dma_pli_words * PKT_SIZE

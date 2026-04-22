@@ -67,11 +67,11 @@ def _parse_hardware(raw: dict) -> HardwareDesc:
     if not (1 <= num_clusters <= 16):
         raise CompilationError("schema", path, "num_clusters must be in [1, 16]")
 
-    num_pes = _get(raw, "num_pes", 64, int)
+    num_pes = _get(raw, "num_pes", 48, int)
     if not (1 <= num_pes <= 256):
         raise CompilationError("schema", path, "num_pes must be in [1, 256]")
 
-    num_bus = _get(raw, "num_bus", 4, int)
+    num_bus = _get(raw, "num_bus", 3, int)
     if not (1 <= num_bus <= 16):
         raise CompilationError("schema", path, "num_bus must be in [1, 16]")
 
@@ -82,7 +82,7 @@ def _parse_hardware(raw: dict) -> HardwareDesc:
     if not (1 <= spm_banks_per_group <= 8):
         raise CompilationError("schema", path, "spm_banks_per_group must be in [1, 8]")
 
-    spm_bank_depth = _get(raw, "spm_bank_depth", 4096, int)
+    spm_bank_depth = _get(raw, "spm_bank_depth", 8192, int)
     if spm_bank_depth < 1024 or (spm_bank_depth & (spm_bank_depth - 1)):
         raise CompilationError("schema", path, "spm_bank_depth must be power of 2, >= 1024")
 

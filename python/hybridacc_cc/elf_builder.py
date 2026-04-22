@@ -20,6 +20,18 @@ DEFAULT_GCC = "riscv32-unknown-elf-gcc"
 DEFAULT_MARCH = "rv32i_zmmul_zicsr"
 
 
+def _normalize_opt_level(opt_level: str, *, leading_dash: bool) -> str:
+    """Normalize optimization level strings like 3/O3/-O3."""
+    normalized = opt_level.strip()
+    if normalized.startswith("-O"):
+        normalized = normalized[1:]
+    elif not normalized.startswith("O"):
+        normalized = f"O{normalized}"
+    if leading_dash:
+        return f"-{normalized}"
+    return normalized
+
+
 def build_gcc_command(
     output_dir: Path,
     elf_name: str = "firmware.elf",
@@ -27,6 +39,7 @@ def build_gcc_command(
     march: str = DEFAULT_MARCH,
     mabi: str = "ilp32",
     opt_level: str = "-O2",
+    mmio_opt_level: Optional[str] = None,
 ) -> List[str]:
     """Build the complete GCC cross-compilation command.
 
@@ -36,6 +49,7 @@ def build_gcc_command(
     source_paths = [str(output_dir / s) for s in sources]
     linker_script = str(output_dir / "linker.ld")
     elf_path = str(output_dir / elf_name)
+    normalized_opt_level = _normalize_opt_level(opt_level, leading_dash=True)
 
     cmd = [
         gcc,
@@ -43,14 +57,20 @@ def build_gcc_command(
         f"-mabi={mabi}",
         "-nostdlib",
         "-ffreestanding",
-        opt_level,
+        normalized_opt_level,
         "-Wall", "-Wextra",
         "-Wl,--gc-sections",
         "-ffunction-sections", "-fdata-sections",
         f"-T{linker_script}",
         f"-I{output_dir}",
         "-o", elf_path,
-    ] + source_paths
+    ]
+
+    if mmio_opt_level is not None:
+        normalized_mmio_opt = _normalize_opt_level(mmio_opt_level, leading_dash=False)
+        cmd.append(f'-DHACC_MMIO_OPTIMIZE_LEVEL="{normalized_mmio_opt}"')
+
+    cmd += source_paths
 
     return cmd
 
@@ -61,6 +81,7 @@ def compile_firmware(
     gcc: str = DEFAULT_GCC,
     march: str = DEFAULT_MARCH,
     opt_level: str = "-O2",
+    mmio_opt_level: Optional[str] = None,
     dry_run: bool = False,
 ) -> Path:
     """Compile firmware C sources into an ELF binary.
@@ -74,7 +95,14 @@ def compile_firmware(
     Returns:
         Path to the generated ELF file.
     """
-    cmd = build_gcc_command(output_dir, elf_name, gcc, march=march, opt_level=opt_level)
+    cmd = build_gcc_command(
+        output_dir,
+        elf_name,
+        gcc,
+        march=march,
+        opt_level=opt_level,
+        mmio_opt_level=mmio_opt_level,
+    )
     elf_path = output_dir / elf_name
 
     if dry_run:

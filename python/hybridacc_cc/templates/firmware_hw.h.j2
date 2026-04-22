@@ -209,61 +209,70 @@ typedef struct {
 #define MCAUSE_MTI_CODE     7u
 #define MCAUSE_MEI_CODE     11u
 
-static inline void mmio_write32(uint32_t addr, uint32_t val) {
+#if defined(__GNUC__) && defined(HACC_MMIO_OPTIMIZE_LEVEL)
+#define HACC_MMIO_OPT_ATTR __attribute__((optimize(HACC_MMIO_OPTIMIZE_LEVEL)))
+#else
+#define HACC_MMIO_OPT_ATTR
+#endif
+
+static inline void HACC_MMIO_OPT_ATTR mmio_write32(uint32_t addr, uint32_t val) {
     *(volatile uint32_t*)addr = val;
 }
 
-static inline uint32_t mmio_read32(uint32_t addr) {
+static inline uint32_t HACC_MMIO_OPT_ATTR mmio_read32(uint32_t addr) {
     return *(volatile uint32_t*)addr;
 }
 
-static inline void bcast_write32(uint32_t cluster_offset, uint32_t val) {
+static inline void HACC_MMIO_OPT_ATTR bcast_write32(uint32_t cluster_offset, uint32_t val) {
     mmio_write32(CLUSTER_BCAST_BASE + cluster_offset, val);
 }
 
-static inline uint32_t csr_read(uint32_t csr) {
-    uint32_t val;
-    __asm__ volatile("csrr %0, %1" : "=r"(val) : "i"(csr));
-    return val;
-}
+#define csr_read(csr)                           \
+    ({                                          \
+        uint32_t val__;                         \
+        __asm__ volatile("csrr %0, %1"         \
+                         : "=r"(val__)         \
+                         : "i"(csr));          \
+        val__;                                  \
+    })
 
-static inline void csr_set_bits(uint32_t csr, uint32_t mask) {
-    __asm__ volatile("csrs %0, %1" :: "i"(csr), "r"(mask));
-}
+#define csr_set_bits(csr, mask)                 \
+    __asm__ volatile("csrs %0, %1"             \
+                     :: "i"(csr), "r"(mask))
 
-static inline void unicast_write32(uint32_t cluster_id,
-                                   uint32_t cluster_offset,
-                                   uint32_t val) {
+static inline void HACC_MMIO_OPT_ATTR unicast_write32(uint32_t cluster_id,
+                                                      uint32_t cluster_offset,
+                                                      uint32_t val) {
     mmio_write32(CLUSTER_UNICAST_BASE
                  + cluster_id * CLUSTER_STRIDE
                  + cluster_offset, val);
 }
 
-static inline void set_cluster_mask(uint32_t mask_lo, uint32_t mask_hi) {
+static inline void HACC_MMIO_OPT_ATTR set_cluster_mask(uint32_t mask_lo, uint32_t mask_hi) {
     mmio_write32(LOCAL_CLUSTER_MASK_LO, mask_lo);
     mmio_write32(LOCAL_CLUSTER_MASK_HI, mask_hi);
 }
 
-static inline uint32_t cluster_unicast_read32(uint32_t cluster_id,
-                                              uint32_t cluster_offset) {
+static inline uint32_t HACC_MMIO_OPT_ATTR cluster_unicast_read32(uint32_t cluster_id,
+                                                                 uint32_t cluster_offset) {
     return mmio_read32(CLUSTER_UNICAST_BASE
                        + cluster_id * CLUSTER_STRIDE
                        + cluster_offset);
 }
 
-static inline void cluster_set_mode(uint32_t mode) {
+static inline void HACC_MMIO_OPT_ATTR cluster_set_mode(uint32_t mode) {
     bcast_write32(CLUSTER_MODE, mode);
 }
 
-static inline void cluster_start_layer(void) {
+static inline void HACC_MMIO_OPT_ATTR cluster_start_layer(void) {
     bcast_write32(CLUSTER_CTRL, CLUSTER_CTRL_START);
 }
 
-static inline void cluster_stop_layer(void) {
+static inline void HACC_MMIO_OPT_ATTR cluster_stop_layer(void) {
     bcast_write32(CLUSTER_CTRL, CLUSTER_CTRL_STOP);
 }
 
-static inline void cluster_soft_reset_layer(void) {
+static inline void HACC_MMIO_OPT_ATTR cluster_soft_reset_layer(void) {
     bcast_write32(CLUSTER_CTRL, CLUSTER_CTRL_SOFT_RESET);
 }
 
@@ -271,9 +280,9 @@ static inline uint32_t agu_addr(uint32_t bank, uint32_t reg) {
     return HDDU_BASE + bank * AGU_BANK_STRIDE + reg;
 }
 
-static inline void bcast_agu_write(uint32_t bank,
-                                   uint32_t reg,
-                                   uint32_t val) {
+static inline void HACC_MMIO_OPT_ATTR bcast_agu_write(uint32_t bank,
+                                                      uint32_t reg,
+                                                      uint32_t val) {
     bcast_write32(agu_addr(bank, reg), val);
 }
 
@@ -290,7 +299,7 @@ static inline uint32_t pack_load_program(uint16_t im_addr_bytes,
 }
 
 /* ── 4D DMA one-time init (call once before first transfer) ── */
-static inline void dma_init_linear(void) {
+static inline void HACC_MMIO_OPT_ATTR dma_init_linear(void) {
     mmio_write32(DMA_SRC_ADDR_HI,     0);
     mmio_write32(DMA_DST_ADDR_HI,     0);
     mmio_write32(DMA_COUNT_D1,        1);
@@ -308,8 +317,8 @@ static inline void dma_init_linear(void) {
 }
 
 /* ── DMA load: DRAM → Cluster SPM ── */
-static inline void dma_load(uint32_t dram_addr, uint32_t spm_offset,
-                            uint32_t cluster_id, uint32_t beat_count, uint32_t tag) {
+static inline void HACC_MMIO_OPT_ATTR dma_load(uint32_t dram_addr, uint32_t spm_offset,
+                                               uint32_t cluster_id, uint32_t beat_count, uint32_t tag) {
     mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_DRAM);
     mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
     mmio_write32(DMA_SRC_ADDR_LO,    dram_addr);
@@ -332,13 +341,13 @@ static inline void dma_load(uint32_t dram_addr, uint32_t spm_offset,
     mmio_write32(DMA_CTRL,           DMA_CTRL_SUBMIT);
 }
 
-static inline void dma_load_2d(uint32_t dram_addr, uint32_t spm_offset,
-                               uint32_t cluster_id,
-                               uint32_t row_beats,
-                               uint32_t row_count,
-                               uint32_t src_row_stride,
-                               uint32_t dst_row_stride,
-                               uint32_t tag) {
+static inline void HACC_MMIO_OPT_ATTR dma_load_2d(uint32_t dram_addr, uint32_t spm_offset,
+                                                  uint32_t cluster_id,
+                                                  uint32_t row_beats,
+                                                  uint32_t row_count,
+                                                  uint32_t src_row_stride,
+                                                  uint32_t dst_row_stride,
+                                                  uint32_t tag) {
     mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_DRAM);
     mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
     mmio_write32(DMA_SRC_ADDR_LO,    dram_addr);
@@ -362,8 +371,8 @@ static inline void dma_load_2d(uint32_t dram_addr, uint32_t spm_offset,
 }
 
 /* ── DMA store: Cluster SPM → DRAM ── */
-static inline void dma_store(uint32_t spm_offset, uint32_t dram_addr,
-                             uint32_t cluster_id, uint32_t beat_count, uint32_t tag) {
+static inline void HACC_MMIO_OPT_ATTR dma_store(uint32_t spm_offset, uint32_t dram_addr,
+                                                uint32_t cluster_id, uint32_t beat_count, uint32_t tag) {
     mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
     mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_DRAM);
     mmio_write32(DMA_SRC_ADDR_LO,    spm_offset);
@@ -386,13 +395,13 @@ static inline void dma_store(uint32_t spm_offset, uint32_t dram_addr,
     mmio_write32(DMA_CTRL,           DMA_CTRL_SUBMIT);
 }
 
-static inline void dma_store_2d(uint32_t spm_offset, uint32_t dram_addr,
-                                uint32_t cluster_id,
-                                uint32_t row_beats,
-                                uint32_t row_count,
-                                uint32_t src_row_stride,
-                                uint32_t dst_row_stride,
-                                uint32_t tag) {
+static inline void HACC_MMIO_OPT_ATTR dma_store_2d(uint32_t spm_offset, uint32_t dram_addr,
+                                                   uint32_t cluster_id,
+                                                   uint32_t row_beats,
+                                                   uint32_t row_count,
+                                                   uint32_t src_row_stride,
+                                                   uint32_t dst_row_stride,
+                                                   uint32_t tag) {
     mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
     mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_DRAM);
     mmio_write32(DMA_SRC_ADDR_LO,    spm_offset);
@@ -415,22 +424,22 @@ static inline void dma_store_2d(uint32_t spm_offset, uint32_t dram_addr,
     mmio_write32(DMA_CTRL,           DMA_CTRL_SUBMIT);
 }
 
-static inline void dma_wait_done(void) {
+static inline void HACC_MMIO_OPT_ATTR dma_wait_done(void) {
     while (!(mmio_read32(DMA_STATUS) & DMA_STATUS_IDLE)) {
     }
 }
 
-static inline void dma_wait_tag(uint32_t tag) {
+static inline void HACC_MMIO_OPT_ATTR dma_wait_tag(uint32_t tag) {
     /* Use signed subtraction to handle "already past" tags and wrap-around */
     while ((int32_t)(mmio_read32(DMA_DONE_TAG) - tag) < 0) {
     }
 }
 
-static inline int dma_is_done(void) {
+static inline int HACC_MMIO_OPT_ATTR dma_is_done(void) {
     return (mmio_read32(DMA_STATUS) & DMA_STATUS_IDLE) != 0;
 }
 
-static inline void enable_wfi_timer_interrupts(void) {
+static inline void HACC_MMIO_OPT_ATTR enable_wfi_timer_interrupts(void) {
     mmio_write32(TIMER_CTRL, 1u);
     mmio_write32(TIMER_MTIMECMP_LO, 0xFFFFFFFFu);
     mmio_write32(TIMER_MTIMECMP_HI, 0xFFFFFFFFu);
@@ -438,14 +447,14 @@ static inline void enable_wfi_timer_interrupts(void) {
     csr_set_bits(CSR_MSTATUS, MSTATUS_MIE);
 }
 
-static inline void arm_wfi_timer_tick(uint32_t delta_cycles) {
+static inline void HACC_MMIO_OPT_ATTR arm_wfi_timer_tick(uint32_t delta_cycles) {
     uint32_t now_lo = mmio_read32(TIMER_MTIME_LO);
     mmio_write32(TIMER_MTIMECMP_HI, 0xFFFFFFFFu);
     mmio_write32(TIMER_MTIMECMP_LO, now_lo + delta_cycles);
     mmio_write32(TIMER_MTIMECMP_HI, 0u);
 }
 
-static inline void hddu_wait_debug_probe(uint32_t cluster_base) {
+static inline void HACC_MMIO_OPT_ATTR hddu_wait_debug_probe(uint32_t cluster_base) {
     /* Read diagnostic registers so their values appear in core-debug WB trace. */
     (void)mmio_read32(cluster_base + HDDU_BASE + HDDU_ERR_CODE);
     (void)mmio_read32(cluster_base + HDDU_BASE + HDDU_ERR_INFO0);
@@ -457,7 +466,7 @@ static inline void hddu_wait_debug_probe(uint32_t cluster_base) {
     (void)mmio_read32(cluster_base + agu_addr(AGU_PLO, AGU_REG_STATUS));
 }
 
-static inline void wait_all_clusters_hddu_done(uint32_t num_clusters) {
+static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_hddu_done(uint32_t num_clusters) {
     for (uint32_t c = 0; c < num_clusters; c++) {
         uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
         uint32_t spin_count = 0;
@@ -475,12 +484,12 @@ static inline void wait_all_clusters_hddu_done(uint32_t num_clusters) {
     }
 }
 
-static inline void wait_all_clusters_done(uint32_t num_clusters) {
+static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_done(uint32_t num_clusters) {
     /* Temporary compatibility wrapper until all call sites move to hddu_done. */
     wait_all_clusters_hddu_done(num_clusters);
 }
 
-static inline void wait_all_clusters_agu_idle(uint32_t num_clusters) {
+static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_agu_idle(uint32_t num_clusters) {
     for (uint32_t c = 0; c < num_clusters; c++) {
         uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
         while (1) {
@@ -497,7 +506,7 @@ static inline void wait_all_clusters_agu_idle(uint32_t num_clusters) {
     }
 }
 
-static inline void wait_all_clusters_pe_halted(uint32_t num_clusters) {
+static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_pe_halted(uint32_t num_clusters) {
     for (uint32_t c = 0; c < num_clusters; c++) {
         uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
         while (1) {
@@ -511,7 +520,7 @@ static inline void wait_all_clusters_pe_halted(uint32_t num_clusters) {
     }
 }
 
-static inline void wait_all_clusters_noc_quiesced(uint32_t num_clusters) {
+static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_noc_quiesced(uint32_t num_clusters) {
     for (uint32_t c = 0; c < num_clusters; c++) {
         uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
         while (1) {
@@ -528,7 +537,7 @@ static inline void wait_all_clusters_noc_quiesced(uint32_t num_clusters) {
     }
 }
 
-static inline void wait_all_clusters_cluster_idle(uint32_t num_clusters) {
+static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_cluster_idle(uint32_t num_clusters) {
     for (uint32_t c = 0; c < num_clusters; c++) {
         while (1) {
             uint32_t st = cluster_unicast_read32(c, CLUSTER_STATUS);
@@ -542,7 +551,7 @@ static inline void wait_all_clusters_cluster_idle(uint32_t num_clusters) {
     }
 }
 
-static inline void wait_all_clusters_cluster_quiesced(uint32_t num_clusters) {
+static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_cluster_quiesced(uint32_t num_clusters) {
     for (uint32_t c = 0; c < num_clusters; c++) {
         while (1) {
             uint32_t st = cluster_unicast_read32(c, CLUSTER_STATUS);
@@ -588,7 +597,9 @@ typedef struct {
     uint32_t dram_output_base;
 
     uint32_t dram_ps_oc_stride;
+    uint32_t dram_ps_h_stride;
     uint32_t dram_ps_ic_stride;
+    uint32_t dram_pd_oc_stride;
     uint32_t dram_pd_h_stride;
     uint32_t dram_pd_w_stride;
     uint32_t dram_pd_ic_stride;
@@ -601,6 +612,8 @@ typedef struct {
     uint32_t dma_plo_words;
 
     uint32_t dram_bias_base;
+    uint32_t dram_bias_oc_stride;
+    uint32_t dram_bias_h_stride;
     uint32_t dma_pli_words;
 
     uint8_t ps_reuse_across_spatial;
@@ -610,8 +623,15 @@ typedef struct {
 
     uint32_t bank_depth_bytes;
     uint8_t  parallel_groups;
+    uint16_t dma_pd_rows_per_bank;
+    uint16_t dma_pli_rows_per_bank;
+    uint16_t dma_plo_rows_per_bank;
     uint32_t dma_ps_words_per_bank;
+    uint32_t dma_pd_words_per_bank;
     uint32_t dma_plo_words_per_bank;
+
+    uint16_t gemm_resident_m_tiles;
+    uint16_t gemm_resident_n_tiles;
 } TilingParams;
 
 typedef struct {

@@ -6,22 +6,42 @@
 #include "firmware_hw.h"
 
 /* Forward declarations */
-void run_layer(const LayerConfig* cfg);
+{% for runner in used_runners %}
+void {{ runner }}(const LayerConfig* cfg);
+{% endfor %}
+
+typedef void (*LayerRunner)(const LayerConfig* cfg);
 
 /* Layer config table (defined in firmware_data.c) */
 extern const LayerConfig layer_configs[];
 extern const uint32_t num_layers;
 
+static const LayerRunner layer_runners[] = {
+{% for layer in layers %}
+    {{ layer.runner }}{{ "," if not loop.last }}
+{% endfor %}
+};
+
 /* ═══════════════════════════════════════════════════════
- * Trap Handler (WFI wakeup for cluster done IRQ)
+ * Trap Handler (timer tick + cluster external IRQ)
  * ═══════════════════════════════════════════════════════ */
 void __attribute__((interrupt("machine"), aligned(4)))
 trap_handler(void) {
     uint32_t mcause = csr_read(CSR_MCAUSE);
-    if ((mcause & MCAUSE_INT_BIT) && ((mcause & 0x7FFFFFFFu) == MCAUSE_MTI_CODE)) {
-        mmio_write32(TIMER_MTIMECMP_LO, 0xFFFFFFFFu);
-        mmio_write32(TIMER_MTIMECMP_HI, 0xFFFFFFFFu);
-        return;
+    if (mcause & MCAUSE_INT_BIT) {
+        uint32_t cause = mcause & 0x7FFFFFFFu;
+        if (cause == MCAUSE_MTI_CODE) {
+            mmio_write32(TIMER_MTIMECMP_LO, 0xFFFFFFFFu);
+            mmio_write32(TIMER_MTIMECMP_HI, 0xFFFFFFFFu);
+            return;
+        }
+        if (cause == MCAUSE_MEI_CODE) {
+            uint32_t src = mmio_read32(PLIC_CLAIM_COMPLETE);
+            if (src != 0u) {
+                mmio_write32(PLIC_CLAIM_COMPLETE, src);
+            }
+            return;
+        }
     }
     while (1) { __asm__ volatile("wfi"); }
 }
@@ -42,7 +62,7 @@ _start(void) {
 void main(void) {
     enable_wfi_timer_interrupts();
     for (uint32_t i = 0; i < num_layers; i++) {
-        run_layer(&layer_configs[i]);
+        layer_runners[i](&layer_configs[i]);
     }
 
     __asm__ volatile("ebreak");  /* signal completion to testbench */
