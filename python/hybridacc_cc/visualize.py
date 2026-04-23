@@ -323,6 +323,11 @@ def _render_layer(layer: LayerHwConfig, hw: HardwareDesc, idx: int) -> str:
     </div>
   </div>
         <div class=\"panel-stack\">
+        <div class="panel">
+            <h3>Workload attributes</h3>
+            {_render_layer_attribute_panel(layer)}
+            <div class="panel-note">Compiler-visible workload attributes are summarized here using lowering metadata, so padding and output epilogue are visible without scanning the DMA sections.</div>
+        </div>
     <div class=\"panel\">
       <h3>Scan-chain topology</h3>
       {_render_scan_chain(layer.scan_chain, hw)}
@@ -346,6 +351,39 @@ def _render_layer(layer: LayerHwConfig, hw: HardwareDesc, idx: int) -> str:
   </div>
 </section>
 """
+
+
+def _render_layer_attribute_panel(layer: LayerHwConfig) -> str:
+    tp = layer.tiling_params
+    attrs = [
+        ("stride", str(tp.input_stride)),
+        ("padding", str(tp.input_padding) if layer.op_type == "conv2d_3x3" else "-"),
+        ("fill mode", _dma_fill_mode_label(tp.input_fill_mode) if tp.input_pad_enable else "disabled"),
+        ("output epilogue", _output_epilogue_label(tp.output_epilogue)),
+        ("relu", "on" if _output_epilogue_label(tp.output_epilogue) == "relu" else "off"),
+        ("input src", f"{tp.input_src_h} x {tp.input_src_w}" if tp.input_src_h > 0 and tp.input_src_w > 0 else "-"),
+    ]
+    cards = "".join(
+        f"<div class=\"meta-card\"><span class=\"label\">{escape(label)}</span><span class=\"value\">{escape(value)}</span></div>"
+        for label, value in attrs
+    )
+    return f"<div class=\"agu-meta-grid\">{cards}</div>"
+
+
+def _dma_fill_mode_label(fill_mode: int) -> str:
+    if fill_mode == 0:
+        return "zero"
+    if fill_mode == 1:
+        return "epsilon"
+    return f"mode-{fill_mode}"
+
+
+def _output_epilogue_label(epilogue: int) -> str:
+    if epilogue == 1:
+        return "relu"
+    if epilogue == 0:
+        return "none"
+    return f"mode-{epilogue}"
 
 
 def _render_scan_chain(entries: list[ScanChainEntry], hw: HardwareDesc) -> str:

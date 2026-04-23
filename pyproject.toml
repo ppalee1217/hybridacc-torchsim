@@ -27,6 +27,7 @@ log-parser = "log_parser.cli:main"
 trace-parser = "trace_parser.cli:main"
 hacc-compile = "hybridacc_cc.cli:main"
 hacc-setup = "hybridacc_cc.setup_cli:main"
+hacc-sweep = "hybridacc_cc.sweep_tools:main"
 
 [tool.setuptools.packages.find]
 where = ["./python"]

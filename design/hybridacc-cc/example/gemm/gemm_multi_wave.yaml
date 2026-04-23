@@ -1,5 +1,4 @@
-# T-GEMM-S4: GEMM Multi Wave across M/N/K simultaneously
-name: test_gemm_s4_m60k128n80
+name: gemm_multi_wave
 hardware:
   num_clusters: 1
   num_pes: 48

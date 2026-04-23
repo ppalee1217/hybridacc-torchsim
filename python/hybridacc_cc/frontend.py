@@ -195,6 +195,13 @@ def _validate_conv2d(op: OpDesc, hw: HardwareDesc) -> None:
     stride = op.attrs.get("stride", 1)
     padding = op.attrs.get("padding", 0)
 
+    if op.op_type != "conv2d_3x3" and "padding" in op.attrs:
+        raise CompilationError(
+            "semantic",
+            op.name,
+            f"{op.op_type} does not support the padding attribute; only conv2d_3x3 may set padding",
+        )
+
     H_out_expected = (H_in + 2 * padding - KH) // stride + 1
     W_out_expected = (W_in + 2 * padding - KW) // stride + 1
 
