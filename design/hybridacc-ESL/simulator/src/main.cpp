@@ -736,6 +736,7 @@ int sc_main(int argc, char* argv[]) {
         sc_start();
     }
 
+    std::cout << "[SIM] Cluster RUN cycles: " << dut.cluster_run_cycles(0) << std::endl;
     std::cout << "[SIM] Simulation ended at " << sc_time_stamp() << std::endl;
     dram.print_oob_summary();
 

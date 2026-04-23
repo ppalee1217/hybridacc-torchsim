@@ -138,6 +138,9 @@ public:
 		NOC_PORT_WIDTH_BITS,
 		NOC_NUM_PES_PER_PORT> noc;
 
+	cluster::ClusterSubstate substate() const { return cluster_ctrl_.substate(); }
+	uint64_t run_cycles() const { return cluster_run_cycles_; }
+
 	SC_HAS_PROCESS(ComputeCluster);
 
 	explicit ComputeCluster(sc_module_name name, NetWorkOnChipConfig noc_cfg = NetWorkOnChipConfig())
@@ -490,6 +493,7 @@ private:
 	sc_uint<32> noc_last_cmd_reg{};
 	bool hddu_start_pending_ = false;  // AHB pipeline race fix: set on CTRL_START write, cleared when STATUS shows BUSY
 	cluster::ClusterControlUnit cluster_ctrl_;
+	uint64_t cluster_run_cycles_ = 0;
 
 	static bool in_range(uint32_t addr, uint32_t base, uint32_t size) {
 		return addr >= base && addr < (base + size);
@@ -627,6 +631,7 @@ private:
 		hddu_mmio_wdata_sig.write(0);
 		hddu_mmio_write_sig.write(false);
 		cluster_ctrl_.reset();
+		cluster_run_cycles_ = 0;
 
 		wait();
 
@@ -852,6 +857,10 @@ private:
 				prev_status_word = debug_status_word;
 				prev_mode = debug_mode;
 				prev_substate = debug_substate;
+			}
+
+			if (power_enable_i.read() && cluster_ctrl_.substate() == cluster::ClusterSubstate::RUNNING) {
+				++cluster_run_cycles_;
 			}
 
 			wait();

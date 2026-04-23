@@ -426,7 +426,22 @@ scripts/fast_entry/run_e2e.sh \
 
 # 用 glob
 scripts/fast_entry/run_e2e.sh design/hybridacc-cc/example/*.yaml
+
+# 限制平行 worker 數量
+scripts/fast_entry/run_e2e.sh design/hybridacc-cc/example/*.yaml --jobs 8
 ```
+
+- 批次模式若未指定 `--jobs`，預設會使用 `nproc` 個 worker 平行執行。
+- terminal 會顯示 live progress dashboard；每個 workload 的完整輸出會寫到對應 build directory 下的 `e2e_run.log`。
+
+### Sweep 報表中的 utilization 指標
+
+若使用 `uv run hacc-sweep report` 彙整 batch 結果，目前報表會區分兩個 MAC utilization 指標：
+
+- `core_level_macs_utilization_pct`：以 core 從啟動到 EBREAK 的 cycle 視窗計算。
+- `cluster_level_macs_utilization_pct`：只以 cluster control state 為 `RUN` 的 cycle 計算。
+
+模擬器會直接在 `sim.log` 輸出 `[SIM] Cluster RUN cycles: <n>`，報表會直接讀取這個數值，因此不需要另外開 trace 來回推 cluster 的執行區間。
 
 ---
 

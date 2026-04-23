@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
 from io import BytesIO
+from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -23,17 +24,49 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_RESULTS_ROOT = _REPO_ROOT / "output"
+_METRIC_LABELS = {
+    "sim_time_ns": "Simulation Time (ns)",
+    "ebreak_cycle": "Core-level cycles (EBREAK)",
+    "cluster_run_cycles": "Cluster RUN cycles",
+    "active_pes": "Active PEs",
+    "active_pe_ratio": "Active PE Ratio",
+    "macs": "MACs",
+    "core_level_macs_utilization_pct": "Core-level MACs Utilization (%)",
+    "cluster_level_macs_utilization_pct": "Cluster-level MACs Utilization (%)",
+    "macs_utilization_pct": "Core-level MACs Utilization (%)",
+}
 _DIMENSION_ALIASES = {
-    "h": "h",
-    "height": "h",
+    "h": "oh",
+    "height": "oh",
+    "oh": "oh",
+    "out_h": "oh",
+    "output_height": "oh",
     "ich": "ic",
     "ic": "ic",
     "input_channels": "ic",
     "och": "oc",
     "oc": "oc",
     "output_channels": "oc",
-    "w": "w",
-    "width": "w",
+    "w": "ow",
+    "width": "ow",
+    "ow": "ow",
+    "out_w": "ow",
+    "output_width": "ow",
+}
+_SCATTER_DIMENSION_ALIASES = {
+    **_DIMENSION_ALIASES,
+    "oh*oc": "oh_oc_product",
+    "oh_oc": "oh_oc_product",
+    "ohoc": "oh_oc_product",
+    "oh_x_oc": "oh_oc_product",
+    "oh_times_oc": "oh_oc_product",
+}
+_SCATTER_DIMENSION_LABELS = {
+    "oh": "OH",
+    "ow": "OW",
+    "ic": "IC",
+    "oc": "OC",
+    "oh_oc_product": "OH*OC",
 }
 
 
@@ -42,8 +75,8 @@ class ConvSweepProfile:
     key: str
     op_type: str
     kernel: int
-    base_h: int
-    base_w: int
+    base_oh: int
+    base_ow: int
     base_ic: int
     base_oc: int
     default_sweeps: dict[str, list[int]]
@@ -54,30 +87,30 @@ _PROFILES = {
         key="conv3x3",
         op_type="conv2d_3x3",
         kernel=3,
-        base_h=16,
-        base_w=16,
+        base_oh=16,
+        base_ow=16,
         base_ic=4,
         base_oc=16,
         default_sweeps={
-            "h": [4, 6, 8, 10, 12, 14, 16],
-            "ic": [4, 8, 16, 64, 256],
-            "oc": [8, 16, 32, 48],
-            "w": [8, 16, 32, 64, 128, 200],
+            "oh": [16, 32, 64, 128, 256, 512],
+            "ow": [64, 128, 256, 512],
+            "ic": [4, 8, 16, 32, 64, 128],
+            "oc": [16, 32, 64, 128, 256, 512],
         },
     ),
     "conv1x1": ConvSweepProfile(
         key="conv1x1",
         op_type="conv2d_1x1",
         kernel=1,
-        base_h=16,
-        base_w=16,
+        base_oh=16,
+        base_ow=16,
         base_ic=12,
         base_oc=16,
         default_sweeps={
-            "h": [16, 32, 48],
-            "ic": [12, 36, 48, 96],
-            "oc": [16, 32, 64],
-            "w": [16, 64, 192],
+            "oh": [16, 32, 48, 96, 144, 192, 384],
+            "ow": [16, 32, 48, 96, 144, 192, 384],
+            "ic": [12, 24, 36, 48, 60, 72, 84, 96],
+            "oc": [16, 32, 64, 128, 256, 512],
         },
     ),
 }
@@ -111,11 +144,100 @@ def _parse_csv_ints(text: str | None, fallback: list[int]) -> list[int]:
 
 def _parse_dimensions(text: str | None) -> list[str]:
     if text is None or text.strip() == "":
-        return ["h", "ic", "oc", "w"]
+        return ["oh", "ow", "ic", "oc"]
     dims = [_canonical_dimension(piece) for piece in text.split(",") if piece.strip()]
     if not dims:
         raise ValueError("expected at least one sweep dimension")
     return list(dict.fromkeys(dims))
+
+
+def _canonical_scatter_dimension(name: str) -> str:
+    key = name.strip().lower()
+    if key not in _SCATTER_DIMENSION_ALIASES:
+        supported = ", ".join(sorted(_SCATTER_DIMENSION_ALIASES))
+        raise ValueError(f"unsupported scatter dimension '{name}', expected one of: {supported}")
+    return _SCATTER_DIMENSION_ALIASES[key]
+
+
+def _parse_scatter_dimensions(text: str | None) -> list[str]:
+    if text is None or text.strip() == "":
+        return ["ic", "ow", "oh_oc_product"]
+    dims = [_canonical_scatter_dimension(piece) for piece in text.split(",") if piece.strip()]
+    if not dims:
+        raise ValueError("expected exactly three scatter dimensions")
+    return list(dict.fromkeys(dims))
+
+
+def _parse_metric_names(text: str | None) -> list[str]:
+    if text is None or text.strip() == "":
+        return ["core_level_macs_utilization_pct", "cluster_level_macs_utilization_pct"]
+    metrics = [piece.strip() for piece in text.split(",") if piece.strip()]
+    if not metrics:
+        raise ValueError("expected at least one metric name")
+    return list(dict.fromkeys(metrics))
+
+
+def _metric_display_label(metric: str) -> str:
+    return _METRIC_LABELS.get(metric, metric.replace("_", " ").title())
+
+
+def _scatter_dimension_display_label(dim: str) -> str:
+    return _SCATTER_DIMENSION_LABELS.get(dim, dim.upper())
+
+
+def _with_scatter_dimensions(frame: pd.DataFrame, dims: list[str]) -> pd.DataFrame:
+    scatter_frame = frame.copy()
+    if "oh_oc_product" in dims:
+        scatter_frame["oh_oc_product"] = scatter_frame["oh"] * scatter_frame["oc"]
+    return scatter_frame
+
+
+def _input_extent_from_output(output_extent: int, kernel: int, stride: int, padding: int, axis_name: str) -> int:
+    if output_extent <= 0:
+        raise ValueError(f"{axis_name} must be positive, got {output_extent}")
+    input_extent = (output_extent - 1) * stride + kernel - 2 * padding
+    if input_extent <= 0:
+        raise ValueError(
+            f"invalid input {axis_name} derived from output {axis_name}={output_extent}, kernel={kernel}, stride={stride}, padding={padding}"
+        )
+    return input_extent
+
+
+def _input_hw_from_output(profile: ConvSweepProfile, oh: int, ow: int, stride: int, padding: int) -> tuple[int, int]:
+    h = _input_extent_from_output(oh, profile.kernel, stride, padding, "height")
+    w = _input_extent_from_output(ow, profile.kernel, stride, padding, "width")
+    return h, w
+
+
+def _sweep_group_name(dims: list[str]) -> str:
+    return dims[0] if len(dims) == 1 else "x".join(dims)
+
+
+def _iter_sweep_cases(
+    dims: list[str],
+    dim_to_values: dict[str, list[int]],
+    base: dict[str, int],
+    mode: str,
+):
+    if mode == "product":
+        sweep_group = _sweep_group_name(dims)
+        for combo in product(*(dim_to_values[dim] for dim in dims)):
+            case_dims = dict(base)
+            for dim, value in zip(dims, combo):
+                case_dims[dim] = value
+            yield sweep_group, list(dims), case_dims
+        return
+
+    if mode == "onehot":
+        for dim in dims:
+            sweep_group = _sweep_group_name([dim])
+            for value in dim_to_values[dim]:
+                case_dims = dict(base)
+                case_dims[dim] = value
+                yield sweep_group, [dim], case_dims
+        return
+
+    raise ValueError("mode must be one of: product, onehot")
 
 
 def _validate_conv_shape(profile: ConvSweepProfile, h: int, w: int, ic: int, oc: int, stride: int, padding: int) -> tuple[int, int]:
@@ -202,8 +324,8 @@ def _build_conv_workload(
 def _case_stem(
     profile: ConvSweepProfile,
     sweep_dim: str,
-    h: int,
-    w: int,
+    oh: int,
+    ow: int,
     ic: int,
     oc: int,
     padding: int,
@@ -212,8 +334,8 @@ def _case_stem(
     parts = [
         profile.key,
         sweep_dim,
-        f"h{h}",
-        f"w{w}",
+        f"oh{oh}",
+        f"ow{ow}",
         f"ic{ic}",
         f"oc{oc}",
     ]
@@ -236,12 +358,14 @@ def _generate_suite(args: argparse.Namespace) -> int:
         raise ValueError("activation must be one of: none, relu")
     if profile.op_type != "conv2d_3x3" and args.padding != 0:
         raise ValueError("only conv2d_3x3 sweeps may set padding")
+    if args.mode not in {"product", "onehot"}:
+        raise ValueError("mode must be one of: product, onehot")
 
     dims = _parse_dimensions(args.dimensions)
-    h_values = _parse_csv_ints(args.h_values, profile.default_sweeps["h"])
+    oh_values = _parse_csv_ints(args.oh_values, profile.default_sweeps["oh"])
     ic_values = _parse_csv_ints(args.ic_values, profile.default_sweeps["ic"])
     oc_values = _parse_csv_ints(args.oc_values, profile.default_sweeps["oc"])
-    w_values = _parse_csv_ints(args.w_values, profile.default_sweeps["w"])
+    ow_values = _parse_csv_ints(args.ow_values, profile.default_sweeps["ow"])
 
     output_dir = args.output_dir.resolve()
     suite_name = args.suite_name or f"{profile.key}_sweeps"
@@ -250,83 +374,95 @@ def _generate_suite(args: argparse.Namespace) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     dim_to_values = {
-        "h": h_values,
+        "oh": oh_values,
+        "ow": ow_values,
         "ic": ic_values,
         "oc": oc_values,
-        "w": w_values,
     }
     base = {
-        "h": profile.base_h,
-        "w": profile.base_w,
+        "oh": profile.base_oh,
+        "ow": profile.base_ow,
         "ic": profile.base_ic,
         "oc": profile.base_oc,
     }
 
     manifest_cases: list[dict[str, Any]] = []
-    per_dim_paths: dict[str, list[Path]] = {dim: [] for dim in dims}
+    grouped_paths: dict[str, list[Path]] = {}
 
-    for dim in dims:
-        for value in dim_to_values[dim]:
-            case_dims = dict(base)
-            case_dims[dim] = value
-            out_h, out_w = _validate_conv_shape(
-                profile,
-                case_dims["h"],
-                case_dims["w"],
-                case_dims["ic"],
-                case_dims["oc"],
-                args.stride,
-                args.padding,
+    for sweep_group, sweep_dims, case_dims in _iter_sweep_cases(dims, dim_to_values, base, args.mode):
+        input_h, input_w = _input_hw_from_output(
+            profile,
+            case_dims["oh"],
+            case_dims["ow"],
+            args.stride,
+            args.padding,
+        )
+        out_h, out_w = _validate_conv_shape(
+            profile,
+            input_h,
+            input_w,
+            case_dims["ic"],
+            case_dims["oc"],
+            args.stride,
+            args.padding,
+        )
+        if out_h != case_dims["oh"] or out_w != case_dims["ow"]:
+            raise ValueError(
+                f"derived output shape mismatch: expected OH/OW={case_dims['oh']}/{case_dims['ow']}, got {out_h}/{out_w}"
             )
-            stem = _case_stem(
-                profile,
-                dim,
-                case_dims["h"],
-                case_dims["w"],
-                case_dims["ic"],
-                case_dims["oc"],
-                args.padding,
-                activation,
-            )
-            yaml_path = (yaml_root / dim / f"{stem}.yaml").resolve()
-            payload = _build_conv_workload(
-                profile,
-                name=stem,
-                h=case_dims["h"],
-                w=case_dims["w"],
-                ic=case_dims["ic"],
-                oc=case_dims["oc"],
-                stride=args.stride,
-                padding=args.padding,
-                activation=activation,
-            )
-            yaml_path.parent.mkdir(parents=True, exist_ok=True)
-            yaml_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
-            per_dim_paths[dim].append(yaml_path)
-            manifest_cases.append(
-                {
-                    "case_name": stem,
-                    "workload_key": profile.key,
-                    "op_type": profile.op_type,
-                    "sweep_dim": dim,
-                    "kernel": profile.kernel,
-                    "stride": args.stride,
-                    "padding": args.padding,
-                    "activation": activation,
-                    "h": case_dims["h"],
-                    "w": case_dims["w"],
-                    "ic": case_dims["ic"],
-                    "oc": case_dims["oc"],
-                    "out_h": out_h,
-                    "out_w": out_w,
-                    "yaml_path": str(yaml_path),
-                    "yaml_stem": stem,
-                    "default_result_dir": str((_DEFAULT_RESULTS_ROOT / f"e2e_{stem}").resolve()),
-                }
-            )
+        stem = _case_stem(
+            profile,
+            sweep_group,
+            case_dims["oh"],
+            case_dims["ow"],
+            case_dims["ic"],
+            case_dims["oc"],
+            args.padding,
+            activation,
+        )
+        yaml_path = (yaml_root / sweep_group / f"{stem}.yaml").resolve()
+        payload = _build_conv_workload(
+            profile,
+            name=stem,
+            h=input_h,
+            w=input_w,
+            ic=case_dims["ic"],
+            oc=case_dims["oc"],
+            stride=args.stride,
+            padding=args.padding,
+            activation=activation,
+        )
+        yaml_path.parent.mkdir(parents=True, exist_ok=True)
+        yaml_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+        grouped_paths.setdefault(sweep_group, [])
+        grouped_paths[sweep_group].append(yaml_path)
+        manifest_cases.append(
+            {
+                "case_name": stem,
+                "workload_key": profile.key,
+                "op_type": profile.op_type,
+                "sweep_dim": sweep_group,
+            "sweep_dims": sweep_dims,
+                "kernel": profile.kernel,
+                "stride": args.stride,
+                "padding": args.padding,
+                "activation": activation,
+                "oh": case_dims["oh"],
+                "ow": case_dims["ow"],
+                "h": input_h,
+                "w": input_w,
+                "ic": case_dims["ic"],
+                "oc": case_dims["oc"],
+                "out_h": out_h,
+                "out_w": out_w,
+                "yaml_path": str(yaml_path),
+                "yaml_stem": stem,
+                "default_result_dir": str((_DEFAULT_RESULTS_ROOT / f"e2e_{stem}").resolve()),
+            }
+        )
 
-    for dim, paths in per_dim_paths.items():
-        list_path = list_root / f"{profile.key}_{dim}.list"
+    for group_name, paths in grouped_paths.items():
+        list_path = list_root / f"{profile.key}_{group_name}.list"
         _write_text(list_path, "\n".join(str(path) for path in paths) + "\n")
 
     all_list_path = list_root / f"{profile.key}_all.list"
@@ -341,6 +477,7 @@ def _generate_suite(args: argparse.Namespace) -> int:
             "key": profile.key,
             "op_type": profile.op_type,
             "kernel": profile.kernel,
+            "mode": args.mode,
             "stride": args.stride,
             "padding": args.padding,
             "activation": activation,
@@ -349,7 +486,7 @@ def _generate_suite(args: argparse.Namespace) -> int:
         "cases": manifest_cases,
         "lists": {
             "all": str(all_list_path.resolve()),
-            **{dim: str((list_root / f"{profile.key}_{dim}.list").resolve()) for dim in dims},
+            **{group_name: str((list_root / f"{profile.key}_{group_name}.list").resolve()) for group_name in grouped_paths},
         },
     }
     manifest_path = output_dir / "manifest.json"
@@ -361,6 +498,7 @@ def _generate_suite(args: argparse.Namespace) -> int:
         "\n".join(
             [
                 f"Suite: {suite_name}",
+                f"Mode: {args.mode}",
                 f"Manifest: {manifest_path.resolve()}",
                 f"All list: {all_list_path.resolve()}",
                 "",
@@ -385,6 +523,7 @@ def _parse_sim_log(path: Path) -> dict[str, Any]:
         "result_state": "missing",
         "sim_time_ns": math.nan,
         "ebreak_cycle": math.nan,
+        "cluster_run_cycles": math.nan,
         "timeout": 0.0,
         "passed": 0.0,
     }
@@ -401,6 +540,10 @@ def _parse_sim_log(path: Path) -> dict[str, Any]:
     ebreak_match = pd.Series(text.splitlines(), dtype="string").str.extract(r"\[TB\] EBREAK at cycle\s+(\d+)").dropna()
     if not ebreak_match.empty:
         metrics["ebreak_cycle"] = float(ebreak_match.iloc[-1, 0])
+
+    cluster_match = pd.Series(text.splitlines(), dtype="string").str.extract(r"\[SIM\] Cluster RUN cycles:\s+(\d+)").dropna()
+    if not cluster_match.empty:
+        metrics["cluster_run_cycles"] = float(cluster_match.iloc[-1, 0])
 
     timeout = "Timeout waiting for EBREAK halt" in text
     passed = "[SIM] ALL TESTS PASSED" in text and "[SIM] SOME TESTS FAILED" not in text and not timeout
@@ -464,13 +607,36 @@ def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) ->
         row["macs"] = _case_macs(case)
         active_pes = row.get("active_pes")
         row["macs_per_active_pe"] = row["macs"] / active_pes if isinstance(active_pes, (int, float)) and active_pes and not math.isnan(active_pes) else math.nan
+        core_cycles = row.get("ebreak_cycle")
+        cluster_cycles = row.get("cluster_run_cycles")
+        row["core_level_macs_utilization_pct"] = (
+            100.0 * row["macs"] / (core_cycles * active_pes * 4.0)
+            if isinstance(core_cycles, (int, float))
+            and isinstance(active_pes, (int, float))
+            and core_cycles
+            and active_pes
+            and not math.isnan(core_cycles)
+            and not math.isnan(active_pes)
+            else math.nan
+        )
+        row["cluster_level_macs_utilization_pct"] = (
+            100.0 * row["macs"] / (cluster_cycles * active_pes * 4.0)
+            if isinstance(cluster_cycles, (int, float))
+            and isinstance(active_pes, (int, float))
+            and cluster_cycles
+            and active_pes
+            and not math.isnan(cluster_cycles)
+            and not math.isnan(active_pes)
+            else math.nan
+        )
+        row["macs_utilization_pct"] = row["core_level_macs_utilization_pct"]
         rows.append(row)
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
-    order = ["h", "ic", "oc", "w"]
-    df["sweep_sort_key"] = df["sweep_dim"].map({name: idx for idx, name in enumerate(order)})
-    return df.sort_values(["sweep_sort_key", "sweep_dim", "case_name"]).drop(columns=["sweep_sort_key"])
+    order = ["oh", "ow", "ic", "oc"]
+    df["sweep_sort_key"] = df["sweep_dim"].map({name: idx for idx, name in enumerate(order)}).fillna(len(order))
+    return df.sort_values(["sweep_sort_key", "sweep_dim", *order, "case_name"]).drop(columns=["sweep_sort_key"])
 
 
 def _figure_data_uri(fig: plt.Figure) -> str:
@@ -482,18 +648,23 @@ def _figure_data_uri(fig: plt.Figure) -> str:
 
 
 def _build_1d_sweep_plot(frame: pd.DataFrame, sweep_dim: str) -> str | None:
+    if sweep_dim not in frame.columns:
+        return None
     passed = frame[frame["passed"] == 1.0].copy()
     if passed.empty:
         return None
     passed = passed.sort_values(sweep_dim)
     metrics = [
-        ("sim_time_ns", "Simulation Time (ns)"),
-        ("active_pes", "Active PEs"),
-        ("active_pe_ratio", "Active PE Ratio"),
-        ("macs", "MACs"),
-        ("macs_per_active_pe", "MACs / Active PE"),
+        ("sim_time_ns", _metric_display_label("sim_time_ns")),
+        ("ebreak_cycle", _metric_display_label("ebreak_cycle")),
+        ("cluster_run_cycles", _metric_display_label("cluster_run_cycles")),
+        ("active_pes", _metric_display_label("active_pes")),
+        ("active_pe_ratio", _metric_display_label("active_pe_ratio")),
+        ("macs", _metric_display_label("macs")),
+        ("core_level_macs_utilization_pct", _metric_display_label("core_level_macs_utilization_pct")),
+        ("cluster_level_macs_utilization_pct", _metric_display_label("cluster_level_macs_utilization_pct")),
     ]
-    fig, axes = plt.subplots(3, 2, figsize=(12, 10), facecolor="#f7f2e8")
+    fig, axes = plt.subplots(4, 2, figsize=(12, 13), facecolor="#f7f2e8")
     axes_list = list(axes.flat)
     x = passed[sweep_dim]
     for axis, (metric, label) in zip(axes_list, metrics):
@@ -508,33 +679,79 @@ def _build_1d_sweep_plot(frame: pd.DataFrame, sweep_dim: str) -> str | None:
     return _figure_data_uri(fig)
 
 
-def _build_3d_scatter(frame: pd.DataFrame, dims: list[str], color_metric: str) -> str | None:
+def _format_dimension_value(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:g}"
+
+
+def _build_3d_scatter(frame: pd.DataFrame, dims: list[str], color_metric: str, axis_scale: str) -> str | None:
     if len(dims) != 3:
         raise ValueError("3D scatter expects exactly three dimensions")
+    frame = _with_scatter_dimensions(frame, dims)
     for dim in dims:
         if dim not in frame.columns:
             raise ValueError(f"manifest does not contain dimension '{dim}'")
     passed = frame[(frame["passed"] == 1.0) & frame[color_metric].notna()].copy()
     if len(passed) < 2:
         return None
+    if axis_scale not in {"linear", "log"}:
+        raise ValueError("axis_scale must be 'linear' or 'log'")
+
+    plot_frame = passed.copy()
+    if axis_scale == "log":
+        for dim in dims:
+            plot_frame = plot_frame[plot_frame[dim] > 0]
+        if len(plot_frame) < 2:
+            return None
+
+    # Multiple workloads can land on the same 3D coordinate when a non-plotted
+    # dimension varies. Color each visible point by the best utilization seen at
+    # that coordinate so overdraw does not hide the peak result.
+    plot_frame = plot_frame.groupby(dims, as_index=False)[color_metric].max()
+    if len(plot_frame) < 2:
+        return None
+
     fig = plt.figure(figsize=(10, 8), facecolor="#f7f2e8")
     ax = fig.add_subplot(111, projection="3d")
+    if axis_scale == "log":
+        x = plot_frame[dims[0]].map(math.log10)
+        y = plot_frame[dims[1]].map(math.log10)
+        z = plot_frame[dims[2]].map(math.log10)
+    else:
+        x = plot_frame[dims[0]]
+        y = plot_frame[dims[1]]
+        z = plot_frame[dims[2]]
+
     scatter = ax.scatter(
-        passed[dims[0]],
-        passed[dims[1]],
-        passed[dims[2]],
-        c=passed[color_metric],
-        cmap=cm.get_cmap("viridis"),
+        x,
+        y,
+        z,
+        c=plot_frame[color_metric],
+        cmap=cm.get_cmap("RdYlGn"),
         s=70,
         edgecolors="#3d2d1f",
         linewidths=0.5,
         alpha=0.9,
     )
-    ax.set_xlabel(dims[0].upper())
-    ax.set_ylabel(dims[1].upper())
-    ax.set_zlabel(dims[2].upper())
-    ax.set_title(f"3D sweep distribution colored by {color_metric}")
-    fig.colorbar(scatter, ax=ax, fraction=0.03, pad=0.08, label=color_metric)
+    if axis_scale == "log":
+        for setter, dim in zip(
+            (ax.set_xticks, ax.set_yticks, ax.set_zticks),
+            dims,
+        ):
+            tick_values = sorted(float(value) for value in plot_frame[dim].unique())
+            setter([math.log10(value) for value in tick_values])
+        ax.set_xticklabels([_format_dimension_value(value) for value in sorted(float(value) for value in plot_frame[dims[0]].unique())])
+        ax.set_yticklabels([_format_dimension_value(value) for value in sorted(float(value) for value in plot_frame[dims[1]].unique())])
+        ax.set_zticklabels([_format_dimension_value(value) for value in sorted(float(value) for value in plot_frame[dims[2]].unique())])
+        ax.set_xlabel(f"{_scatter_dimension_display_label(dims[0])} (log10)")
+        ax.set_ylabel(f"{_scatter_dimension_display_label(dims[1])} (log10)")
+        ax.set_zlabel(f"{_scatter_dimension_display_label(dims[2])} (log10)")
+    else:
+        ax.set_xlabel(_scatter_dimension_display_label(dims[0]))
+        ax.set_ylabel(_scatter_dimension_display_label(dims[1]))
+        ax.set_zlabel(_scatter_dimension_display_label(dims[2]))
+    metric_label = _metric_display_label(color_metric)
+    ax.set_title(f"3D sweep distribution ({axis_scale} scale) colored by {metric_label}")
+    fig.colorbar(scatter, ax=ax, fraction=0.03, pad=0.08, label=metric_label)
     return _figure_data_uri(fig)
 
 
@@ -545,6 +762,8 @@ def _summary_cards(frame: pd.DataFrame) -> str:
     missing = int((frame["result_state"] == "missing").sum())
     avg_time = frame.loc[frame["sim_time_ns"].notna(), "sim_time_ns"].mean()
     avg_active = frame.loc[frame["active_pes"].notna(), "active_pes"].mean()
+    avg_core_util = frame.loc[frame["core_level_macs_utilization_pct"].notna(), "core_level_macs_utilization_pct"].mean()
+    avg_cluster_util = frame.loc[frame["cluster_level_macs_utilization_pct"].notna(), "cluster_level_macs_utilization_pct"].mean()
     cards = [
         ("Cases", str(total), "manifest entries"),
         ("Passed", str(passed), "completed simulations"),
@@ -552,6 +771,8 @@ def _summary_cards(frame: pd.DataFrame) -> str:
         ("Missing", str(missing), "results directory not found"),
         ("Avg sim time", f"{avg_time:.0f} ns" if not math.isnan(avg_time) else "-", "passed cases"),
         ("Avg active PEs", f"{avg_active:.1f}" if not math.isnan(avg_active) else "-", "max enabled per workload"),
+        ("Avg core MAC util", f"{avg_core_util:.2f}%" if not math.isnan(avg_core_util) else "-", "passed cases"),
+        ("Avg cluster MAC util", f"{avg_cluster_util:.2f}%" if not math.isnan(avg_cluster_util) else "-", "passed cases"),
     ]
     return "".join(
         f'<div class="card"><div class="label">{escape(label)}</div><div class="value">{escape(value)}</div><div class="sub">{escape(sub)}</div></div>'
@@ -564,6 +785,10 @@ def _format_table(frame: pd.DataFrame, columns: list[str]) -> str:
     for column in table.columns:
         if pd.api.types.is_float_dtype(table[column]):
             table[column] = table[column].map(lambda value: "-" if pd.isna(value) else f"{value:.4g}")
+    table.columns = [
+        dim.upper() if dim in {"oh", "ow", "ic", "oc"} else _metric_display_label(str(dim))
+        for dim in table.columns
+    ]
     return table.to_html(index=False, classes="report-table", border=0, justify="center")
 
 
@@ -571,33 +796,73 @@ def _render_report_html(
     manifest: dict[str, Any],
     frame: pd.DataFrame,
     plots_1d: dict[str, str | None],
-    scatter_plot: str | None,
+    scatter_plots: dict[str, dict[str, str | None]],
     scatter_dims: list[str],
-    color_metric: str,
+    scatter_metrics: list[str],
 ) -> str:
     sweep_sections = []
     for sweep_dim, group in frame.groupby("sweep_dim", sort=False):
+        raw_dims = group.iloc[0].get("sweep_dims", [sweep_dim])
+        sweep_dims = [str(dim) for dim in raw_dims if str(dim) in group.columns] if isinstance(raw_dims, list) else [sweep_dim] if sweep_dim in group.columns else []
+        section_title = " x ".join(dim.upper() for dim in sweep_dims) if sweep_dims else sweep_dim.upper()
+        table_columns = [
+            *sweep_dims,
+            "ebreak_cycle",
+            "cluster_run_cycles",
+            "sim_time_ns",
+            "active_pes",
+            "active_pe_ratio",
+            "macs",
+            "core_level_macs_utilization_pct",
+            "cluster_level_macs_utilization_pct",
+            "result_state",
+        ]
+        sort_columns = [*sweep_dims, "case_name"] if sweep_dims else ["case_name"]
         plot_uri = plots_1d.get(sweep_dim)
         image_html = (
-            f'<img src="{plot_uri}" alt="{escape(sweep_dim)} sweep plot" class="plot">' if plot_uri is not None else '<div class="empty">No passed runs available for plotting.</div>'
+            f'<img src="{plot_uri}" alt="{escape(sweep_dim)} sweep plot" class="plot">'
+            if plot_uri is not None
+            else '<div class="empty">1D plot is only available when exactly one sweep dimension varies.</div>'
         )
         sweep_sections.append(
             "".join(
                 [
-                    f'<section class="section"><div class="section-head"><h2>{escape(sweep_dim.upper())} Sweep</h2><span>{escape(group.iloc[0]["workload_key"])} workload</span></div>',
+                    f'<section class="section"><div class="section-head"><h2>{escape(section_title)} Sweep</h2><span>{escape(group.iloc[0]["workload_key"])} workload</span></div>',
                     image_html,
                     _format_table(
-                        group.sort_values(sweep_dim),
-                        [sweep_dim, "sim_time_ns", "active_pes", "active_pe_ratio", "macs", "macs_per_active_pe", "result_state"],
+                        group.sort_values(sort_columns),
+                        table_columns,
                     ),
                     "</section>",
                 ]
             )
         )
 
-    scatter_html = '<div class="empty">Not enough completed runs to render the 3D scatter plot.</div>'
-    if scatter_plot is not None:
-        scatter_html = f'<img src="{scatter_plot}" alt="3D sweep scatter" class="plot plot-wide">'
+    scatter_parts = []
+    for metric in scatter_metrics:
+        metric_label = _metric_display_label(metric)
+        metric_plots = scatter_plots.get(metric, {})
+        metric_sections = []
+        for axis_scale, title in (("linear", "Linear scale"), ("log", "Log scale")):
+            plot_uri = metric_plots.get(axis_scale)
+            if plot_uri is None:
+                metric_sections.append(
+                    f'<div class="scatter-block"><h3>{escape(title)}</h3><div class="empty">Not enough completed runs to render the {escape(axis_scale)} 3D scatter plot for {escape(metric_label)}.</div></div>'
+                )
+            else:
+                metric_sections.append(
+                    f'<div class="scatter-block"><h3>{escape(title)}</h3><img src="{plot_uri}" alt="{escape(axis_scale)} 3D sweep scatter for {escape(metric_label)}" class="plot plot-wide"></div>'
+                )
+        scatter_parts.append(
+            "".join(
+                [
+                    f'<section class="section"><div class="section-head"><h2>{escape(metric_label)}</h2><span>Distribution over {escape(', '.join(_scatter_dimension_display_label(dim) for dim in scatter_dims))}</span></div>',
+                    *metric_sections,
+                    "</section>",
+                ]
+            )
+        )
+    scatter_html = "".join(scatter_parts)
 
     return f"""
 <!doctype html>
@@ -637,9 +902,12 @@ def _render_report_html(
     .section-head span {{ color: var(--muted); }}
     .plot {{ width: 100%; border-radius: 18px; border: 1px solid rgba(0,0,0,0.05); background: #fffdf8; margin-bottom: 18px; }}
     .plot-wide {{ max-height: 760px; object-fit: contain; }}
+    .scatter-block + .scatter-block {{ margin-top: 24px; }}
+    .scatter-block h3 {{ margin: 0 0 12px; font-size: 18px; }}
     .report-table {{ width: 100%; border-collapse: collapse; background: var(--panel-strong); overflow: hidden; border-radius: 16px; }}
     .report-table th, .report-table td {{ padding: 10px 12px; border-bottom: 1px solid rgba(0,0,0,0.06); text-align: center; font-size: 13px; }}
     .report-table th {{ background: rgba(139, 94, 52, 0.08); color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-size: 12px; }}
+    .report-table th {{ white-space: normal; overflow-wrap: anywhere; word-break: break-word; }}
     .empty {{ border: 1px dashed var(--line); border-radius: 18px; padding: 28px; text-align: center; color: var(--muted); background: rgba(255,255,255,0.56); }}
     @media (max-width: 860px) {{
       main {{ padding: 14px; }}
@@ -652,21 +920,18 @@ def _render_report_html(
   <main>
     <section class="hero">
       <h1>{escape(manifest['suite_name'])} sweep report</h1>
-      <p>Generated from manifest plus e2e output directories. The report combines simulation runtime, active PE footprint, MAC counts, and MACs per active PE into one visual summary.</p>
+            <p>Generated from manifest plus e2e output directories. The report summarizes core-level cycles to EBREAK, cluster RUN cycles gathered directly from the simulator, active PE footprint, and both core-level and cluster-level MAC utilization.</p>
       <div class="meta">
         <span class="pill">workload={escape(manifest['workload']['key'])}</span>
         <span class="pill">op={escape(manifest['workload']['op_type'])}</span>
         <span class="pill">padding={escape(str(manifest['workload']['padding']))}</span>
         <span class="pill">activation={escape(manifest['workload']['activation'])}</span>
-        <span class="pill">scatter={escape(', '.join(dim.upper() for dim in scatter_dims))}</span>
-        <span class="pill">color metric={escape(color_metric)}</span>
+        <span class="pill">scatter={escape(', '.join(_scatter_dimension_display_label(dim) for dim in scatter_dims))}</span>
+                <span class="pill">scatter metrics={escape(', '.join(_metric_display_label(metric) for metric in scatter_metrics))}</span>
       </div>
       <div class="card-grid">{_summary_cards(frame)}</div>
     </section>
-    <section class="section">
-      <div class="section-head"><h2>3D Scatter</h2><span>Distribution over {escape(', '.join(dim.upper() for dim in scatter_dims))}</span></div>
-      {scatter_html}
-    </section>
+        {scatter_html}
     {''.join(sweep_sections)}
   </main>
 </body>
@@ -685,16 +950,26 @@ def _report_suite(args: argparse.Namespace) -> int:
     csv_path = output_dir / "sweep_metrics.csv"
     frame.to_csv(csv_path, index=False)
 
-    scatter_dims = [_canonical_dimension(piece) for piece in args.scatter_dims.split(",") if piece.strip()]
+    scatter_dims = _parse_scatter_dimensions(args.scatter_dims)
     if len(scatter_dims) != 3:
         raise ValueError("--scatter-dims expects exactly three comma-separated dimensions")
+    scatter_metrics = _parse_metric_names(args.color_metric)
+    for metric in scatter_metrics:
+        if metric not in frame.columns:
+            raise ValueError(f"metric column '{metric}' is not available in the report data")
 
     plots_1d = {
         sweep_dim: _build_1d_sweep_plot(group, sweep_dim)
         for sweep_dim, group in frame.groupby("sweep_dim", sort=False)
     }
-    scatter_plot = _build_3d_scatter(frame, scatter_dims, args.color_metric)
-    html = _render_report_html(manifest, frame, plots_1d, scatter_plot, scatter_dims, args.color_metric)
+    scatter_plots = {
+        metric: {
+            "linear": _build_3d_scatter(frame, scatter_dims, metric, "linear"),
+            "log": _build_3d_scatter(frame, scatter_dims, metric, "log"),
+        }
+        for metric in scatter_metrics
+    }
+    html = _render_report_html(manifest, frame, plots_1d, scatter_plots, scatter_dims, scatter_metrics)
     html_path = output_dir / "report.html"
     html_path.write_text(html, encoding="utf-8")
 
@@ -714,11 +989,12 @@ def _build_parser() -> argparse.ArgumentParser:
     gen.add_argument("--workload", choices=sorted(_PROFILES), required=True, help="Built-in workload family to sweep")
     gen.add_argument("--output-dir", type=Path, required=True, help="Directory for generated YAML/list/manifest files")
     gen.add_argument("--suite-name", type=str, default=None, help="Optional human-readable suite name")
-    gen.add_argument("--dimensions", type=str, default="h,ic,oc,w", help="Comma-separated sweep dimensions")
-    gen.add_argument("--h-values", type=str, default=None, help="Comma-separated H values")
+    gen.add_argument("--mode", choices=("product", "onehot"), default="product", help="Sweep expansion mode")
+    gen.add_argument("--dimensions", type=str, default="oh,ow,ic,oc", help="Comma-separated sweep dimensions")
+    gen.add_argument("--oh-values", "--h-values", dest="oh_values", type=str, default=None, help="Comma-separated OH values")
     gen.add_argument("--ic-values", type=str, default=None, help="Comma-separated IC values")
     gen.add_argument("--oc-values", type=str, default=None, help="Comma-separated OC values")
-    gen.add_argument("--w-values", type=str, default=None, help="Comma-separated W values")
+    gen.add_argument("--ow-values", "--w-values", dest="ow_values", type=str, default=None, help="Comma-separated OW values")
     gen.add_argument("--stride", type=int, default=1, help="Stride value written into attrs")
     gen.add_argument("--padding", type=int, default=0, help="Padding value (conv3x3 only)")
     gen.add_argument("--activation", type=str, default="none", help="Output activation: none or relu")
@@ -728,8 +1004,8 @@ def _build_parser() -> argparse.ArgumentParser:
     report.add_argument("--manifest", type=Path, required=True, help="Manifest JSON emitted by hacc-sweep gen")
     report.add_argument("--results-root", type=Path, default=None, help="Root directory passed to run_e2e.sh --output-dir")
     report.add_argument("--output-dir", type=Path, required=True, help="Directory for CSV and HTML report")
-    report.add_argument("--scatter-dims", type=str, default="h,ic,oc", help="Three comma-separated dimensions for the 3D scatter")
-    report.add_argument("--color-metric", type=str, default="sim_time_ns", help="Metric column used for scatter plot color")
+    report.add_argument("--scatter-dims", type=str, default="ic,ow,oh*oc", help="Three comma-separated dimensions for the 3D scatter (supports derived OH*OC)")
+    report.add_argument("--color-metric", type=str, default="core_level_macs_utilization_pct,cluster_level_macs_utilization_pct", help="Comma-separated metric columns used for 3D scatter colors")
     report.set_defaults(func=_report_suite)
     return parser
 

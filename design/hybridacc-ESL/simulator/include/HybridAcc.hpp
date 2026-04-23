@@ -441,6 +441,13 @@ SC_MODULE(HybridAcc) {
 
     uint32_t irq_summary() const { return core_ctrl.irq_summary(); }
 
+    uint64_t cluster_run_cycles(unsigned c = 0) const {
+        if (c >= NUM_CLUSTERS || !cluster[c]) {
+            return 0;
+        }
+        return cluster[c]->run_cycles();
+    }
+
     bool fast_load_section(SectionKind kind,
                            uint32_t local_addr,
                            const uint8_t* data,
