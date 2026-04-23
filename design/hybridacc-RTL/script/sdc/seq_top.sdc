@@ -16,7 +16,7 @@ set output_min  [expr {double(round(1000*$clk_period * 0.0))/1000}]
 create_clock -name clk -period $clk_period [get_ports clk]
 
 # 在 16nm，Uncertainty 是關鍵 (包含 Jitter 與 OCV 預估)
-set_clock_uncertainty  0  [all_clocks]
+set_clock_uncertainty  0.01  [all_clocks]
 set_clock_latency      0.2   [all_clocks]
 set_clock_latency -source 0  [all_clocks]
 

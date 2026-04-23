@@ -231,9 +231,9 @@ def format_slack(val: float, met: bool) -> str:
 
 
 def generate_markdown(results: list, output_path: str = None) -> str:
-    """Generate consolidated Markdown report."""
+    """Generate consolidated Markdown report organized by hierarchy level."""
     lines = []
-    lines.append("# PE Unit Synthesis Report")
+    lines.append("# Synthesis Report")
     lines.append("")
     lines.append(f"**Generated**: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"**Technology**: N16ADFP (16nm FinFET)")
@@ -243,110 +243,182 @@ def generate_markdown(results: list, output_path: str = None) -> str:
         lines.append(f"**Clock Period**: {results[0].clk_period} ns ({freq:.0f} MHz)")
     lines.append("")
 
-    # === Summary Table ===
-    lines.append("## Summary")
+    # === Overall Summary ===
+    valid = [r for r in results if not r.errors]
+    total_area = sum(r.total_cell_area for r in valid)
+    total_power = sum(r.total_dynamic_power_mw for r in valid)
+    all_met = all(r.slack_max_met and r.slack_min_met for r in valid)
+
+    lines.append("## Overall Summary")
     lines.append("")
-    lines.append(
-        "| Module | Type | Total Cell Area | Comb Area | Seq Area | "
-        "Setup Slack | Hold Slack | Dynamic Power (mW) | Leakage (nW) |"
-    )
-    lines.append(
-        "|--------|------|----------------:|----------:|---------:|"
-        "-----------:|----------:|--------------------:|-------------:|"
-    )
+    lines.append(f"- **Modules Synthesized**: {len(valid)} / {len(results)}")
+    lines.append(f"- **Total Cell Area**: {total_area:.2f}")
+    lines.append(f"- **Total Dynamic Power**: {total_power:.4f} mW")
+    lines.append(f"- **All Timing Met**: {'✅ Yes' if all_met else '❌ No'}")
+    lines.append("")
 
-    total_area = 0.0
-    total_power = 0.0
-    all_met = True
-
+    # Group by hierarchy
+    grouped = {}
     for r in results:
-        mod_type = "Comb" if r.module in COMBINATIONAL_MODULES else "Seq"
-        if r.errors:
-            lines.append(
-                f"| {r.module} | {mod_type} | — | — | — | — | — | — | — |"
-            )
+        level = classify_module(r.module)
+        grouped.setdefault(level, []).append(r)
+
+    level_order = ["PE Unit", "PE Integration", "NoC Unit", "NoC Integration",
+                   "Cluster", "Core", "Other"]
+
+    # === Per-level summary tables ===
+    global_idx = 0
+    for level in level_order:
+        level_results = grouped.get(level, [])
+        if not level_results:
             continue
 
-        setup = format_slack(r.slack_max, r.slack_max_met)
-        hold = format_slack(r.slack_min, r.slack_min_met)
+        level_valid = [r for r in level_results if not r.errors]
+        level_met = all(r.slack_max_met and r.slack_min_met for r in level_valid) if level_valid else False
+        level_icon = "✅" if level_met else "❌"
+        level_area = sum(r.total_cell_area for r in level_valid)
+        level_power = sum(r.total_dynamic_power_mw for r in level_valid)
+
+        lines.append(f"## {level} {level_icon}")
+        lines.append("")
+        lines.append(f"**Area**: {level_area:.2f} | **Power**: {level_power:.4f} mW")
+        lines.append("")
+
         lines.append(
-            f"| {r.module} "
-            f"| {mod_type} "
-            f"| {r.total_cell_area:.2f} "
-            f"| {r.comb_area:.2f} "
-            f"| {r.noncomb_area:.2f} "
-            f"| {setup} "
-            f"| {hold} "
-            f"| {r.total_dynamic_power_mw:.4f} "
-            f"| {r.leakage_power_nw:.2f} |"
+            "| # | Module | Type | Total Area | Comb Area | Seq Area | "
+            "Setup Slack | Hold Slack | Power (mW) | Leakage (nW) |"
         )
-        total_area += r.total_cell_area
-        total_power += r.total_dynamic_power_mw
-        if not r.slack_max_met or not r.slack_min_met:
-            all_met = False
+        lines.append(
+            "|---|--------|------|----------:|---------:|--------:|"
+            "-----------:|----------:|----------:|-------------:|"
+        )
 
-    lines.append("")
-    lines.append(f"**Total Cell Area (sum)**: {total_area:.2f}")
-    lines.append(f"**Total Dynamic Power (sum)**: {total_power:.4f} mW")
-    lines.append(f"**All Timing Met**: {'✅ Yes' if all_met else '❌ No'}")
-    lines.append("")
+        for r in level_results:
+            global_idx += 1
+            mod_type = "Comb" if r.module in COMBINATIONAL_MODULES else "Seq"
+            if r.errors:
+                lines.append(
+                    f"| {global_idx} | {r.module} | {mod_type} "
+                    f"| — | — | — | — | — | — | — |"
+                )
+                continue
 
-    # === Detailed per-module sections ===
+            setup = format_slack(r.slack_max, r.slack_max_met)
+            hold = format_slack(r.slack_min, r.slack_min_met)
+            lines.append(
+                f"| {global_idx} | {r.module} "
+                f"| {mod_type} "
+                f"| {r.total_cell_area:.2f} "
+                f"| {r.comb_area:.2f} "
+                f"| {r.noncomb_area:.2f} "
+                f"| {setup} "
+                f"| {hold} "
+                f"| {r.total_dynamic_power_mw:.4f} "
+                f"| {r.leakage_power_nw:.2f} |"
+            )
+
+        lines.append("")
+
+    # === Detailed per-module sections (unified at the end) ===
     lines.append("## Detailed Results")
     lines.append("")
 
-    for r in results:
-        is_comb = r.module in COMBINATIONAL_MODULES
-        mod_type = "Combinational" if is_comb else "Sequential"
-        clk_type = "Virtual (vclk)" if is_comb else "Physical (clk)"
-        lines.append(f"### {r.module}")
-        lines.append("")
-
-        if r.errors:
-            for e in r.errors:
-                lines.append(f"- ⚠️ {e}")
-            lines.append("")
+    for level in level_order:
+        level_results = grouped.get(level, [])
+        if not level_results:
             continue
 
-        lines.append("| Metric | Value |")
-        lines.append("|--------|-------|")
-        lines.append(f"| Module Type | {mod_type} |")
-        lines.append(f"| Clock Type | {clk_type} |")
-        lines.append(f"| Clock Period | {r.clk_period} ns |")
-        freq_mhz = 1000.0 / r.clk_period if r.clk_period > 0 else 0
-        lines.append(f"| Target Frequency | {freq_mhz:.0f} MHz |")
-        lines.append(f"| Setup Slack (max delay) | {format_slack(r.slack_max, r.slack_max_met)} |")
-        lines.append(f"| Hold Slack (min delay) | {format_slack(r.slack_min, r.slack_min_met)} |")
-        lines.append(f"| Critical Path | {r.critical_path_start} → {r.critical_path_end} |")
-        lines.append(f"| Total Cell Area | {r.total_cell_area:.2f} |")
-        lines.append(f"| Combinational Area | {r.comb_area:.2f} |")
-        lines.append(f"| Non-combinational Area | {r.noncomb_area:.2f} |")
-        lines.append(f"| # Cells | {r.num_cells} |")
-        lines.append(f"| # Combinational | {r.num_comb_cells} |")
-        lines.append(f"| # Sequential | {r.num_seq_cells} |")
-        lines.append(f"| # Ports | {r.num_ports} |")
-        lines.append(f"| Internal Power | {r.internal_power_mw:.4f} mW |")
-        lines.append(f"| Switching Power | {r.switching_power_mw:.4f} mW |")
-        lines.append(f"| Total Dynamic Power | {r.total_dynamic_power_mw:.4f} mW |")
-        lines.append(f"| Leakage Power | {r.leakage_power_nw:.2f} nW |")
+        lines.append(f"### {level}")
         lines.append("")
+
+        for r in level_results:
+            is_comb = r.module in COMBINATIONAL_MODULES
+            mod_type = "Combinational" if is_comb else "Sequential"
+            clk_type = "Virtual (vclk)" if is_comb else "Physical (clk)"
+            lines.append(f"#### {r.module}")
+            lines.append("")
+
+            if r.errors:
+                for e in r.errors:
+                    lines.append(f"- ⚠️ {e}")
+                lines.append("")
+                continue
+
+            lines.append("| Metric | Value |")
+            lines.append("|--------|-------|")
+            lines.append(f"| Module Type | {mod_type} |")
+            lines.append(f"| Clock Type | {clk_type} |")
+            lines.append(f"| Clock Period | {r.clk_period} ns |")
+            freq_mhz = 1000.0 / r.clk_period if r.clk_period > 0 else 0
+            lines.append(f"| Target Frequency | {freq_mhz:.0f} MHz |")
+            lines.append(f"| Setup Slack (max delay) | {format_slack(r.slack_max, r.slack_max_met)} |")
+            lines.append(f"| Hold Slack (min delay) | {format_slack(r.slack_min, r.slack_min_met)} |")
+            lines.append(f"| Critical Path | {r.critical_path_start} → {r.critical_path_end} |")
+            lines.append(f"| Total Cell Area | {r.total_cell_area:.2f} |")
+            lines.append(f"| Combinational Area | {r.comb_area:.2f} |")
+            lines.append(f"| Non-combinational Area | {r.noncomb_area:.2f} |")
+            lines.append(f"| # Cells | {r.num_cells} |")
+            lines.append(f"| # Combinational | {r.num_comb_cells} |")
+            lines.append(f"| # Sequential | {r.num_seq_cells} |")
+            lines.append(f"| # Ports | {r.num_ports} |")
+            lines.append(f"| Internal Power | {r.internal_power_mw:.4f} mW |")
+            lines.append(f"| Switching Power | {r.switching_power_mw:.4f} mW |")
+            lines.append(f"| Total Dynamic Power | {r.total_dynamic_power_mw:.4f} mW |")
+            lines.append(f"| Leakage Power | {r.leakage_power_nw:.2f} nW |")
+            lines.append("")
 
     md = "\n".join(lines) + "\n"
 
     if output_path:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         Path(output_path).write_text(md)
         print(f"Report written to {output_path}")
 
     return md
 
 
-# Default PE module list (leaf → hierarchical order)
-PE_UNITS = [
+# =========================================================================
+# Hierarchy classification
+# =========================================================================
+MODULE_HIERARCHY = {
+    "PE Unit": [
+        "DataMemory", "InstructionMemory", "LoopController",
+        "Decoder", "PsumRegFile", "TransformRegFile",
+        "VADDU", "VMULU", "LDMA", "SDMA",
+        "IF_ID_Stage", "EXE_M_Stage", "EXE_A_Stage",
+        "PErouter",
+    ],
+    "PE Integration": [
+        "ProcessElement",
+    ],
+    "NoC Unit": [
+        "MBUS", "NoCRouter",
+    ],
+    "NoC Integration": [
+        "NetworkOnChip",
+    ],
+    "Cluster": [],
+    "Core": [],
+}
+
+_MOD_LEVEL = {}
+for _level, _mods in MODULE_HIERARCHY.items():
+    for _mod in _mods:
+        _MOD_LEVEL[_mod] = _level
+
+
+def classify_module(mod_name: str) -> str:
+    return _MOD_LEVEL.get(mod_name, "Other")
+
+
+# Default module list (leaf → hierarchical order)
+ALL_MODULES = [
     "DataMemory", "InstructionMemory", "LoopController",
     "Decoder", "PsumRegFile", "TransformRegFile",
     "VADDU", "VMULU", "LDMA", "SDMA",
     "IF_ID_Stage", "EXE_M_Stage", "EXE_A_Stage",
     "PErouter", "ProcessElement",
+    "MBUS", "NoCRouter", "NetworkOnChip",
 ]
 
 # Purely combinational modules (no physical clock)
@@ -362,8 +434,8 @@ def main():
         help="Path to report directory (default: ./report)"
     )
     parser.add_argument(
-        "--output", "-o", default="report/pe_synthesis_report.md",
-        help="Output Markdown file (default: report/pe_synthesis_report.md)"
+        "--output", "-o", default=None,
+        help="Output Markdown file (default: report/synthesis_report_<timestamp>.md)"
     )
     parser.add_argument(
         "--modules", nargs="+",
@@ -371,7 +443,7 @@ def main():
     )
     parser.add_argument(
         "--all", action="store_true",
-        help="Include all PE_UNITS even if reports don't exist yet"
+        help="Include all ALL_MODULES even if reports don't exist yet"
     )
     parser.add_argument(
         "--sdc", default=None,
@@ -397,7 +469,7 @@ def main():
     if args.modules:
         modules = args.modules
     elif args.all:
-        modules = PE_UNITS
+        modules = ALL_MODULES
     else:
         # Auto-detect: find subdirectories that have timing reports
         modules = []
@@ -416,7 +488,13 @@ def main():
     print(f"Parsing {len(modules)} module(s): {', '.join(modules)}")
     results = [parse_module(report_dir, mod, sdc_clk) for mod in modules]
 
-    md = generate_markdown(results, args.output)
+    output_path = args.output
+    if output_path is None:
+        from datetime import datetime
+        ts = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
+        output_path = f"report/synthesis_report_{ts}.md"
+
+    md = generate_markdown(results, output_path)
     print(md)
 
 

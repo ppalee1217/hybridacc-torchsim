@@ -18,30 +18,42 @@ import hybridacc_utils_pkg::*;
 module NetworkOnChip #(
     parameter int unsigned NUM_PORTS = 3,
     parameter int unsigned PORT_WIDTH_BITS = 64,
-    parameter int unsigned NUM_PES_PER_PORT = 4,
-    parameter int unsigned PE_FIFO_DEPTH = 4
+    parameter int unsigned NUM_PES_PER_PORT = 16,
+    parameter int unsigned PE_FIFO_DEPTH = 4,
+    parameter int unsigned NOC_FIFO_DEPTH = 4
 ) (
     input  logic clk,
     input  logic reset_n,
     input  logic command_mode,
     input  logic [31:0] command_data,
 
+    // PS input
     input  logic [NUM_PORTS*PORT_WIDTH_BITS-1:0] noc_ps_in_data,
+    input  logic [15:0]                          noc_ps_in_addr,
+    input  logic [63:0]                          noc_ps_in_mask,
     input  logic noc_ps_in_valid,
     output logic noc_ps_in_ready,
 
+    // PD input
     input  logic [NUM_PORTS*PORT_WIDTH_BITS-1:0] noc_pd_in_data,
+    input  logic [15:0]                          noc_pd_in_addr,
+    input  logic [63:0]                          noc_pd_in_mask,
     input  logic noc_pd_in_valid,
     output logic noc_pd_in_ready,
 
+    // PLI input
     input  logic [NUM_PORTS*PORT_WIDTH_BITS-1:0] noc_pli_in_data,
+    input  logic [15:0]                          noc_pli_in_addr,
+    input  logic [63:0]                          noc_pli_in_mask,
     input  logic noc_pli_in_valid,
     output logic noc_pli_in_ready,
 
+    // PLO input (read request)
     input  noc_addr_req_t noc_plo_in_data,
     input  logic noc_plo_in_valid,
     output logic noc_plo_in_ready,
 
+    // PLO output (response)
     output logic [NUM_PORTS*PORT_WIDTH_BITS-1:0] noc_plo_out_data,
     output NOC_RESPONSE_STATUS noc_plo_out_status,
     output logic noc_plo_out_valid,
@@ -101,11 +113,22 @@ module NetworkOnChip #(
     logic        ln_valid[NUM_PORTS+1][NUM_PES_PER_PORT];
     logic        ln_ready[NUM_PORTS+1][NUM_PES_PER_PORT];
 
-    NoCRouter #(.NUM_PORTS(NUM_PORTS), .PORT_WIDTH_BITS(PORT_WIDTH_BITS)) router (
+    // Tie off unconnected LN chain endpoints to avoid X propagation
+    // ln_data/valid[0]  = entry of chain (no upstream PE drives these)
+    // ln_ready[NUM_PORTS] = exit of chain (no downstream PE drives these)
+    generate
+        for (genvar k = 0; k < NUM_PES_PER_PORT; k++) begin : gen_ln_tieoff
+            assign ln_data [0][k]         = 64'd0;
+            assign ln_valid[0][k]         = 1'b0;
+            assign ln_ready[NUM_PORTS][k] = 1'b1;
+        end
+    endgenerate
+
+    NoCRouter #(.NUM_PORTS(NUM_PORTS), .PORT_WIDTH_BITS(PORT_WIDTH_BITS), .FIFO_DEPTH(NOC_FIFO_DEPTH)) router (
         .clk(clk), .reset_n(reset_n), .command_mode(command_mode), .command_data(command_data),
-        .noc_ps_in_data(noc_ps_in_data), .noc_ps_in_valid(noc_ps_in_valid), .noc_ps_in_ready(noc_ps_in_ready),
-        .noc_pd_in_data(noc_pd_in_data), .noc_pd_in_valid(noc_pd_in_valid), .noc_pd_in_ready(noc_pd_in_ready),
-        .noc_pli_in_data(noc_pli_in_data), .noc_pli_in_valid(noc_pli_in_valid), .noc_pli_in_ready(noc_pli_in_ready),
+        .noc_ps_in_data(noc_ps_in_data), .noc_ps_in_addr(noc_ps_in_addr), .noc_ps_in_mask(noc_ps_in_mask), .noc_ps_in_valid(noc_ps_in_valid), .noc_ps_in_ready(noc_ps_in_ready),
+        .noc_pd_in_data(noc_pd_in_data), .noc_pd_in_addr(noc_pd_in_addr), .noc_pd_in_mask(noc_pd_in_mask), .noc_pd_in_valid(noc_pd_in_valid), .noc_pd_in_ready(noc_pd_in_ready),
+        .noc_pli_in_data(noc_pli_in_data), .noc_pli_in_addr(noc_pli_in_addr), .noc_pli_in_mask(noc_pli_in_mask), .noc_pli_in_valid(noc_pli_in_valid), .noc_pli_in_ready(noc_pli_in_ready),
         .noc_plo_in_data(noc_plo_in_data), .noc_plo_in_valid(noc_plo_in_valid), .noc_plo_in_ready(noc_plo_in_ready),
         .noc_plo_out_data(noc_plo_out_data), .noc_plo_out_status(noc_plo_out_status), .noc_plo_out_valid(noc_plo_out_valid), .noc_plo_out_ready(noc_plo_out_ready),
         .noc_ps_to_bus_req_data(noc_ps_to_bus_data), .noc_ps_to_bus_req_valid(noc_ps_to_bus_valid), .noc_ps_to_bus_req_ready(noc_ps_to_bus_ready),

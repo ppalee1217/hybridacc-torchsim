@@ -84,9 +84,9 @@ module DataMemory #(
     // SRAM control logic
     // ----------------------------------------------------------------
     always_comb begin
-        // Defaults: both banks enabled (CEB=0), read mode (WEB=1)
-        sram0_ceb  = 1'b0;                     // chip enabled (active-low)
-        sram1_ceb  = 1'b0;
+        // Defaults: both banks disabled during reset (CEB=1), read mode (WEB=1)
+        sram0_ceb  = ~reset_n;                  // disabled during reset (active-low)
+        sram1_ceb  = ~reset_n;
         sram0_web  = 1'b1;                     // read mode
         sram1_web  = 1'b1;
         sram0_bweb = {64{1'b1}};               // all bits masked (no write)
@@ -142,9 +142,9 @@ module DataMemory #(
         .SLP    (1'b0),
         .DSLP   (1'b0),
         .SD     (1'b0),
-        // Test mode — default settings
+        // Test mode — default settings per TSMC datasheet
         .RTSEL  (2'b01),
-        .WTSEL  (2'b00)
+        .WTSEL  (2'b01)
     );
 
     TS1N16ADFPCLLLVTA128X64M4SWSHOD u_sram_bank1 (
@@ -159,9 +159,9 @@ module DataMemory #(
         .SLP    (1'b0),
         .DSLP   (1'b0),
         .SD     (1'b0),
-        // Test mode — default settings
+        // Test mode — default settings per TSMC datasheet
         .RTSEL  (2'b01),
-        .WTSEL  (2'b00)
+        .WTSEL  (2'b01)
     );
 
     // ----------------------------------------------------------------

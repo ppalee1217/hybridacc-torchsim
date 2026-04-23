@@ -70,9 +70,6 @@ end
         imm = 16'h0001; set_mode = 1; @(posedge clk); set_mode = 0; // stride=1
 
         // Activate + Provide data
-        // Set ps_valid right after the posedge that enters RUN, so the
-        // combinational fire signal (dm_write_en) is visible at negedge
-        // without an intervening posedge consuming the single-element write.
         active = 1; @(posedge clk); active = 0;
         ps_data.lanes[0] = 16'h1111;
         ps_data.lanes[1] = 16'h2222;
@@ -82,13 +79,16 @@ end
         @(negedge clk);
         `CHECK_BIT("Activate: busy=1", busy, 1'b1)
         `CHECK_BIT("Activate: ps_ready=1", ps_ready, 1'b1)
-        `CHECK_BIT("Write: dm_write_en=1", dm_write_en, 1'b1)
-        `CHECK_VAL("Write: dm_write_addr=0x10", dm_write_addr, 16'h0010)
-        `CHECK_VAL("Write: dm_write_mask=FF", dm_write_mask, 8'hFF)
+        `CHECK_BIT("Activate: dm_write_en=0 before capture", dm_write_en, 1'b0)
         @(posedge clk);
         ps_valid = 0;
+        @(negedge clk);
+        `CHECK_BIT("Write: dm_write_en=1", dm_write_en, 1'b1)
+        `CHECK_VAL("Write: dm_write_addr=0x10", dm_write_addr, 16'h0010)
+        `CHECK_VAL("Write: dm_write_data packed", dm_write_data, 64'h4444_3333_2222_1111)
+        `CHECK_VAL("Write: dm_write_mask=FF", dm_write_mask, 8'hFF)
 
-        // Should move to WAIT_SWAP
+        // Should move to WAIT_SWAP after the buffered write is issued
         @(posedge clk); @(negedge clk);
         `CHECK_COND("AfterWrite: waiting for swap", busy === 1'b0 || ps_ready === 1'b0, {busy, ps_ready})
 
@@ -139,14 +139,13 @@ end
         @(posedge clk); @(negedge clk);
         `CHECK_BIT("NoData: dm_write_en=0", dm_write_en, 1'b0)
         `CHECK_BIT("NoData: busy=1 (waiting)", busy, 1'b1)
-        // Now provide data — set ps_valid right after posedge so the
-        // combinational fire is visible at negedge without state advancing.
+        // Now provide data and observe the buffered write on the next cycle.
         @(posedge clk);
         ps_valid = 1;
-        @(negedge clk);
-        `CHECK_BIT("DataArrives: dm_write_en=1", dm_write_en, 1'b1)
         @(posedge clk);
         ps_valid = 0;
+        @(negedge clk);
+        `CHECK_BIT("DataArrives: dm_write_en=1", dm_write_en, 1'b1)
 
         // Cleanup
         swap_in = 1; @(posedge clk); swap_in = 0;
@@ -162,22 +161,22 @@ end
         active = 1; @(posedge clk); active = 0;
         ps_data.lanes[0] = 16'hAA00;
         ps_valid = 1;
-        @(negedge clk);
-        `CHECK_BIT("MultiLoop1: dm_write_en=1", dm_write_en, 1'b1)
         @(posedge clk);
         ps_valid = 0;
+        @(negedge clk);
+        `CHECK_BIT("MultiLoop1: dm_write_en=1", dm_write_en, 1'b1)
         // Should need swap to continue to next loop iteration
         @(posedge clk); @(negedge clk);
         // Issue swap for the bank → starts second loop iteration
         swap_in = 1; @(posedge clk); swap_in = 0;
         @(posedge clk);
-        // Right after posedge: state=RUN for 2nd loop. Set in posedge→negedge window.
+        // Right after posedge: state=RUN for 2nd loop. Capture data on the next edge.
         ps_data.lanes[0] = 16'hBB00;
         ps_valid = 1;
-        @(negedge clk);
-        `CHECK_BIT("MultiLoop2: dm_write_en=1", dm_write_en, 1'b1)
         @(posedge clk);
         ps_valid = 0;
+        @(negedge clk);
+        `CHECK_BIT("MultiLoop2: dm_write_en=1", dm_write_en, 1'b1)
         // Second loop done → WAIT_SWAP, issue final swap → FINISH
         @(posedge clk); @(negedge clk);
         swap_in = 1; @(posedge clk); swap_in = 0;
@@ -193,7 +192,7 @@ end
         active = 1; @(posedge clk); active = 0;
         ps_data.lanes[0] = 16'hBB00;
         ps_valid = 1;
-        @(negedge clk);
+        @(posedge clk); @(negedge clk);
         `CHECK_VAL("Stride: first addr=0x0060", dm_write_addr, 16'h0060)
         @(posedge clk); @(negedge clk);
         // Second element: addr should be 0x0060 + stride*2 = 0x0060 + 4 = 0x0064

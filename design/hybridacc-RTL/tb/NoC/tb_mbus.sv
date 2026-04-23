@@ -15,11 +15,13 @@
 //-----------------------------------------------------------------------------
 `include "../tb_common.svh"
 `include "../../src/hybridacc_utils_pkg.sv"
+`ifndef GATE_SIM
 `include "../../src/NoC/MBUS.sv"
+`endif
 
 module tb_mbus;
     import hybridacc_utils_pkg::*;
-    localparam int N = 2;
+    localparam int N = 16;
 
     logic clk, reset_n;
     logic router_enable[N];
@@ -42,6 +44,75 @@ module tb_mbus;
 
     tb_clock_reset clk_rst(.clk(clk), .reset_n(reset_n));
 
+`ifdef GATE_SIM
+    // ---- Flat-wire intermediates for gate-level MBUS (NUM_PES=16) ----
+    localparam int NRQ = $bits(noc_request_t);   // 144
+    localparam int NAQ = $bits(noc_addr_req_t);  // 16
+    localparam int NRS = $bits(noc_response_t);  // 66
+    localparam int PMW = $bits(PERouterMode);    // 2
+
+    // DUT output arrays
+    wire [0:N-1]          g_router_enable;
+    wire [N*PMW-1:0]      g_router_mode;
+    wire [N*NRQ-1:0]      g_bus_to_pe_ps_req_data;
+    wire [0:N-1]          g_bus_to_pe_ps_req_valid;
+    wire [N*NRQ-1:0]      g_bus_to_pe_pd_req_data;
+    wire [0:N-1]          g_bus_to_pe_pd_req_valid;
+    wire [N*NRQ-1:0]      g_bus_to_pe_pli_req_data;
+    wire [0:N-1]          g_bus_to_pe_pli_req_valid;
+    wire [N*NAQ-1:0]      g_bus_to_pe_plo_req_data;
+    wire [0:N-1]          g_bus_to_pe_plo_req_valid;
+    wire [0:N-1]          g_pe_to_bus_plo_resp_ready;
+    // DUT input arrays
+    wire [0:N-1]          g_bus_to_pe_ps_req_ready;
+    wire [0:N-1]          g_bus_to_pe_pd_req_ready;
+    wire [0:N-1]          g_bus_to_pe_pli_req_ready;
+    wire [0:N-1]          g_bus_to_pe_plo_req_ready;
+    wire [N*NRS-1:0]      g_pe_to_bus_plo_resp_data;
+    wire [0:N-1]          g_pe_to_bus_plo_resp_valid;
+    wire [0:N-1]          g_pe_busy;
+
+    genvar gi;
+    generate for (gi = 0; gi < N; gi++) begin : g_conv
+        // DUT outputs → TB structured signals
+        assign router_enable[gi]            = g_router_enable[gi];
+        assign router_mode[gi]              = PERouterMode'(g_router_mode[gi*PMW +: PMW]);
+        assign bus_to_pe_ps_req_data[gi]    = g_bus_to_pe_ps_req_data[gi*NRQ +: NRQ];
+        assign bus_to_pe_ps_req_valid[gi]   = g_bus_to_pe_ps_req_valid[gi];
+        assign bus_to_pe_pd_req_data[gi]    = g_bus_to_pe_pd_req_data[gi*NRQ +: NRQ];
+        assign bus_to_pe_pd_req_valid[gi]   = g_bus_to_pe_pd_req_valid[gi];
+        assign bus_to_pe_pli_req_data[gi]   = g_bus_to_pe_pli_req_data[gi*NRQ +: NRQ];
+        assign bus_to_pe_pli_req_valid[gi]  = g_bus_to_pe_pli_req_valid[gi];
+        assign bus_to_pe_plo_req_data[gi]   = g_bus_to_pe_plo_req_data[gi*NAQ +: NAQ];
+        assign bus_to_pe_plo_req_valid[gi]  = g_bus_to_pe_plo_req_valid[gi];
+        assign pe_to_bus_plo_resp_ready[gi] = g_pe_to_bus_plo_resp_ready[gi];
+        // TB structured signals → DUT inputs
+        assign g_bus_to_pe_ps_req_ready[gi]              = bus_to_pe_ps_req_ready[gi];
+        assign g_bus_to_pe_pd_req_ready[gi]              = bus_to_pe_pd_req_ready[gi];
+        assign g_bus_to_pe_pli_req_ready[gi]             = bus_to_pe_pli_req_ready[gi];
+        assign g_bus_to_pe_plo_req_ready[gi]             = bus_to_pe_plo_req_ready[gi];
+        assign g_pe_to_bus_plo_resp_data[gi*NRS +: NRS]  = pe_to_bus_plo_resp_data[gi];
+        assign g_pe_to_bus_plo_resp_valid[gi]            = pe_to_bus_plo_resp_valid[gi];
+        assign g_pe_busy[gi]                             = pe_busy[gi];
+    end endgenerate
+
+    MBUS dut (
+        .clk(clk), .reset_n(reset_n),
+        .router_enable(g_router_enable), .router_mode(g_router_mode),
+        .bus_to_pe_ps_req_data(g_bus_to_pe_ps_req_data), .bus_to_pe_ps_req_valid(g_bus_to_pe_ps_req_valid), .bus_to_pe_ps_req_ready(g_bus_to_pe_ps_req_ready),
+        .bus_to_pe_pd_req_data(g_bus_to_pe_pd_req_data), .bus_to_pe_pd_req_valid(g_bus_to_pe_pd_req_valid), .bus_to_pe_pd_req_ready(g_bus_to_pe_pd_req_ready),
+        .bus_to_pe_pli_req_data(g_bus_to_pe_pli_req_data), .bus_to_pe_pli_req_valid(g_bus_to_pe_pli_req_valid), .bus_to_pe_pli_req_ready(g_bus_to_pe_pli_req_ready),
+        .bus_to_pe_plo_req_data(g_bus_to_pe_plo_req_data), .bus_to_pe_plo_req_valid(g_bus_to_pe_plo_req_valid), .bus_to_pe_plo_req_ready(g_bus_to_pe_plo_req_ready),
+        .pe_to_bus_plo_resp_data(g_pe_to_bus_plo_resp_data), .pe_to_bus_plo_resp_valid(g_pe_to_bus_plo_resp_valid), .pe_to_bus_plo_resp_ready(g_pe_to_bus_plo_resp_ready),
+        .pe_busy(g_pe_busy),
+        .noc_ps_to_bus_req_data(noc_ps_to_bus_req_data), .noc_ps_to_bus_req_valid(noc_ps_to_bus_req_valid), .noc_ps_to_bus_req_ready(noc_ps_to_bus_req_ready),
+        .noc_pd_to_bus_req_data(noc_pd_to_bus_req_data), .noc_pd_to_bus_req_valid(noc_pd_to_bus_req_valid), .noc_pd_to_bus_req_ready(noc_pd_to_bus_req_ready),
+        .noc_pli_to_bus_req_data(noc_pli_to_bus_req_data), .noc_pli_to_bus_req_valid(noc_pli_to_bus_req_valid), .noc_pli_to_bus_req_ready(noc_pli_to_bus_req_ready),
+        .noc_plo_to_bus_req_data(noc_plo_to_bus_req_data), .noc_plo_to_bus_req_valid(noc_plo_to_bus_req_valid), .noc_plo_to_bus_req_ready(noc_plo_to_bus_req_ready),
+        .bus_to_noc_plo_resp_data(bus_to_noc_plo_resp_data), .bus_to_noc_plo_resp_valid(bus_to_noc_plo_resp_valid), .bus_to_noc_plo_resp_ready(bus_to_noc_plo_resp_ready),
+        .scan_chain_enable(scan_chain_enable), .scan_chain_in(scan_chain_in), .scan_chain_out(scan_chain_out)
+    );
+`else
     MBUS #(.NUM_PES(N)) dut(
         .clk(clk), .reset_n(reset_n), .router_enable(router_enable), .router_mode(router_mode),
         .bus_to_pe_ps_req_data(bus_to_pe_ps_req_data), .bus_to_pe_ps_req_valid(bus_to_pe_ps_req_valid), .bus_to_pe_ps_req_ready(bus_to_pe_ps_req_ready),
@@ -57,6 +128,7 @@ module tb_mbus;
         .bus_to_noc_plo_resp_data(bus_to_noc_plo_resp_data), .bus_to_noc_plo_resp_valid(bus_to_noc_plo_resp_valid), .bus_to_noc_plo_resp_ready(bus_to_noc_plo_resp_ready),
         .scan_chain_enable(scan_chain_enable), .scan_chain_in(scan_chain_in), .scan_chain_out(scan_chain_out)
     );
+`endif
 
     int pass_count = 0;
     int fail_count = 0;

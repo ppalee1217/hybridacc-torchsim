@@ -49,11 +49,7 @@ module InstructionMemory #(
     end
 
     always_comb begin
-        if (!reset_n) begin
-            im_read_data = 16'h0000;
-        end else begin
-            im_read_data = mem[im_read_addr[15:1]];
-        end
+        im_read_data = mem[im_read_addr[15:1]];
     end
 
 endmodule

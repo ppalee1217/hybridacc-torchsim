@@ -79,7 +79,7 @@ module PsumRegFile (
         p_out = 16'h0000;
         vp_out = '0;
 
-        if (reset_n && enable) begin
+        if (enable) begin
             read_pid = use_pcounter ? pcounter_reg : pid;
             if (mode == 0) begin
                 if (read_pid < 32) p_out = p_regs[read_pid];
