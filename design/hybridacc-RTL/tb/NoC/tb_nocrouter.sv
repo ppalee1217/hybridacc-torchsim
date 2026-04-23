@@ -6,25 +6,32 @@
 // Project Name:  HybridAcc
 // Target Devices: ASIC
 // Tool Versions: Synopsys VCS W-2024.09-SP1
-// Description:   Testbench for nocrouter module.
-// Dependencies:  tb_common.svh, src/hybridacc_utils_pkg.sv, src/NoC/NoCRouter.sv
+// Description:   Testbench for NoCRouter module (FIFO-based).
+// Dependencies:  tb_common.svh, src/hybridacc_utils_pkg.sv, src/FIFO.sv, src/NoC/NoCRouter.sv
 // Revision:
 //   2026/03/28 - Initial version
+//   2026/04/02 - Rewrite for FIFO-based NoCRouter (addr/mask ports, clock timing)
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
 `include "../tb_common.svh"
 `include "../../src/hybridacc_utils_pkg.sv"
+`ifndef GATE_SIM
+`include "../../src/FIFO.sv"
 `include "../../src/NoC/NoCRouter.sv"
+`endif
 
 module tb_nocrouter;
     import hybridacc_utils_pkg::*;
-    localparam int NP=2;
+    localparam int NP=3;
     localparam int PW=64;
 
     logic clk, reset_n, command_mode;
     logic [31:0] command_data;
+
     logic [NP*PW-1:0] noc_ps_in_data, noc_pd_in_data, noc_pli_in_data;
+    logic [15:0]       noc_ps_in_addr, noc_pd_in_addr, noc_pli_in_addr;
+    logic [63:0]       noc_ps_in_mask, noc_pd_in_mask, noc_pli_in_mask;
     logic noc_ps_in_valid, noc_ps_in_ready, noc_pd_in_valid, noc_pd_in_ready, noc_pli_in_valid, noc_pli_in_ready;
     noc_addr_req_t noc_plo_in_data; logic noc_plo_in_valid, noc_plo_in_ready;
     logic [NP*PW-1:0] noc_plo_out_data; NOC_RESPONSE_STATUS noc_plo_out_status; logic noc_plo_out_valid, noc_plo_out_ready;
@@ -38,11 +45,85 @@ module tb_nocrouter;
 
     tb_clock_reset clk_rst(.clk(clk), .reset_n(reset_n));
 
+`ifdef GATE_SIM
+    // ---- Flat-wire intermediates for gate-level NoCRouter (NUM_PORTS=3) ----
+    localparam int NRQ = $bits(noc_request_t);   // 144
+    localparam int NAQ = $bits(noc_addr_req_t);  // 16
+    localparam int NRS = $bits(noc_response_t);  // 66
+    localparam int SCW = $bits(ScanChainFormat);  // 27
+
+    // DUT output arrays
+    wire [NP*NRQ-1:0]    g_noc_ps_to_bus_req_data;
+    wire [0:NP-1]         g_noc_ps_to_bus_req_valid;
+    wire [NP*NRQ-1:0]    g_noc_pd_to_bus_req_data;
+    wire [0:NP-1]         g_noc_pd_to_bus_req_valid;
+    wire [NP*NRQ-1:0]    g_noc_pli_to_bus_req_data;
+    wire [0:NP-1]         g_noc_pli_to_bus_req_valid;
+    wire [NP*NAQ-1:0]    g_noc_plo_to_bus_req_data;
+    wire [0:NP-1]         g_noc_plo_to_bus_req_valid;
+    wire [0:NP-1]         g_bus_to_noc_plo_resp_ready;
+    wire [NP*SCW-1:0]    g_scan_chain_out;
+    // DUT input arrays
+    wire [0:NP-1]         g_noc_ps_to_bus_req_ready;
+    wire [0:NP-1]         g_noc_pd_to_bus_req_ready;
+    wire [0:NP-1]         g_noc_pli_to_bus_req_ready;
+    wire [0:NP-1]         g_noc_plo_to_bus_req_ready;
+    wire [NP*NRS-1:0]    g_bus_to_noc_plo_resp_data;
+    wire [0:NP-1]         g_bus_to_noc_plo_resp_valid;
+    wire [NP*SCW-1:0]    g_scan_chain_in;
+    // Enum output
+    wire [1:0]            g_noc_plo_out_status;
+    assign noc_plo_out_status = NOC_RESPONSE_STATUS'(g_noc_plo_out_status);
+
+    genvar gi;
+    generate for (gi = 0; gi < NP; gi++) begin : g_conv
+        // DUT outputs → TB
+        assign noc_ps_to_bus_req_data[gi]    = g_noc_ps_to_bus_req_data[gi*NRQ +: NRQ];
+        assign noc_ps_to_bus_req_valid[gi]   = g_noc_ps_to_bus_req_valid[gi];
+        assign noc_pd_to_bus_req_data[gi]    = g_noc_pd_to_bus_req_data[gi*NRQ +: NRQ];
+        assign noc_pd_to_bus_req_valid[gi]   = g_noc_pd_to_bus_req_valid[gi];
+        assign noc_pli_to_bus_req_data[gi]   = g_noc_pli_to_bus_req_data[gi*NRQ +: NRQ];
+        assign noc_pli_to_bus_req_valid[gi]  = g_noc_pli_to_bus_req_valid[gi];
+        assign noc_plo_to_bus_req_data[gi]   = g_noc_plo_to_bus_req_data[gi*NAQ +: NAQ];
+        assign noc_plo_to_bus_req_valid[gi]  = g_noc_plo_to_bus_req_valid[gi];
+        assign bus_to_noc_plo_resp_ready[gi] = g_bus_to_noc_plo_resp_ready[gi];
+        assign scan_chain_out[gi]            = g_scan_chain_out[gi*SCW +: SCW];
+        // TB → DUT inputs
+        assign g_noc_ps_to_bus_req_ready[gi]              = noc_ps_to_bus_req_ready[gi];
+        assign g_noc_pd_to_bus_req_ready[gi]              = noc_pd_to_bus_req_ready[gi];
+        assign g_noc_pli_to_bus_req_ready[gi]             = noc_pli_to_bus_req_ready[gi];
+        assign g_noc_plo_to_bus_req_ready[gi]             = noc_plo_to_bus_req_ready[gi];
+        assign g_bus_to_noc_plo_resp_data[gi*NRS +: NRS]  = bus_to_noc_plo_resp_data[gi];
+        assign g_bus_to_noc_plo_resp_valid[gi]            = bus_to_noc_plo_resp_valid[gi];
+        assign g_scan_chain_in[gi*SCW +: SCW]             = scan_chain_in[gi];
+    end endgenerate
+
+    NoCRouter dut (
+        .clk(clk), .reset_n(reset_n), .command_mode(command_mode), .command_data(command_data),
+        .noc_ps_in_data(noc_ps_in_data), .noc_ps_in_addr(noc_ps_in_addr), .noc_ps_in_mask(noc_ps_in_mask),
+        .noc_ps_in_valid(noc_ps_in_valid), .noc_ps_in_ready(noc_ps_in_ready),
+        .noc_pd_in_data(noc_pd_in_data), .noc_pd_in_addr(noc_pd_in_addr), .noc_pd_in_mask(noc_pd_in_mask),
+        .noc_pd_in_valid(noc_pd_in_valid), .noc_pd_in_ready(noc_pd_in_ready),
+        .noc_pli_in_data(noc_pli_in_data), .noc_pli_in_addr(noc_pli_in_addr), .noc_pli_in_mask(noc_pli_in_mask),
+        .noc_pli_in_valid(noc_pli_in_valid), .noc_pli_in_ready(noc_pli_in_ready),
+        .noc_plo_in_data(noc_plo_in_data), .noc_plo_in_valid(noc_plo_in_valid), .noc_plo_in_ready(noc_plo_in_ready),
+        .noc_plo_out_data(noc_plo_out_data), .noc_plo_out_status(g_noc_plo_out_status), .noc_plo_out_valid(noc_plo_out_valid), .noc_plo_out_ready(noc_plo_out_ready),
+        .noc_ps_to_bus_req_data(g_noc_ps_to_bus_req_data), .noc_ps_to_bus_req_valid(g_noc_ps_to_bus_req_valid), .noc_ps_to_bus_req_ready(g_noc_ps_to_bus_req_ready),
+        .noc_pd_to_bus_req_data(g_noc_pd_to_bus_req_data), .noc_pd_to_bus_req_valid(g_noc_pd_to_bus_req_valid), .noc_pd_to_bus_req_ready(g_noc_pd_to_bus_req_ready),
+        .noc_pli_to_bus_req_data(g_noc_pli_to_bus_req_data), .noc_pli_to_bus_req_valid(g_noc_pli_to_bus_req_valid), .noc_pli_to_bus_req_ready(g_noc_pli_to_bus_req_ready),
+        .noc_plo_to_bus_req_data(g_noc_plo_to_bus_req_data), .noc_plo_to_bus_req_valid(g_noc_plo_to_bus_req_valid), .noc_plo_to_bus_req_ready(g_noc_plo_to_bus_req_ready),
+        .bus_to_noc_plo_resp_data(g_bus_to_noc_plo_resp_data), .bus_to_noc_plo_resp_valid(g_bus_to_noc_plo_resp_valid), .bus_to_noc_plo_resp_ready(g_bus_to_noc_plo_resp_ready),
+        .scan_chain_enable(scan_chain_enable), .scan_chain_in(g_scan_chain_in), .scan_chain_out(g_scan_chain_out)
+    );
+`else
     NoCRouter #(.NUM_PORTS(NP), .PORT_WIDTH_BITS(PW)) dut(
         .clk(clk), .reset_n(reset_n), .command_mode(command_mode), .command_data(command_data),
-        .noc_ps_in_data(noc_ps_in_data), .noc_ps_in_valid(noc_ps_in_valid), .noc_ps_in_ready(noc_ps_in_ready),
-        .noc_pd_in_data(noc_pd_in_data), .noc_pd_in_valid(noc_pd_in_valid), .noc_pd_in_ready(noc_pd_in_ready),
-        .noc_pli_in_data(noc_pli_in_data), .noc_pli_in_valid(noc_pli_in_valid), .noc_pli_in_ready(noc_pli_in_ready),
+        .noc_ps_in_data(noc_ps_in_data), .noc_ps_in_addr(noc_ps_in_addr), .noc_ps_in_mask(noc_ps_in_mask),
+        .noc_ps_in_valid(noc_ps_in_valid), .noc_ps_in_ready(noc_ps_in_ready),
+        .noc_pd_in_data(noc_pd_in_data), .noc_pd_in_addr(noc_pd_in_addr), .noc_pd_in_mask(noc_pd_in_mask),
+        .noc_pd_in_valid(noc_pd_in_valid), .noc_pd_in_ready(noc_pd_in_ready),
+        .noc_pli_in_data(noc_pli_in_data), .noc_pli_in_addr(noc_pli_in_addr), .noc_pli_in_mask(noc_pli_in_mask),
+        .noc_pli_in_valid(noc_pli_in_valid), .noc_pli_in_ready(noc_pli_in_ready),
         .noc_plo_in_data(noc_plo_in_data), .noc_plo_in_valid(noc_plo_in_valid), .noc_plo_in_ready(noc_plo_in_ready),
         .noc_plo_out_data(noc_plo_out_data), .noc_plo_out_status(noc_plo_out_status), .noc_plo_out_valid(noc_plo_out_valid), .noc_plo_out_ready(noc_plo_out_ready),
         .noc_ps_to_bus_req_data(noc_ps_to_bus_req_data), .noc_ps_to_bus_req_valid(noc_ps_to_bus_req_valid), .noc_ps_to_bus_req_ready(noc_ps_to_bus_req_ready),
@@ -52,6 +133,7 @@ module tb_nocrouter;
         .bus_to_noc_plo_resp_data(bus_to_noc_plo_resp_data), .bus_to_noc_plo_resp_valid(bus_to_noc_plo_resp_valid), .bus_to_noc_plo_resp_ready(bus_to_noc_plo_resp_ready),
         .scan_chain_enable(scan_chain_enable), .scan_chain_in(scan_chain_in), .scan_chain_out(scan_chain_out)
     );
+`endif
 
     int pass_count = 0;
     int fail_count = 0;
@@ -61,73 +143,121 @@ module tb_nocrouter;
         else begin $display("[PASS] %s", test_name); pass_count++; end
     endtask
 
-    initial begin
+    task automatic clear_inputs();
         command_mode=0; command_data=0;
-        noc_ps_in_data=0; noc_ps_in_valid=0;
-        noc_pd_in_data=0; noc_pd_in_valid=0;
-        noc_pli_in_data=0; noc_pli_in_valid=0;
+        noc_ps_in_data=0; noc_ps_in_addr=0; noc_ps_in_mask=0; noc_ps_in_valid=0;
+        noc_pd_in_data=0; noc_pd_in_addr=0; noc_pd_in_mask=0; noc_pd_in_valid=0;
+        noc_pli_in_data=0; noc_pli_in_addr=0; noc_pli_in_mask=0; noc_pli_in_valid=0;
         noc_plo_in_data='0; noc_plo_in_valid=0; noc_plo_out_ready=1;
         for (int i=0;i<NP;i++) begin
-            noc_ps_to_bus_req_ready[i]=1; noc_pd_to_bus_req_ready[i]=1; noc_pli_to_bus_req_ready[i]=1; noc_plo_to_bus_req_ready[i]=1;
-            bus_to_noc_plo_resp_data[i]='0; bus_to_noc_plo_resp_valid[i]=0; scan_chain_in[i]='0;
+            noc_ps_to_bus_req_ready[i]=1; noc_pd_to_bus_req_ready[i]=1;
+            noc_pli_to_bus_req_ready[i]=1; noc_plo_to_bus_req_ready[i]=1;
+            bus_to_noc_plo_resp_data[i]='0; bus_to_noc_plo_resp_valid[i]=0;
+            scan_chain_in[i]='0;
         end
+    endtask
+
+    initial begin
+        clear_inputs();
         @(posedge reset_n);
+        repeat (2) @(posedge clk);
         #(`TB_SETTLE);
 
-        // Test 1: All ingress channels ready after reset
-        check("Ready: PS", noc_ps_in_ready === 1'b1);
-        check("Ready: PD", noc_pd_in_ready === 1'b1);
-        check("Ready: PLI", noc_pli_in_ready === 1'b1);
-        check("Ready: PLO", noc_plo_in_ready === 1'b1);
-
-        // Test 2: PS fanout to all ports
-        noc_ps_in_data = {64'h1111, 64'h2222};
+        // Test 1: Ready signals — ready = valid && !full, so ready=0 when valid=0
         noc_ps_in_valid = 1; #(`TB_SETTLE);
+        check("Ready: PS (valid=1)", noc_ps_in_ready === 1'b1);
+        noc_ps_in_valid = 0;
+        noc_pd_in_valid = 1; #(`TB_SETTLE);
+        check("Ready: PD (valid=1)", noc_pd_in_ready === 1'b1);
+        noc_pd_in_valid = 0;
+        noc_pli_in_valid = 1; #(`TB_SETTLE);
+        check("Ready: PLI (valid=1)", noc_pli_in_ready === 1'b1);
+        noc_pli_in_valid = 0;
+        noc_plo_in_valid = 1; #(`TB_SETTLE);
+        check("Ready: PLO (valid=1)", noc_plo_in_ready === 1'b1);
+        noc_plo_in_valid = 0;
+
+        // Test 2: PS broadcast fanout — data goes through FIFO (1 cycle)
+        noc_ps_in_data = {64'h1111, 64'h2222};
+        noc_ps_in_addr = 16'h0005;
+        noc_ps_in_mask = 64'hF;
+        noc_ps_in_valid = 1;
+        @(posedge clk); // FIFO push; after edge Block C sees non-empty FIFO
+        #(`TB_SETTLE);
         check("PS fanout: port0 valid", noc_ps_to_bus_req_valid[0] === 1'b1);
         check("PS fanout: port1 valid", noc_ps_to_bus_req_valid[1] === 1'b1);
+        // Broadcast (addr[6]=0): all ports get lane0 data = 0x2222
+        check("PS fanout: port0 data", noc_ps_to_bus_req_data[0].data === 64'h2222);
+        check("PS fanout: port1 data", noc_ps_to_bus_req_data[1].data === 64'h2222);
         noc_ps_in_valid = 0;
+        @(posedge clk);
 
-        // Test 3: PD fanout
+        // Test 3: PD broadcast fanout
         noc_pd_in_data = {64'hAAAA, 64'hBBBB};
-        noc_pd_in_valid = 1; #(`TB_SETTLE);
+        noc_pd_in_addr = 16'h0003;
+        noc_pd_in_mask = 64'hFF;
+        noc_pd_in_valid = 1;
+        @(posedge clk);
+        #(`TB_SETTLE);
         check("PD fanout: port0 valid", noc_pd_to_bus_req_valid[0] === 1'b1);
         check("PD fanout: port1 valid", noc_pd_to_bus_req_valid[1] === 1'b1);
         noc_pd_in_valid = 0;
+        @(posedge clk);
 
-        // Test 4: PLO fanout
-        noc_plo_in_data.addr = 16'h1234;
-        noc_plo_in_valid = 1; #(`TB_SETTLE);
+        // Test 4: PLO request fanout through FIFO
+        noc_plo_in_data.addr = 16'h0012;
+        noc_plo_in_valid = 1;
+        @(posedge clk); // FIFO push; after edge Block F sees non-empty FIFO
+        #(`TB_SETTLE);
         check("PLO fanout: port0 valid", noc_plo_to_bus_req_valid[0] === 1'b1);
-        check("PLO fanout: port0 addr", noc_plo_to_bus_req_data[0].addr === 16'h1234);
+        check("PLO fanout: port1 valid", noc_plo_to_bus_req_valid[1] === 1'b1);
+        check("PLO fanout: port0 addr", noc_plo_to_bus_req_data[0].addr === 16'h0012);
         noc_plo_in_valid = 0;
 
-        // Test 5: PLO response aggregation
+        // Test 5: PLO response aggregation (pending_read flow)
+        // After PLO request is dispatched, pending_read_reg=1 next cycle
+        @(posedge clk); // pending_read_reg ← 1; Block G waits for responses
+        // Provide broadcast response from port 0 (non-ultra: addr[6]=0)
         bus_to_noc_plo_resp_data[0].data = 64'hDEAD_0000;
         bus_to_noc_plo_resp_data[0].status = NOC_OK;
         bus_to_noc_plo_resp_valid[0] = 1;
-        bus_to_noc_plo_resp_data[1].data = 64'hBEEF_0000;
-        bus_to_noc_plo_resp_data[1].status = NOC_OK;
-        bus_to_noc_plo_resp_valid[1] = 1;
+        #(`TB_SETTLE);
+        @(posedge clk); // resp_fifo push; after edge Block B sees non-empty resp_fifo
         #(`TB_SETTLE);
         check("PLO resp: valid", noc_plo_out_valid === 1'b1);
         check("PLO resp: status OK", noc_plo_out_status === NOC_OK);
-        check("PLO resp: port0 data", noc_plo_out_data[0*PW +: PW] === 64'hDEAD_0000);
-        check("PLO resp: port1 data", noc_plo_out_data[1*PW +: PW] === 64'hBEEF_0000);
-        bus_to_noc_plo_resp_valid[0] = 0; bus_to_noc_plo_resp_valid[1] = 0;
+        check("PLO resp: port0 data", noc_plo_out_data[63:0] === 64'hDEAD_0000);
+        bus_to_noc_plo_resp_valid[0] = 0;
+        @(posedge clk); // pop resp_fifo
+        #(`TB_SETTLE);
 
-        // Test 6: PLO response with error status
+        // Test 6: PLO response with error — need another PLO read cycle
+        noc_plo_in_data.addr = 16'h0002;
+        noc_plo_in_valid = 1;
+        @(posedge clk); // FIFO push
+        noc_plo_in_valid = 0;
+        @(posedge clk); // plo_fifo pop + dispatch; pending_read_reg ← 1
+        @(posedge clk); // pending_read_reg=1; Block G active
+        bus_to_noc_plo_resp_data[1].data = 64'hBEEF_0000;
         bus_to_noc_plo_resp_data[1].status = NOC_ERROR;
         bus_to_noc_plo_resp_valid[1] = 1;
         #(`TB_SETTLE);
+        @(posedge clk); // resp_fifo push
+        #(`TB_SETTLE);
         check("PLO err: status=ERROR", noc_plo_out_status === NOC_ERROR);
         bus_to_noc_plo_resp_valid[1] = 0;
+        @(posedge clk);
 
-        // Test 7: Scan chain enable via command
+        // Test 7: Scan chain enable via command (registered — 1 cycle latency)
+        clear_inputs();
         command_mode = 1;
         command_data = {28'h0, CMD_NOC_SCAN_CHAIN};
+        @(posedge clk); // FF captures scan_chain_enable_next=1
         #(`TB_SETTLE);
         check("ScanChain: enable=1", scan_chain_enable === 1'b1);
-        command_mode = 0; #(`TB_SETTLE);
+        command_mode = 0;
+        @(posedge clk); // FF captures scan_chain_enable_next=0
+        #(`TB_SETTLE);
         check("ScanChain: enable=0", scan_chain_enable === 1'b0);
 
         // Test 8: No response => plo_out_valid=0

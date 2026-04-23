@@ -39,6 +39,9 @@ initial begin
 end
 `endif
 
+    // Registered sampling for reliable gate-level post-sim checking
+    logic [63:0] dm_read_data_sampled;
+    always_ff @(posedge clk) dm_read_data_sampled <= dm_read_data;
 
     int pass_count = 0;
     int fail_count = 0;
@@ -52,8 +55,8 @@ end
 
         // Test 1: Read after reset (all zero)
         dm_read_addr = 16'h0000;
-        @(posedge clk); @(negedge clk);
-        `CHECK_VAL("Reset: read=0", dm_read_data, 64'h0)
+        @(posedge clk); @(posedge clk); @(negedge clk);
+        `CHECK_VAL("Reset: read=0", dm_read_data_sampled, 64'h0)
 
         // Test 2: Write to bank0 (bank_sel=0 => write bank0, read bank1)
         // bank_sel=0: write_bank_idx=0(bank0), read_bank_idx=1(bank1)
@@ -62,14 +65,14 @@ end
 
         // Read from addr 0x10 with bank_sel=0 reads bank1 (which is still 0)
         dm_read_addr = 16'h0010;
-        @(posedge clk); @(negedge clk);
-        `CHECK_VAL("DualBank: read bank1 after write bank0 = 0", dm_read_data, 64'h0)
+        @(posedge clk); @(posedge clk); @(negedge clk);
+        `CHECK_VAL("DualBank: read bank1 after write bank0 = 0", dm_read_data_sampled, 64'h0)
 
         // Test 3: Swap banks - now read from bank0 which has our data
         bank_sel = 1; // write_bank_idx=1, read_bank_idx=0
         dm_read_addr = 16'h0010;
-        @(posedge clk); @(negedge clk);
-        `CHECK_VAL("BankSwap: read bank0 = written data", dm_read_data, 64'h1122_3344_5566_7788)
+        @(posedge clk); @(posedge clk); @(negedge clk);
+        `CHECK_VAL("BankSwap: read bank0 = written data", dm_read_data_sampled, 64'h1122_3344_5566_7788)
 
         // Test 4: Byte mask write (partial write)
         bank_sel = 0; // write to bank0
@@ -80,8 +83,8 @@ end
         @(posedge clk); dm_write_en = 0;
         bank_sel = 1; // read from bank0
         dm_read_addr = 16'h0020;
-        @(posedge clk); @(negedge clk);
-        `CHECK_VAL("ByteMask: lower 4 bytes=FF, upper 4=0", dm_read_data, 64'h00000000_FFFFFFFF)
+        @(posedge clk); @(posedge clk); @(negedge clk);
+        `CHECK_VAL("ByteMask: lower 4 bytes=FF, upper 4=0", dm_read_data_sampled, 64'h00000000_FFFFFFFF)
 
         // Test 5: Overwrite with different mask
         bank_sel = 1; // write to bank1
@@ -98,8 +101,8 @@ end
         @(posedge clk); dm_write_en = 0;
         bank_sel = 0; // read from bank1
         dm_read_addr = 16'h0030;
-        @(posedge clk); @(negedge clk);
-        `CHECK_VAL("MaskOverwrite: selective bytes updated", dm_read_data, 64'hEEFF_CCDD_1122_3344)
+        @(posedge clk); @(posedge clk); @(negedge clk);
+        `CHECK_VAL("MaskOverwrite: selective bytes updated", dm_read_data_sampled, 64'hEEFF_CCDD_1122_3344)
 
         // Test 6: Address boundary (max address)
         bank_sel = 0;
@@ -110,8 +113,8 @@ end
         @(posedge clk); dm_write_en = 0;
         bank_sel = 1;
         dm_read_addr = 16'h01F8;
-        @(posedge clk); @(negedge clk);
-        `CHECK_VAL("AddrBoundary: near-end write/read", dm_read_data, 64'hDEADBEEF_CAFEBABE)
+        @(posedge clk); @(posedge clk); @(negedge clk);
+        `CHECK_VAL("AddrBoundary: near-end write/read", dm_read_data_sampled, 64'hDEADBEEF_CAFEBABE)
 
         // Test 7: Simultaneous read and write to different banks
         bank_sel = 0; // write bank0, read bank1
@@ -120,8 +123,8 @@ end
         dm_write_data = 64'h1111_2222_3333_4444;
         dm_write_mask = 8'hFF;
         dm_read_addr = 16'h0040; // reads bank1 which should be 0
-        @(posedge clk); dm_write_en = 0; @(negedge clk);
-        `CHECK_VAL("SimRW: read other bank=0", dm_read_data, 64'h0)
+        @(posedge clk); dm_write_en = 0; @(posedge clk); @(negedge clk);
+        `CHECK_VAL("SimRW: read other bank=0", dm_read_data_sampled, 64'h0)
 
         `TB_SUMMARY("tb_datamemory")
         $finish;

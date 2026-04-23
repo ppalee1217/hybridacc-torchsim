@@ -49,6 +49,17 @@ initial begin
 end
 `endif
 
+    // Registered sampling for reliable gate-level post-sim checking
+    pe_decode_signals_t ID_decode_signals_out_sampled;
+    logic valid_out_sampled;
+    logic [15:0] pc_out_sampled;
+    logic halted_out_sampled;
+    always_ff @(posedge clk) begin
+        ID_decode_signals_out_sampled <= ID_decode_signals_out;
+        valid_out_sampled <= valid_out;
+        pc_out_sampled <= pc_out;
+        halted_out_sampled <= halted_out;
+    end
 
     int pass_count = 0;
     int fail_count = 0;
@@ -58,12 +69,12 @@ end
         logic [15:0] stalled_pc;
         stage_reset=0; pe_running=0; ready_in=1; pc_init_value=0; im_write_en=0; im_write_addr=0; im_write_data=0;
         @(posedge reset_n);
-        @(posedge clk); @(negedge clk);
+        @(posedge clk); @(posedge clk); @(negedge clk);
 
         // Test 1: Reset state
-        `CHECK_BIT("Reset: valid_out=0", valid_out, 1'b0)
-        `CHECK_BIT("Reset: halted_out=0", halted_out, 1'b0)
-        `CHECK_VAL("Reset: pc_out=0", pc_out, 16'h0000)
+        `CHECK_BIT("Reset: valid_out=0", valid_out_sampled, 1'b0)
+        `CHECK_BIT("Reset: halted_out=0", halted_out_sampled, 1'b0)
+        `CHECK_VAL("Reset: pc_out=0", pc_out_sampled, 16'h0000)
 
         // Test 2: Write program into IM
         // NOP encoding: opcode=2(10), funct2=2(10), func1=0, payload=0 => 16'b0000000000_0_10_10_0 = 0x0014
@@ -76,49 +87,49 @@ end
 
         // Test 3: Start running
         pe_running = 1;
-        @(posedge clk); @(negedge clk);
-        `CHECK_BIT("Run1: valid_out=1", valid_out, 1'b1)
-        `CHECK_VAL("Run1: pc=0", pc_out, 16'h0000)
-        `CHECK_BIT("Run1: NOP decoded", ID_decode_signals_out.nop, 1'b1)
+        @(posedge clk); @(posedge clk); @(negedge clk);
+        `CHECK_BIT("Run1: valid_out=1", valid_out_sampled, 1'b1)
+        `CHECK_VAL("Run1: pc=0", pc_out_sampled, 16'h0000)
+        `CHECK_BIT("Run1: NOP decoded", ID_decode_signals_out_sampled.nop, 1'b1)
 
         // Test 4: PC advances to next instruction
         @(posedge clk); @(negedge clk);
-        `CHECK_VAL("Run2: pc=2", pc_out, 16'h0002)
+        `CHECK_VAL("Run2: pc=2", pc_out_sampled, 16'h0002)
 
         // Test 5: HALT instruction halts pipeline
-        @(posedge clk); #(0.99); // Wait for combinational paths to settle after instruction fetch
-        `CHECK_VAL("Run3: pc=4", pc_out, 16'h0004)
-        `CHECK_BIT("Run3: halt decoded", ID_decode_signals_out.halt, 1'b1)
         @(posedge clk); @(negedge clk);
-        `CHECK_BIT("PostHalt: halted_out=1", halted_out, 1'b1)
-        `CHECK_BIT("PostHalt: valid_out=0", valid_out, 1'b0)
+        `CHECK_VAL("Run3: pc=4", pc_out_sampled, 16'h0004)
+        `CHECK_BIT("Run3: halt decoded", ID_decode_signals_out_sampled.halt, 1'b1)
+        @(posedge clk); @(negedge clk);
+        `CHECK_BIT("PostHalt: halted_out=1", halted_out_sampled, 1'b1)
+        `CHECK_BIT("PostHalt: valid_out=0", valid_out_sampled, 1'b0)
 
         // Test 6: Stage reset clears halt
-        stage_reset = 1; @(posedge clk); stage_reset = 0; @(negedge clk);
-        `CHECK_BIT("StageReset: halted_out=0", halted_out, 1'b0)
-        `CHECK_BIT("StageReset: valid_out=0", valid_out, 1'b0)
+        stage_reset = 1; @(posedge clk); stage_reset = 0; @(posedge clk); @(negedge clk);
+        `CHECK_BIT("StageReset: halted_out=0", halted_out_sampled, 1'b0)
+        `CHECK_BIT("StageReset: valid_out=0", valid_out_sampled, 1'b0)
 
         // Test 7: Stall when ready_in=0
         pe_running = 1;
         @(posedge clk); @(negedge clk); // valid becomes 1
         ready_in = 0;
+        @(posedge clk); @(posedge clk); @(negedge clk);
+        stalled_pc = pc_out_sampled;
         @(posedge clk); @(negedge clk);
-        stalled_pc = pc_out;
-        @(posedge clk); @(negedge clk);
-        `CHECK_VAL("Stall: PC held", pc_out, stalled_pc)
+        `CHECK_VAL("Stall: PC held", pc_out_sampled, stalled_pc)
         ready_in = 1;
-        @(posedge clk); @(negedge clk);
-        `CHECK_COND("Unstall: PC advanced", pc_out !== stalled_pc, pc_out)
+        @(posedge clk); @(posedge clk); @(negedge clk);
+        `CHECK_COND("Unstall: PC advanced", pc_out_sampled !== stalled_pc, pc_out_sampled)
 
         // Test 8: pe_running=0 stops output
         pe_running = 0;
-        @(posedge clk); @(negedge clk);
-        `CHECK_BIT("NotRunning: valid_out=0", valid_out, 1'b0)
+        @(posedge clk); @(posedge clk); @(negedge clk);
+        `CHECK_BIT("NotRunning: valid_out=0", valid_out_sampled, 1'b0)
 
         // Test 9: pc_init_value
         pe_running = 0;
-        stage_reset = 1; pc_init_value = 16'h0002; @(posedge clk); stage_reset = 0; @(negedge clk);
-        `CHECK_VAL("PcInit: pc set", pc_out, 16'h0002)
+        stage_reset = 1; pc_init_value = 16'h0002; @(posedge clk); stage_reset = 0; @(posedge clk); @(negedge clk);
+        `CHECK_VAL("PcInit: pc set", pc_out_sampled, 16'h0002)
 
         `TB_SUMMARY("tb_if_id_stage")
         $finish;

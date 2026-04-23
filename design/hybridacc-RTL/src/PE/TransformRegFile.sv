@@ -87,7 +87,7 @@ module TransformRegFile (
 
     always_comb begin
         vtid_out = '0;
-        if (reset_n && (enable != 0)) begin
+        if (enable != 0) begin
             logic [31:0] base;
             base = use_vcounter ? vcounter_reg : tid;
             if (base + 9 < 12) begin

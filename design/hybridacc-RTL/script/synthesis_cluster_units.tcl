@@ -32,6 +32,9 @@ set MOD_HAS_SRAM {ComputeCluster}
 # Purely combinational modules
 set MOD_COMBINATIONAL {AddressGenerateUnit}
 
+# Integration-level modules
+set MOD_INTEGRATION {ComputeCluster}
+
 # ============================================================================
 # Validate module name
 # ============================================================================
@@ -64,43 +67,59 @@ current_design $MOD_NAME
 link
 
 # ============================================================================
-# Compile
+# Constraints
 # ============================================================================
 set_host_options -max_core 8
 
+# SDC selection: combinational / unit / integration
 if {[lsearch -exact $MOD_COMBINATIONAL $MOD_NAME] >= 0} {
-    puts "INFO: $MOD_NAME is COMBINATIONAL - using DC_comb.sdc (virtual clock)"
-    source ../script/DC_comb.sdc
+    puts "INFO: $MOD_NAME -- sdc/comb.sdc (virtual clock)"
+    source ../script/sdc/comb.sdc
+} elseif {[lsearch -exact $MOD_INTEGRATION $MOD_NAME] >= 0} {
+    puts "INFO: $MOD_NAME -- sdc/seq_top.sdc (integration, 50% input budget)"
+    source ../script/sdc/seq_top.sdc
 } else {
-    puts "INFO: $MOD_NAME is SEQUENTIAL - using DC.sdc (physical clock on port clk)"
-    source ../script/DC.sdc
+    puts "INFO: $MOD_NAME -- sdc/seq_unit.sdc (unit, 30% input budget)"
+    source ../script/sdc/seq_unit.sdc
 }
+
+# Exclude async reset from timing analysis (sequential modules only)
+# if {[lsearch -exact $MOD_COMBINATIONAL $MOD_NAME] < 0} {
+#     if {[sizeof_collection [get_ports reset_n]] > 0} {
+#         puts "INFO: Applying false path from reset_n"
+#         set_false_path -from [get_ports reset_n]
+#     }
+# }
 
 check_design
 uniquify
 set_fix_multiple_port_nets -feedthroughs
 set_fix_multiple_port_nets -all -buffer_constants [get_designs *]
-set_max_area 0
 
 # Protect SRAM hard macro instances from optimization
-if {[lsearch -exact $MOD_HAS_SRAM $MOD_NAME] >= 0} {
-    puts "INFO: $MOD_NAME contains SRAM macros - applying set_dont_touch"
-    set_dont_touch [get_cells -hierarchical -filter "ref_name =~ TS1N16ADFP*"]
-}
+# if {[lsearch -exact $MOD_HAS_SRAM $MOD_NAME] >= 0} {
+#     puts "INFO: $MOD_NAME contains SRAM macros -- applying set_dont_touch"
+#     set_dont_touch [get_cells -hierarchical -filter "ref_name =~ TS1N16ADFP*"]
+# }
 
-if {$MOD_NAME == "ComputeCluster"} {
-    set compile_seqmap_propagate_high_effort true
-    set compile_seqmap_propagate_constants true
-    set compile_timing_high_effort true
-    set compile_ultra_ungroup_dw true
-    set compile_ultra_ungroup_small_hierarchies true
-    compile_ultra -retime -no_seq_output_inversion -no_autoungroup -exact_map
-} else {
-    set compile_implementation_selection true
-    set compile_seqmap_propagate_constants false
-    compile_ultra -retime -no_seq_output_inversion -no_autoungroup -exact_map
-    compile_ultra -inc
-}
+# ============================================================================
+# Compile
+# ============================================================================
+set compile_implementation_selection true
+set_critical_range 0.1 [current_design]
+
+# if {[lsearch -exact $MOD_INTEGRATION $MOD_NAME] >= 0} {
+#     puts "INFO: $MOD_NAME -- compile_ultra -gate_clock + 2x -inc (integration)"
+#     compile_ultra -gate_clock
+#     compile_ultra -inc
+#     compile_ultra -inc
+# } else {
+#     puts "INFO: $MOD_NAME -- compile_ultra"
+#     compile_ultra
+# }
+
+compile_ultra -gate_clock
+optimize_netlist -area
 
 # ============================================================================
 # Reports

@@ -18,7 +18,7 @@ SRAM_V    := /cad/process/ADFP/Executable_Package/Collaterals/IP/sram/N16ADFP_SR
 VCS_FLAGS ?= -full64 -sverilog -debug_access+all -timescale=1ns/1ps \
 	-y $(DW_SIM_VER) +libext+.v
 GATE_VCS_FLAGS := -full64 -sverilog -debug_access+all -timescale=1ns/1ps \
-	+define+GATE_SIM +neg_tchk +sdfverbose +no_notifier \
+	+define+GATE_SIM +neg_tchk +sdfverbose +no_notifier +notimingcheck \
 	-v $(STDCELL_V) -v $(SRAM_V) \
 	-y $(DW_SIM_VER) +libext+.v
 SIM_PLUSARGS := $(if $(TEST_DATA_DIR),+DATA_DIR=$(TEST_DATA_DIR),) \
@@ -52,9 +52,12 @@ help:
 	@echo "  sim_all              - Pre-sim: run all testbenches under tb/"
 	@echo "  sim_pe               - Pre-sim: run all testbenches under tb/PE/"
 	@echo "  sim_noc              - Pre-sim: run all testbenches under tb/NoC/"
+	@echo "  sim_noc_sim          - Pre-sim: full NoC system sim with ESL test data"
+	@echo "  sim_noc_sim_all      - Pre-sim: run all NoC test cases under output/noc-sim/"
 	@echo "  sim_cluster          - Pre-sim: run all testbenches under tb/Cluster/"
 	@echo "  gate_sim_<tb|module> - Post-sim: compile and run a testbench (gate-level + SDF)"
 	@echo "  gate_sim_pe          - Post-sim: run all PE testbenches (gate-level + SDF)"
+	@echo "  gate_sim_noc         - Post-sim: run all NoC testbenches (gate-level + SDF)"
 	@echo "  synthesize_<name>    - Run script/synthesis_<name>.tcl"
 	@echo "  synall               - Run all synthesis_*.tcl scripts under script/"
 	@echo "  syn_pe_<module>      - Synthesize a PE unit, e.g. syn_pe_VADDU"
@@ -182,6 +185,15 @@ GATE_PE_TBS := tb_datamemory tb_decoder tb_instructionmemory tb_loopcontroller \
                tb_ldma tb_sdma tb_if_id_stage tb_exe_m_stage tb_exe_a_stage \
                tb_perouter tb_processelement tb_pe_sim
 
+# NoC unit TB -> module name mapping for gate_sim
+GATE_NOC_MAP_tb_mbus            := MBUS
+GATE_NOC_MAP_tb_nocrouter       := NoCRouter
+GATE_NOC_MAP_tb_noc_unit        := NetworkOnChip
+GATE_NOC_MAP_tb_noc_sim         := NetworkOnChip
+
+# All NoC testbenches that have gate-level counterparts
+GATE_NOC_TBS := tb_mbus tb_nocrouter tb_noc_unit tb_noc_sim
+
 define run_gate_tb
 	@tb_file=$$(find tb -type f \( -name 'tb_$*.sv' -o -name '$*.sv' \) | head -n 1); \
 	if [ -z "$$tb_file" ]; then \
@@ -190,7 +202,7 @@ define run_gate_tb
 	fi; \
 	tb_base=$$(basename $$tb_file .sv); \
 	tb_dir=$$(dirname $$tb_file); \
-	mod_name=$${MOD_NAME:-$$(echo $(GATE_PE_MAP_$$(basename $$tb_file .sv)))}; \
+	mod_name=$${MOD_NAME:-$$(echo $(GATE_PE_MAP_$$(basename $$tb_file .sv))$(GATE_NOC_MAP_$$(basename $$tb_file .sv)))}; \
 	if [ -z "$$mod_name" ]; then \
 		echo "[GATE_SIM] ERROR: MOD_NAME not set and no mapping for $$tb_base"; \
 		exit 1; \
@@ -198,14 +210,15 @@ define run_gate_tb
 	netlist=$(GATE_NETLIST_DIR)/$$mod_name/$${mod_name}_syn.v; \
 	if [ ! -f "$$netlist" ]; then \
 		echo "[GATE_SIM] ERROR: Gate netlist not found: $$netlist"; \
-		echo "[GATE_SIM] Run 'make syn_pe_$$mod_name' first."; \
+		echo "[GATE_SIM] Run 'make syn_pe_$$mod_name' or 'make syn_noc_$$mod_name' first."; \
 		exit 1; \
 	fi; \
 	echo "[GATE_SIM] Compiling $$tb_file (gate: $$mod_name) ..."; \
 	$(VCS) $(GATE_VCS_FLAGS) +incdir+$$tb_dir +incdir+tb \
 		$(SRAM_SIM_MODEL) $$netlist $$tb_file \
 		-o $(gate_sim_bld_dir)/$$tb_base.gate.simv \
-		> $(gate_sim_log_dir)/$$tb_base.compile.log 2>&1; \
+		> $(gate_sim_log_dir)/$$tb_base.compile.log 2>&1 || \
+		{ echo "[GATE_SIM] ERROR: VCS compile failed. See $(gate_sim_log_dir)/$$tb_base.compile.log"; exit 1; }; \
 	echo "[GATE_SIM] Running $$tb_base ..."; \
 	$(gate_sim_bld_dir)/$$tb_base.gate.simv $(SIM_PLUSARGS) \
 		> $(gate_sim_log_dir)/$$tb_base.run.log 2>&1; \
@@ -233,6 +246,18 @@ gate_sim_pe: | $(gate_sim_bld_dir) $(gate_sim_log_dir)
 		tb_exe_a_stage:EXE_A_Stage \
 		tb_perouter:PErouter \
 		tb_processelement:ProcessElement \
+	; do \
+		tb=$${pair%%:*}; mod=$${pair##*:}; \
+		$(MAKE) gate_sim_$$tb MOD_NAME=$$mod; \
+	done
+
+gate_sim_noc: | $(gate_sim_bld_dir) $(gate_sim_log_dir)
+	@set -e; \
+	for pair in \
+		tb_mbus:MBUS \
+		tb_nocrouter:NoCRouter \
+		tb_noc_unit:NetworkOnChip \
+		tb_noc_sim:NetworkOnChip \
 	; do \
 		tb=$${pair%%:*}; mod=$${pair##*:}; \
 		$(MAKE) gate_sim_$$tb MOD_NAME=$$mod; \
@@ -307,14 +332,16 @@ syn_cluster_all: | $(bld_dir) $(syn_dir) $(report_dir)
 
 VENV_PYTHON := /home/easonyeh/hybridacc/.venv/bin/python
 
+TIMESTAMP := $(shell date +%Y_%m_%d_%H_%M_%S)
+
 syn_report:
-	@$(VENV_PYTHON) script/syn_report.py --report-dir $(report_dir) --output $(report_dir)/pe_synthesis_report.md
+	@$(VENV_PYTHON) script/syn_report.py --report-dir $(report_dir) --output $(report_dir)/pe_synthesis_report_$(TIMESTAMP).md
 
 sim_report:
-	@$(VENV_PYTHON) script/sim_report.py --log-dir $(sim_log_dir) --mode pre-sim --output $(report_dir)/pre_sim_report.md
+	@$(VENV_PYTHON) script/sim_report.py --log-dir $(sim_log_dir) --mode pre-sim --output $(report_dir)/pre_sim_report_$(TIMESTAMP).md
 
 gate_sim_report:
-	@$(VENV_PYTHON) script/sim_report.py --log-dir $(gate_sim_log_dir) --mode post-sim --output $(report_dir)/post_sim_report.md
+	@$(VENV_PYTHON) script/sim_report.py --log-dir $(gate_sim_log_dir) --mode post-sim --output $(report_dir)/post_sim_report_$(TIMESTAMP).md
 
 postsim_%:
 	$(summarize_tb)
@@ -333,4 +360,54 @@ clean:
 clean_syn:
 	rm -rf $(syn_dir) $(report_dir)
 
-.PHONY: help sim_all sim_pe sim_noc sim_cluster synall syn_pe_all syn_noc_all syn_cluster_all syn_report sim_report gate_sim_report gate_sim_pe postsim_all clean clean_syn
+# ---------------------------------------------------------------------------
+# sim_noc_sim — Full NoC system-level simulation using ESL test data
+#   make sim_noc_sim TEST_DATA_DIR=output/noc-sim/conv_k3c4
+#   make sim_noc_sim TEST_DATA_DIR=output/noc-sim/gemm VERIFY_TOL=0.05
+#   make sim_noc_sim_all                      → run all cases under output/noc-sim/
+# ---------------------------------------------------------------------------
+sim_noc_sim: | $(sim_bld_dir) $(sim_log_dir)
+	@echo "[NOC_SIM] Compiling tb_noc_sim.sv ..."; \
+	$(VCS) $(VCS_FLAGS) +incdir+tb/NoC +incdir+tb \
+		$(SRAM_SIM_MODEL) tb/NoC/tb_noc_sim.sv \
+		-o $(sim_bld_dir)/tb_noc_sim.simv \
+		> $(sim_log_dir)/tb_noc_sim.compile.log 2>&1; \
+	if [ $$? -ne 0 ]; then \
+		echo "[NOC_SIM] Compilation FAILED — see $(sim_log_dir)/tb_noc_sim.compile.log"; \
+		tail -40 $(sim_log_dir)/tb_noc_sim.compile.log; \
+		exit 1; \
+	fi; \
+	echo "[NOC_SIM] Running tb_noc_sim (data=$(TEST_DATA_DIR)) ..."; \
+	$(sim_bld_dir)/tb_noc_sim.simv $(SIM_PLUSARGS) \
+		> $(sim_log_dir)/tb_noc_sim.run.log 2>&1; \
+	echo "[NOC_SIM] Logs: $(sim_log_dir)/tb_noc_sim.compile.log $(sim_log_dir)/tb_noc_sim.run.log"; \
+	tail -30 $(sim_log_dir)/tb_noc_sim.run.log
+
+sim_noc_sim_all: | $(sim_bld_dir) $(sim_log_dir)
+	@echo "[NOC_SIM] Compiling tb_noc_sim.sv ..."; \
+	$(VCS) $(VCS_FLAGS) +incdir+tb/NoC +incdir+tb \
+		$(SRAM_SIM_MODEL) tb/NoC/tb_noc_sim.sv \
+		-o $(sim_bld_dir)/tb_noc_sim.simv \
+		> $(sim_log_dir)/tb_noc_sim.compile.log 2>&1; \
+	if [ $$? -ne 0 ]; then \
+		echo "[NOC_SIM] Compilation FAILED"; \
+		tail -40 $(sim_log_dir)/tb_noc_sim.compile.log; \
+		exit 1; \
+	fi; \
+	pass=0; fail=0; \
+	for case_dir in output/noc-sim/*/; do \
+		case_name=$$(basename $$case_dir); \
+		echo "[NOC_SIM] Running $$case_name ..."; \
+		$(sim_bld_dir)/tb_noc_sim.simv +DATA_DIR=$$case_dir \
+			$(if $(VERIFY_TOL),+VERIFY_TOL=$(VERIFY_TOL),) \
+			$(if $(CLOCK_PERIOD_NS),+CLOCK_PERIOD_NS=$(CLOCK_PERIOD_NS),) \
+			> $(sim_log_dir)/tb_noc_sim_$$case_name.run.log 2>&1; \
+		if grep -q 'Test PASSED' $(sim_log_dir)/tb_noc_sim_$$case_name.run.log; then \
+			echo "[NOC_SIM] $$case_name: PASSED"; pass=$$((pass+1)); \
+		else \
+			echo "[NOC_SIM] $$case_name: FAILED"; fail=$$((fail+1)); \
+		fi; \
+	done; \
+	echo "[NOC_SIM] Summary: $$pass PASSED, $$fail FAILED"
+
+.PHONY: help sim_all sim_pe sim_noc sim_cluster sim_noc_fast sim_noc_sim sim_noc_sim_all synall syn_pe_all syn_noc_all syn_cluster_all syn_report sim_report gate_sim_report gate_sim_pe gate_sim_noc postsim_all clean clean_syn

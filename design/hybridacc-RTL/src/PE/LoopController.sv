@@ -25,66 +25,66 @@ module LoopController #(
     output logic [15:0] pc_out,
     output logic        jump
 );
+    // Stack storage — holds levels below the current top
     logic [15:0] loop_start_pc [0:LOOP_STACK_DEPTH-1];
     logic [15:0] loop_remaining[0:LOOP_STACK_DEPTH-1];
     logic [$clog2(LOOP_STACK_DEPTH+1)-1:0] loop_size_reg;
 
+    // Authoritative top-of-stack (directly maintained, not a stale copy)
     logic [15:0] top_pc_reg;
     logic [15:0] top_remaining_reg;
 
-    always_comb begin
-        if (loop_size_reg == 0) begin
-            pc_out = 16'h0000;
-        end else begin
-            pc_out = top_pc_reg;
-        end
+    // ---- Pre-computed speculative values (independent of loop_end_en) ----
+    // Available every cycle before loop_end_en arrives
+    logic [15:0] top_rem_dec;        // remaining - 1 (for decrement)
+    logic        top_at_last;        // will pop on next loop_end?
 
-        if (loop_end_en && (loop_size_reg > 0) && (top_remaining_reg > 16'd1)) begin
-            jump = 1'b1;
-        end else begin
-            jump = 1'b0;
-        end
+    assign top_rem_dec = top_remaining_reg - 16'd1;
+    assign top_at_last = (top_remaining_reg <= 16'd1);
+
+    // ---- Outputs: only gate registered values with loop_end_en ----
+    always_comb begin
+        pc_out = (loop_size_reg > 0) ? top_pc_reg : 16'h0000;
+        jump   = loop_end_en && (loop_size_reg > 0) && !top_at_last;
     end
 
+    // ---- Stack update ----
     always_ff @(posedge clk or negedge reset_n) begin
-        int idx;
-        logic [$clog2(LOOP_STACK_DEPTH+1)-1:0] next_size;
         if (!reset_n) begin
-            for (idx = 0; idx < LOOP_STACK_DEPTH; idx++) begin
+            for (int idx = 0; idx < LOOP_STACK_DEPTH; idx++) begin
                 loop_start_pc[idx]  <= 16'h0000;
                 loop_remaining[idx] <= 16'h0000;
             end
             loop_size_reg     <= '0;
             top_pc_reg        <= 16'h0000;
             top_remaining_reg <= 16'h0000;
-        end else begin
-            next_size = loop_size_reg;
 
-            if (loop_in_en && (count_in != 16'h0000) && (loop_size_reg < LOOP_STACK_DEPTH)) begin
-                loop_start_pc[loop_size_reg]  <= pc_in;
-                loop_remaining[loop_size_reg] <= count_in + 16'd1;
-                next_size = loop_size_reg + 1'b1;
+        end else if (loop_in_en && (count_in != 16'h0000) &&
+                     (loop_size_reg < LOOP_STACK_DEPTH[$clog2(LOOP_STACK_DEPTH+1)-1:0])) begin
+            // === Push: save current top to array, new entry becomes top ===
+            if (loop_size_reg > 0) begin
+                loop_remaining[loop_size_reg - 1] <= top_remaining_reg;
+                loop_start_pc[loop_size_reg - 1]  <= top_pc_reg;
             end
+            top_remaining_reg <= count_in + 16'd1;
+            top_pc_reg        <= pc_in;
+            loop_size_reg     <= loop_size_reg + 1'b1;
 
-            if (loop_end_en && (next_size > 0)) begin
-                logic [15:0] rem;
-                rem = loop_remaining[next_size-1];
-                if (rem > 16'd0) begin
-                    rem = rem - 16'd1;
-                    loop_remaining[next_size-1] <= rem;
+        end else if (loop_end_en && (loop_size_reg > 0)) begin
+            if (top_at_last) begin
+                // === Pop: restore sub-top from array ===
+                loop_size_reg <= loop_size_reg - 1'b1;
+                if (loop_size_reg >= 2) begin
+                    top_remaining_reg <= loop_remaining[loop_size_reg - 2];
+                    top_pc_reg        <= loop_start_pc[loop_size_reg - 2];
+                end else begin
+                    top_remaining_reg <= 16'h0000;
+                    top_pc_reg        <= 16'h0000;
                 end
-                if (rem == 16'd0) begin
-                    next_size = next_size - 1'b1;
-                end
-            end
-
-            loop_size_reg <= next_size;
-            if (next_size > 0) begin
-                top_pc_reg        <= loop_start_pc[next_size-1];
-                top_remaining_reg <= loop_remaining[next_size-1];
             end else begin
-                top_pc_reg        <= 16'h0000;
-                top_remaining_reg <= 16'h0000;
+                // === Decrement: use pre-computed top_rem_dec ===
+                top_remaining_reg                 <= top_rem_dec;
+                loop_remaining[loop_size_reg - 1] <= top_rem_dec;
             end
         end
     end

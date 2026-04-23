@@ -2,7 +2,7 @@
 """Parse VCS simulation logs and generate a Markdown summary report.
 
 Reads run log files from the sim/log/ directory and outputs a consolidated
-Markdown table with pass/fail counts per testbench.
+Markdown table with pass/fail counts per testbench, organized by hierarchy level.
 
 Usage:
     python3 sim_report.py [--log-dir LOG_DIR] [--output OUTPUT_FILE]
@@ -23,6 +23,41 @@ from pathlib import Path
 from datetime import datetime
 
 
+# =========================================================================
+# Hierarchy classification
+# =========================================================================
+HIERARCHY = {
+    "PE Unit": [
+        "tb_datamemory", "tb_instructionmemory", "tb_loopcontroller",
+        "tb_decoder", "tb_psumregfile", "tb_transformregfile",
+        "tb_vaddu", "tb_vmulu", "tb_ldma", "tb_sdma",
+        "tb_if_id_stage", "tb_exe_m_stage", "tb_exe_a_stage",
+        "tb_perouter",
+    ],
+    "PE Integration": [
+        "tb_processelement", "tb_pe_sim",
+    ],
+    "NoC Unit": [
+        "tb_mbus", "tb_nocrouter", "tb_noc_unit",
+    ],
+    "NoC Integration": [
+        "tb_noc_sim",
+    ],
+    "Cluster": [],
+    "Core": [],
+}
+
+# Flat lookup: tb_name -> level
+_TB_LEVEL = {}
+for _level, _tbs in HIERARCHY.items():
+    for _tb in _tbs:
+        _TB_LEVEL[_tb] = _level
+
+
+def classify_tb(tb_name: str) -> str:
+    return _TB_LEVEL.get(tb_name, "Other")
+
+
 @dataclass
 class SimResult:
     testbench: str = ""
@@ -40,9 +75,18 @@ class SimResult:
     logic_fail_count: int = 0
     x_fail_tests: list = field(default_factory=list)
     logic_fail_tests: list = field(default_factory=list)
-    # For system-level TBs (tb_pe_sim)
+    # For system-level TBs (tb_pe_sim, tb_noc_sim)
     mismatches: int = -1
     cosine_similarity: float = -1.0
+    total_elements: int = -1
+    max_diff: float = -1.0
+    mse: float = -1.0
+    # Performance statistics
+    cycle_count: int = -1
+    data_movement: str = ""
+    throughput: str = ""
+    performance: str = ""
+    arith_intensity: str = ""
 
 
 def parse_compile_log(filepath: str, result: SimResult):
@@ -129,16 +173,46 @@ def parse_run_log(filepath: str, result: SimResult):
             result.fail_count = int(m.group(3))
             result.total_assertions = result.pass_count + result.fail_count
 
-    # Check for system-level TB metrics (tb_pe_sim style)
+    # Check for system-level TB metrics (tb_pe_sim / tb_noc_sim style)
     for line in lines:
-        m = re.search(r'Mismatches:\s+(\d+)', line)
+        m = re.search(r'Total Elements\s*:\s*(\d+)', line)
+        if m:
+            result.total_elements = int(m.group(1))
+        m = re.search(r'Mismatches\s*:\s*(\d+)', line)
         if m:
             result.mismatches = int(m.group(1))
-        m = re.search(r'Cosine Similarity:\s+([\d.]+)', line)
+        m = re.search(r'Cosine Similarity\s*:\s*([\d.]+)', line)
         if m:
             result.cosine_similarity = float(m.group(1))
+        m = re.search(r'Max Difference\s*:\s*([\d.eE+-]+)', line)
+        if m:
+            result.max_diff = float(m.group(1))
+        m = re.search(r'MSE\s*:\s*([\d.eE+-]+)', line)
+        if m:
+            result.mse = float(m.group(1))
 
-    # Determine verdict from final line patterns
+    # Parse NoC/PE performance statistics
+    for line in lines:
+        m = re.search(r'(?:Total\s+)?(?:NoC\s+)?cycle\s+count\s*:\s*(\d+)', line, re.IGNORECASE)
+        if m:
+            result.cycle_count = int(m.group(1))
+        m = re.search(r'Active Cycles\s*:\s*(\d+)', line)
+        if m and result.cycle_count < 0:
+            result.cycle_count = int(m.group(1))
+        m = re.search(r'(?:Total\s+)?(?:NoC\s+)?data movement\s*:\s*(.+)', line, re.IGNORECASE)
+        if m:
+            result.data_movement = m.group(1).strip()
+        m = re.search(r'(?:NoC\s+)?Throughput\s*:\s*(.+)', line, re.IGNORECASE)
+        if m:
+            result.throughput = m.group(1).strip()
+        m = re.search(r'Performance\s*:\s*(.+)', line, re.IGNORECASE)
+        if m:
+            result.performance = m.group(1).strip()
+        m = re.search(r'Arithmetic Intensity\s*:\s*(.+)', line, re.IGNORECASE)
+        if m:
+            result.arith_intensity = m.group(1).strip()
+
+    # Determine verdict
     verdict_found = False
     for line in reversed(lines):
         line_stripped = line.strip()
@@ -153,9 +227,24 @@ def parse_run_log(filepath: str, result: SimResult):
             break
 
     if not verdict_found:
+        # System-level TBs: "PASS: ..." or "FAIL: ..." without tb_ prefix
+        for line in reversed(lines):
+            line_stripped = line.strip()
+            if re.match(r'^PASS\b', line_stripped):
+                result.verdict = "PASS"
+                verdict_found = True
+                break
+            elif re.match(r'^FAIL\b', line_stripped):
+                result.verdict = "FAIL"
+                verdict_found = True
+                break
+
+    if not verdict_found:
         if result.fail_count > 0:
             result.verdict = "FAIL"
         elif result.pass_count > 0:
+            result.verdict = "PASS"
+        elif result.cosine_similarity >= 0.99:
             result.verdict = "PASS"
         else:
             result.verdict = "UNKNOWN"
@@ -177,8 +266,62 @@ def parse_testbench(log_dir: str, tb_name: str) -> SimResult:
     return result
 
 
+def _format_verdict(r: SimResult) -> str:
+    """Format verdict string for table cell."""
+    verdict_icon = {
+        "PASS": "✅ **PASS**",
+        "FAIL": "❌ **FAIL**",
+        "TIMEOUT": "⏱️ **TIMEOUT**",
+        "COMPILE_ERROR": "❌ **COMPILE_ERR**",
+        "UNKNOWN": "❓ **UNKNOWN**",
+        "NOT_RUN": "⏸️ **NOT_RUN**",
+    }.get(r.verdict, r.verdict)
+    return verdict_icon
+
+
+def _format_result_cols(r: SimResult) -> str:
+    """Format one result row (without leading index and name)."""
+    compile_icon = "✅" if r.compile_ok else "❌"
+    run_icon = "✅" if r.run_ok else "❌"
+    verdict_icon = _format_verdict(r)
+
+    # For system-level TBs show metrics instead of assertion counts
+    is_sys = r.cosine_similarity >= 0 or r.mismatches >= 0
+    if is_sys:
+        metrics = ""
+        if r.mismatches >= 0:
+            metrics += f"Mismatches={r.mismatches}"
+        if r.cosine_similarity >= 0:
+            if metrics:
+                metrics += ", "
+            metrics += f"Cosine={r.cosine_similarity:.6f}"
+        pass_str = metrics if metrics else "—"
+        fail_x_str = "—"
+        fail_logic_str = "—"
+    else:
+        pass_str = str(r.pass_count)
+        fail_x_str = str(r.x_fail_count)
+        fail_logic_str = str(r.logic_fail_count)
+        unclassified = r.fail_count - r.x_fail_count - r.logic_fail_count
+        if unclassified > 0:
+            fail_logic_str += f" (+{unclassified})"
+
+    return (f"| {compile_icon} | {run_icon} | "
+            f"{pass_str} | {fail_x_str} | {fail_logic_str} | {verdict_icon} |")
+
+
+def _section_table(results: list, counter_start: int) -> tuple:
+    """Generate table rows for a section. Returns (lines, next_counter)."""
+    lines = []
+    idx = counter_start
+    for r in results:
+        idx += 1
+        lines.append(f"| {idx} | {r.testbench} {_format_result_cols(r)}")
+    return lines, idx
+
+
 def generate_markdown(results: list, mode: str = "pre-sim", output_path: str = None) -> str:
-    """Generate consolidated Markdown report."""
+    """Generate consolidated Markdown report organized by hierarchy level."""
     mode_label = "Pre-Simulation" if mode == "pre-sim" else "Post-Simulation (Gate-Level)"
     lines = []
     lines.append(f"# {mode_label} Report")
@@ -188,66 +331,28 @@ def generate_markdown(results: list, mode: str = "pre-sim", output_path: str = N
     lines.append(f"**Mode**: {mode_label}")
     lines.append("")
 
-    # === Summary Table ===
-    lines.append("## Summary")
-    lines.append("")
-    lines.append(
-        "| # | Testbench | Compile | Run | PASS | FAIL-X | FAIL-Logic | Verdict |"
-    )
-    lines.append(
-        "|---|-----------|---------|-----|------|--------|------------|---------|"
-    )
+    # Group results by hierarchy level
+    grouped = {}
+    for r in results:
+        level = classify_tb(r.testbench)
+        grouped.setdefault(level, []).append(r)
 
-    total_pass = 0
-    total_fail = 0
-    total_tb_pass = 0
-    total_tb_fail = 0
+    # Ordered hierarchy levels
+    level_order = ["PE Unit", "PE Integration", "NoC Unit", "NoC Integration",
+                   "Cluster", "Core", "Other"]
 
-    for i, r in enumerate(results, 1):
-        compile_icon = "✅" if r.compile_ok else "❌"
-        run_icon = "✅" if r.run_ok else "❌"
-        verdict_icon = {
-            "PASS": "✅ **PASS**",
-            "FAIL": "❌ **FAIL**",
-            "TIMEOUT": "⏱️ **TIMEOUT**",
-            "COMPILE_ERROR": "❌ **COMPILE_ERROR**",
-            "UNKNOWN": "❓ **UNKNOWN**",
-            "NOT_RUN": "⏸️ **NOT_RUN**",
-        }.get(r.verdict, r.verdict)
-
-        # Fail breakdown
-        pass_str = str(r.pass_count)
-        fail_x_str = str(r.x_fail_count)
-        fail_logic_str = str(r.logic_fail_count)
-        unclassified = r.fail_count - r.x_fail_count - r.logic_fail_count
-        if unclassified > 0:
-            fail_logic_str += f" (+{unclassified})"
-        if r.mismatches >= 0:
-            verdict_icon += f" (Mismatches={r.mismatches}"
-            if r.cosine_similarity >= 0:
-                verdict_icon += f", Cosine={r.cosine_similarity:.6f}"
-            verdict_icon += ")"
-
-        lines.append(
-            f"| {i} | {r.testbench} | {compile_icon} | {run_icon} | "
-            f"{pass_str} | {fail_x_str} | {fail_logic_str} | {verdict_icon} |"
-        )
-
-        total_pass += r.pass_count
-        total_fail += r.fail_count
-        if r.verdict == "PASS":
-            total_tb_pass += 1
-        else:
-            total_tb_fail += 1
-
-    lines.append("")
-    lines.append("## Statistics")
-    lines.append("")
-    lines.append(f"- **Testbenches Passed**: {total_tb_pass} / {len(results)}")
-    lines.append(f"- **Testbenches Failed**: {total_tb_fail} / {len(results)}")
+    # === Overall Summary ===
+    total_pass = sum(r.pass_count for r in results)
+    total_fail = sum(r.fail_count for r in results)
+    total_tb_pass = sum(1 for r in results if r.verdict == "PASS")
+    total_tb_fail = sum(1 for r in results if r.verdict != "PASS")
     total_x_fail = sum(r.x_fail_count for r in results)
     total_logic_fail = sum(r.logic_fail_count for r in results)
     total_unclassified = total_fail - total_x_fail - total_logic_fail
+
+    lines.append("## Overall Summary")
+    lines.append("")
+    lines.append(f"- **Testbenches**: {total_tb_pass} / {len(results)} PASSED")
     fail_parts = []
     if total_x_fail > 0:
         fail_parts.append(f"{total_x_fail} FAIL-X")
@@ -256,17 +361,72 @@ def generate_markdown(results: list, mode: str = "pre-sim", output_path: str = N
     if total_unclassified > 0:
         fail_parts.append(f"{total_unclassified} FAIL")
     fail_detail = ", ".join(fail_parts) if fail_parts else "0 FAIL"
-    lines.append(f"- **Total Assertions**: {total_pass + total_fail} ({total_pass} PASS, {fail_detail})")
+    lines.append(f"- **Assertions**: {total_pass + total_fail} ({total_pass} PASS, {fail_detail})")
     lines.append(f"- **All Passed**: {'✅ Yes' if total_tb_fail == 0 else '❌ No'}")
     lines.append("")
 
-    # === Failure Details ===
+    # === Per-level sections ===
+    global_idx = 0
+    for level in level_order:
+        level_results = grouped.get(level, [])
+        if not level_results:
+            continue
+
+        level_pass = sum(1 for r in level_results if r.verdict == "PASS")
+        level_icon = "✅" if level_pass == len(level_results) else "❌"
+        lines.append(f"## {level} ({level_pass}/{len(level_results)} PASSED) {level_icon}")
+        lines.append("")
+
+        lines.append(
+            "| # | Testbench | Compile | Run | PASS | FAIL-X | FAIL-Logic | Verdict |"
+        )
+        lines.append(
+            "|---|-----------|---------|-----|------|--------|------------|---------|"
+        )
+
+        rows, global_idx = _section_table(level_results, global_idx)
+        lines.extend(rows)
+        lines.append("")
+
+        # Performance metrics for system-level TBs in this section
+        sys_results = [r for r in level_results
+                       if r.cycle_count >= 0 or r.cosine_similarity >= 0]
+        if sys_results:
+            for r in sys_results:
+                lines.append(f"**{r.testbench} Metrics:**")
+                lines.append("")
+                lines.append("| Metric | Value |")
+                lines.append("|--------|-------|")
+                if r.total_elements >= 0:
+                    lines.append(f"| Total Elements | {r.total_elements:,} |")
+                if r.mismatches >= 0:
+                    lines.append(f"| Mismatches | {r.mismatches} |")
+                if r.cosine_similarity >= 0:
+                    lines.append(f"| Cosine Similarity | {r.cosine_similarity:.6f} |")
+                if r.max_diff >= 0:
+                    lines.append(f"| Max Difference | {r.max_diff:.6e} |")
+                if r.mse >= 0:
+                    lines.append(f"| MSE | {r.mse:.6e} |")
+                if r.cycle_count >= 0:
+                    lines.append(f"| Cycle Count | {r.cycle_count:,} |")
+                if r.data_movement:
+                    lines.append(f"| Data Movement | {r.data_movement} |")
+                if r.throughput:
+                    lines.append(f"| Throughput | {r.throughput} |")
+                if r.performance:
+                    lines.append(f"| Performance | {r.performance} |")
+                if r.arith_intensity:
+                    lines.append(f"| Arithmetic Intensity | {r.arith_intensity} |")
+                lines.append("")
+
+    # === Failure Details (unified at the end) ===
     failed = [r for r in results if r.verdict != "PASS"]
     if failed:
         lines.append("## Failure Details")
         lines.append("")
         for r in failed:
-            lines.append(f"### {r.testbench} — {r.verdict}")
+            level = classify_tb(r.testbench)
+            lines.append(f"### {r.testbench} [{level}] — {r.verdict}")
             lines.append("")
             if r.errors:
                 lines.append("**Errors:**")
@@ -353,7 +513,8 @@ def main():
 
     output_path = args.output
     if output_path is None:
-        output_path = f"report/{args.mode.replace('-', '_')}_sim_report.md"
+        ts = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
+        output_path = f"report/{args.mode.replace('-', '_')}_sim_report_{ts}.md"
 
     md = generate_markdown(results, mode=args.mode, output_path=output_path)
     print(md)

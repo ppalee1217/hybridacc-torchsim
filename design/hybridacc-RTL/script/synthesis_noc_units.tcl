@@ -30,6 +30,9 @@ set MOD_HAS_SRAM {NetworkOnChip}
 # Purely combinational modules
 set MOD_COMBINATIONAL {}
 
+# Integration-level modules
+set MOD_INTEGRATION {NetworkOnChip}
+
 # ============================================================================
 # Validate module name
 # ============================================================================
@@ -62,43 +65,78 @@ current_design $MOD_NAME
 link
 
 # ============================================================================
-# Compile
+# Constraints
 # ============================================================================
 set_host_options -max_core 8
 
+# SDC selection: combinational / unit / integration
 if {[lsearch -exact $MOD_COMBINATIONAL $MOD_NAME] >= 0} {
-    puts "INFO: $MOD_NAME is COMBINATIONAL - using DC_comb.sdc (virtual clock)"
-    source ../script/DC_comb.sdc
+    puts "INFO: $MOD_NAME -- sdc/comb.sdc (virtual clock)"
+    source ../script/sdc/comb.sdc
+} elseif {[lsearch -exact $MOD_INTEGRATION $MOD_NAME] >= 0} {
+    puts "INFO: $MOD_NAME -- sdc/seq_top.sdc (integration, 50% input budget)"
+    source ../script/sdc/seq_top.sdc
 } else {
-    puts "INFO: $MOD_NAME is SEQUENTIAL - using DC.sdc (physical clock on port clk)"
-    source ../script/DC.sdc
+    puts "INFO: $MOD_NAME -- sdc/seq_unit.sdc (unit, 30% input budget)"
+    source ../script/sdc/seq_unit.sdc
 }
+
+# # Exclude async reset from timing analysis (sequential modules only)
+# if {[lsearch -exact $MOD_COMBINATIONAL $MOD_NAME] < 0} {
+#     if {[sizeof_collection [get_ports reset_n]] > 0} {
+#         puts "INFO: Applying false path from reset_n"
+#         set_false_path -from [get_ports reset_n]
+#     }
+# }
 
 check_design
 uniquify
 set_fix_multiple_port_nets -feedthroughs
 set_fix_multiple_port_nets -all -buffer_constants [get_designs *]
-set_max_area 0
 
 # Protect SRAM hard macro instances from optimization
-if {[lsearch -exact $MOD_HAS_SRAM $MOD_NAME] >= 0} {
-    puts "INFO: $MOD_NAME contains SRAM macros - applying set_dont_touch"
-    set_dont_touch [get_cells -hierarchical -filter "ref_name =~ TS1N16ADFP*"]
+# if {[lsearch -exact $MOD_HAS_SRAM $MOD_NAME] >= 0} {
+#     puts "INFO: $MOD_NAME contains SRAM macros -- applying set_dont_touch"
+#     set_dont_touch [get_cells -hierarchical -filter "ref_name =~ TS1N16ADFP*"]
+
+#     set hold_delay_cells [get_cells -quiet -hierarchical -filter "full_name =~ *u_dm_write_hold_inv*"]
+#     set addr_delay_cells [get_cells -quiet -hierarchical -filter "full_name =~ *u_sram_addr_hold_inv*"]
+#     if {[sizeof_collection $addr_delay_cells] > 0} {
+#         set hold_delay_cells [add_to_collection $hold_delay_cells $addr_delay_cells]
+#     }
+#     if {[sizeof_collection $hold_delay_cells] > 0} {
+#         puts "INFO: $MOD_NAME contains explicit SRAM hold-delay cells -- preserving them"
+#         set_dont_touch $hold_delay_cells
+#     }
+# }
+
+# ============================================================================
+# Compile
+# ============================================================================
+set compile_implementation_selection true
+set_critical_range 0.1 [current_design]
+
+
+# Compile
+# ============================================================================
+set compile_implementation_selection true
+set_critical_range 0.1 [current_design]
+
+if {[lsearch -exact $MOD_INTEGRATION $MOD_NAME] >= 0} {
+    puts "INFO: $MOD_NAME -- compile_ultra -gate_clock + 2x -inc"
+    compile -map_effort high -area_effort high
+    # Do NOT run optimize_netlist -area -- it removes hold-fix buffers.
+} elseif {[lsearch -exact $MOD_HAS_SRAM $MOD_NAME] >= 0} {
+    puts "INFO: $MOD_NAME -- compile_ultra + -inc (SRAM unit)"
+    compile -map_effort high -area_effort high
+} else {
+    puts "INFO: $MOD_NAME -- compile"
+    compile -map_effort high -area_effort high
+    # try
+    compile_ultra -inc
+    optimize_netlist -area
 }
 
-if {$MOD_NAME == "NetworkOnChip"} {
-    set compile_seqmap_propagate_high_effort true
-    set compile_seqmap_propagate_constants true
-    set compile_timing_high_effort true
-    set compile_ultra_ungroup_dw true
-    set compile_ultra_ungroup_small_hierarchies true
-    compile_ultra -retime -no_seq_output_inversion -no_autoungroup -exact_map
-} else {
-    set compile_implementation_selection true
-    set compile_seqmap_propagate_constants false
-    compile_ultra -retime -no_seq_output_inversion -no_autoungroup -exact_map
-    compile_ultra -inc
-}
 
 # ============================================================================
 # Reports

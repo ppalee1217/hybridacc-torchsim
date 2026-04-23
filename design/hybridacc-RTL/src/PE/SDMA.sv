@@ -49,6 +49,9 @@ module SDMA (
     logic [15:0] dma_offset_active_reg, dma_len_active_rem_reg, dma_loops_active_rem_reg;
     logic bank_sel_active_reg;
     logic [1:0] bank_valid_active_reg;
+    logic write_pending_reg;
+    logic [15:0] write_addr_reg;
+    logic [63:0] write_data_reg;
 
     // Next-state signals (combinational)
     SDMAState state_next;
@@ -56,6 +59,9 @@ module SDMA (
     logic [15:0] dma_offset_active_next, dma_len_active_rem_next, dma_loops_active_rem_next;
     logic bank_sel_active_next;
     logic [1:0] bank_valid_active_next;
+    logic write_pending_next;
+    logic [15:0] write_addr_next;
+    logic [63:0] write_data_next;
 
     function automatic logic [15:0] normalize_loop_count(input logic [15:0] v);
         return (v == 16'h0) ? 16'd1 : v;
@@ -64,6 +70,7 @@ module SDMA (
     // Next-state combinational logic
     always_comb begin
         logic [1:0] mask;
+        logic fire;
 
         // Default: hold current values
         state_next = state_reg;
@@ -76,8 +83,12 @@ module SDMA (
         dma_loops_active_rem_next = dma_loops_active_rem_reg;
         bank_sel_active_next = bank_sel_active_reg;
         bank_valid_active_next = bank_valid_active_reg;
+        write_pending_next = 1'b0;
+        write_addr_next = write_addr_reg;
+        write_data_next = write_data_reg;
 
         mask = bank_sel_active_reg ? 2'b10 : 2'b01;
+        fire = (state_reg == RUN) && ps_valid && (dma_len_active_rem_reg > 16'd0);
 
         // Reset active runtime registers
         if (reset_active) begin
@@ -87,6 +98,9 @@ module SDMA (
             dma_loops_active_rem_next = 16'h0;
             bank_sel_active_next = 1'b0;
             bank_valid_active_next = 2'b00;
+            write_pending_next = 1'b0;
+            write_addr_next = 16'h0;
+            write_data_next = 64'h0;
         end
 
         // FSM state transitions
@@ -120,7 +134,11 @@ module SDMA (
             end
 
             RUN: begin
-                if (ps_valid && (dma_len_active_rem_reg > 16'd0)) begin
+                if (fire) begin
+                    // Buffer the write payload so DM sees registered data/address.
+                    write_pending_next = 1'b1;
+                    write_addr_next = dma_base_static_reg + dma_offset_active_reg;
+                    write_data_next = v_fp16_to_u64(ps_data);
                     dma_offset_active_next = dma_offset_active_reg + dma_stride_static_reg * 16'd2;
                     dma_len_active_rem_next = dma_len_active_rem_reg - 16'd1;
                     if (dma_len_active_rem_reg == 16'd1) begin
@@ -176,6 +194,9 @@ module SDMA (
             dma_loops_active_rem_reg <= 16'h0;
             bank_sel_active_reg <= 1'b0;
             bank_valid_active_reg <= 2'b00;
+            write_pending_reg <= 1'b0;
+            write_addr_reg <= 16'h0;
+            write_data_reg <= 64'h0;
         end else begin
             state_reg <= state_next;
             dma_base_static_reg <= dma_base_static_next;
@@ -187,32 +208,24 @@ module SDMA (
             dma_loops_active_rem_reg <= dma_loops_active_rem_next;
             bank_sel_active_reg <= bank_sel_active_next;
             bank_valid_active_reg <= bank_valid_active_next;
+            write_pending_reg <= write_pending_next;
+            write_addr_reg <= write_addr_next;
+            write_data_reg <= write_data_next;
         end
     end
 
     // Output combinational logic
     always_comb begin
-        logic fire;
-        fire = (state_reg == RUN) && ps_valid && (dma_len_active_rem_reg > 16'd0);
-
         busy = 1'b0;
         done = 1'b0;
-        dm_write_en = 1'b0;
-        dm_write_addr = dma_base_static_reg + dma_offset_active_reg;
-        dm_write_data = 64'h0;
-        dm_write_mask = 8'h00;
+        dm_write_en = write_pending_reg;
+        dm_write_addr = write_addr_reg;
+        dm_write_data = write_data_reg;
+        dm_write_mask = write_pending_reg ? 8'hFF : 8'h00;
         bank_sel = bank_sel_active_reg;
 
         case (state_reg)
-            RUN: begin
-                busy = 1'b1;
-                if (fire) begin
-                    dm_write_en = 1'b1;
-                    dm_write_addr = dma_base_static_reg + dma_offset_active_reg;
-                    dm_write_data = v_fp16_to_u64(ps_data);
-                    dm_write_mask = 8'hFF;
-                end
-            end
+            RUN: busy = 1'b1;
             FINISH: done = 1'b1;
             default: ;
         endcase

@@ -53,69 +53,75 @@ end
         `CHECK_BIT("Reset: jump=0", jump, 1'b0)
         `CHECK_VAL("Reset: pc_out=0", pc_out, 16'h0000)
 
-        // Test 2: Push loop (count=2 => 3 iterations due to count+1 internal)
-        pc_in = 16'h0010; count_in = 16'd2;
+        // Test 2: Push loop (count=3 → internal remaining=4, so 3 iterations / 2 jumps)
+        pc_in = 16'h0010; count_in = 16'd3;
         loop_in_en = 1; @(posedge clk); loop_in_en = 0;
-        // Need extra cycle for top_pc_reg/top_remaining_reg to reflect NBA writes
         @(posedge clk); @(negedge clk);
         `CHECK_VAL("Push: pc_out=0x0010", pc_out, 16'h0010)
 
-        // Test 3: First loop_end -> should jump (remaining=3>1)
-        // top_remaining_reg lags array by 1 cycle due to NBA read-before-write.
-        // @(negedge clk) crosses one posedge, so the first check is after 1 edge.
-        // With count_in=2 → internal remaining=3, we get 3 posedges before pop:
-        //   After P1: array rem=2, top_remaining_reg=3(lag) → jump=1
-        //   After P2: array rem=1, top_remaining_reg=2(lag) → jump=1
-        //   After P3: array rem=0, pop, stack empty       → jump=0
+        // Test 3–6: loop_end iterations.
+        // top_remaining_reg is the authoritative top-of-stack (no lag).
+        // With count_in=3 → remaining=4:
+        //   Edge 1: rem 4→3, jump=1  (3>1)
+        //   Edge 2: rem 3→2, jump=1  (2>1)
+        //   Edge 3: rem 2→1, jump=0  (at_last)
+        //   Edge 4: rem=1,  pop,  stack empty, jump=0
         loop_end_en = 1; @(negedge clk);
         `CHECK_BIT("LoopEnd1: jump=1", jump, 1'b1)
         @(posedge clk); @(negedge clk);
 
-        // Test 4: After 2nd edge: top_remaining shows 2 (lag), still jump
         `CHECK_BIT("LoopEnd2: jump=1", jump, 1'b1)
         @(posedge clk); @(negedge clk);
 
-        // Test 5: After 3rd edge: array rem=0, frame popped, stack empty -> no jump
+        // remaining decremented to 1 → top_at_last, no jump
         `CHECK_BIT("LoopEnd3: jump=0", jump, 1'b0)
+        @(posedge clk); @(negedge clk);
+
+        // pop completed, stack empty
+        `CHECK_BIT("LoopEnd4: jump=0", jump, 1'b0)
         @(posedge clk); loop_end_en = 0; @(negedge clk);
 
-        // Test 6: Stack should be empty now
+        // Test 7: Stack should be empty now
         `CHECK_VAL("AfterPop: pc_out=0", pc_out, 16'h0000)
 
-        // Test 7: Pop on empty stack (should be safe no-op)
+        // Test 8: Pop on empty stack (should be safe no-op)
         loop_end_en = 1; @(posedge clk); loop_end_en = 0; @(negedge clk);
         `CHECK_BIT("PopEmpty: jump=0", jump, 1'b0)
 
-        // Test 8: Nested loops
-        // Outer loop: count=1 (remaining=2), PC=0x0020
-        pc_in = 16'h0020; count_in = 16'd1;
+        // Test 9: Nested loops
+        // Outer loop: count=2 (remaining=3), PC=0x0020
+        pc_in = 16'h0020; count_in = 16'd2;
         loop_in_en = 1; @(posedge clk); loop_in_en = 0;
-        @(posedge clk); @(negedge clk); // extra cycle for top regs to settle
-        // Inner loop: count=1 (remaining=2), PC=0x0030
-        pc_in = 16'h0030; count_in = 16'd1;
+        @(posedge clk); @(negedge clk);
+        // Inner loop: count=2 (remaining=3), PC=0x0030
+        pc_in = 16'h0030; count_in = 16'd2;
         loop_in_en = 1; @(posedge clk); loop_in_en = 0;
-        @(posedge clk); @(negedge clk); // extra cycle for top regs to settle
+        @(posedge clk); @(negedge clk);
         `CHECK_VAL("Nested: pc_out=inner 0x0030", pc_out, 16'h0030)
 
-        // Exhaust inner loop then outer loop (4 total edges needed)
-        // inner remaining=2, outer remaining=2
+        // Exhaust inner then outer (6 edges total with loop_end_en held high)
+        // inner remaining=3, outer remaining=3
         loop_end_en = 1;
-        @(posedge clk); @(negedge clk); // edge1: inner rem 2->1, top_rem=2(lag), jump=1
+        @(posedge clk); @(negedge clk); // edge1: inner rem 3→2, jump=1
         `CHECK_BIT("InnerEnd1: jump=1", jump, 1'b1)
-        @(posedge clk); @(negedge clk); // edge2: inner rem 1->0, pop to outer, top_rem=outer(2), jump=1
-        `CHECK_BIT("InnerEnd2: jump=1", jump, 1'b1)
-        `CHECK_VAL("InnerEnd2: pc_out switches to outer", pc_out, 16'h0020)
-        @(posedge clk); @(negedge clk); // edge3: outer rem 2->1, top_rem=2(lag), jump=1
+        `CHECK_VAL("InnerEnd1: pc_out=inner", pc_out, 16'h0030)
+        @(posedge clk); @(negedge clk); // edge2: inner rem 2→1, at_last, jump=0
+        `CHECK_BIT("InnerEnd2: jump=0", jump, 1'b0)
+        @(posedge clk); @(negedge clk); // edge3: inner pop → outer restored (rem=3), jump=1
+        `CHECK_BIT("InnerPop: jump=1", jump, 1'b1)
+        `CHECK_VAL("InnerPop: pc_out=outer 0x0020", pc_out, 16'h0020)
+        @(posedge clk); @(negedge clk); // edge4: outer rem 3→2, jump=1
         `CHECK_BIT("OuterEnd1: jump=1", jump, 1'b1)
-        @(posedge clk); @(negedge clk); // edge4: outer rem 1->0, pop, stack empty, jump=0
+        @(posedge clk); @(negedge clk); // edge5: outer rem 2→1, at_last, jump=0
         `CHECK_BIT("OuterEnd2: jump=0", jump, 1'b0)
+        @(posedge clk); @(negedge clk); // edge6: outer pop, stack empty, jump=0
+        `CHECK_BIT("OuterPop: jump=0", jump, 1'b0)
         @(posedge clk); loop_end_en = 0; @(negedge clk);
         `CHECK_VAL("AfterNested: pc_out=0", pc_out, 16'h0000)
 
-        // Test 9: Zero count (treated as 1 iteration due to count!=0 guard)
+        // Test 10: Zero count — should NOT push (guard: count_in != 0)
         pc_in = 16'h0050; count_in = 16'd0;
         loop_in_en = 1; @(posedge clk); loop_in_en = 0; @(negedge clk);
-        // count_in=0 should NOT push (guard: count_in != 0)
         `CHECK_VAL("ZeroCount: stack empty, pc_out=0", pc_out, 16'h0000)
 
         `TB_SUMMARY("tb_loopcontroller")

@@ -73,7 +73,7 @@ module tb_pe_sim;
     // =====================================================================
     string data_dir        = "../../output/pe-sim/conv_k3c4";
     real   verify_tolerance = 0.01;
-    int    clock_period_ns  = DEFAULT_CLOCK_PERIOD_NS;
+    real   clock_period_ns  = DEFAULT_CLOCK_PERIOD_NS;
 
     // =====================================================================
     // Clock & reset
@@ -472,7 +472,7 @@ end
     // =====================================================================
     initial begin
         clk = 1'b0;
-        forever #(clock_period_ns / 2) clk = ~clk;
+        forever #(clock_period_ns / 2.0) clk = ~clk;
     end
 
     // =====================================================================
