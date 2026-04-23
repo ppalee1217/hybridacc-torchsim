@@ -139,6 +139,33 @@ static inline void dma_load_2d_sync(uint32_t dram_addr, uint32_t spm_offset,
     dma_wait_tag(dma_tag);
 }
 
+static inline void dma_load_2d_pad_sync(uint32_t dram_addr, uint32_t spm_offset,
+                                        uint32_t row_beats,
+                                        uint32_t row_count,
+                                        uint32_t src_row_stride,
+                                        uint32_t dst_row_stride,
+                                        int32_t window_h0,
+                                        int32_t window_w0,
+                                        uint32_t src_h,
+                                        uint32_t src_w,
+                                        uint32_t beats_per_pixel,
+                                        uint32_t fill_mode,
+                                        uint32_t fill_value_lo,
+                                        uint32_t fill_value_hi) {
+    dma_tag++;
+    dma_load_2d_pad(dram_addr, spm_offset, 0,
+                    row_beats, row_count,
+                    src_row_stride, dst_row_stride,
+                    window_h0, window_w0,
+                    src_h, src_w,
+                    beats_per_pixel,
+                    fill_mode,
+                    fill_value_lo,
+                    fill_value_hi,
+                    dma_tag);
+    dma_wait_tag(dma_tag);
+}
+
 static inline void dma_store_2d_sync(uint32_t spm_offset, uint32_t dram_addr,
                                      uint32_t row_beats,
                                      uint32_t row_count,
@@ -152,12 +179,38 @@ static inline void dma_store_2d_sync(uint32_t spm_offset, uint32_t dram_addr,
     dma_wait_tag(dma_tag);
 }
 
+static inline void dma_store_2d_epilogue_sync(uint32_t spm_offset, uint32_t dram_addr,
+                                              uint32_t row_beats,
+                                              uint32_t row_count,
+                                              uint32_t src_row_stride,
+                                              uint32_t dst_row_stride,
+                                              uint32_t epilogue_mode,
+                                              uint32_t epilogue_param0) {
+    dma_tag++;
+    dma_store_2d_epilogue(spm_offset, dram_addr, 0,
+                          row_beats, row_count,
+                          src_row_stride, dst_row_stride,
+                          epilogue_mode,
+                          epilogue_param0,
+                          dma_tag);
+    dma_wait_tag(dma_tag);
+}
+
 static inline uint8_t plane_is_parallel(const TilingParams* t, uint32_t plane_idx) {
     return ((t->parallel_groups >> plane_idx) & 0x1u) != 0u;
 }
 
 static inline uint32_t min_u32(uint32_t a, uint32_t b) {
     return (a < b) ? a : b;
+}
+
+static inline uint32_t scale_stride_for_extent(uint32_t full_stride,
+                                               uint32_t full_extent,
+                                               uint32_t valid_extent) {
+    if ((full_extent == 0u) || (valid_extent >= full_extent)) {
+        return full_stride;
+    }
+    return (full_stride / full_extent) * valid_extent;
 }
 
 static inline uint32_t active_parallel_banks(uint32_t total_rows,
@@ -261,6 +314,47 @@ static inline void dma_load_parallel_rows_2d_sync(uint32_t dram_addr,
     }
 }
 
+static inline void dma_load_parallel_rows_2d_pad_sync(uint32_t dram_addr,
+                                                      uint32_t spm_base,
+                                                      uint32_t row_beats,
+                                                      uint32_t total_rows,
+                                                      uint32_t rows_per_bank,
+                                                      uint32_t bank_depth_bytes,
+                                                      uint32_t src_row_stride,
+                                                      uint32_t dst_row_stride,
+                                                      int32_t window_h0,
+                                                      int32_t window_w0,
+                                                      uint32_t src_h,
+                                                      uint32_t src_w,
+                                                      uint32_t beats_per_pixel,
+                                                      uint32_t fill_mode,
+                                                      uint32_t fill_value_lo,
+                                                      uint32_t fill_value_hi) {
+    uint32_t row_start = 0u;
+    uint32_t banks = active_parallel_banks(total_rows, rows_per_bank);
+    for (uint32_t b = 0; b < banks; b++) {
+        uint32_t bank_rows = bank_rows_for(total_rows, rows_per_bank, b);
+        if (bank_rows == 0u) {
+            break;
+        }
+        dma_load_2d_pad_sync(dram_addr,
+                             spm_base + b * bank_depth_bytes,
+                             row_beats,
+                             bank_rows,
+                             src_row_stride,
+                             dst_row_stride,
+                             window_h0 + (int32_t)row_start,
+                             window_w0,
+                             src_h,
+                             src_w,
+                             beats_per_pixel,
+                             fill_mode,
+                             fill_value_lo,
+                             fill_value_hi);
+        row_start += bank_rows;
+    }
+}
+
 static inline void dma_store_parallel_rows_sync(uint32_t spm_base,
                                                 uint32_t dram_addr,
                                                 uint32_t row_beats,
@@ -307,6 +401,35 @@ static inline void dma_store_parallel_rows_2d_sync(uint32_t spm_base,
     }
 }
 
+static inline void dma_store_parallel_rows_2d_epilogue_sync(uint32_t spm_base,
+                                                            uint32_t dram_addr,
+                                                            uint32_t row_beats,
+                                                            uint32_t total_rows,
+                                                            uint32_t rows_per_bank,
+                                                            uint32_t bank_depth_bytes,
+                                                            uint32_t src_row_stride,
+                                                            uint32_t dst_row_stride,
+                                                            uint32_t epilogue_mode,
+                                                            uint32_t epilogue_param0) {
+    uint32_t row_start = 0u;
+    uint32_t banks = active_parallel_banks(total_rows, rows_per_bank);
+    for (uint32_t b = 0; b < banks; b++) {
+        uint32_t bank_rows = bank_rows_for(total_rows, rows_per_bank, b);
+        if (bank_rows == 0u) {
+            break;
+        }
+        dma_store_2d_epilogue_sync(spm_base + b * bank_depth_bytes,
+                                   dram_addr + row_start * dst_row_stride,
+                                   row_beats,
+                                   bank_rows,
+                                   src_row_stride,
+                                   dst_row_stride,
+                                   epilogue_mode,
+                                   epilogue_param0);
+        row_start += bank_rows;
+    }
+}
+
 static inline uint32_t tile_extent(uint16_t tile_idx, uint16_t num_tiles,
                                    uint16_t full_extent, uint16_t last_extent) {
     return (tile_idx + 1u < num_tiles) ? full_extent : last_extent;
@@ -324,7 +447,8 @@ typedef struct {
     uint32_t pli_rows_per_bank;
     uint32_t plo_words_per_spatial;
     uint32_t plo_rows_per_bank;
-    uint32_t plo_row_stride;
+    uint32_t plo_src_row_stride;
+    uint32_t plo_dst_row_stride;
 } SpatialDmaRuntime;
 
 typedef struct {
@@ -364,6 +488,12 @@ typedef struct {
     uint32_t pli_row_count;
     uint32_t plo_row_beats;
     uint32_t plo_row_count;
+    uint32_t valid_h_out;
+    uint32_t valid_w_out;
+    uint32_t valid_h_in;
+    uint32_t valid_w_in;
+    int32_t pd_pad_window_h0;
+    int32_t pd_pad_window_w0;
 } WaveRuntime;
 
 typedef struct {
@@ -485,9 +615,18 @@ static inline void build_wave_runtime(const TilingParams* t,
                   + coord->ic * t->dram_ps_ic_stride;
     wave->dram_pd = t->dram_input_base
                   + coord->oc * t->dram_pd_oc_stride
-                  + coord->h  * t->dram_pd_h_stride
-                  + coord->w  * t->dram_pd_w_stride
                   + coord->ic * t->dram_pd_ic_stride;
+    if (t->input_pad_enable) {
+        wave->pd_pad_window_h0 = (int32_t)(coord->h * t->tile_h_out * t->input_stride)
+                               - (int32_t)t->input_padding;
+        wave->pd_pad_window_w0 = (int32_t)(coord->w * t->tile_w_out * t->input_stride)
+                               - (int32_t)t->input_padding;
+    } else {
+        wave->dram_pd += coord->h * t->dram_pd_h_stride
+                       + coord->w * t->dram_pd_w_stride;
+        wave->pd_pad_window_h0 = 0;
+        wave->pd_pad_window_w0 = 0;
+    }
     wave->dram_out = t->dram_output_base
                    + coord->oc * t->dram_out_oc_stride
                    + coord->h  * t->dram_out_h_stride
@@ -507,21 +646,20 @@ static inline void build_wave_runtime(const TilingParams* t,
     wave->pli_row_count = 1;
     wave->plo_row_beats = t->dma_plo_words;
     wave->plo_row_count = 1;
+    wave->valid_h_out = tile_extent(coord->h, t->num_h_tiles,
+                                    t->tile_h_out, t->last_h_out);
+    wave->valid_w_out = tile_extent(coord->w, t->num_w_tiles,
+                                    t->tile_w_out, t->last_w_out);
+    wave->valid_h_in = wave->valid_h_out + spatial->pd_input_halo;
+    wave->valid_w_in = wave->valid_w_out + spatial->pd_input_w_halo;
 
     if (t->spatial_2d_dma) {
-        uint32_t valid_h_out = tile_extent(coord->h, t->num_h_tiles,
-                                           t->tile_h_out, t->last_h_out);
-        uint32_t valid_w_out = tile_extent(coord->w, t->num_w_tiles,
-                                           t->tile_w_out, t->last_w_out);
-        uint32_t valid_h_in = valid_h_out + spatial->pd_input_halo;
-        uint32_t valid_w_in = valid_w_out + spatial->pd_input_w_halo;
-
-        wave->pd_row_beats = valid_w_in * spatial->pd_words_per_spatial;
-        wave->pd_row_count = valid_h_in;
-        wave->pli_row_beats = valid_w_out * spatial->pli_words_per_spatial;
-        wave->pli_row_count = valid_h_out;
-        wave->plo_row_beats = valid_w_out * spatial->plo_words_per_spatial;
-        wave->plo_row_count = valid_h_out;
+        wave->pd_row_beats = wave->valid_w_in * spatial->pd_words_per_spatial;
+        wave->pd_row_count = wave->valid_h_in;
+        wave->pli_row_beats = wave->valid_w_out * spatial->pli_words_per_spatial;
+        wave->pli_row_count = wave->valid_h_out;
+        wave->plo_row_beats = wave->valid_w_out * spatial->plo_words_per_spatial;
+        wave->plo_row_count = wave->valid_h_out;
     }
 
     wave->is_last_ic = (coord->ic + 1u == t->num_ic_tiles);
@@ -717,6 +855,10 @@ static inline void prefetch_wave_inputs_generic(const TilingParams* t,
 
     prefetch_count = 0;
 
+    if (t->input_pad_enable) {
+        return;
+    }
+
     if (wave->need_ps_dma) {
         if (plane_is_parallel(t, 0u) && (t->dma_ps_words_per_bank > 0u)) {
             prefetch_enqueue_parallel_words(wave->dram_ps, wave->spm_ps,
@@ -771,6 +913,10 @@ static inline void prefetch_wave_inputs_conv_3x3(const TilingParams* t,
 
     prefetch_count = 0;
 
+    if (t->input_pad_enable) {
+        return;
+    }
+
     if (wave->need_ps_dma) {
         prefetch_enqueue_linear(wave->dram_ps, wave->spm_ps, t->dma_ps_words);
     }
@@ -796,7 +942,8 @@ static inline void reset_spatial_dma_runtime(SpatialDmaRuntime* spatial) {
     spatial->pli_rows_per_bank = 0;
     spatial->plo_words_per_spatial = 0;
     spatial->plo_rows_per_bank = 0;
-    spatial->plo_row_stride = 0;
+    spatial->plo_src_row_stride = 0;
+    spatial->plo_dst_row_stride = 0;
 }
 
 static inline void init_spatial_dma_runtime_generic(const TilingParams* t,
@@ -827,7 +974,8 @@ static inline void init_spatial_dma_runtime_generic(const TilingParams* t,
         spatial->pli_rows_per_bank = pli_rows;
         spatial->plo_words_per_spatial = plo_full_row_beats / t->tile_w_out;
         spatial->plo_rows_per_bank = plo_rows;
-        spatial->plo_row_stride = plo_full_row_beats * BEAT_BYTES;
+        spatial->plo_src_row_stride = plo_full_row_beats * BEAT_BYTES;
+        spatial->plo_dst_row_stride = t->dram_out_row_stride;
     }
 }
 
@@ -851,7 +999,132 @@ static inline void init_spatial_dma_runtime_conv_3x3(const TilingParams* t,
     spatial->pd_dst_row_stride = pd_full_row_beats * BEAT_BYTES;
     spatial->pli_row_stride = pli_full_row_beats * BEAT_BYTES;
     spatial->plo_words_per_spatial = plo_full_row_beats / t->tile_w_out;
-    spatial->plo_row_stride = plo_full_row_beats * BEAT_BYTES;
+    spatial->plo_src_row_stride = plo_full_row_beats * BEAT_BYTES;
+    spatial->plo_dst_row_stride = t->dram_out_row_stride;
+}
+
+static inline void dma_load_pd_wave_sync(const TilingParams* t,
+                                         const SpatialDmaRuntime* spatial,
+                                         const WaveRuntime* wave) {
+    if (t->input_pad_enable) {
+        if (plane_is_parallel(t, 1u) && (spatial->pd_rows_per_bank > 0u)) {
+            dma_load_parallel_rows_2d_pad_sync(wave->dram_pd, wave->spm_pd,
+                                               wave->pd_row_beats,
+                                               wave->pd_row_count,
+                                               spatial->pd_rows_per_bank,
+                                               t->bank_depth_bytes,
+                                               spatial->pd_src_row_stride,
+                                               spatial->pd_dst_row_stride,
+                                               wave->pd_pad_window_h0,
+                                               wave->pd_pad_window_w0,
+                                               t->input_src_h,
+                                               t->input_src_w,
+                                               spatial->pd_words_per_spatial,
+                                               t->input_fill_mode,
+                                               t->input_fill_value_lo,
+                                               t->input_fill_value_hi);
+        } else {
+            dma_load_2d_pad_sync(wave->dram_pd, wave->spm_pd,
+                                 wave->pd_row_beats,
+                                 wave->pd_row_count,
+                                 spatial->pd_src_row_stride,
+                                 spatial->pd_dst_row_stride,
+                                 wave->pd_pad_window_h0,
+                                 wave->pd_pad_window_w0,
+                                 t->input_src_h,
+                                 t->input_src_w,
+                                 spatial->pd_words_per_spatial,
+                                 t->input_fill_mode,
+                                 t->input_fill_value_lo,
+                                 t->input_fill_value_hi);
+        }
+        return;
+    }
+
+    if (plane_is_parallel(t, 1u) && (t->dma_pd_words_per_bank > 0u)) {
+        dma_load_parallel_words_sync(wave->dram_pd, wave->spm_pd,
+                                     t->dma_pd_words,
+                                     t->dma_pd_words_per_bank,
+                                     t->bank_depth_bytes);
+    } else if (plane_is_parallel(t, 1u) && (spatial->pd_rows_per_bank > 0u)) {
+        if (t->spatial_2d_dma) {
+            dma_load_parallel_rows_2d_sync(wave->dram_pd, wave->spm_pd,
+                                           wave->pd_row_beats,
+                                           wave->pd_row_count,
+                                           spatial->pd_rows_per_bank,
+                                           t->bank_depth_bytes,
+                                           spatial->pd_src_row_stride,
+                                           spatial->pd_dst_row_stride);
+        } else {
+            dma_load_parallel_rows_sync(wave->dram_pd, wave->spm_pd,
+                                        wave->pd_row_beats,
+                                        wave->pd_row_count,
+                                        spatial->pd_rows_per_bank,
+                                        t->bank_depth_bytes);
+        }
+    } else if (t->spatial_2d_dma) {
+        dma_load_2d_sync(wave->dram_pd, wave->spm_pd,
+                         wave->pd_row_beats, wave->pd_row_count,
+                         spatial->pd_src_row_stride, spatial->pd_dst_row_stride);
+    } else {
+        dma_load_sync(wave->dram_pd, wave->spm_pd, t->dma_pd_words);
+    }
+}
+
+static inline void dma_writeback_plo_wave_sync(const TilingParams* t,
+                                               const SpatialDmaRuntime* spatial,
+                                               const WaveRuntime* wave) {
+    if (plane_is_parallel(t, 3u) && (spatial->plo_rows_per_bank > 0u)) {
+        if (t->spatial_2d_dma) {
+            if (t->output_epilogue != DMA_EPILOGUE_NONE) {
+                dma_store_parallel_rows_2d_epilogue_sync(wave->spm_plo, wave->dram_out,
+                                                         wave->plo_row_beats,
+                                                         wave->plo_row_count,
+                                                         spatial->plo_rows_per_bank,
+                                                         t->bank_depth_bytes,
+                                                         spatial->plo_src_row_stride,
+                                                         spatial->plo_dst_row_stride,
+                                                         t->output_epilogue,
+                                                         t->output_epilogue_param0);
+            } else {
+                dma_store_parallel_rows_2d_sync(wave->spm_plo, wave->dram_out,
+                                                wave->plo_row_beats,
+                                                wave->plo_row_count,
+                                                spatial->plo_rows_per_bank,
+                                                t->bank_depth_bytes,
+                                                spatial->plo_src_row_stride,
+                                                spatial->plo_dst_row_stride);
+            }
+        } else {
+            dma_store_parallel_rows_sync(wave->spm_plo, wave->dram_out,
+                                         wave->plo_row_beats,
+                                         wave->plo_row_count,
+                                         spatial->plo_rows_per_bank,
+                                         t->bank_depth_bytes);
+        }
+    } else if (t->spatial_2d_dma) {
+        if (t->output_epilogue != DMA_EPILOGUE_NONE) {
+            dma_store_2d_epilogue_sync(wave->spm_plo, wave->dram_out,
+                                       wave->plo_row_beats, wave->plo_row_count,
+                                       spatial->plo_src_row_stride,
+                                       spatial->plo_dst_row_stride,
+                                       t->output_epilogue,
+                                       t->output_epilogue_param0);
+        } else {
+            dma_store_2d_sync(wave->spm_plo, wave->dram_out,
+                              wave->plo_row_beats, wave->plo_row_count,
+                              spatial->plo_src_row_stride,
+                              spatial->plo_dst_row_stride);
+        }
+    } else if (t->output_epilogue != DMA_EPILOGUE_NONE) {
+        dma_store_2d_epilogue_sync(wave->spm_plo, wave->dram_out,
+                                   t->dma_plo_words, 1u,
+                                   0u, 0u,
+                                   t->output_epilogue,
+                                   t->output_epilogue_param0);
+    } else {
+        dma_store_sync(wave->spm_plo, wave->dram_out, t->dma_plo_words);
+    }
 }
 
 static inline void dma_load_bias_generic(const TilingParams* t,
@@ -894,7 +1167,7 @@ static inline void ensure_wave_inputs_ready_generic(const TilingParams* t,
                                                     const SpatialDmaRuntime* spatial,
                                                     const WaveRuntime* wave,
                                                     uint32_t wave_count) {
-    if (wave_count == 0u) {
+    if (wave_count == 0u || t->input_pad_enable) {
         dma_load_bias_generic(t, spatial, wave);
 
         if (wave->need_ps_dma) {
@@ -908,34 +1181,7 @@ static inline void ensure_wave_inputs_ready_generic(const TilingParams* t,
             }
         }
 
-        if (plane_is_parallel(t, 1u) && (t->dma_pd_words_per_bank > 0u)) {
-            dma_load_parallel_words_sync(wave->dram_pd, wave->spm_pd,
-                                         t->dma_pd_words,
-                                         t->dma_pd_words_per_bank,
-                                         t->bank_depth_bytes);
-        } else if (plane_is_parallel(t, 1u) && (spatial->pd_rows_per_bank > 0u)) {
-            if (t->spatial_2d_dma) {
-                dma_load_parallel_rows_2d_sync(wave->dram_pd, wave->spm_pd,
-                                               wave->pd_row_beats,
-                                               wave->pd_row_count,
-                                               spatial->pd_rows_per_bank,
-                                               t->bank_depth_bytes,
-                                               spatial->pd_src_row_stride,
-                                               spatial->pd_dst_row_stride);
-            } else {
-                dma_load_parallel_rows_sync(wave->dram_pd, wave->spm_pd,
-                                            wave->pd_row_beats,
-                                            wave->pd_row_count,
-                                            spatial->pd_rows_per_bank,
-                                            t->bank_depth_bytes);
-            }
-        } else if (t->spatial_2d_dma) {
-            dma_load_2d_sync(wave->dram_pd, wave->spm_pd,
-                             wave->pd_row_beats, wave->pd_row_count,
-                             spatial->pd_src_row_stride, spatial->pd_dst_row_stride);
-        } else {
-            dma_load_sync(wave->dram_pd, wave->spm_pd, t->dma_pd_words);
-        }
+        dma_load_pd_wave_sync(t, spatial, wave);
     } else {
         prefetch_wait_all();
         dma_load_bias_generic(t, spatial, wave);
@@ -946,18 +1192,14 @@ static inline void ensure_wave_inputs_ready_conv_3x3(const TilingParams* t,
                                                      const SpatialDmaRuntime* spatial,
                                                      const WaveRuntime* wave,
                                                      uint32_t wave_count) {
-    if (wave_count == 0u) {
+    if (wave_count == 0u || t->input_pad_enable) {
         dma_load_bias_conv_3x3(t, wave);
 
         if (wave->need_ps_dma) {
             dma_load_sync(wave->dram_ps, wave->spm_ps, t->dma_ps_words);
         }
 
-        dma_load_2d_sync(wave->dram_pd, wave->spm_pd,
-                         wave->pd_row_beats,
-                         wave->pd_row_count,
-                         spatial->pd_src_row_stride,
-                         spatial->pd_dst_row_stride);
+        dma_load_pd_wave_sync(t, spatial, wave);
     } else {
         prefetch_wait_all();
         dma_load_bias_conv_3x3(t, wave);
@@ -967,40 +1209,13 @@ static inline void ensure_wave_inputs_ready_conv_3x3(const TilingParams* t,
 static inline void writeback_wave_generic(const TilingParams* t,
                                           const SpatialDmaRuntime* spatial,
                                           const WaveRuntime* wave) {
-    if (plane_is_parallel(t, 3u) && (spatial->plo_rows_per_bank > 0u)) {
-        if (t->spatial_2d_dma) {
-            dma_store_parallel_rows_2d_sync(wave->spm_plo, wave->dram_out,
-                                            wave->plo_row_beats,
-                                            wave->plo_row_count,
-                                            spatial->plo_rows_per_bank,
-                                            t->bank_depth_bytes,
-                                            spatial->plo_row_stride,
-                                            spatial->plo_row_stride);
-        } else {
-            dma_store_parallel_rows_sync(wave->spm_plo, wave->dram_out,
-                                         wave->plo_row_beats,
-                                         wave->plo_row_count,
-                                         spatial->plo_rows_per_bank,
-                                         t->bank_depth_bytes);
-        }
-    } else if (t->spatial_2d_dma) {
-        dma_store_2d_sync(wave->spm_plo, wave->dram_out,
-                          wave->plo_row_beats, wave->plo_row_count,
-                          spatial->plo_row_stride, spatial->plo_row_stride);
-    } else {
-        dma_store_sync(wave->spm_plo, wave->dram_out, t->dma_plo_words);
-    }
+    dma_writeback_plo_wave_sync(t, spatial, wave);
 }
 
 static inline void writeback_wave_conv_3x3(const TilingParams* t,
                                            const SpatialDmaRuntime* spatial,
                                            const WaveRuntime* wave) {
-    (void)t;
-    dma_store_2d_sync(wave->spm_plo, wave->dram_out,
-                      wave->plo_row_beats,
-                      wave->plo_row_count,
-                      spatial->plo_row_stride,
-                      spatial->plo_row_stride);
+    dma_writeback_plo_wave_sync(t, spatial, wave);
 }
 
 typedef void (*SpatialRuntimeInitFn)(const TilingParams* t,
@@ -1015,6 +1230,44 @@ typedef void (*WavePrefetchFn)(const TilingParams* t,
 typedef void (*WaveWritebackFn)(const TilingParams* t,
                                 const SpatialDmaRuntime* spatial,
                                 const WaveRuntime* wave);
+
+static inline void patch_wave_spatial_agus(const LayerConfig* cfg,
+                                           const WaveRuntime* wave) {
+    const TilingParams* t = &cfg->tiling;
+    uint32_t pd_iter0 = cfg->agu_pd.regs[2] & 0xFFFFu;
+    uint32_t pd_iter3 = (cfg->agu_pd.regs[3] >> 16) & 0xFFFFu;
+    uint32_t pli_iter0 = cfg->agu_pli.regs[2] & 0xFFFFu;
+    uint32_t pli_iter3 = (cfg->agu_pli.regs[3] >> 16) & 0xFFFFu;
+    uint32_t plo_iter0 = cfg->agu_plo.regs[2] & 0xFFFFu;
+    uint32_t plo_iter3 = (cfg->agu_plo.regs[3] >> 16) & 0xFFFFu;
+
+    bcast_agu_write(AGU_PD, AGU_REG_ITER01,
+                    (wave->valid_h_in << 16) | pd_iter0);
+    bcast_agu_write(AGU_PD, AGU_REG_ITER23,
+                    (pd_iter3 << 16) | wave->valid_w_in);
+    bcast_agu_write(AGU_PD, AGU_REG_STRIDE1,
+                    scale_stride_for_extent(cfg->agu_pd.regs[5],
+                                            t->tile_w_in,
+                                            wave->valid_w_in));
+
+    bcast_agu_write(AGU_PLI, AGU_REG_ITER01,
+                    (wave->valid_h_out << 16) | pli_iter0);
+    bcast_agu_write(AGU_PLI, AGU_REG_ITER23,
+                    (pli_iter3 << 16) | wave->valid_w_out);
+    bcast_agu_write(AGU_PLI, AGU_REG_STRIDE1,
+                    scale_stride_for_extent(cfg->agu_pli.regs[5],
+                                            t->tile_w_out,
+                                            wave->valid_w_out));
+
+    bcast_agu_write(AGU_PLO, AGU_REG_ITER01,
+                    (wave->valid_h_out << 16) | plo_iter0);
+    bcast_agu_write(AGU_PLO, AGU_REG_ITER23,
+                    (plo_iter3 << 16) | wave->valid_w_out);
+    bcast_agu_write(AGU_PLO, AGU_REG_STRIDE1,
+                    scale_stride_for_extent(cfg->agu_plo.regs[5],
+                                            t->tile_w_out,
+                                            wave->valid_w_out));
+}
 
 /* ═══════════════════════════════════════════════════════
  * run_loop_tiling_common — Core tiling loop with DMA/compute overlap
@@ -1068,6 +1321,7 @@ static void run_loop_tiling_common(const LayerConfig* cfg,
         /* Phase 3: Only base_addr changes per wave.
          * The layer-scope AGU iter/stride/control state stays programmed
          * across HDDU STOP + AGU idle boundaries. */
+        patch_wave_spatial_agus(cfg, current_wave);
         bcast_agu_write(AGU_PS,  AGU_REG_BASE_ADDR, current_wave->agu_base_ps);
         bcast_agu_write(AGU_PD,  AGU_REG_BASE_ADDR, current_wave->agu_base_pd);
         bcast_agu_write(AGU_PLI, AGU_REG_BASE_ADDR, current_wave->agu_base_pli);
@@ -1198,25 +1452,198 @@ static inline void dma_load_gemm_pd_resident_sync(const TilingParams* t,
     }
 }
 
+static inline void issue_dma_load_async(uint32_t dram_addr,
+                                        uint32_t spm_offset,
+                                        uint32_t beat_count,
+                                        uint32_t* last_tag);
+
+static inline void dma_load_gemm_pd_resident_tile_async(const TilingParams* t,
+                                                        uint32_t dram_pd,
+                                                        uint32_t local_m,
+                                                        uint32_t* last_tag) {
+    if (plane_is_parallel(t, 1u) && (t->dma_pd_words_per_bank > 0u)) {
+        uint32_t word_start = 0u;
+        uint32_t banks = active_parallel_words(t->dma_pd_words,
+                                               t->dma_pd_words_per_bank);
+        uint32_t spm_base = t->spm_ping[1]
+                          + local_m * t->dma_pd_words_per_bank * BEAT_BYTES;
+
+        for (uint32_t b = 0u; b < banks; ++b) {
+            uint32_t bank_words = bank_words_for(t->dma_pd_words,
+                                                 t->dma_pd_words_per_bank,
+                                                 b);
+            if (bank_words == 0u) {
+                break;
+            }
+            issue_dma_load_async(dram_pd + word_start * BEAT_BYTES,
+                                 spm_base + b * t->bank_depth_bytes,
+                                 bank_words,
+                                 last_tag);
+            word_start += bank_words;
+        }
+    } else {
+        issue_dma_load_async(dram_pd,
+                             t->spm_ping[1] + local_m * t->dma_pd_words * BEAT_BYTES,
+                             t->dma_pd_words,
+                             last_tag);
+    }
+}
+
+static inline void issue_dma_load_async(uint32_t dram_addr,
+                                        uint32_t spm_offset,
+                                        uint32_t beat_count,
+                                        uint32_t* last_tag) {
+    dma_tag++;
+    dma_load(dram_addr, spm_offset, 0, beat_count, dma_tag);
+    *last_tag = dma_tag;
+}
+
+static inline void issue_dma_load_2d_async(uint32_t dram_addr,
+                                           uint32_t spm_offset,
+                                           uint32_t row_beats,
+                                           uint32_t row_count,
+                                           uint32_t src_row_stride,
+                                           uint32_t dst_row_stride,
+                                           uint32_t* last_tag) {
+    dma_tag++;
+    dma_load_2d(dram_addr, spm_offset, 0,
+                row_beats, row_count,
+                src_row_stride, dst_row_stride,
+                dma_tag);
+    *last_tag = dma_tag;
+}
+
+static inline void issue_dma_store_2d_async(uint32_t spm_offset,
+                                            uint32_t dram_addr,
+                                            uint32_t row_beats,
+                                            uint32_t row_count,
+                                            uint32_t src_row_stride,
+                                            uint32_t dst_row_stride,
+                                            uint32_t* last_tag) {
+    dma_tag++;
+    dma_store_2d(spm_offset, dram_addr, 0,
+                 row_beats, row_count,
+                 src_row_stride, dst_row_stride,
+                 dma_tag);
+    *last_tag = dma_tag;
+}
+
+static inline uint32_t gemm_ps_resident_spm_offset(const TilingParams* t,
+                                                   uint32_t n_tile) {
+    if (plane_is_parallel(t, 0u) && (t->dma_ps_words_per_bank > 0u)) {
+        return t->spm_ping[0] + n_tile * t->dma_ps_words_per_bank * BEAT_BYTES;
+    }
+    return t->spm_ping[0] + n_tile * t->dma_ps_words * BEAT_BYTES;
+}
+
+static inline uint32_t gemm_resident_spm_col_stride_bytes(uint32_t resident_n_tiles,
+                                                          uint32_t tile_words) {
+    return resident_n_tiles * tile_words * BEAT_BYTES;
+}
+
+static inline void dma_load_gemm_ps_resident_tile_async(const TilingParams* t,
+                                                        uint32_t n_tile,
+                                                        uint32_t* last_tag) {
+    uint32_t dram_addr = t->dram_weight_base + n_tile * t->dram_ps_h_stride;
+    uint32_t spm_base = gemm_ps_resident_spm_offset(t, n_tile);
+
+    if (plane_is_parallel(t, 0u) && (t->dma_ps_words_per_bank > 0u)) {
+        uint32_t word_start = 0u;
+        uint32_t banks = active_parallel_words(t->dma_ps_words,
+                                               t->dma_ps_words_per_bank);
+        for (uint32_t b = 0u; b < banks; ++b) {
+            uint32_t bank_words = bank_words_for(t->dma_ps_words,
+                                                 t->dma_ps_words_per_bank,
+                                                 b);
+            if (bank_words == 0u) {
+                break;
+            }
+            issue_dma_load_async(dram_addr + word_start * BEAT_BYTES,
+                                 spm_base + b * t->bank_depth_bytes,
+                                 bank_words,
+                                 last_tag);
+            word_start += bank_words;
+        }
+    } else {
+        issue_dma_load_async(dram_addr, spm_base, t->dma_ps_words, last_tag);
+    }
+}
+
+static inline void dma_load_gemm_pli_resident_tile_async(const TilingParams* t,
+                                                         uint32_t resident_m_tiles,
+                                                         uint32_t n_tile,
+                                                         uint32_t* last_tag) {
+    uint32_t spm_stride_bytes;
+
+    if ((resident_m_tiles == 0u) || (t->dma_pli_words == 0u)) {
+        return;
+    }
+
+    spm_stride_bytes = gemm_resident_spm_col_stride_bytes(t->gemm_resident_n_tiles,
+                                                          t->dma_pli_words);
+    issue_dma_load_2d_async(t->dram_bias_base + n_tile * t->dram_bias_h_stride,
+                            t->spm_ping[2] + n_tile * t->dma_pli_words * BEAT_BYTES,
+                            t->dma_pli_words,
+                            resident_m_tiles,
+                            t->dram_bias_oc_stride,
+                            spm_stride_bytes,
+                            last_tag);
+}
+
+static inline void dma_load_gemm_resident_tile_sync(const TilingParams* t,
+                                                    uint32_t resident_m_tiles,
+                                                    uint32_t n_tile) {
+    uint32_t last_tag = 0u;
+
+    dma_load_gemm_ps_resident_tile_async(t, n_tile, &last_tag);
+    dma_load_gemm_pli_resident_tile_async(t, resident_m_tiles, n_tile, &last_tag);
+    if (last_tag != 0u) {
+        dma_wait_tag(last_tag);
+    }
+}
+
+static inline void dma_store_gemm_plo_resident_tile_async(const TilingParams* t,
+                                                          uint32_t resident_m_tiles,
+                                                          uint32_t n_tile,
+                                                          uint32_t* last_tag) {
+    uint32_t spm_stride_bytes;
+
+    if (resident_m_tiles == 0u) {
+        return;
+    }
+
+    spm_stride_bytes = gemm_resident_spm_col_stride_bytes(t->gemm_resident_n_tiles,
+                                                          t->dma_plo_words);
+    issue_dma_store_2d_async(t->spm_ping[3] + n_tile * t->dma_plo_words * BEAT_BYTES,
+                             t->dram_output_base + n_tile * t->dram_out_h_stride,
+                             t->dma_plo_words,
+                             resident_m_tiles,
+                             spm_stride_bytes,
+                             t->dram_out_oc_stride,
+                             last_tag);
+}
+
 static inline void run_loop_tiling_gemm_resident_full_n(const LayerConfig* cfg) {
     const TilingParams* t = &cfg->tiling;
     uint32_t resident_n_tiles = t->gemm_resident_n_tiles;
     uint32_t resident_m_tiles = t->gemm_resident_m_tiles;
+    uint32_t pd_preload_m_tiles = t->gemm_pd_preload_m_tiles;
     uint32_t ps_tile_words = gemm_ps_agu_tile_words(t);
     uint32_t pd_tile_words = gemm_pd_agu_tile_words(t);
     uint32_t pd_iter2 = cfg->agu_pd.regs[3] & 0xFFFFu;
     uint32_t pli_iter2 = cfg->agu_pli.regs[3] & 0xFFFFu;
     uint32_t plo_iter2 = cfg->agu_plo.regs[3] & 0xFFFFu;
+    uint32_t prefetch_tag = 0u;
+    uint32_t store_tag = 0u;
+
+    if ((pd_preload_m_tiles == 0u) || (pd_preload_m_tiles > resident_m_tiles)) {
+        pd_preload_m_tiles = resident_m_tiles;
+    }
 
     dma_init_linear();
-    cluster_start_layer();
 
-    dma_load_gemm_ps_resident_sync(t);
-    dma_load_gemm_pd_resident_sync(t, t->dram_input_base, resident_m_tiles);
-    if (t->dma_pli_words > 0u) {
-        dma_load_sync(t->dram_bias_base, t->spm_ping[2],
-                      resident_m_tiles * resident_n_tiles * t->dma_pli_words);
-    }
+    dma_load_gemm_pd_resident_sync(t, t->dram_input_base, pd_preload_m_tiles);
+    dma_load_gemm_resident_tile_sync(t, resident_m_tiles, 0u);
 
     bcast_agu_write(AGU_PD, AGU_REG_ITER23, (resident_m_tiles << 16) | pd_iter2);
     bcast_agu_write(AGU_PD, AGU_REG_STRIDE3, pd_tile_words);
@@ -1225,10 +1652,17 @@ static inline void run_loop_tiling_gemm_resident_full_n(const LayerConfig* cfg) 
     bcast_agu_write(AGU_PLO, AGU_REG_ITER23, (resident_m_tiles << 16) | plo_iter2);
     bcast_agu_write(AGU_PLO, AGU_REG_STRIDE3, resident_n_tiles * t->dma_plo_words);
 
+    cluster_start_layer();
+
     for (uint32_t n_tile = 0u; n_tile < resident_n_tiles; ++n_tile) {
         uint32_t ps_agu_base = t->agu_ping[0] + n_tile * ps_tile_words;
         uint32_t pli_agu_base = t->agu_ping[2] + n_tile * t->dma_pli_words;
         uint32_t plo_agu_base = t->agu_ping[3] + n_tile * t->dma_plo_words;
+
+        if (prefetch_tag != 0u) {
+            dma_wait_tag(prefetch_tag);
+            prefetch_tag = 0u;
+        }
 
         bcast_write32(SPM_CONFIG_MAP, t->spm_map_even);
         bcast_write32(SPM_CONFIG_UPDATE, 0x01u);
@@ -1242,14 +1676,40 @@ static inline void run_loop_tiling_gemm_resident_full_n(const LayerConfig* cfg) 
         bcast_write32(HDDU_BASE + HDDU_PLANE_MODE, cfg->hddu_plane_mode);
         bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);
 
+        if (n_tile == 0u) {
+            for (uint32_t m_tile = pd_preload_m_tiles; m_tile < resident_m_tiles; ++m_tile) {
+                dma_load_gemm_pd_resident_tile_async(
+                    t,
+                    t->dram_input_base + m_tile * t->dram_pd_oc_stride,
+                    m_tile,
+                    &prefetch_tag
+                );
+            }
+        }
+        if (n_tile + 1u < resident_n_tiles) {
+            dma_load_gemm_ps_resident_tile_async(t, n_tile + 1u, &prefetch_tag);
+            dma_load_gemm_pli_resident_tile_async(t, resident_m_tiles,
+                                                  n_tile + 1u,
+                                                  &prefetch_tag);
+        }
+        if (n_tile > 0u) {
+            dma_store_gemm_plo_resident_tile_async(t, resident_m_tiles,
+                                                   n_tile - 1u,
+                                                   &store_tag);
+        }
+
         wait_all_clusters_hddu_done(cfg->num_clusters);
 
         bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_STOP);
         wait_all_clusters_agu_idle(cfg->num_clusters);
     }
 
-    dma_store_sync(t->spm_ping[3], t->dram_output_base,
-                   resident_m_tiles * resident_n_tiles * t->dma_plo_words);
+    dma_store_gemm_plo_resident_tile_async(t, resident_m_tiles,
+                                           resident_n_tiles - 1u,
+                                           &store_tag);
+    if (store_tag != 0u) {
+        dma_wait_tag(store_tag);
+    }
 
     cluster_stop_layer();
     wait_all_clusters_cluster_quiesced(cfg->num_clusters);

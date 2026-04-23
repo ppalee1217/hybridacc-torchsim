@@ -265,6 +265,7 @@ class TilingParams:
     dram_out_oc_stride: int
     dram_out_h_stride: int
     dram_out_w_stride: int
+    dram_out_row_stride: int
 
     # DMA word counts (constant per wave)
     dma_ps_words: int
@@ -283,6 +284,20 @@ class TilingParams:
     # Runtime should use 2D spatial DMA helpers for PD/PLO
     spatial_2d_dma: bool
 
+    # PD load-pad transform metadata
+    input_pad_enable: bool
+    input_padding: int
+    input_stride: int
+    input_src_h: int
+    input_src_w: int
+    input_fill_mode: int
+    input_fill_value_lo: int
+    input_fill_value_hi: int
+
+    # PLO store epilogue metadata
+    output_epilogue: int
+    output_epilogue_param0: int
+
     # PD IC-tile AGU offset (for NHWC-input multi-IC-tile layers)
     # When > 0, firmware adds ic * pd_ic_agu_offset to PD base_addr each wave
     pd_ic_agu_offset: int
@@ -300,6 +315,7 @@ class TilingParams:
     # GEMM resident-slab mode
     gemm_resident_m_tiles: int = 0
     gemm_resident_n_tiles: int = 0
+    gemm_pd_preload_m_tiles: int = 0
 
 
 @dataclass

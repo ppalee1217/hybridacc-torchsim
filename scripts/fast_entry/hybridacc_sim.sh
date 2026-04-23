@@ -85,6 +85,8 @@ Options (for test-fw / run-task):
   --core-debug      Enable core pipeline debug trace
   --dma-check       Enable DMA loopback verification (auto for test_dma)
   --fw-check        Enable DSRAM firmware test result verification
+    --fast-boot       Preload core SRAM directly and bypass manifest loader
+    --clock-period N  Override simulator clock period in ns (supports float, default: 2)
   --max-cycles N    Override max simulation cycles (default: 500000)
   --mirror FILE     Load/dump DRAM mirror image
   --trace FILE      Generate Perfetto trace JSON file
@@ -162,7 +164,8 @@ do_clean() {
 # Resolves the firmware ELF (and optional DRAM mirror) from either:
 #   1. A build output directory containing firmware.elf  (e.g. output/hacc_conv3x3_test_build)
 #   2. A firmware test name under $FW_DIR               (e.g. test_alu)
-# Returns the simulator exit code.
+# Returns the simulator exit code. Extra args are forwarded directly, e.g.
+#   --clock-period 1.5 --max-cycles 200000 --core-debug
 run_task() {
     local name="$1"; shift
     local elf="" log="" task_dir=""

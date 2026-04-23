@@ -27,6 +27,9 @@ import torch.nn.functional as F
 import yaml
 
 
+HARDWARE_PAD_EPS = np.float16(np.nextafter(np.float16(0), np.float16(1)))
+
+
 # ---------------------------------------------------------------------------
 # Golden computations (fp16 arithmetic via fp32 accumulation → fp16 cast)
 # ---------------------------------------------------------------------------
@@ -75,6 +78,49 @@ def fp16_gemm_golden(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     return out.numpy().astype(np.float16, copy=False)
 
 
+def _coerce_bool_attr(value, attr_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off"):
+            return False
+    raise ValueError(f"attr '{attr_name}' must be bool-like, got {value!r}")
+
+
+def _relu_requested(op: dict) -> bool:
+    attrs = op.get("attrs", {})
+    activation = attrs.get("activation")
+    if activation is None:
+        activation = attrs.get("epilogue")
+    if activation is not None:
+        if not isinstance(activation, str):
+            raise ValueError(
+                f"{op['name']}: attr 'activation' must be a string, got {type(activation).__name__}"
+            )
+        activation_l = activation.strip().lower()
+        if activation_l in ("", "none", "identity"):
+            return False
+        if activation_l == "relu":
+            return True
+        raise ValueError(f"{op['name']}: unsupported activation '{activation}'")
+
+    for attr_name in ("relu", "fuse_relu", "output_relu"):
+        if attr_name in attrs and _coerce_bool_attr(attrs[attr_name], attr_name):
+            return True
+    return False
+
+
+def _apply_output_epilogue(op: dict, output: np.ndarray) -> np.ndarray:
+    if _relu_requested(op):
+        return np.maximum(output, np.float16(0.0)).astype(np.float16, copy=False)
+    return output
+
+
 # ---------------------------------------------------------------------------
 # Layer-level golden computation
 # ---------------------------------------------------------------------------
@@ -106,6 +152,7 @@ def _compute_layer_golden(op, tensors_data, wl_tensors, rng, layer_tp):
         output_shape = tuple(wl_tensors[output_name]["shape"])
 
         golden = fp16_conv2d_golden(inp, weight, stride=stride, padding=padding)
+        golden = _apply_output_epilogue(op, golden)
         assert golden.shape == output_shape, \
             f"Shape mismatch for {output_name}: golden {golden.shape} vs expected {output_shape}"
         return output_name, golden
@@ -120,6 +167,7 @@ def _compute_layer_golden(op, tensors_data, wl_tensors, rng, layer_tp):
         output_shape = tuple(wl_tensors[output_name]["shape"])
 
         golden = fp16_gemm_golden(A, B)
+        golden = _apply_output_epilogue(op, golden)
         assert golden.shape == output_shape, \
             f"Shape mismatch for {output_name}: golden {golden.shape} vs expected {output_shape}"
         return output_name, golden
@@ -173,6 +221,34 @@ def _tile_input_ic(inp: np.ndarray, num_ic_tiles: int, tile_ic: int) -> bytes:
     x = inp.reshape(N, H, W, num_ic_tiles, tile_ic)
     x = x.transpose(0, 3, 1, 2, 4)  # [N, num_ic_tiles, H, W, tile_ic]
     return x.astype(np.float16).tobytes()
+
+
+def _make_conv_halo_canvas_nhwc(shape: tuple[int, int, int, int], padding: int) -> np.ndarray:
+    """Create an NHWC canvas whose border uses the hardware-safe halo value."""
+    if padding <= 0:
+        return np.zeros(shape, dtype=np.float16)
+
+    N, H, W, C = shape
+    canvas = np.zeros((N, H + 2 * padding, W + 2 * padding, C), dtype=np.float16)
+    canvas[:, :padding, :, :] = HARDWARE_PAD_EPS
+    canvas[:, -padding:, :, :] = HARDWARE_PAD_EPS
+    canvas[:, :, :padding, :] = HARDWARE_PAD_EPS
+    canvas[:, :, -padding:, :] = HARDWARE_PAD_EPS
+    return canvas
+
+
+def _pad_conv_input_nhwc(inp: np.ndarray, padding: int) -> np.ndarray:
+    """Materialize a padded NHWC tensor for conv source inputs.
+
+    The 3x3 datapath can deadlock on exact-zero halo values, so the hardware
+    mirror uses the smallest positive fp16 value while golden math still uses
+    logical zero padding.
+    """
+    if padding <= 0:
+        return inp
+    padded = _make_conv_halo_canvas_nhwc(inp.shape, padding)
+    padded[:, padding:padding + inp.shape[1], padding:padding + inp.shape[2], :] = inp
+    return padded
 
 
 def _pack_gemm_a_pd(A: np.ndarray, layer: dict) -> bytes:
@@ -551,9 +627,13 @@ def main():
 
     # Pre-generate all input tensors (those not produced by any op)
     output_tensor_names = set()
+    output_tensor_map = {}
     for op in ops:
         for name in op["outputs"]:
             output_tensor_names.add(name)
+    for idx, op in enumerate(ops):
+        for name in op["outputs"]:
+            output_tensor_map[name] = idx
 
     for name, tdef in wl_tensors.items():
         if name not in output_tensor_names:

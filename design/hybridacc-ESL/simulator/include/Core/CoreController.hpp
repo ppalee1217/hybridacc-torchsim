@@ -679,6 +679,40 @@ SC_MODULE(CoreController) {
         return val;
     }
 
+    void fast_boot_start(uint32_t boot_addr) {
+        u_boot_host_if.fast_boot_start(boot_addr);
+    }
+
+    bool core_halted() const { return sig_core_halted.read(); }
+
+    uint32_t irq_summary() const { return u_boot_host_if.debug_irq_summary(); }
+
+    bool fast_load_section(SectionKind kind,
+                           uint32_t local_addr,
+                           const uint8_t* data,
+                           uint32_t size) {
+        if (data == nullptr) {
+            return false;
+        }
+
+        switch (kind) {
+            case SectionKind::CORE:
+                if (static_cast<uint64_t>(local_addr) + size > kIsramBytes) {
+                    return false;
+                }
+                u_isram.load_bytes(local_addr, data, size);
+                return true;
+            case SectionKind::JOB:
+                if (static_cast<uint64_t>(local_addr) + size > kDataSramBytes) {
+                    return false;
+                }
+                u_dsram.load_bytes(local_addr, data, size);
+                return true;
+            default:
+                return false;
+        }
+    }
+
 private:
     // ========================================================================
     // Submodule instances

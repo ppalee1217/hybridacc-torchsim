@@ -58,12 +58,32 @@ typedef struct {
 #define DMA_ERR_CODE        (DMA_MMIO_BASE + 0x064u)
 #define DMA_ERR_INFO        (DMA_MMIO_BASE + 0x068u)
 #define DMA_DEBUG_STATE     (DMA_MMIO_BASE + 0x06Cu)
+#define DMA_XFORM_CTRL      (DMA_MMIO_BASE + 0x070u)
+#define DMA_PAD_WINDOW_H0   (DMA_MMIO_BASE + 0x074u)
+#define DMA_PAD_WINDOW_W0   (DMA_MMIO_BASE + 0x078u)
+#define DMA_PAD_SRC_H       (DMA_MMIO_BASE + 0x07Cu)
+#define DMA_PAD_SRC_W       (DMA_MMIO_BASE + 0x080u)
+#define DMA_BEATS_PER_PIXEL (DMA_MMIO_BASE + 0x084u)
+#define DMA_FILL_VALUE_LO   (DMA_MMIO_BASE + 0x088u)
+#define DMA_FILL_VALUE_HI   (DMA_MMIO_BASE + 0x08Cu)
+#define DMA_EPILOGUE_CTRL   (DMA_MMIO_BASE + 0x090u)
+#define DMA_EPILOGUE_PARAM0 (DMA_MMIO_BASE + 0x094u)
 
 #define DMA_ENDPOINT_DRAM        0u
 #define DMA_ENDPOINT_CLUSTER_SPM 1u
 #define DMA_CTRL_SUBMIT          (1u << 0)
 #define DMA_STATUS_IDLE          (1u << 0)
 #define DMA_STATUS_BUSY          (1u << 1)
+#define DMA_XFORM_LOAD_PAD_EN_MASK   (1u << 0)
+#define DMA_XFORM_FILL_MODE_SHIFT    4u
+#define DMA_XFORM_FILL_MODE_MASK     (0x3u << DMA_XFORM_FILL_MODE_SHIFT)
+#define DMA_XFORM_FILL_ZERO          0u
+#define DMA_XFORM_FILL_EPSILON       1u
+#define DMA_XFORM_FILL_CONST         2u
+#define DMA_EPILOGUE_MODE_SHIFT      0u
+#define DMA_EPILOGUE_MODE_MASK       (0x3u << DMA_EPILOGUE_MODE_SHIFT)
+#define DMA_EPILOGUE_NONE            0u
+#define DMA_EPILOGUE_RELU            1u
 #define BEAT_BYTES               8u  /* 64-bit cluster AXI bus */
 
 /* PLIC */
@@ -298,8 +318,52 @@ static inline uint32_t pack_load_program(uint16_t im_addr_bytes,
     return pack_noc_cmd(NOC_CMD_LOAD_PROGRAM, p);
 }
 
+static inline void HACC_MMIO_OPT_ATTR dma_clear_transform(void) {
+    mmio_write32(DMA_XFORM_CTRL,      0);
+    mmio_write32(DMA_PAD_WINDOW_H0,   0);
+    mmio_write32(DMA_PAD_WINDOW_W0,   0);
+    mmio_write32(DMA_PAD_SRC_H,       0);
+    mmio_write32(DMA_PAD_SRC_W,       0);
+    mmio_write32(DMA_BEATS_PER_PIXEL, 0);
+    mmio_write32(DMA_FILL_VALUE_LO,   0);
+    mmio_write32(DMA_FILL_VALUE_HI,   0);
+    mmio_write32(DMA_EPILOGUE_CTRL,   DMA_EPILOGUE_NONE);
+    mmio_write32(DMA_EPILOGUE_PARAM0, 0);
+}
+
+static inline void HACC_MMIO_OPT_ATTR dma_config_load_pad(int32_t window_h0,
+                                                          int32_t window_w0,
+                                                          uint32_t src_h,
+                                                          uint32_t src_w,
+                                                          uint32_t beats_per_pixel,
+                                                          uint32_t fill_mode,
+                                                          uint32_t fill_value_lo,
+                                                          uint32_t fill_value_hi) {
+    uint32_t xform_ctrl = DMA_XFORM_LOAD_PAD_EN_MASK
+                        | ((fill_mode << DMA_XFORM_FILL_MODE_SHIFT) & DMA_XFORM_FILL_MODE_MASK);
+
+    dma_clear_transform();
+    mmio_write32(DMA_XFORM_CTRL,      xform_ctrl);
+    mmio_write32(DMA_PAD_WINDOW_H0,   (uint32_t)window_h0);
+    mmio_write32(DMA_PAD_WINDOW_W0,   (uint32_t)window_w0);
+    mmio_write32(DMA_PAD_SRC_H,       src_h);
+    mmio_write32(DMA_PAD_SRC_W,       src_w);
+    mmio_write32(DMA_BEATS_PER_PIXEL, beats_per_pixel);
+    mmio_write32(DMA_FILL_VALUE_LO,   fill_value_lo);
+    mmio_write32(DMA_FILL_VALUE_HI,   fill_value_hi);
+}
+
+static inline void HACC_MMIO_OPT_ATTR dma_config_store_epilogue(uint32_t epilogue_mode,
+                                                                uint32_t epilogue_param0) {
+    dma_clear_transform();
+    mmio_write32(DMA_EPILOGUE_CTRL,
+                 (epilogue_mode << DMA_EPILOGUE_MODE_SHIFT) & DMA_EPILOGUE_MODE_MASK);
+    mmio_write32(DMA_EPILOGUE_PARAM0, epilogue_param0);
+}
+
 /* ── 4D DMA one-time init (call once before first transfer) ── */
 static inline void HACC_MMIO_OPT_ATTR dma_init_linear(void) {
+    dma_clear_transform();
     mmio_write32(DMA_SRC_ADDR_HI,     0);
     mmio_write32(DMA_DST_ADDR_HI,     0);
     mmio_write32(DMA_COUNT_D1,        1);
@@ -319,6 +383,7 @@ static inline void HACC_MMIO_OPT_ATTR dma_init_linear(void) {
 /* ── DMA load: DRAM → Cluster SPM ── */
 static inline void HACC_MMIO_OPT_ATTR dma_load(uint32_t dram_addr, uint32_t spm_offset,
                                                uint32_t cluster_id, uint32_t beat_count, uint32_t tag) {
+    dma_clear_transform();
     mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_DRAM);
     mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
     mmio_write32(DMA_SRC_ADDR_LO,    dram_addr);
@@ -348,6 +413,50 @@ static inline void HACC_MMIO_OPT_ATTR dma_load_2d(uint32_t dram_addr, uint32_t s
                                                   uint32_t src_row_stride,
                                                   uint32_t dst_row_stride,
                                                   uint32_t tag) {
+    dma_clear_transform();
+    mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_DRAM);
+    mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
+    mmio_write32(DMA_SRC_ADDR_LO,    dram_addr);
+    mmio_write32(DMA_DST_ADDR_LO,    spm_offset);
+    mmio_write32(DMA_SRC_CLUSTER_ID, 0);
+    mmio_write32(DMA_DST_CLUSTER_ID, cluster_id);
+    mmio_write32(DMA_COUNT_D0,       row_beats);
+    mmio_write32(DMA_COUNT_D1,       row_count);
+    mmio_write32(DMA_COUNT_D2,       1);
+    mmio_write32(DMA_COUNT_D3,       1);
+    mmio_write32(DMA_SRC_STRIDE_D0,  BEAT_BYTES);
+    mmio_write32(DMA_SRC_STRIDE_D1,  src_row_stride);
+    mmio_write32(DMA_SRC_STRIDE_D2,  0);
+    mmio_write32(DMA_SRC_STRIDE_D3,  0);
+    mmio_write32(DMA_DST_STRIDE_D0,  BEAT_BYTES);
+    mmio_write32(DMA_DST_STRIDE_D1,  dst_row_stride);
+    mmio_write32(DMA_DST_STRIDE_D2,  0);
+    mmio_write32(DMA_DST_STRIDE_D3,  0);
+    mmio_write32(DMA_CMD_TAG,         tag);
+    mmio_write32(DMA_CTRL,           DMA_CTRL_SUBMIT);
+}
+
+static inline void HACC_MMIO_OPT_ATTR dma_load_2d_pad(uint32_t dram_addr, uint32_t spm_offset,
+                                                      uint32_t cluster_id,
+                                                      uint32_t row_beats,
+                                                      uint32_t row_count,
+                                                      uint32_t src_row_stride,
+                                                      uint32_t dst_row_stride,
+                                                      int32_t window_h0,
+                                                      int32_t window_w0,
+                                                      uint32_t src_h,
+                                                      uint32_t src_w,
+                                                      uint32_t beats_per_pixel,
+                                                      uint32_t fill_mode,
+                                                      uint32_t fill_value_lo,
+                                                      uint32_t fill_value_hi,
+                                                      uint32_t tag) {
+    dma_config_load_pad(window_h0, window_w0,
+                        src_h, src_w,
+                        beats_per_pixel,
+                        fill_mode,
+                        fill_value_lo,
+                        fill_value_hi);
     mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_DRAM);
     mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
     mmio_write32(DMA_SRC_ADDR_LO,    dram_addr);
@@ -373,6 +482,7 @@ static inline void HACC_MMIO_OPT_ATTR dma_load_2d(uint32_t dram_addr, uint32_t s
 /* ── DMA store: Cluster SPM → DRAM ── */
 static inline void HACC_MMIO_OPT_ATTR dma_store(uint32_t spm_offset, uint32_t dram_addr,
                                                 uint32_t cluster_id, uint32_t beat_count, uint32_t tag) {
+    dma_clear_transform();
     mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
     mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_DRAM);
     mmio_write32(DMA_SRC_ADDR_LO,    spm_offset);
@@ -402,6 +512,40 @@ static inline void HACC_MMIO_OPT_ATTR dma_store_2d(uint32_t spm_offset, uint32_t
                                                    uint32_t src_row_stride,
                                                    uint32_t dst_row_stride,
                                                    uint32_t tag) {
+    dma_clear_transform();
+    mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
+    mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_DRAM);
+    mmio_write32(DMA_SRC_ADDR_LO,    spm_offset);
+    mmio_write32(DMA_DST_ADDR_LO,    dram_addr);
+    mmio_write32(DMA_SRC_CLUSTER_ID, cluster_id);
+    mmio_write32(DMA_DST_CLUSTER_ID, 0);
+    mmio_write32(DMA_COUNT_D0,       row_beats);
+    mmio_write32(DMA_COUNT_D1,       row_count);
+    mmio_write32(DMA_COUNT_D2,       1);
+    mmio_write32(DMA_COUNT_D3,       1);
+    mmio_write32(DMA_SRC_STRIDE_D0,  BEAT_BYTES);
+    mmio_write32(DMA_SRC_STRIDE_D1,  src_row_stride);
+    mmio_write32(DMA_SRC_STRIDE_D2,  0);
+    mmio_write32(DMA_SRC_STRIDE_D3,  0);
+    mmio_write32(DMA_DST_STRIDE_D0,  BEAT_BYTES);
+    mmio_write32(DMA_DST_STRIDE_D1,  dst_row_stride);
+    mmio_write32(DMA_DST_STRIDE_D2,  0);
+    mmio_write32(DMA_DST_STRIDE_D3,  0);
+    mmio_write32(DMA_CMD_TAG,         tag);
+    mmio_write32(DMA_CTRL,           DMA_CTRL_SUBMIT);
+}
+
+static inline void HACC_MMIO_OPT_ATTR dma_store_2d_epilogue(uint32_t spm_offset,
+                                                            uint32_t dram_addr,
+                                                            uint32_t cluster_id,
+                                                            uint32_t row_beats,
+                                                            uint32_t row_count,
+                                                            uint32_t src_row_stride,
+                                                            uint32_t dst_row_stride,
+                                                            uint32_t epilogue_mode,
+                                                            uint32_t epilogue_param0,
+                                                            uint32_t tag) {
+    dma_config_store_epilogue(epilogue_mode, epilogue_param0);
     mmio_write32(DMA_SRC_KIND,       DMA_ENDPOINT_CLUSTER_SPM);
     mmio_write32(DMA_DST_KIND,       DMA_ENDPOINT_DRAM);
     mmio_write32(DMA_SRC_ADDR_LO,    spm_offset);
@@ -606,6 +750,7 @@ typedef struct {
     uint32_t dram_out_oc_stride;
     uint32_t dram_out_h_stride;
     uint32_t dram_out_w_stride;
+    uint32_t dram_out_row_stride;
 
     uint32_t dma_ps_words;
     uint32_t dma_pd_words;
@@ -618,6 +763,18 @@ typedef struct {
 
     uint8_t ps_reuse_across_spatial;
     uint8_t spatial_2d_dma;
+
+    uint8_t input_pad_enable;
+    uint8_t input_fill_mode;
+    uint8_t output_epilogue;
+    uint8_t reserved0;
+    uint16_t input_padding;
+    uint16_t input_stride;
+    uint16_t input_src_h;
+    uint16_t input_src_w;
+    uint32_t input_fill_value_lo;
+    uint32_t input_fill_value_hi;
+    uint32_t output_epilogue_param0;
 
     uint16_t pd_ic_agu_offset;   /* NHWC-input: PD base_addr += ic * this */
 
@@ -632,6 +789,7 @@ typedef struct {
 
     uint16_t gemm_resident_m_tiles;
     uint16_t gemm_resident_n_tiles;
+    uint16_t gemm_pd_preload_m_tiles;
 } TilingParams;
 
 typedef struct {

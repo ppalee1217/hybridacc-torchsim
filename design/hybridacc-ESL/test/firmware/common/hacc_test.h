@@ -94,6 +94,29 @@
 #define DMA_ERR_CODE        (DMA_MMIO_BASE + 0x064)
 #define DMA_ERR_INFO        (DMA_MMIO_BASE + 0x068)
 #define DMA_DEBUG_STATE     (DMA_MMIO_BASE + 0x06C)
+#define DMA_XFORM_CTRL      (DMA_MMIO_BASE + 0x070)
+#define DMA_PAD_WINDOW_H0   (DMA_MMIO_BASE + 0x074)
+#define DMA_PAD_WINDOW_W0   (DMA_MMIO_BASE + 0x078)
+#define DMA_PAD_SRC_H       (DMA_MMIO_BASE + 0x07C)
+#define DMA_PAD_SRC_W       (DMA_MMIO_BASE + 0x080)
+#define DMA_BEATS_PER_PIXEL (DMA_MMIO_BASE + 0x084)
+#define DMA_FILL_VALUE_LO   (DMA_MMIO_BASE + 0x088)
+#define DMA_FILL_VALUE_HI   (DMA_MMIO_BASE + 0x08C)
+#define DMA_EPILOGUE_CTRL   (DMA_MMIO_BASE + 0x090)
+#define DMA_EPILOGUE_PARAM0 (DMA_MMIO_BASE + 0x094)
+
+#define DMA_XFORM_LOAD_PAD_EN   (1u << 0)
+#define DMA_XFORM_FILL_MODE_SHIFT 4u
+#define DMA_XFORM_FILL_MODE(mode) (((uint32_t)(mode) & 0x3u) << DMA_XFORM_FILL_MODE_SHIFT)
+
+#define DMA_XFORM_FILL_ZERO     0u
+#define DMA_XFORM_FILL_EPSILON  1u
+#define DMA_XFORM_FILL_CONST    2u
+
+#define DMA_EPILOGUE_NONE       0u
+#define DMA_EPILOGUE_RELU       1u
+
+#define DMA_ERR_BAD_XFORM       8u
 
 /* ---- Timer / MSIP registers (base 0x20002000) ---- */
 #define TIMER_MSIP          (LOCAL_TIMER_BASE + 0x000)

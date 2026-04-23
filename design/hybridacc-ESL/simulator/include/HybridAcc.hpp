@@ -435,6 +435,19 @@ SC_MODULE(HybridAcc) {
 
     uint32_t dsram_read_word(uint32_t byte_addr) const { return core_ctrl.dsram_read_word(byte_addr); }
 
+    void fast_boot_start(uint32_t boot_addr) { core_ctrl.fast_boot_start(boot_addr); }
+
+    bool core_halted() const { return core_ctrl.core_halted(); }
+
+    uint32_t irq_summary() const { return core_ctrl.irq_summary(); }
+
+    bool fast_load_section(SectionKind kind,
+                           uint32_t local_addr,
+                           const uint8_t* data,
+                           uint32_t size) {
+        return core_ctrl.fast_load_section(kind, local_addr, data, size);
+    }
+
     void set_cluster_power_enable(unsigned c, bool en) {
         if (c < NUM_CLUSTERS) sig_cluster_power_en[c].write(en);
     }

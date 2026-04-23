@@ -23,6 +23,13 @@ from pathlib import Path
 from typing import Any
 
 
+CORE_PHASES = ["host_configure", "wait_loader", "section_load", "core_running"]
+IDLE_TOKENS = {
+    "IDLE", "RESET", "EMPTY", "TX_IDLE", "IN_IDLE", "RX_IDLE",
+    "OUT_IDLE", "POWER_OFF", "PENDING",
+}
+
+
 def load_trace(path: str) -> list[dict[str, Any]]:
     """Load Chrome Trace Event JSON and return the event list."""
     with open(path) as f:
@@ -39,12 +46,19 @@ def match_begin_end(events: list[dict]) -> list[dict]:
     """
     open_stack: dict[tuple, list] = defaultdict(list)  # (pid, tid, cat, name) → [ts...]
     spans = []
+    thread_names: dict[tuple[int, int], str] = {}
 
     for ev in events:
         ph = ev.get("ph")
+        pid = ev.get("pid", 0)
+        tid = ev.get("tid", 0)
         if ph == "M":
+            if ev.get("name") == "thread_name":
+                thread_names[(pid, tid)] = ev.get("args", {}).get(
+                    "name", f"{pid}:{tid}"
+                )
             continue
-        key = (ev.get("pid", 0), ev.get("tid", 0), ev.get("cat", ""), ev.get("name", ""))
+        key = (pid, tid, ev.get("cat", ""), ev.get("name", ""))
         ts = ev.get("ts", 0)
 
         if ph == "B":
@@ -58,6 +72,7 @@ def match_begin_end(events: list[dict]) -> list[dict]:
                     "name":     key[3],
                     "pid":      key[0],
                     "tid":      key[1],
+                    "thread_name": thread_names.get((key[0], key[1]), f"{key[0]}:{key[1]}"),
                     "start_us": begin_ts,
                     "end_us":   ts,
                     "dur_us":   ts - begin_ts,
@@ -67,14 +82,227 @@ def match_begin_end(events: list[dict]) -> list[dict]:
             spans.append({
                 "cat":      ev.get("cat", ""),
                 "name":     ev.get("name", ""),
-                "pid":      ev.get("pid", 0),
-                "tid":      ev.get("tid", 0),
+                "pid":      pid,
+                "tid":      tid,
+                "thread_name": thread_names.get((pid, tid), f"{pid}:{tid}"),
                 "start_us": ts,
                 "end_us":   ts + dur,
                 "dur_us":   dur,
             })
 
     return spans
+
+
+def merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Merge overlapping time ranges."""
+    if not ranges:
+        return []
+
+    merged: list[list[float]] = []
+    for start_us, end_us in sorted(ranges):
+        if not merged or start_us > merged[-1][1]:
+            merged.append([start_us, end_us])
+        else:
+            merged[-1][1] = max(merged[-1][1], end_us)
+    return [(start_us, end_us) for start_us, end_us in merged]
+
+
+def total_range_us(ranges: list[tuple[float, float]]) -> float:
+    """Return the total covered time of merged or disjoint ranges."""
+    return sum(end_us - start_us for start_us, end_us in ranges)
+
+
+def clip_range_to_windows(start_us: float,
+                          end_us: float,
+                          windows: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Clip a span against a list of windows and return the intersections."""
+    clipped: list[tuple[float, float]] = []
+    for win_start, win_end in windows:
+        lo = max(start_us, win_start)
+        hi = min(end_us, win_end)
+        if hi > lo:
+            clipped.append((lo, hi))
+    return clipped
+
+
+def subtract_ranges(base: list[tuple[float, float]],
+                    cuts: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Subtract merged cut ranges from merged base ranges."""
+    result: list[tuple[float, float]] = []
+    if not base:
+        return result
+    if not cuts:
+        return list(base)
+
+    cut_idx = 0
+    for base_start, base_end in base:
+        cursor = base_start
+        while cut_idx < len(cuts) and cuts[cut_idx][1] <= cursor:
+            cut_idx += 1
+
+        local_idx = cut_idx
+        while local_idx < len(cuts):
+            cut_start, cut_end = cuts[local_idx]
+            if cut_start >= base_end:
+                break
+            if cut_start > cursor:
+                result.append((cursor, min(cut_start, base_end)))
+            cursor = max(cursor, cut_end)
+            if cursor >= base_end:
+                break
+            local_idx += 1
+
+        if cursor < base_end:
+            result.append((cursor, base_end))
+
+    return result
+
+
+def classify_runtime_group(span: dict[str, Any]) -> str:
+    """Map a span to a coarse runtime activity group."""
+    thread_name = str(span.get("thread_name", ""))
+    thread_name_l = thread_name.lower()
+    cat = str(span.get("cat", ""))
+
+    if thread_name == "CPU Pipeline":
+        return "cpu"
+    if thread_name == "DMA Engine" and span.get("name") == "dma_transfer":
+        return "dma_external"
+    if thread_name.endswith(" Cluster"):
+        return "cluster_wrapper"
+    if thread_name.endswith(" Cmd") or cat == "Cluster_AHB":
+        return "dispatch_cmd"
+    if thread_name.startswith("PE "):
+        return "PE"
+    if "hddu" in thread_name_l or cat.startswith("HDDU_") or cat == "AGU_State":
+        return "HDDU/AGU"
+    if thread_name.startswith("NoC-") or thread_name.startswith("MBUS ") \
+       or cat.startswith("NoC_") or cat.startswith("MBUS_"):
+        return "NoC/MBUS"
+    if "spm" in thread_name_l or cat.startswith("SPM_") or cat == "SRAM_State":
+        return "SPM/SRAM"
+    if " DMA" in thread_name or cat == "Cluster_DMA":
+        return "Cluster DMA port"
+    return "Other"
+
+
+def analyze_runtime(spans: list[dict], us_per_cycle: float) -> dict[str, Any]:
+    """Analyze the core_running window into dispatch / dma-wait / busy / halt-tail."""
+    runtime_windows = merge_ranges([
+        (span["start_us"], span["end_us"])
+        for span in spans
+        if span.get("name") == "core_running"
+    ])
+    runtime_total_us = total_range_us(runtime_windows)
+    if runtime_total_us <= 0.0:
+        return {
+            "total_us": 0.0,
+            "breakdown": {},
+            "groups": [],
+            "hotspots": [],
+        }
+
+    cluster_ranges: list[tuple[float, float]] = []
+    dma_ranges: list[tuple[float, float]] = []
+    group_ranges: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    hotspot_ranges: dict[tuple[str, str, str], list[tuple[float, float]]] = defaultdict(list)
+
+    for span in spans:
+        if span.get("dur_us", 0.0) <= 0.0 or span.get("name") in IDLE_TOKENS:
+            continue
+
+        clipped_ranges = clip_range_to_windows(
+            span["start_us"], span["end_us"], runtime_windows
+        )
+        if not clipped_ranges:
+            continue
+
+        group = classify_runtime_group(span)
+        if group in {"cpu", "cluster_wrapper", "dispatch_cmd"}:
+            continue
+
+        if group == "dma_external":
+            dma_ranges.extend(clipped_ranges)
+            continue
+
+        cluster_ranges.extend(clipped_ranges)
+        group_ranges[group].extend(clipped_ranges)
+        hotspot_ranges[(group, span["cat"], span["name"])].extend(clipped_ranges)
+
+    cluster_ranges = merge_ranges(cluster_ranges)
+    dma_ranges = merge_ranges(dma_ranges)
+    dma_only_ranges = subtract_ranges(dma_ranges, cluster_ranges)
+    busy_union = merge_ranges(cluster_ranges + dma_ranges)
+
+    core_dispatch_ranges: list[tuple[float, float]] = []
+    halt_tail_ranges: list[tuple[float, float]] = []
+    for win_start, win_end in runtime_windows:
+        busy_in_window = clip_range_to_windows(win_start, win_end, busy_union)
+        busy_in_window = merge_ranges(busy_in_window)
+        if not busy_in_window:
+            core_dispatch_ranges.append((win_start, win_end))
+            continue
+
+        cursor = win_start
+        last_busy_end = win_start
+        for busy_start, busy_end in busy_in_window:
+            if busy_start > cursor:
+                core_dispatch_ranges.append((cursor, busy_start))
+            cursor = max(cursor, busy_end)
+            last_busy_end = max(last_busy_end, busy_end)
+        if last_busy_end < win_end:
+            halt_tail_ranges.append((last_busy_end, win_end))
+
+    cluster_busy_us = total_range_us(cluster_ranges)
+    dma_wait_us = total_range_us(dma_only_ranges)
+    core_dispatch_us = total_range_us(core_dispatch_ranges)
+    halt_tail_us = total_range_us(halt_tail_ranges)
+
+    def metric(total_us: float) -> dict[str, Any]:
+        return {
+            "total_us": total_us,
+            "total_cycles": int(round(total_us / us_per_cycle)) if us_per_cycle else 0,
+            "pct_runtime": (total_us / runtime_total_us * 100.0) if runtime_total_us else 0.0,
+        }
+
+    groups = []
+    for group_name, ranges in group_ranges.items():
+        merged_ranges = merge_ranges(ranges)
+        total_us = total_range_us(merged_ranges)
+        groups.append({
+            "group": group_name,
+            "total_us": total_us,
+            "total_cycles": int(round(total_us / us_per_cycle)) if us_per_cycle else 0,
+            "pct_runtime": (total_us / runtime_total_us * 100.0) if runtime_total_us else 0.0,
+            "segments": len(merged_ranges),
+        })
+    groups.sort(key=lambda item: item["total_us"], reverse=True)
+
+    hotspots = []
+    for (group_name, cat, name), ranges in hotspot_ranges.items():
+        merged_ranges = merge_ranges(ranges)
+        total_us = total_range_us(merged_ranges)
+        hotspots.append({
+            "group": group_name,
+            "cat": cat,
+            "name": name,
+            "total_us": total_us,
+            "total_cycles": int(round(total_us / us_per_cycle)) if us_per_cycle else 0,
+            "pct_runtime": (total_us / runtime_total_us * 100.0) if runtime_total_us else 0.0,
+        })
+    hotspots.sort(key=lambda item: item["total_us"], reverse=True)
+
+    return {
+        "total_us": runtime_total_us,
+        "breakdown": {
+            "cluster_busy": metric(cluster_busy_us),
+            "dma_wait": metric(dma_wait_us),
+            "core_dispatch": metric(core_dispatch_us),
+            "halt_tail": metric(halt_tail_us),
+        },
+        "groups": groups,
+        "hotspots": hotspots,
+    }
 
 
 def analyze(spans: list[dict], clock_period_ns: float = 10.0) -> dict:
@@ -86,14 +314,13 @@ def analyze(spans: list[dict], clock_period_ns: float = 10.0) -> dict:
     us_per_cycle = clock_period_ns / 1000.0
 
     # Phase breakdown (top-level core phases)
-    core_phases = ["host_configure", "wait_loader", "section_load", "core_running"]
     phase_map: dict[str, list[dict]] = defaultdict(list)
     for s in spans:
-        if s["name"] in core_phases:
+        if s["name"] in CORE_PHASES:
             phase_map[s["name"]].append(s)
 
     phase_breakdown = {}
-    for name in core_phases:
+    for name in CORE_PHASES:
         items = phase_map.get(name, [])
         total_us = sum(s["dur_us"] for s in items)
         total_cycles = total_us / us_per_cycle if us_per_cycle else 0
@@ -130,12 +357,15 @@ def analyze(spans: list[dict], clock_period_ns: float = 10.0) -> dict:
             proportions[name] = info["total_us"] / total_sim_us * 100
         proportions["dma_transfer"] = dma_stats["total_us"] / total_sim_us * 100
 
+    runtime_breakdown = analyze_runtime(spans, us_per_cycle)
+
     return {
         "phase_breakdown": phase_breakdown,
         "dma_stats":       dma_stats,
         "total_sim_us":    total_sim_us,
         "total_sim_cycles": total_sim_cycles,
         "proportions":     proportions,
+        "runtime_breakdown": runtime_breakdown,
         "all_spans":       spans,
     }
 
@@ -168,6 +398,42 @@ def print_report(result: dict):
         pct = result["proportions"].get("dma_transfer", 0)
         print(f"  DMA proportion: {pct:.1f}% of total simulation")
 
+    runtime = result.get("runtime_breakdown", {})
+    runtime_total_us = runtime.get("total_us", 0.0)
+    if runtime_total_us > 0.0:
+        print("\n--- Runtime Breakdown (core_running window) ---")
+        print(f"  Runtime window: {runtime_total_us:.1f} µs")
+        print(f"  {'Slice':<20s} {'Cycles':>10s} {'Time (µs)':>12s} {'Proportion':>12s}")
+        print("  " + "-" * 56)
+        for name, info in runtime["breakdown"].items():
+            print(
+                f"  {name:<20s} {info['total_cycles']:>10d} "
+                f"{info['total_us']:>12.1f} {info['pct_runtime']:>11.1f}%"
+            )
+
+        groups = runtime.get("groups", [])
+        if groups:
+            print("\n--- Runtime Group Hotspots ---")
+            print(f"  {'Group':<20s} {'Cycles':>10s} {'Time (µs)':>12s} {'Runtime %':>12s}")
+            print("  " + "-" * 56)
+            for entry in groups[:5]:
+                print(
+                    f"  {entry['group']:<20s} {entry['total_cycles']:>10d} "
+                    f"{entry['total_us']:>12.1f} {entry['pct_runtime']:>11.1f}%"
+                )
+
+        hotspots = runtime.get("hotspots", [])
+        if hotspots:
+            print("\n--- Runtime Active States ---")
+            print(f"  {'Group':<18s} {'State':<32s} {'Cycles':>10s} {'Runtime %':>12s}")
+            print("  " + "-" * 76)
+            for entry in hotspots[:8]:
+                label = f"{entry['cat']}:{entry['name']}"
+                print(
+                    f"  {entry['group']:<18s} {label:<32.32s} "
+                    f"{entry['total_cycles']:>10d} {entry['pct_runtime']:>11.1f}%"
+                )
+
     print("\n" + "=" * 70)
 
 
@@ -187,6 +453,26 @@ def export_csv(result: dict, path: str):
         w.writerow(["dma_count", ds["count"], "transfers"])
         w.writerow(["dma_total_cycles", ds["total_cycles"], "cycles"])
         w.writerow(["dma_avg_cycles", ds["avg_cycles"], "cycles"])
+
+        runtime = result.get("runtime_breakdown", {})
+        runtime_total_us = runtime.get("total_us", 0.0)
+        if runtime_total_us > 0.0:
+            w.writerow(["runtime_total_us", f"{runtime_total_us:.1f}", "µs"])
+            for name, info in runtime.get("breakdown", {}).items():
+                w.writerow([f"runtime_{name}_cycles", info["total_cycles"], "cycles"])
+                w.writerow([f"runtime_{name}_us", f"{info['total_us']:.1f}", "µs"])
+                w.writerow([f"runtime_{name}_pct", f"{info['pct_runtime']:.1f}", "%"])
+
+            for idx, entry in enumerate(runtime.get("groups", [])[:5], start=1):
+                w.writerow([f"runtime_group_{idx}_label", entry["group"], ""])
+                w.writerow([f"runtime_group_{idx}_cycles", entry["total_cycles"], "cycles"])
+                w.writerow([f"runtime_group_{idx}_pct", f"{entry['pct_runtime']:.1f}", "%"])
+
+            for idx, entry in enumerate(runtime.get("hotspots", [])[:8], start=1):
+                label = f"{entry['group']}|{entry['cat']}|{entry['name']}"
+                w.writerow([f"runtime_hotspot_{idx}_label", label, ""])
+                w.writerow([f"runtime_hotspot_{idx}_cycles", entry["total_cycles"], "cycles"])
+                w.writerow([f"runtime_hotspot_{idx}_pct", f"{entry['pct_runtime']:.1f}", "%"])
     print(f"[CSV] Written to {path}")
 
 

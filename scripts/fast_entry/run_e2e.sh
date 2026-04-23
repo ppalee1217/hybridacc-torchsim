@@ -11,11 +11,13 @@
 #   --output-dir DIR    Base output directory (default: output/)
 #   --seed N            Random seed for test data (default: 42)
 #   --max-cycles N      Max simulation cycles (default: 1000000)
+#   --clock-period F    Simulator clock period in ns (default: 2)
 #   --tolerance F       Cosine similarity threshold (default: 0.99)
 #   --skip-build        Skip simulator build step
 #   --skip-compile      Skip hacc-compile step (use existing build)
 #   --skip-sim          Skip simulation step (verify existing output)
 #   --core-debug        Enable core pipeline debug trace
+#   --fast-boot         Preload core SRAM directly and bypass manifest loader
 #   --trace             Generate Perfetto trace file for each workload
 #   --trace-level N     Trace level 1-4 (default: 2=cluster)
 #   --verbose           Show detailed output
@@ -31,11 +33,13 @@ DEFAULT_OUTPUT_DIR="$TOP_DIR/output"
 # ── Defaults ───────────────────────────────────────────────────────────────
 SEED=42
 MAX_CYCLES=1000000
+CLOCK_PERIOD_NS="2"
 TOLERANCE=0.99
 SKIP_BUILD=0
 SKIP_COMPILE=0
 SKIP_SIM=0
 CORE_DEBUG=0
+FAST_BOOT=0
 TRACE=0
 TRACE_LEVEL=2
 VERBOSE=0
@@ -71,11 +75,13 @@ Options:
   --output-dir DIR    Base output directory (default: output/)
   --seed N            Random seed for test data generation (default: 42)
   --max-cycles N      Max simulation cycles (default: 1000000)
+    --clock-period F    Simulator clock period in ns (default: 2)
   --tolerance F       Cosine similarity threshold (default: 0.99)
   --skip-build        Skip simulator build step
   --skip-compile      Skip hacc-compile (reuse existing firmware)
   --skip-sim          Skip simulation (verify existing DRAM output)
   --core-debug        Enable core pipeline debug trace
+    --fast-boot         Preload core SRAM directly and bypass manifest loader
   --trace             Generate Perfetto trace JSON for each workload
     --trace-level N     Trace detail level: 1=core 2=cluster 3=noc 4=pe (default: 2)
   --verbose           Show detailed output
@@ -101,11 +107,13 @@ while [[ $# -gt 0 ]]; do
         --output-dir)   OUTPUT_BASE="$2"; shift 2 ;;
         --seed)         SEED="$2"; shift 2 ;;
         --max-cycles)   MAX_CYCLES="$2"; shift 2 ;;
+        --clock-period) CLOCK_PERIOD_NS="$2"; shift 2 ;;
         --tolerance)    TOLERANCE="$2"; shift 2 ;;
         --skip-build)   SKIP_BUILD=1; shift ;;
         --skip-compile) SKIP_COMPILE=1; shift ;;
         --skip-sim)     SKIP_SIM=1; shift ;;
         --core-debug)   CORE_DEBUG=1; shift ;;
+        --fast-boot)    FAST_BOOT=1; shift ;;
         --trace)        TRACE=1; shift ;;
         --trace-level)  TRACE_LEVEL="$2"; shift 2 ;;
         --verbose)      VERBOSE=1; shift ;;
@@ -234,9 +242,12 @@ for ((idx=0; idx<TOTAL; idx++)); do
     # ── Step 3: Simulate ──────────────────────────────────────────────
     if [[ $FAILED -eq 0 && $SKIP_SIM -eq 0 ]]; then
         step "  [3/4] Running ESL simulation..."
-        SIM_ARGS=("--max-cycles" "$MAX_CYCLES")
+        SIM_ARGS=("--clock-period" "$CLOCK_PERIOD_NS" "--max-cycles" "$MAX_CYCLES")
         if [[ $CORE_DEBUG -eq 1 ]]; then
             SIM_ARGS+=("--core-debug")
+        fi
+        if [[ $FAST_BOOT -eq 1 ]]; then
+            SIM_ARGS+=("--fast-boot")
         fi
         if [[ $TRACE -eq 1 ]]; then
             SIM_ARGS+=("--trace" "$BUILD_DIR/trace.json" "--trace-level" "$TRACE_LEVEL")

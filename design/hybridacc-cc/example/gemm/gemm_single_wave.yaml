@@ -4,7 +4,7 @@
 name: gemm_example
 
 hardware:
-  num_clusters: 3
+  num_clusters: 1
   num_pes: 48
   num_bus: 3
   spm_banks_per_group: 3
@@ -13,13 +13,13 @@ hardware:
 
 tensors:
   A:
-    shape: [32, 64]
+    shape: [48, 96]
     dtype: fp16
   B:
-    shape: [64, 48]
+    shape: [96, 32]
     dtype: fp16
   C:
-    shape: [32, 48]
+    shape: [48, 32]
     dtype: fp16
 
 ops:

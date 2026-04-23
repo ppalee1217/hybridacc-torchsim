@@ -167,6 +167,13 @@ private:
     }
 
 public:
+    void load_bytes(uint32_t byte_addr, const uint8_t* data, uint32_t size) {
+        for (uint32_t i = 0; i < size; ++i) {
+            const uint32_t off = (byte_addr + i) & (SRAM_BYTES - 1);
+            sram_.mem[off] = data[i];
+        }
+    }
+
     /** Read one byte from the backing SRAM array (for data-port access). */
     uint8_t read_byte(uint32_t byte_addr) const {
         const uint32_t off = byte_addr & (SRAM_BYTES - 1);

@@ -187,6 +187,7 @@ enum class DmaError : uint32_t {
     DMA_ERR_CLUSTER_RESP    = 5,
     DMA_ERR_DRAM_AXI        = 6,
     DMA_ERR_ABORTED         = 7,
+    DMA_ERR_BAD_XFORM       = 8,
 };
 
 inline std::ostream& operator<<(std::ostream& os, DmaError e) {
@@ -199,6 +200,7 @@ inline std::ostream& operator<<(std::ostream& os, DmaError e) {
         case DmaError::DMA_ERR_CLUSTER_RESP:    return os << "DMA_ERR_CLUSTER_RESP";
         case DmaError::DMA_ERR_DRAM_AXI:        return os << "DMA_ERR_DRAM_AXI";
         case DmaError::DMA_ERR_ABORTED:         return os << "DMA_ERR_ABORTED";
+        case DmaError::DMA_ERR_BAD_XFORM:       return os << "DMA_ERR_BAD_XFORM";
         default:                                return os << "DMA_ERR_UNKNOWN";
     }
 }
@@ -228,6 +230,46 @@ inline void sc_trace(sc_trace_file* tf, const DmaEndpoint& k, const std::string&
     sc_trace(tf, static_cast<uint32_t>(k), name);
 }
 
+static constexpr uint32_t kDmaXformLoadPadEn     = 1u << 0;
+static constexpr uint32_t kDmaXformFillModeShift = 4;
+static constexpr uint32_t kDmaXformFillModeMask  = 0x3u << kDmaXformFillModeShift;
+static constexpr uint32_t kDmaEpilogueModeMask   = 0x3u;
+
+enum class DmaFillMode : uint32_t {
+    ZERO    = 0,
+    EPSILON = 1,
+    CONST   = 2,
+};
+
+enum class DmaEpilogueMode : uint32_t {
+    NONE = 0,
+    RELU = 1,
+};
+
+struct DmaTransformCfg {
+    uint32_t xform_ctrl = 0;
+    int32_t  pad_window_h0 = 0;
+    int32_t  pad_window_w0 = 0;
+    uint32_t pad_src_h = 0;
+    uint32_t pad_src_w = 0;
+    uint32_t beats_per_pixel = 0;
+    uint64_t fill_value = 0;
+    uint32_t epilogue_ctrl = 0;
+    uint32_t epilogue_param0 = 0;
+
+    bool operator==(const DmaTransformCfg& o) const {
+        return xform_ctrl == o.xform_ctrl &&
+               pad_window_h0 == o.pad_window_h0 &&
+               pad_window_w0 == o.pad_window_w0 &&
+               pad_src_h == o.pad_src_h &&
+               pad_src_w == o.pad_src_w &&
+               beats_per_pixel == o.beats_per_pixel &&
+               fill_value == o.fill_value &&
+               epilogue_ctrl == o.epilogue_ctrl &&
+               epilogue_param0 == o.epilogue_param0;
+    }
+};
+
 // ============================================================================
 // DMA command (snapshot into command FIFO)
 // ============================================================================
@@ -244,6 +286,7 @@ struct DmaCommand {
     uint32_t count[4];       ///< 4D iteration counts (d0=innermost)
     uint32_t src_stride[4];  ///< source stride per dimension (bytes)
     uint32_t dst_stride[4];  ///< destination stride per dimension (bytes)
+    DmaTransformCfg transform;
     uint32_t cmd_tag;
 
     /// Total number of beats = product of all counts (0 treated as 1).
@@ -257,12 +300,17 @@ struct DmaCommand {
     bool operator==(const DmaCommand& o) const {
         return src_kind == o.src_kind && dst_kind == o.dst_kind &&
                src_addr_lo == o.src_addr_lo && dst_addr_lo == o.dst_addr_lo &&
-               total_beats() == o.total_beats() && cmd_tag == o.cmd_tag;
+               total_beats() == o.total_beats() &&
+               transform == o.transform &&
+               cmd_tag == o.cmd_tag;
     }
     friend std::ostream& operator<<(std::ostream& os, const DmaCommand& c) {
         os << "DmaCmd{src=" << c.src_kind
            << ", dst=" << c.dst_kind
            << ", beats=" << c.total_beats()
+           << ", xctrl=0x" << std::hex << c.transform.xform_ctrl
+           << ", epi=0x" << c.transform.epilogue_ctrl
+           << std::dec
            << ", tag=" << c.cmd_tag << "}";
         return os;
     }
@@ -270,6 +318,7 @@ struct DmaCommand {
         sc_trace(tf, c.cmd_tag,     name + ".cmd_tag");
         sc_trace(tf, c.count[0],    name + ".count_d0");
         sc_trace(tf, c.src_addr_lo, name + ".src_addr_lo");
+        sc_trace(tf, c.transform.xform_ctrl, name + ".xform_ctrl");
     }
 };
 

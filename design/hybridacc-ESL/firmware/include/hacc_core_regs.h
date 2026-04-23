@@ -232,6 +232,16 @@ static inline uint32_t hacc_core_nlu_base(uint32_t nlu_id) {
 #define HACC_DMA_REG_ERR_CODE                   UINT32_C(0x064)
 #define HACC_DMA_REG_ERR_INFO                   UINT32_C(0x068)
 #define HACC_DMA_REG_DEBUG_STATE                UINT32_C(0x06C)
+#define HACC_DMA_REG_XFORM_CTRL                 UINT32_C(0x070)
+#define HACC_DMA_REG_PAD_WINDOW_H0             UINT32_C(0x074)
+#define HACC_DMA_REG_PAD_WINDOW_W0             UINT32_C(0x078)
+#define HACC_DMA_REG_PAD_SRC_H                 UINT32_C(0x07C)
+#define HACC_DMA_REG_PAD_SRC_W                 UINT32_C(0x080)
+#define HACC_DMA_REG_BEATS_PER_PIXEL           UINT32_C(0x084)
+#define HACC_DMA_REG_FILL_VALUE_LO             UINT32_C(0x088)
+#define HACC_DMA_REG_FILL_VALUE_HI             UINT32_C(0x08C)
+#define HACC_DMA_REG_EPILOGUE_CTRL             UINT32_C(0x090)
+#define HACC_DMA_REG_EPILOGUE_PARAM0           UINT32_C(0x094)
 
 /* DMA_STATUS bits */
 #define HACC_DMA_STATUS_IDLE_SHIFT              0u
@@ -259,6 +269,21 @@ static inline uint32_t hacc_core_nlu_base(uint32_t nlu_id) {
 #define HACC_DMA_CTRL_SOFT_RESET_MASK           HACC_BIT32(HACC_DMA_CTRL_SOFT_RESET_SHIFT)
 #define HACC_DMA_CTRL_IRQ_EN_MASK               HACC_BIT32(HACC_DMA_CTRL_IRQ_EN_SHIFT)
 
+/* DMA transform control */
+#define HACC_DMA_XFORM_LOAD_PAD_EN_SHIFT        0u
+#define HACC_DMA_XFORM_LOAD_PAD_EN_MASK         HACC_BIT32(HACC_DMA_XFORM_LOAD_PAD_EN_SHIFT)
+#define HACC_DMA_XFORM_FILL_MODE_SHIFT          4u
+#define HACC_DMA_XFORM_FILL_MODE_MASK           (UINT32_C(0x3) << HACC_DMA_XFORM_FILL_MODE_SHIFT)
+
+#define HACC_DMA_XFORM_FILL_ZERO                UINT32_C(0)
+#define HACC_DMA_XFORM_FILL_EPSILON             UINT32_C(1)
+#define HACC_DMA_XFORM_FILL_CONST               UINT32_C(2)
+
+#define HACC_DMA_EPILOGUE_MODE_SHIFT            0u
+#define HACC_DMA_EPILOGUE_MODE_MASK             (UINT32_C(0x3) << HACC_DMA_EPILOGUE_MODE_SHIFT)
+#define HACC_DMA_EPILOGUE_NONE                  UINT32_C(0)
+#define HACC_DMA_EPILOGUE_RELU                  UINT32_C(1)
+
 /* DMA endpoint kinds */
 #define HACC_DMA_ENDPOINT_DRAM                  UINT32_C(0)
 #define HACC_DMA_ENDPOINT_CLUSTER_SPM           UINT32_C(1)
@@ -272,6 +297,7 @@ static inline uint32_t hacc_core_nlu_base(uint32_t nlu_id) {
 #define HACC_DMA_ERR_CLUSTER_RESP               UINT32_C(5)
 #define HACC_DMA_ERR_DRAM_AXI                   UINT32_C(6)
 #define HACC_DMA_ERR_ABORTED                    UINT32_C(7)
+#define HACC_DMA_ERR_BAD_XFORM                  UINT32_C(8)
 
 /* PLIC MMIO offsets */
 #define HACC_PLIC_REG_PRIORITY_BASE             UINT32_C(0x0000)

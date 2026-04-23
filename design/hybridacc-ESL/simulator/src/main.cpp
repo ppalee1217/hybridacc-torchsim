@@ -11,11 +11,13 @@
  * CLI:
  *   hybridacc-sim [-M dram_size(K/M/G)] [--mirror file.bin]
  *                 [--max-cycles N] [--core-debug] [--dma-check]
+ *                 [--fast-boot]
  *                 [--trace file.json] [--trace-level N]
  *                 <firmware.elf>
  */
 
 #include <systemc>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -61,10 +63,21 @@ static bool parse_trace_level(const std::string& s, uint32_t& out_level) {
     return true;
 }
 
+static bool parse_positive_double(const std::string& s, double& out_value) {
+    char* end = nullptr;
+    double value = std::strtod(s.c_str(), &end);
+    if (end == nullptr || *end != '\0' || value <= 0.0) {
+        return false;
+    }
+    out_value = value;
+    return true;
+}
+
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " [-M dram_size] [--mirror file.bin] [--max-cycles N]"
-              << " [--core-debug] [--dma-check]"
+              << " [--clock-period ns]"
+              << " [--core-debug] [--dma-check] [--fast-boot]"
               << " [--trace file.json] [--trace-level N]"
               << " <firmware.elf>\n";
 }
@@ -236,6 +249,72 @@ static constexpr uint32_t kPayloadDramBase  = 0x80010000;
 static constexpr uint32_t kTestDramSrc = 0x80020000;
 static constexpr uint32_t kTestDramDst = 0x80030000;
 static constexpr uint32_t kTestBytes   = 64;
+static constexpr uint32_t kPadTestDramSrc = 0x80040000;
+static constexpr uint32_t kPadTestDramDst = 0x80050000;
+static constexpr uint32_t kReluTestDramSrc = 0x80060000;
+static constexpr uint32_t kReluTestDramDst = 0x80070000;
+
+static constexpr std::array<uint64_t, 4> kPadTestSrcBeats = {
+    0x1111111111111111ull,
+    0x2222222222222222ull,
+    0x3333333333333333ull,
+    0x4444444444444444ull,
+};
+
+static constexpr std::array<uint64_t, 16> kPadExpectedBeats = {
+    0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull,
+    0x0000000000000000ull, 0x1111111111111111ull, 0x2222222222222222ull, 0x0000000000000000ull,
+    0x0000000000000000ull, 0x3333333333333333ull, 0x4444444444444444ull, 0x0000000000000000ull,
+    0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull,
+};
+
+static constexpr std::array<uint64_t, 4> kReluTestSrcBeats = {
+    0xC0003C003800BC00ull,
+    0x04003E00B8008000ull,
+    0xB40000004400FC00ull,
+    0x7BFF3C01BA004200ull,
+};
+
+static constexpr std::array<uint64_t, 4> kReluExpectedBeats = {
+    0x00003C0038000000ull,
+    0x04003E0000000000ull,
+    0x0000000044000000ull,
+    0x7BFF3C0100004200ull,
+};
+
+static void store_u64(FakeDram& dram, uint32_t addr, uint64_t value) {
+    dram.store32(addr + 0, static_cast<uint32_t>(value & 0xFFFFFFFFu));
+    dram.store32(addr + 4, static_cast<uint32_t>(value >> 32));
+}
+
+static uint64_t read_u64(const FakeDram& dram, uint32_t addr) {
+    return uint64_t(dram.read_word(addr)) |
+           (uint64_t(dram.read_word(addr + 4)) << 32);
+}
+
+template <size_t N>
+static bool verify_dram_beats(const FakeDram& dram,
+                              const std::string& label,
+                              uint32_t base_addr,
+                              const std::array<uint64_t, N>& expected) {
+    bool ok = true;
+    std::cout << "\n[SIM] === " << label << " ===" << std::endl;
+    for (size_t i = 0; i < N; ++i) {
+        const uint64_t actual = read_u64(dram, base_addr + static_cast<uint32_t>(i * 8));
+        if (actual != expected[i]) {
+            std::cout << "[SIM] FAIL: dram[0x" << std::hex
+                      << (base_addr + static_cast<uint32_t>(i * 8))
+                      << "] = 0x" << actual
+                      << " expected 0x" << expected[i]
+                      << std::dec << std::endl;
+            ok = false;
+        }
+    }
+    if (ok) {
+        std::cout << "[SIM] " << label << ": PASS" << std::endl;
+    }
+    return ok;
+}
 
 int sc_main(int argc, char* argv[]) {
     // ========================================================================
@@ -246,9 +325,11 @@ int sc_main(int argc, char* argv[]) {
     std::string mirror_path;
     uint64_t dram_size = 256ULL * 1024 * 1024; // 256 MB default
     uint32_t max_cycles = 500000;
+    double clock_period_ns = 2.0;
     bool core_debug = false;
     bool dma_check = false;
     bool fw_check = false;
+    bool fast_boot = false;
     std::string trace_path;
     uint32_t trace_level = 2;
 
@@ -260,12 +341,20 @@ int sc_main(int argc, char* argv[]) {
             mirror_path = argv[++i];
         } else if (arg == "--max-cycles" && i + 1 < argc) {
             max_cycles = static_cast<uint32_t>(std::atoi(argv[++i]));
+        } else if (arg == "--clock-period" && i + 1 < argc) {
+            if (!parse_positive_double(argv[++i], clock_period_ns)) {
+                std::cerr << "[SIM] Invalid clock period: expected positive floating-point ns\n";
+                print_usage(argv[0]);
+                return 1;
+            }
         } else if (arg == "--core-debug") {
             core_debug = true;
         } else if (arg == "--fw-check") {
             fw_check = true;
         } else if (arg == "--dma-check") {
             dma_check = true;
+        } else if (arg == "--fast-boot") {
+            fast_boot = true;
         } else if (arg == "--trace" && i + 1 < argc) {
             trace_path = argv[++i];
         } else if (arg == "--trace-level" && i + 1 < argc) {
@@ -295,7 +384,10 @@ int sc_main(int argc, char* argv[]) {
     std::cout << "[SIM] === HybridAcc SoC Simulator ===" << std::endl;
     std::cout << "[SIM] DRAM size: " << (dram_size / 1024) << " KB" << std::endl;
     std::cout << "[SIM] Max cycles: " << max_cycles << std::endl;
+    std::cout << "[SIM] Clock period: " << std::fixed << std::setprecision(3)
+              << clock_period_ns << " ns" << std::endl;
     std::cout << "[SIM] Clusters: " << NUM_CLUSTERS << std::endl;
+    std::cout << "[SIM] Fast boot: " << (fast_boot ? "enabled" : "disabled") << std::endl;
 
     // ========================================================================
     // Load ELF
@@ -317,7 +409,10 @@ int sc_main(int argc, char* argv[]) {
     // Signals
     // ========================================================================
 
-    sc_clock clk("clk", 10, SC_NS);
+    const sc_time clock_period(clock_period_ns, SC_NS);
+    const sc_time reset_time(clock_period_ns * 5.0, SC_NS);
+
+    sc_clock clk("clk", clock_period);
     sc_signal<bool> reset_n("reset_n");
     sc_signal<bool> controller_irq("controller_irq");
 
@@ -471,41 +566,81 @@ int sc_main(int argc, char* argv[]) {
         if (!load_mirror(dram, mirror_path, dram_size, kManifestDramAddr)) return 1;
     }
 
-    // ========================================================================
-    // Build manifest from ELF segments
-    // ========================================================================
-
-    ManifestBuilder builder(&dram, kManifestDramAddr, kPayloadDramBase);
-
-    for (const auto& seg : elf_segs) {
-        SectionKind kind;
-        uint32_t local_addr;
-
+    auto classify_segment = [](const elf::Segment& seg,
+                               SectionKind& kind,
+                               uint32_t& local_addr) -> bool {
         if (seg.paddr >= kBaseInstRam && seg.paddr < kBaseInstRam + kIsramBytes) {
             kind = SectionKind::CORE;
             local_addr = seg.paddr - kBaseInstRam;
-        } else if (seg.paddr >= kBaseDataRam && seg.paddr < kBaseDataRam + kDataSramBytes) {
+            return true;
+        }
+        if (seg.paddr >= kBaseDataRam && seg.paddr < kBaseDataRam + kDataSramBytes) {
             kind = SectionKind::JOB;
             local_addr = seg.paddr - kBaseDataRam;
-        } else {
-            std::cout << "[SIM] WARNING: Skipping segment paddr=0x"
-                      << std::hex << seg.paddr << std::dec << std::endl;
-            continue;
+            return true;
+        }
+        return false;
+    };
+
+    if (fast_boot) {
+        for (const auto& seg : elf_segs) {
+            SectionKind kind;
+            uint32_t local_addr;
+
+            if (!classify_segment(seg, kind, local_addr)) {
+                std::cout << "[SIM] WARNING: Skipping segment paddr=0x"
+                          << std::hex << seg.paddr << std::dec << std::endl;
+                continue;
+            }
+
+            if (!dut.fast_load_section(kind,
+                                       local_addr,
+                                       seg.data.data(),
+                                       static_cast<uint32_t>(seg.memsz))) {
+                std::cerr << "[SIM] ERROR: Fast boot preload failed for segment paddr=0x"
+                          << std::hex << seg.paddr << std::dec << std::endl;
+                return 1;
+            }
+
+            std::cout << "[SIM] Fast-boot preload: kind="
+                      << static_cast<int>(kind) << " local=0x" << std::hex
+                      << local_addr << " size=0x" << seg.memsz
+                      << std::dec << std::endl;
+        }
+    } else {
+        // ====================================================================
+        // Build manifest from ELF segments
+        // ====================================================================
+
+        ManifestBuilder builder(&dram, kManifestDramAddr, kPayloadDramBase);
+
+        for (const auto& seg : elf_segs) {
+            SectionKind kind;
+            uint32_t local_addr;
+
+            if (!classify_segment(seg, kind, local_addr)) {
+                std::cout << "[SIM] WARNING: Skipping segment paddr=0x"
+                          << std::hex << seg.paddr << std::dec << std::endl;
+                continue;
+            }
+
+            builder.add_section(kind, local_addr,
+                                seg.data.data(),
+                                static_cast<uint32_t>(seg.memsz));
+            std::cout << "[SIM] Manifest entry: kind="
+                      << static_cast<int>(kind) << " local=0x" << std::hex
+                      << local_addr << " size=0x" << seg.memsz
+                      << std::dec << std::endl;
         }
 
-        builder.add_section(kind, local_addr,
-                            seg.data.data(),
-                            static_cast<uint32_t>(seg.memsz));
-        std::cout << "[SIM] Manifest entry: kind="
-                  << static_cast<int>(kind) << " local=0x" << std::hex
-                  << local_addr << " size=0x" << seg.memsz
+        builder.finalize();
+        std::cout << "[SIM] Manifest: " << builder.entries.size()
+                  << " entries at DRAM 0x" << std::hex << kManifestDramAddr
                   << std::dec << std::endl;
-    }
 
-    builder.finalize();
-    std::cout << "[SIM] Manifest: " << builder.entries.size()
-              << " entries at DRAM 0x" << std::hex << kManifestDramAddr
-              << std::dec << std::endl;
+        driver.manifest_dram_addr = kManifestDramAddr;
+        driver.manifest_num_entries = static_cast<uint32_t>(builder.entries.size());
+    }
 
     // Pre-load DMA test pattern (for dma-check mode)
     if (dma_check) {
@@ -514,13 +649,25 @@ int sc_main(int argc, char* argv[]) {
         for (uint32_t i = 0; i < kTestBytes / 4; ++i) {
             dram.store32(kTestDramSrc + i * 4, i + 1);
         }
+
+        std::cout << "[SIM] Pre-loading DMA padding source at 0x"
+                  << std::hex << kPadTestDramSrc << std::dec << std::endl;
+        for (size_t i = 0; i < kPadTestSrcBeats.size(); ++i) {
+            store_u64(dram, kPadTestDramSrc + static_cast<uint32_t>(i * 8), kPadTestSrcBeats[i]);
+        }
+
+        std::cout << "[SIM] Pre-loading DMA ReLU source at 0x"
+                  << std::hex << kReluTestDramSrc << std::dec << std::endl;
+        for (size_t i = 0; i < kReluTestSrcBeats.size(); ++i) {
+            store_u64(dram, kReluTestDramSrc + static_cast<uint32_t>(i * 8), kReluTestSrcBeats[i]);
+        }
     }
 
     // Configure driver
-    driver.manifest_dram_addr = kManifestDramAddr;
-    driver.manifest_num_entries = static_cast<uint32_t>(builder.entries.size());
     driver.boot_addr = entry_point;
     driver.max_cycles = max_cycles;
+    driver.fast_boot = fast_boot;
+    driver.skip_run = fast_boot;
 
     // ========================================================================
     // Power-on clusters before simulation
@@ -552,12 +699,42 @@ int sc_main(int argc, char* argv[]) {
     // ========================================================================
 
     reset_n.write(false);
-    sc_start(50, SC_NS);
+    sc_start(reset_time);
     reset_n.write(true);
 
     std::cout << "[SIM] Reset released"
               << (core_debug ? " (core-debug ON)" : "") << std::endl;
-    sc_start();
+
+    if (fast_boot) {
+        uint32_t cycle = 0;
+
+        std::cout << "[TB] === Phase 1: Fast local preload ===" << std::endl;
+        std::cout << "[TB] Loader bypassed; local SRAM already preloaded" << std::endl;
+        std::cout << "[TB] === Phase 2: Enable core ===" << std::endl;
+        dut.fast_boot_start(entry_point);
+        std::cout << "[TB] Core enabled directly, boot_addr=0x" << std::hex
+                  << entry_point << std::dec << std::endl;
+
+        while (!dut.core_halted() && cycle < max_cycles) {
+            sc_start(clock_period);
+            ++cycle;
+        }
+
+        if (cycle >= max_cycles) {
+            std::cerr << "[TB] ERROR: Timeout waiting for EBREAK halt" << std::endl;
+            std::cerr << "[TB] Final IRQ_SUMMARY=0x" << std::hex
+                      << dut.irq_summary() << std::dec << std::endl;
+            driver.run_timed_out = true;
+        } else {
+            std::cout << "[TB] === Simulation complete ===" << std::endl;
+            std::cout << "[TB] EBREAK at cycle " << cycle
+                      << ", IRQ_SUMMARY=0x" << std::hex << dut.irq_summary()
+                      << std::dec << std::endl;
+            driver.run_passed = true;
+        }
+    } else {
+        sc_start();
+    }
 
     std::cout << "[SIM] Simulation ended at " << sc_time_stamp() << std::endl;
     dram.print_oob_summary();
@@ -607,6 +784,7 @@ int sc_main(int argc, char* argv[]) {
     // DMA verification (if enabled)
     bool dram_ok = true;
     if (dma_check) {
+        bool loopback_ok = true;
         std::cout << "\n[SIM] === DMA Loopback Verification ===" << std::endl;
         for (uint32_t i = 0; i < kTestBytes / 4; ++i) {
             uint32_t expected = i + 1;  // loopback: dst should match src pattern
@@ -615,10 +793,22 @@ int sc_main(int argc, char* argv[]) {
                 std::cout << "[SIM] FAIL: dram[0x" << std::hex
                           << (kTestDramDst + i * 4) << "] = 0x" << actual
                           << " expected 0x" << expected << std::dec << std::endl;
-                dram_ok = false;
+                loopback_ok = false;
             }
         }
-        if (dram_ok) std::cout << "[SIM] DMA loopback (DRAM→SPM→DRAM): PASS" << std::endl;
+        if (loopback_ok) {
+            std::cout << "[SIM] DMA loopback (DRAM→SPM→DRAM): PASS" << std::endl;
+        }
+
+        const bool pad_ok = verify_dram_beats(dram,
+                                              "DMA load-pad writeback verification",
+                                              kPadTestDramDst,
+                                              kPadExpectedBeats);
+        const bool relu_ok = verify_dram_beats(dram,
+                                               "DMA store-ReLU verification",
+                                               kReluTestDramDst,
+                                               kReluExpectedBeats);
+        dram_ok = loopback_ok && pad_ok && relu_ok;
     }
 
     // Summary

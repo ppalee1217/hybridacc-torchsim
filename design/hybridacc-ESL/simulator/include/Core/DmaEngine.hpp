@@ -26,7 +26,7 @@ SC_MODULE(DmaEngine) {
     static constexpr unsigned kTicketFifoDepth      = 16;
     static constexpr unsigned kRespFifoDepth        = 16;
 
-    static constexpr unsigned kClusterAddrBits      = 24; 
+    static constexpr unsigned kClusterAddrBits      = 24;
     static constexpr uint32_t kClusterAddrMask      = (1u << kClusterAddrBits) - 1;
 
     sc_in<bool>  clk;
@@ -215,7 +215,7 @@ private:
     DmaCommand active_cmd_reg;
     DmaState   state_reg = DmaState::IDLE;
 
-    uint32_t agu_idx_reg[4] = {}; 
+    uint32_t agu_idx_reg[4] = {};
     uint32_t beats_src_issued_reg = 0;
     uint32_t beats_src_retired_reg = 0;
     uint32_t beats_dst_issued_reg = 0;
@@ -259,6 +259,16 @@ private:
     uint32_t mmio_count_reg[4] = {};
     uint32_t mmio_src_stride_reg[4] = {};
     uint32_t mmio_dst_stride_reg[4] = {};
+    uint32_t mmio_xform_ctrl_reg = 0;
+    int32_t  mmio_pad_window_h0_reg = 0;
+    int32_t  mmio_pad_window_w0_reg = 0;
+    uint32_t mmio_pad_src_h_reg = 0;
+    uint32_t mmio_pad_src_w_reg = 0;
+    uint32_t mmio_beats_per_pixel_reg = 0;
+    uint32_t mmio_fill_value_lo_reg = 0;
+    uint32_t mmio_fill_value_hi_reg = 0;
+    uint32_t mmio_epilogue_ctrl_reg = 0;
+    uint32_t mmio_epilogue_param0_reg = 0;
     uint32_t mmio_cmd_tag_reg = 0;
     uint32_t mmio_status_reg = 0x1;
     uint32_t mmio_error_code_reg = 0;
@@ -317,8 +327,20 @@ private:
         active_cmd_reg = DmaCommand{};
         state_reg = DmaState::IDLE;
         reset_execution_state();
+        mmio_xform_ctrl_reg = 0;
+        mmio_pad_window_h0_reg = 0;
+        mmio_pad_window_w0_reg = 0;
+        mmio_pad_src_h_reg = 0;
+        mmio_pad_src_w_reg = 0;
+        mmio_beats_per_pixel_reg = 0;
+        mmio_fill_value_lo_reg = 0;
+        mmio_fill_value_hi_reg = 0;
+        mmio_epilogue_ctrl_reg = 0;
+        mmio_epilogue_param0_reg = 0;
         mmio_status_reg = 0x1;
         mmio_error_code_reg = 0;
+        mmio_done_tag_reg = 0;
+        mmio_irq_en_reg = false;
     }
 
     void reset_execution_state() {
@@ -385,8 +407,141 @@ private:
     uint32_t beats_src_queued_reg = 0;
     uint32_t beats_dst_queued_reg = 0;
 
-    void update_agu_pipelines() {
+    static uint32_t effective_count(uint32_t value) {
+        return value == 0 ? 1u : value;
+    }
+
+    bool load_pad_enabled(const DmaCommand& cmd) const {
+        return (cmd.transform.xform_ctrl & kDmaXformLoadPadEn) != 0;
+    }
+
+    uint32_t fill_mode(const DmaCommand& cmd) const {
+        return (cmd.transform.xform_ctrl & kDmaXformFillModeMask) >> kDmaXformFillModeShift;
+    }
+
+    bool store_relu_enabled(const DmaCommand& cmd) const {
+        return (cmd.transform.epilogue_ctrl & kDmaEpilogueModeMask) ==
+               static_cast<uint32_t>(DmaEpilogueMode::RELU);
+    }
+
+    bool direct_load_pad_active() const {
+        return load_pad_enabled(active_cmd_reg) && active_cmd_reg.src_kind == DmaEndpoint::DRAM;
+    }
+
+    uint64_t epsilon_fill_pattern() const {
+        uint64_t pattern = 0;
+        for (unsigned lane = 0; lane < (kClAxiDataWidth / 16); ++lane) {
+            pattern |= (uint64_t(0x0001u) << (lane * 16));
+        }
+        return pattern;
+    }
+
+    DataBeat make_fill_beat(const DmaCommand& cmd) const {
+        uint64_t pattern = 0;
+        switch (static_cast<DmaFillMode>(fill_mode(cmd))) {
+            case DmaFillMode::ZERO:
+                pattern = 0;
+                break;
+            case DmaFillMode::EPSILON:
+                pattern = epsilon_fill_pattern();
+                break;
+            case DmaFillMode::CONST:
+                pattern = cmd.transform.fill_value;
+                break;
+            default:
+                pattern = 0;
+                break;
+        }
+
+        DataBeat beat;
+        beat.data = sc_biguint<kClAxiDataWidth>(pattern);
+        beat.strb = 0xFF;
+        return beat;
+    }
+
+    bool validate_transform_cfg() {
+        if (load_pad_enabled(active_cmd_reg)) {
+            const uint32_t row_beats = effective_count(active_cmd_reg.count[0]);
+            const uint32_t beats_per_pixel = active_cmd_reg.transform.beats_per_pixel;
+
+            if (active_cmd_reg.src_kind != DmaEndpoint::DRAM ||
+                beats_per_pixel == 0 ||
+                (row_beats % beats_per_pixel) != 0 ||
+                effective_count(active_cmd_reg.count[2]) != 1 ||
+                effective_count(active_cmd_reg.count[3]) != 1 ||
+                fill_mode(active_cmd_reg) > static_cast<uint32_t>(DmaFillMode::CONST)) {
+                mmio_error_code_reg = static_cast<uint32_t>(DmaError::DMA_ERR_BAD_XFORM);
+                return false;
+            }
+        }
+
+        if ((active_cmd_reg.transform.epilogue_ctrl & kDmaEpilogueModeMask) !=
+                static_cast<uint32_t>(DmaEpilogueMode::NONE) &&
+            (active_cmd_reg.dst_kind != DmaEndpoint::DRAM || !store_relu_enabled(active_cmd_reg))) {
+            mmio_error_code_reg = static_cast<uint32_t>(DmaError::DMA_ERR_BAD_XFORM);
+            return false;
+        }
+
+        return true;
+    }
+
+    void decode_load_pad_request(uint32_t linear_beat_idx,
+                                 uint32_t& dram_addr,
+                                 bool& synth_fill) const {
+        const uint32_t row_beats = effective_count(active_cmd_reg.count[0]);
+        const uint32_t beats_per_pixel = active_cmd_reg.transform.beats_per_pixel;
+        const uint32_t local_row = linear_beat_idx / row_beats;
+        const uint32_t local_beat_in_row = linear_beat_idx % row_beats;
+        const uint32_t local_col = local_beat_in_row / beats_per_pixel;
+        const uint32_t beat_in_pixel = local_beat_in_row % beats_per_pixel;
+
+        const int64_t src_row = static_cast<int64_t>(active_cmd_reg.transform.pad_window_h0) +
+                                static_cast<int64_t>(local_row);
+        const int64_t src_col = static_cast<int64_t>(active_cmd_reg.transform.pad_window_w0) +
+                                static_cast<int64_t>(local_col);
+
+        if (src_row < 0 || src_col < 0 ||
+            src_row >= static_cast<int64_t>(active_cmd_reg.transform.pad_src_h) ||
+            src_col >= static_cast<int64_t>(active_cmd_reg.transform.pad_src_w)) {
+            synth_fill = true;
+            dram_addr = 0;
+            return;
+        }
+
+        const uint64_t pixel_index = static_cast<uint64_t>(src_row) *
+                                         static_cast<uint64_t>(active_cmd_reg.transform.pad_src_w) +
+                                     static_cast<uint64_t>(src_col);
+        const uint64_t byte_offset =
+            ((pixel_index * static_cast<uint64_t>(beats_per_pixel)) + beat_in_pixel) *
+            static_cast<uint64_t>(kMemAxiDataWidth / 8);
+
+        synth_fill = false;
+        dram_addr = active_cmd_reg.src_addr_lo + static_cast<uint32_t>(byte_offset);
+    }
+
+    DataBeat apply_store_epilogue(DataBeat beat) const {
+        if (!store_relu_enabled(active_cmd_reg)) {
+            return beat;
+        }
+
+        const uint64_t raw = beat.data.to_uint64();
+        uint64_t relu_out = 0;
+        for (unsigned lane = 0; lane < (kClAxiDataWidth / 16); ++lane) {
+            const uint16_t lane_bits = static_cast<uint16_t>((raw >> (lane * 16)) & 0xFFFFu);
+            if ((lane_bits & 0x8000u) == 0) {
+                relu_out |= (uint64_t(lane_bits) << (lane * 16));
+            }
+        }
+
+        beat.data = sc_biguint<kClAxiDataWidth>(relu_out);
+        return beat;
+    }
+
+    void update_src_agu_pipeline() {
         const uint32_t total = active_cmd_reg.total_beats();
+        if (direct_load_pad_active()) {
+            return;
+        }
         if (src_addr_fifo.size() < 8) {
             if (src_agu_pipe_reg.s3.valid) src_addr_fifo.push_back(src_agu_pipe_reg.s3.addr);
             src_agu_pipe_reg.s3.valid = src_agu_pipe_reg.s2.valid;
@@ -401,6 +556,10 @@ private:
                 beats_src_queued_reg++;
             } else src_agu_pipe_reg.s1.valid = false;
         }
+    }
+
+    void update_dst_agu_pipeline() {
+        const uint32_t total = active_cmd_reg.total_beats();
         if (dst_addr_fifo.size() < 8) {
             if (dst_agu_pipe_reg.s3.valid) dst_addr_fifo.push_back(dst_agu_pipe_reg.s3.addr);
             dst_agu_pipe_reg.s3.valid = dst_agu_pipe_reg.s2.valid;
@@ -445,6 +604,16 @@ private:
                                 cmd.src_stride[i] = mmio_src_stride_reg[i];
                                 cmd.dst_stride[i] = mmio_dst_stride_reg[i];
                             }
+                            cmd.transform.xform_ctrl = mmio_xform_ctrl_reg;
+                            cmd.transform.pad_window_h0 = mmio_pad_window_h0_reg;
+                            cmd.transform.pad_window_w0 = mmio_pad_window_w0_reg;
+                            cmd.transform.pad_src_h = mmio_pad_src_h_reg;
+                            cmd.transform.pad_src_w = mmio_pad_src_w_reg;
+                            cmd.transform.beats_per_pixel = mmio_beats_per_pixel_reg;
+                            cmd.transform.fill_value =
+                                (uint64_t(mmio_fill_value_hi_reg) << 32) | uint64_t(mmio_fill_value_lo_reg);
+                            cmd.transform.epilogue_ctrl = mmio_epilogue_ctrl_reg;
+                            cmd.transform.epilogue_param0 = mmio_epilogue_param0_reg;
                             cmd.cmd_tag = mmio_cmd_tag_reg;
                             cmd_fifo_reg.push_back(cmd);
                         }
@@ -472,6 +641,16 @@ private:
                 case 0x054: mmio_dst_stride_reg[2] = wdata; break;
                 case 0x058: mmio_dst_stride_reg[3] = wdata; break;
                 case 0x05C: mmio_cmd_tag_reg = wdata; break;
+                case 0x070: mmio_xform_ctrl_reg = wdata; break;
+                case 0x074: mmio_pad_window_h0_reg = static_cast<int32_t>(wdata); break;
+                case 0x078: mmio_pad_window_w0_reg = static_cast<int32_t>(wdata); break;
+                case 0x07C: mmio_pad_src_h_reg = wdata; break;
+                case 0x080: mmio_pad_src_w_reg = wdata; break;
+                case 0x084: mmio_beats_per_pixel_reg = wdata; break;
+                case 0x088: mmio_fill_value_lo_reg = wdata; break;
+                case 0x08C: mmio_fill_value_hi_reg = wdata; break;
+                case 0x090: mmio_epilogue_ctrl_reg = wdata; break;
+                case 0x094: mmio_epilogue_param0_reg = wdata; break;
                 default: break;
             }
         } else {
@@ -502,7 +681,17 @@ private:
                 case 0x060: mmio_resp_rdata_o.write(mmio_done_tag_reg); break;
                 case 0x064: mmio_resp_rdata_o.write(mmio_error_code_reg); break;
                 case 0x068: mmio_resp_rdata_o.write(0); break;
-                case 0x06C: mmio_resp_rdata_o.write(static_cast<uint32_t>(state_reg)); break; 
+                case 0x06C: mmio_resp_rdata_o.write(static_cast<uint32_t>(state_reg)); break;
+                case 0x070: mmio_resp_rdata_o.write(mmio_xform_ctrl_reg); break;
+                case 0x074: mmio_resp_rdata_o.write(static_cast<uint32_t>(mmio_pad_window_h0_reg)); break;
+                case 0x078: mmio_resp_rdata_o.write(static_cast<uint32_t>(mmio_pad_window_w0_reg)); break;
+                case 0x07C: mmio_resp_rdata_o.write(mmio_pad_src_h_reg); break;
+                case 0x080: mmio_resp_rdata_o.write(mmio_pad_src_w_reg); break;
+                case 0x084: mmio_resp_rdata_o.write(mmio_beats_per_pixel_reg); break;
+                case 0x088: mmio_resp_rdata_o.write(mmio_fill_value_lo_reg); break;
+                case 0x08C: mmio_resp_rdata_o.write(mmio_fill_value_hi_reg); break;
+                case 0x090: mmio_resp_rdata_o.write(mmio_epilogue_ctrl_reg); break;
+                case 0x094: mmio_resp_rdata_o.write(mmio_epilogue_param0_reg); break;
                 default: mmio_resp_rdata_o.write(0); break;
             }
         }
@@ -522,6 +711,7 @@ private:
                 if (!cmd_fifo_reg.empty()) {
                     active_cmd_reg = cmd_fifo_reg.front();
                     cmd_fifo_reg.pop_front();
+                    mmio_error_code_reg = 0;
                     state_reg = DmaState::VALIDATE;
                 }
                 break;
@@ -533,17 +723,22 @@ private:
                     state_reg = DmaState::ERROR;
                     break;
                 }
+                if (!validate_transform_cfg()) {
+                    state_reg = DmaState::ERROR;
+                    break;
+                }
                 TRACE_EVENT("dma_transfer", "DMA", TRACE_BEGIN, 0, 1, "{}");
                 reset_execution_state();
                 state_reg = DmaState::RUN;
-                mmio_status_reg = 0x2; 
+                mmio_status_reg = 0x2;
                 break;
             }
             case DmaState::RUN: {
                 const uint32_t total = active_cmd_reg.total_beats();
                 bool src_is_dram = (active_cmd_reg.src_kind == DmaEndpoint::DRAM);
                 bool dst_is_dram = (active_cmd_reg.dst_kind == DmaEndpoint::DRAM);
-                update_agu_pipelines();
+                update_src_agu_pipeline();
+                update_dst_agu_pipeline();
                 if (src_is_dram) run_src_retire_dram(); else run_src_retire_cluster();
                 if (dst_is_dram) run_dst_retire_dram(); else run_dst_retire_cluster();
                 drive_dram_axi_outputs();
@@ -603,10 +798,53 @@ private:
     }
 
     void run_src_issue_dram(bool allow_issue) {
+        if (direct_load_pad_active()) {
+            const bool ar_done = dram_ar_send_valid_reg && m_mem_axi_ar_ready_i.read();
+            bool next_valid = dram_ar_send_valid_reg && !ar_done;
+            uint32_t next_addr = dram_ar_send_addr_reg;
+
+            if (allow_issue && !next_valid) {
+                const bool can_issue_read =
+                    (data_buffer_reg.size() + dram_rd_inflight_cnt_reg < kDataBufferDepth) &&
+                    (dram_rd_inflight_cnt_reg < kDmaMaxOutstanding);
+                const bool can_issue_fill =
+                    data_buffer_reg.size() < kDataBufferDepth &&
+                    dram_rd_inflight_cnt_reg == 0 &&
+                    dram_rd_resp_fifo_reg.empty();
+
+                if (beats_src_issued_reg < active_cmd_reg.total_beats()) {
+                    uint32_t read_addr = 0;
+                    bool synth_fill = false;
+                    decode_load_pad_request(beats_src_issued_reg, read_addr, synth_fill);
+
+                    if (synth_fill) {
+                        if (can_issue_fill) {
+                            data_buffer_reg.push_back(make_fill_beat(active_cmd_reg));
+                            beats_src_issued_reg++;
+                            beats_src_retired_reg++;
+                        }
+                    } else if (can_issue_read) {
+                        next_valid = true;
+                        next_addr = read_addr;
+                        dram_rd_inflight_cnt_reg++;
+                        beats_src_issued_reg++;
+                        pmu_dram_rd_issue_cnt_reg++;
+                    }
+                }
+            }
+
+            dram_ar_send_valid_reg = next_valid;
+            dram_ar_send_addr_reg = next_addr;
+            m_mem_axi_ar_valid_o.write(next_valid);
+            m_mem_axi_ar_addr_o.write(next_addr);
+            m_mem_axi_ar_len_o.write(0);
+            return;
+        }
+
         const bool ar_done = dram_ar_send_valid_reg && m_mem_axi_ar_ready_i.read();
         bool next_valid = dram_ar_send_valid_reg && !ar_done;
         uint32_t next_addr = dram_ar_send_addr_reg;
-        if (allow_issue && !next_valid && (data_buffer_reg.size() + dram_rd_inflight_cnt_reg < kDataBufferDepth) && 
+        if (allow_issue && !next_valid && (data_buffer_reg.size() + dram_rd_inflight_cnt_reg < kDataBufferDepth) &&
             dram_rd_inflight_cnt_reg < kDmaMaxOutstanding && !src_addr_fifo.empty()) {
             next_valid = true;
             next_addr = src_addr_fifo.front();
@@ -626,7 +864,7 @@ private:
         const bool ar_done = cl_ar_send_valid_reg && m_cl_axi_ar_ready_i.read();
         bool next_valid = cl_ar_send_valid_reg && !ar_done;
         uint32_t next_addr = cl_ar_send_addr_reg;
-        if (allow_issue && !next_valid && (data_buffer_reg.size() + cl_rd_inflight_cnt_reg < kDataBufferDepth) && 
+        if (allow_issue && !next_valid && (data_buffer_reg.size() + cl_rd_inflight_cnt_reg < kDataBufferDepth) &&
             cl_rd_inflight_cnt_reg < kDmaMaxOutstanding && !src_addr_fifo.empty()) {
             next_valid = true;
             next_addr = encode_cluster_fabric_addr(active_cmd_reg.src_cluster_id, src_addr_fifo.front());
@@ -679,10 +917,10 @@ private:
     void run_dst_issue_dram() {
         if (dram_aw_send_valid_reg && m_mem_axi_aw_ready_i.read()) dram_aw_send_valid_reg = false;
         if (dram_w_send_valid_reg && m_mem_axi_w_ready_i.read()) dram_w_send_valid_reg = false;
-        if (!dram_aw_send_valid_reg && !dram_w_send_valid_reg && (beats_dst_issued_reg < active_cmd_reg.total_beats()) && 
+        if (!dram_aw_send_valid_reg && !dram_w_send_valid_reg && (beats_dst_issued_reg < active_cmd_reg.total_beats()) &&
             dram_wr_inflight_cnt_reg < kDmaMaxOutstanding && !data_buffer_reg.empty() && !dst_addr_fifo.empty()) {
             dram_aw_send_addr_reg = dst_addr_fifo.front(); dst_addr_fifo.pop_front();
-            auto beat = data_buffer_reg.front(); data_buffer_reg.pop_front();
+            auto beat = apply_store_epilogue(data_buffer_reg.front()); data_buffer_reg.pop_front();
             dram_aw_send_valid_reg = true;
             dram_w_send_valid_reg = true;
             dram_w_send_data_reg = sc_biguint<kMemAxiDataWidth>(beat.data.to_uint64());
@@ -705,7 +943,7 @@ private:
         const bool w_done = cl_w_prev_valid_reg && m_cl_axi_w_ready_i.read();
         bool next_aw_valid = cl_aw_send_valid_reg && !aw_done;
         bool next_w_valid = cl_w_send_valid_reg && !w_done;
-        if (allow_refill && !next_aw_valid && !next_w_valid && !data_buffer_reg.empty() && 
+        if (allow_refill && !next_aw_valid && !next_w_valid && !data_buffer_reg.empty() &&
             (cl_wr_inflight_cnt_reg < kDmaMaxOutstanding) && !dst_addr_fifo.empty()) {
             cl_aw_send_addr_reg = encode_cluster_fabric_addr(active_cmd_reg.dst_cluster_id, dst_addr_fifo.front());
             dst_addr_fifo.pop_front();

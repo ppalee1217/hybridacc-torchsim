@@ -174,6 +174,19 @@ SC_MODULE(BootHostIf) {
         reset_signal_is(reset_n, false);
     }
 
+    void fast_boot_start(uint32_t boot_addr) {
+        boot_addr_ = boot_addr;
+        ctrl_reg_ = (ctrl_reg_ & ~0x03u) | 0x01u;
+        core_enable_o.write(true);
+        core_haltreq_o.write(false);
+        boot_addr_o.write(boot_addr_);
+        load_phase_o.write(false);
+        loader_kick_o.write(false);
+        controller_irq_o.write(irq_summary() != 0);
+    }
+
+    uint32_t debug_irq_summary() const { return irq_summary(); }
+
 private:
     // ========================================================================
     // Internal state

@@ -739,6 +739,8 @@ public:
     uint32_t manifest_num_entries = 0;
     uint32_t boot_addr = 0;
     uint32_t max_cycles = 500000;
+    bool fast_boot = false;
+    bool skip_run = false;
     bool run_passed = false;
     bool run_timed_out = false;
 
@@ -815,37 +817,50 @@ private:
         r_ready_o.write(false);
         wait();
 
+        if (skip_run) {
+            while (true) wait();
+        }
+
         for (int i = 0; i < 5; ++i) wait();
 
         TRACE_EVENT("host_configure", "Core", TRACE_BEGIN, 0, 0, "{}");
-        std::cout << "[TB] === Phase 1: Configure BootHostIf ===" << std::endl;
+        uint32_t cycle = 0;
+        uint32_t irq = 0;
 
-        axi_write(kCoreBootAddr, boot_addr);
-        axi_write(kManifestAddrLo, manifest_dram_addr);
-        axi_write(kManifestAddrHi, 0);
-        axi_write(kManifestSize, manifest_num_entries * 32);
-        axi_write(kManifestKick, 1);
-        std::cout << "[TB] Loader kicked" << std::endl;
+        if (fast_boot) {
+            std::cout << "[TB] === Phase 1: Fast local preload ===" << std::endl;
+            axi_write(kCoreBootAddr, boot_addr);
+            std::cout << "[TB] Loader bypassed; local SRAM already preloaded" << std::endl;
+        } else {
+            std::cout << "[TB] === Phase 1: Configure BootHostIf ===" << std::endl;
+            axi_write(kCoreBootAddr, boot_addr);
+            axi_write(kManifestAddrLo, manifest_dram_addr);
+            axi_write(kManifestAddrHi, 0);
+            axi_write(kManifestSize, manifest_num_entries * 32);
+            axi_write(kManifestKick, 1);
+            std::cout << "[TB] Loader kicked" << std::endl;
+        }
         TRACE_EVENT("host_configure", "Core", TRACE_END, 0, 0, "{}");
 
-        TRACE_EVENT("wait_loader", "Core", TRACE_BEGIN, 0, 0, "{}");
+        if (!fast_boot) {
+            TRACE_EVENT("wait_loader", "Core", TRACE_BEGIN, 0, 0, "{}");
 
-        uint32_t cycle = 0;
-        while (!controller_irq_i.read() && cycle < max_cycles) {
-            wait(); ++cycle;
-        }
-        if (cycle >= max_cycles) {
-            std::cerr << "[TB] ERROR: Timeout waiting for loader IRQ" << std::endl;
-            run_timed_out = true;
-            sc_stop(); return;
-        }
+            while (!controller_irq_i.read() && cycle < max_cycles) {
+                wait(); ++cycle;
+            }
+            if (cycle >= max_cycles) {
+                std::cerr << "[TB] ERROR: Timeout waiting for loader IRQ" << std::endl;
+                run_timed_out = true;
+                sc_stop(); return;
+            }
 
-        uint32_t irq = axi_read(kIrqSummary);
-        std::cout << "[TB] Loader IRQ at cycle " << cycle
-                  << ", IRQ_SUMMARY=0x" << std::hex << irq << std::dec << std::endl;
-        axi_write(kIrqForceAck, irq);
-        for (int i = 0; i < 3; ++i) wait();
-        TRACE_EVENT("wait_loader", "Core", TRACE_END, 0, 0, "{}");
+            irq = axi_read(kIrqSummary);
+            std::cout << "[TB] Loader IRQ at cycle " << cycle
+                      << ", IRQ_SUMMARY=0x" << std::hex << irq << std::dec << std::endl;
+            axi_write(kIrqForceAck, irq);
+            for (int i = 0; i < 3; ++i) wait();
+            TRACE_EVENT("wait_loader", "Core", TRACE_END, 0, 0, "{}");
+        }
 
         TRACE_EVENT("core_running", "Core", TRACE_BEGIN, 0, 0, "{}");
         std::cout << "[TB] === Phase 2: Enable core ===" << std::endl;
@@ -855,9 +870,10 @@ private:
 
         // Poll IRQ_SUMMARY for bit3 (core_halted from EBREAK)
         cycle = 0; irq = 0;
+        const uint32_t halt_poll_stride = fast_boot ? 256u : 16u;
         while (!(irq & 0x08) && cycle < max_cycles) {
             wait(); ++cycle;
-            if ((cycle & 0xF) == 0 || controller_irq_i.read()) {
+            if ((cycle % halt_poll_stride) == 0u) {
                 irq = axi_read(kIrqSummary);
             }
         }

@@ -31,6 +31,11 @@ PKT_SIZE = 8   # bytes per SPM transaction (64-bit)
 WORD64 = 8     # bytes per word64 (AGU stride/base_addr unit)
 DRAM_BOOT_RESERVED = 0x100000  # 1 MB reserved for manifest + ELF payload
 
+_DMA_FILL_ZERO = 0
+_DMA_FILL_EPSILON = 1
+_DMA_EPILOGUE_NONE = 0
+_DMA_EPILOGUE_RELU = 1
+
 
 class TilingFailed(Exception):
     pass
@@ -65,6 +70,47 @@ def _has_duplicate_enabled_ids(scan_chain: List[ScanChainEntry], field_name: str
 
 def _conv1x1_multi_bus(layer: LayerHwConfig) -> bool:
     return _has_duplicate_enabled_ids(layer.scan_chain, "pli_id")
+
+
+def _coerce_bool_attr(value: object, op_name: str, attr_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off"):
+            return False
+    raise TilingFailed(
+        f"{op_name}: attr '{attr_name}' must be a bool-like value, got {value!r}"
+    )
+
+
+def _resolve_output_epilogue(op: OpDesc) -> int:
+    attrs = op.attrs
+    activation = attrs.get("activation")
+    if activation is None:
+        activation = attrs.get("epilogue")
+    if activation is not None:
+        if not isinstance(activation, str):
+            raise TilingFailed(
+                f"{op.name}: attr 'activation' must be a string, got {type(activation).__name__}"
+            )
+        activation_l = activation.strip().lower()
+        if activation_l in ("", "none", "identity"):
+            return _DMA_EPILOGUE_NONE
+        if activation_l == "relu":
+            return _DMA_EPILOGUE_RELU
+        raise TilingFailed(
+            f"{op.name}: unsupported activation '{activation}'"
+        )
+
+    for attr_name in ("relu", "fuse_relu", "output_relu"):
+        if attr_name in attrs and _coerce_bool_attr(attrs[attr_name], op.name, attr_name):
+            return _DMA_EPILOGUE_RELU
+    return _DMA_EPILOGUE_NONE
 
 
 def _expected_spm_modes(layer: LayerHwConfig) -> Dict[str, str]:
@@ -483,7 +529,9 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
                       tensor_base: int = 0,
                       dram_input_override: int = 0,
                       output_ic_tiled: bool = False,
-                      input_nhwc_packs: int = 0) -> LayerHwConfig:
+                      input_nhwc_packs: int = 0,
+                      output_pad: int = 0,
+                      use_runtime_load_pad: bool = False) -> LayerHwConfig:
     act = op.inputs[0]
     wt = op.inputs[1]
     out = op.outputs[0]
@@ -494,6 +542,20 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
 
     stride = op.attrs.get("stride", 1)
     padding = op.attrs.get("padding", 0)
+
+    if padding < 0:
+        raise TilingFailed(
+            f"{op.name}: conv2d_3x3 padding must be >= 0, got {padding}"
+        )
+
+    if padding > 0 and not use_runtime_load_pad:
+        raise TilingFailed(
+            f"{op.name}: padded conv2d_3x3 requires runtime DMA load-pad"
+        )
+    if output_pad > 0:
+        raise TilingFailed(
+            f"{op.name}: padded output canvas path is no longer supported"
+        )
 
     # Fixed tile dims
     tile_ic = 4
@@ -516,9 +578,11 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
     tile_h_out = tile_w_out = None
     # Conv2D normal mode maps one output row per PE within a bus.
     # Any tile taller than pes_per_bus would leave rows with no consumer.
-    for th in range(min(H_out, pes_per_bus), 0, -1):
+    max_tile_h_out = min(H_out, pes_per_bus)
+    max_tile_w_out = W_out
+    for th in range(max_tile_h_out, 0, -1):
         th_in = th + halo
-        for tw in range(W_out, 0, -1):
+        for tw in range(max_tile_w_out, 0, -1):
             tw_in = tw + halo
             pd = th_in * tw_in * in_ch_pack * PKT_SIZE
             pli = th * tw * out_ch_pack * PKT_SIZE
@@ -675,7 +739,7 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
     #                               input  [N, num_ic_tiles, H_in, W_in, tile_ic]
     dram_ps_oc_stride = num_ic_tiles * tile_oc * KH * KW * tile_ic * 2
     dram_ps_ic_stride = tile_oc * KH * KW * tile_ic * 2
-    # NHWC-input mode: DRAM input is [N, H_in, W_in, C_in] (not IC-tiled)
+    # NHWC-input mode: DRAM input is [N, H, W, C_in] (not IC-tiled).
     if input_nhwc_packs > 0 and num_ic_tiles > 1:
         dram_pd_h_stride = tile_h_out * stride * W_in * C_in * 2
         dram_pd_w_stride = tile_w_out * stride * C_in * 2
@@ -690,17 +754,18 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
     dram_out_w_stride = plo_tile_bytes
     dram_out_h_stride = num_w_tiles * plo_tile_bytes
     dram_out_oc_stride = num_h_tiles * num_w_tiles * plo_tile_bytes
+    dram_out_row_stride = tile_w_out * tile_oc * 2
 
     # DRAM tensor base addresses
     W_size = OC * KH * KW * C_in * 2
     I_size = N * H_in * W_in * C_in * 2
-    O_size = N * H_out * W_out * OC * 2
+    output_region_size = num_oc_tiles * num_h_tiles * num_w_tiles * plo_tile_bytes
 
     dram_weight_base = tensor_base
     if dram_input_override:
         # Multi-layer: input comes from previous layer's output region
         dram_input_base = dram_input_override
-        dram_output_base = tensor_base + W_size  # output after weight (no input alloc)
+        dram_output_base = tensor_base + W_size
     else:
         dram_input_base = tensor_base + W_size
         dram_output_base = tensor_base + W_size + I_size
@@ -710,7 +775,7 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
     # OC tile to prevent accumulating stale partial sums from the
     # previous OC tile's last IC iteration.
     dma_pli_words = pli_wave // PKT_SIZE
-    dram_bias_base = dram_output_base + O_size
+    dram_bias_base = dram_output_base + output_region_size
 
     # DMA group bases (absolute SPM byte addresses for DMA engine)
     g0_dma = hw.spm_dma_group_base(0)  # PS
@@ -757,6 +822,7 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
         dram_out_oc_stride=dram_out_oc_stride,
         dram_out_h_stride=dram_out_h_stride,
         dram_out_w_stride=dram_out_w_stride,
+        dram_out_row_stride=dram_out_row_stride,
         dma_ps_words=ps_wave // PKT_SIZE,
         dma_pd_words=pd_wave // PKT_SIZE,
         dma_plo_words=pli_wave // PKT_SIZE,
@@ -766,6 +832,16 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
         dma_pli_words=dma_pli_words,
         ps_reuse_across_spatial=False,  # disabled to ensure correct prefetching with double-buffering
         spatial_2d_dma=True,
+        input_pad_enable=padding > 0,
+        input_padding=padding,
+        input_stride=stride,
+        input_src_h=H_in,
+        input_src_w=W_in,
+        input_fill_mode=_DMA_FILL_EPSILON if padding > 0 else _DMA_FILL_ZERO,
+        input_fill_value_lo=0,
+        input_fill_value_hi=0,
+        output_epilogue=_resolve_output_epilogue(op),
+        output_epilogue_param0=0,
         pd_ic_agu_offset=pd_ic_agu_offset,
         bank_depth_bytes=hw.bank_depth_bytes,
         parallel_groups=0x0,  # no parallel groups for 3x3
@@ -801,7 +877,9 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
                       tensor_base: int = 0,
                       dram_input_override: int = 0,
                       output_ic_tiled: bool = False,
-                      input_nhwc_packs: int = 0) -> LayerHwConfig:
+                      input_nhwc_packs: int = 0,
+                      output_pad: int = 0,
+                      use_runtime_load_pad: bool = False) -> LayerHwConfig:
     act = op.inputs[0]
     wt = op.inputs[1]
     out = op.outputs[0]
@@ -809,6 +887,21 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     N, H_in, W_in, C_in = act.shape
     OC, KH, KW, _ = wt.shape
     _, H_out, W_out, _ = out.shape
+    stride_v = op.attrs.get("stride", 1)
+    padding = int(op.attrs.get("padding", 0))
+
+    if padding < 0:
+        raise TilingFailed(
+            f"{op.name}: conv2d_1x1 padding must be >= 0, got {padding}"
+        )
+    if padding > 0 and not use_runtime_load_pad:
+        raise TilingFailed(
+            f"{op.name}: padded conv2d_1x1 requires runtime DMA load-pad"
+        )
+    if output_pad > 0:
+        raise TilingFailed(
+            f"{op.name}: padded output canvas path is no longer supported"
+        )
 
     tile_ic = 12
     tile_oc = min(OC, 16)
@@ -841,6 +934,12 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     #   parallel; each bus carries up to pes_per_bus rows.
     # ----------------------------------------------------------------
     use_ultra = H_out > pes_per_bus
+
+    if padding > 0 and use_ultra:
+        raise TilingFailed(
+            f"{op.name}: conv2d_1x1 padding is not yet supported when output height "
+            f"requires multi-bus ultra transport"
+        )
 
     if use_ultra:
         active_buses = min(num_bus, math.ceil(H_out / pes_per_bus))
@@ -917,12 +1016,21 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     # iter1 walks rows that the bus's PEs own (tile_h_per_bus). When ultra
     # is enabled the per-bus PD bank still only carries its own H stripe,
     # so we use tile_h_per_bus, not the wave-level tile_h.
+    pd_ic_agu_offset = 0
+    pd_stride1 = tile_w * ic_words_per_pe
+    pd_stride2 = ic_words_per_pe
+    if input_nhwc_packs > 0 and num_ic_tiles > 1:
+        pd_wave = tile_h_per_bus * tile_w * input_nhwc_packs * PKT_SIZE
+        pd_ic_agu_offset = ic_words_per_pe
+        pd_stride1 = tile_w * input_nhwc_packs
+        pd_stride2 = input_nhwc_packs
+
     agu_pd = AguBankConfig(
         base_addr=pp_w if use_ultra else 0, base_addr_h=0,
         iter0=ic_words_per_pe, iter1=tile_h_per_bus, iter2=tile_w, iter3=1,
         stride0=1,
-        stride1=tile_w * ic_words_per_pe,
-        stride2=ic_words_per_pe,
+        stride1=pd_stride1,
+        stride2=pd_stride2,
         stride3=0,
         ctrl=ultra_ctrl, lane_cfg=0,
         tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=1,
@@ -974,7 +1082,6 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     )
     cluster_map = compute_cluster_mapping(hw.num_clusters, tiling, op.op_type)
 
-    stride_v = op.attrs.get("stride", 1)
     dram_base = hw.dram_base
     if tensor_base == 0:
         tensor_base = dram_base + DRAM_BOOT_RESERVED
@@ -982,20 +1089,26 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     #                               input  [N, num_ic_tiles, H_in, W_in, tile_ic]
     dram_ps_oc_stride = num_ic_tiles * tile_oc * tile_ic * 2
     dram_ps_ic_stride = tile_oc * tile_ic * 2
-    dram_pd_h_stride = tile_h * stride_v * W_in * tile_ic * 2
-    dram_pd_w_stride = tile_w * stride_v * tile_ic * 2
-    dram_pd_ic_stride = H_in * W_in * tile_ic * 2
+    if input_nhwc_packs > 0 and num_ic_tiles > 1:
+        dram_pd_h_stride = tile_h * stride_v * W_in * C_in * 2
+        dram_pd_w_stride = tile_w * stride_v * C_in * 2
+        dram_pd_ic_stride = 0
+    else:
+        dram_pd_h_stride = tile_h * stride_v * W_in * tile_ic * 2
+        dram_pd_w_stride = tile_w * stride_v * tile_ic * 2
+        dram_pd_ic_stride = H_in * W_in * tile_ic * 2
     # Output tile-packed layout: [num_oc, num_h, num_w, tile_h, tile_w, tile_oc]
     plo_tile_bytes = tile_h * tile_w * tile_oc * 2
     dram_out_w_stride = plo_tile_bytes
     dram_out_h_stride = num_w_tiles * plo_tile_bytes
     dram_out_oc_stride = num_h_tiles * num_w_tiles * plo_tile_bytes
+    dram_out_row_stride = tile_w * tile_oc * 2
 
     bdb = hw.bank_depth_bytes
 
     W_size = OC * C_in * 2
     I_size = N * H_in * W_in * C_in * 2
-    O_size = N * H_out * W_out * OC * 2
+    output_region_size = num_oc_tiles * num_h_tiles * num_w_tiles * plo_tile_bytes
 
     dram_weight_base = tensor_base
     if dram_input_override:
@@ -1007,7 +1120,7 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
 
     # PLI initialization: always provide a DRAM region for PLI DMA.
     dma_pli_words = pli_wave // PKT_SIZE
-    dram_bias_base = dram_output_base + O_size
+    dram_bias_base = dram_output_base + output_region_size
 
     # DMA group bases
     g0_dma = hw.spm_dma_group_base(0)
@@ -1042,6 +1155,7 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
         dram_out_oc_stride=dram_out_oc_stride,
         dram_out_h_stride=dram_out_h_stride,
         dram_out_w_stride=dram_out_w_stride,
+        dram_out_row_stride=dram_out_row_stride,
         dma_ps_words=ps_wave // PKT_SIZE,
         dma_pd_words=pd_wave // PKT_SIZE,
         dma_plo_words=pli_wave // PKT_SIZE,
@@ -1051,7 +1165,17 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
         dma_pli_words=dma_pli_words,
         ps_reuse_across_spatial=False,
         spatial_2d_dma=True,
-        pd_ic_agu_offset=0,
+        input_pad_enable=padding > 0,
+        input_padding=padding,
+        input_stride=stride_v,
+        input_src_h=H_in,
+        input_src_w=W_in,
+        input_fill_mode=_DMA_FILL_ZERO,
+        input_fill_value_lo=0,
+        input_fill_value_hi=0,
+        output_epilogue=_resolve_output_epilogue(op),
+        output_epilogue_param0=0,
+        pd_ic_agu_offset=pd_ic_agu_offset,
         bank_depth_bytes=bdb,
         parallel_groups=0xE if use_ultra else 0x0,  # PD, PLI, PLO (groups 1, 2, 3)
         dma_pd_rows_per_bank=tile_h_per_bus if use_ultra else 0,
@@ -1082,7 +1206,9 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
                 tensor_base: int = 0,
                 dram_input_override: int = 0,
                 output_ic_tiled: bool = False,
-                input_nhwc_packs: int = 0) -> LayerHwConfig:
+                input_nhwc_packs: int = 0,
+                output_pad: int = 0,
+                use_runtime_load_pad: bool = False) -> LayerHwConfig:
     A = op.inputs[0]
     B = op.inputs[1]
     C = op.outputs[0]
@@ -1206,7 +1332,16 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
             return 0, 0
         return resident_m, resident_n
 
+    def _choose_gemm_pd_preload_m_tiles(resident_m: int) -> int:
+        if resident_m <= 0:
+            return 0
+        # PD background fill only runs during the first resident N-tile.
+        # Preload the front half of the resident M window so the remaining
+        # tail has one N-tile worth of compute/backpressure time to arrive.
+        return min(resident_m, max(1, (resident_m + 1) // 2))
+
     resident_m_tiles, resident_n_tiles = _choose_full_n_resident_tiles()
+    pd_preload_m_tiles = _choose_gemm_pd_preload_m_tiles(resident_m_tiles)
     ps_spm_bytes = resident_n_tiles * ps_wave if resident_n_tiles else ps_wave
     pd_spm_bytes = resident_m_tiles * pd_wave if resident_m_tiles else pd_wave
     out_spm_bytes = resident_m_tiles * resident_n_tiles * pli_wave if resident_m_tiles and resident_n_tiles else pli_wave
@@ -1442,6 +1577,7 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
         dram_out_oc_stride=num_n_tiles * plo_tile_bytes,    # C M-wave step
         dram_out_h_stride=plo_tile_bytes,                   # C N-wave step
         dram_out_w_stride=0,
+        dram_out_row_stride=0,
         dma_ps_words=ps_wave // PKT_SIZE,
         dma_pd_words=pd_wave // PKT_SIZE,
         dma_plo_words=pli_wave // PKT_SIZE,
@@ -1451,6 +1587,16 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
         dma_pli_words=dma_pli_words,
         ps_reuse_across_spatial=False,
         spatial_2d_dma=False,
+        input_pad_enable=False,
+        input_padding=0,
+        input_stride=0,
+        input_src_h=0,
+        input_src_w=0,
+        input_fill_mode=_DMA_FILL_ZERO,
+        input_fill_value_lo=0,
+        input_fill_value_hi=0,
+        output_epilogue=_resolve_output_epilogue(op),
+        output_epilogue_param0=0,
         pd_ic_agu_offset=0,
         bank_depth_bytes=bdb,
         parallel_groups=0x3 if use_ultra else 0x0,  # PS, PD
@@ -1462,6 +1608,7 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
         dma_plo_words_per_bank=0,
         gemm_resident_m_tiles=resident_m_tiles,
         gemm_resident_n_tiles=resident_n_tiles,
+        gemm_pd_preload_m_tiles=pd_preload_m_tiles,
     )
 
     return LayerHwConfig(
@@ -1511,7 +1658,7 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
         inp_name = op.inputs[0].name
         if inp_name in output_tensor_map and output_tensor_map[inp_name] < i:
             consumer_ic = op.inputs[0].shape[-1]  # NHWC last dim = IC
-            tile_ic = 4
+            tile_ic = 12 if op.op_type == "conv2d_1x1" else 4
             if consumer_ic // tile_ic > 1:
                 # Compute producer's out_ch_pack = min(OC, 16) // 4
                 prev_idx = output_tensor_map[inp_name]
@@ -1537,6 +1684,18 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
             # and use previous layer's dram_output_base as this layer's input.
             prev_idx = output_tensor_map[op.inputs[0].name]
             prev_tp = layers[prev_idx].tiling_params
+            input_pad = int(op.attrs.get("padding", 0)) if op.op_type in ("conv2d_3x3", "conv2d_1x1") else 0
+            if input_pad > 0 and (
+                prev_tp.num_oc_tiles != 1
+                or prev_tp.num_h_tiles != 1
+                or prev_tp.num_w_tiles != 1
+            ):
+                raise TilingFailed(
+                    f"{op.name}: padded conv input from previous layer currently "
+                    f"requires producer output to be a single tile"
+                )
+
+            dram_input_base = prev_tp.dram_output_base
 
             prev_out_end = prev_tp.dram_output_base + _output_total_bytes(prev_tp)
             prev_bias_end = prev_tp.dram_bias_base + _bias_total_bytes(prev_tp) \
@@ -1546,13 +1705,16 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
 
             layer = fn(op, wir.hardware,
                        tensor_base=weight_base,
-                       dram_input_override=prev_tp.dram_output_base,
-                       input_nhwc_packs=input_nhwc_packs_map.get(i, 0))
+                       dram_input_override=dram_input_base,
+                       input_nhwc_packs=input_nhwc_packs_map.get(i, 0),
+                       use_runtime_load_pad=input_pad > 0)
 
         else:
+            input_pad = int(op.attrs.get("padding", 0)) if op.op_type in ("conv2d_3x3", "conv2d_1x1") else 0
             layer = fn(op, wir.hardware,
                        tensor_base=dram_cursor,
-                       input_nhwc_packs=input_nhwc_packs_map.get(i, 0))
+                       input_nhwc_packs=input_nhwc_packs_map.get(i, 0),
+                       use_runtime_load_pad=input_pad > 0)
 
         layers.append(layer)
 
@@ -1586,6 +1748,18 @@ def _output_total_bytes(tp: TilingParams) -> int:
     if tp.num_w_tiles > 0:
         last_offset += (tp.num_w_tiles - 1) * tp.dram_out_w_stride
     return last_offset + tp.dma_plo_words * PKT_SIZE
+
+
+def _nhwc_pad_head_bytes(width: int, channels: int, padding: int) -> int:
+    if padding <= 0:
+        return 0
+    padded_w = width + 2 * padding
+    return (padding * padded_w + padding) * channels * 2
+
+
+def _nhwc_padded_tensor_bytes(n: int, height: int, width: int,
+                              channels: int, padding: int) -> int:
+    return n * (height + 2 * padding) * (width + 2 * padding) * channels * 2
 
 
 def _bias_total_bytes(tp: TilingParams) -> int:
