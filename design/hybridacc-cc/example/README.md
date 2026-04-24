@@ -26,6 +26,7 @@ Sweep YAMLs are no longer stored in git. Generate them into a scratch directory 
 ```bash
 uv run hacc-sweep gen --workload conv3x3 --output-dir ./output/hacc-conv3x3-sweeps
 uv run hacc-sweep gen --workload conv1x1 --output-dir ./output/hacc-conv1x1-sweeps
+uv run hacc-sweep gen --workload gemm --output-dir ./output/hacc-gemm-sweeps
 ```
 
 By default, `hacc-sweep gen` uses `--mode product`, so `--dimensions oh,ow,ic,oc` generates every `OH x OW x IC x OC` combination.

@@ -1,4 +1,4 @@
-name: conv2d_1x1_multi_wave
+name: conv2d_3x3_oh16_ow256_ic4_oc16
 hardware:
   num_clusters: 1
   num_pes: 48
@@ -8,21 +8,22 @@ hardware:
   dram_base: 0x80000000
 tensors:
   input:
-    shape: [1, 48, 12, 12]
+    shape: [1, 18, 258, 4]
     dtype: fp16
     layout: NHWC
   weight:
-    shape: [16, 1, 1, 12]
+    shape: [16, 3, 3, 4]
     dtype: fp16
     layout: OIHW
   output:
-    shape: [1, 48, 12, 16]
+    shape: [1, 16, 256, 16]
     dtype: fp16
     layout: NHWC
 ops:
-  - name: conv1x1
-    type: conv2d_1x1
+  - name: conv1
+    type: conv2d_3x3
     inputs: [input, weight]
     outputs: [output]
     attrs:
       stride: 1
+      padding: 0

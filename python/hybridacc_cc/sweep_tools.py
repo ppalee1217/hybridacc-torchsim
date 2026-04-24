@@ -28,6 +28,7 @@ _METRIC_LABELS = {
     "sim_time_ns": "Simulation Time (ns)",
     "ebreak_cycle": "Core-level cycles (EBREAK)",
     "cluster_run_cycles": "Cluster RUN cycles",
+    "gfops_per_sec": "GFLOPS/sec",
     "active_pes": "Active PEs",
     "active_pe_ratio": "Active PE Ratio",
     "macs": "MACs",
@@ -41,9 +42,19 @@ _DIMENSION_ALIASES = {
     "oh": "oh",
     "out_h": "oh",
     "output_height": "oh",
+    "m": "m",
+    "rows": "m",
+    "output_rows": "m",
     "ich": "ic",
     "ic": "ic",
     "input_channels": "ic",
+    "k": "k",
+    "reduction": "k",
+    "inner": "k",
+    "shared_dim": "k",
+    "n": "n",
+    "cols": "n",
+    "output_cols": "n",
     "och": "oc",
     "oc": "oc",
     "output_channels": "oc",
@@ -65,53 +76,78 @@ _SCATTER_DIMENSION_LABELS = {
     "oh": "OH",
     "ow": "OW",
     "ic": "IC",
+    "k": "K",
+    "m": "M",
+    "n": "N",
     "oc": "OC",
     "oh_oc_product": "OH*OC",
 }
 
+_DIMENSION_VALUE_ARGUMENTS = {
+    "oh": "oh_values",
+    "ow": "ow_values",
+    "ic": "ic_values",
+    "oc": "oc_values",
+    "m": "m_values",
+    "n": "n_values",
+    "k": "k_values",
+}
+
 
 @dataclass(frozen=True)
-class ConvSweepProfile:
+class SweepProfile:
     key: str
     op_type: str
-    kernel: int
-    base_oh: int
-    base_ow: int
-    base_ic: int
-    base_oc: int
+    axis_order: tuple[str, ...]
+    base_dims: dict[str, int]
     default_sweeps: dict[str, list[int]]
+    default_scatter_dims: tuple[str, str, str]
+    kernel: int | None = None
+    supports_activation: bool = False
 
 
 _PROFILES = {
-    "conv3x3": ConvSweepProfile(
+    "conv3x3": SweepProfile(
         key="conv3x3",
         op_type="conv2d_3x3",
+        axis_order=("oh", "ow", "ic", "oc"),
+        base_dims={"oh": 16, "ow": 16, "ic": 4, "oc": 16},
         kernel=3,
-        base_oh=16,
-        base_ow=16,
-        base_ic=4,
-        base_oc=16,
         default_sweeps={
-            "oh": [16, 32, 64, 128, 256, 512],
-            "ow": [64, 128, 256, 512],
+            "oh": [16, 32, 64, 128],
+            "ow": [64, 128, 192, 384],
             "ic": [4, 8, 16, 32, 64, 128],
-            "oc": [16, 32, 64, 128, 256, 512],
+            "oc": [16, 32, 64, 128],
         },
+        default_scatter_dims=("ic", "ow", "oh_oc_product"),
+        supports_activation=True,
     ),
-    "conv1x1": ConvSweepProfile(
+    "conv1x1": SweepProfile(
         key="conv1x1",
         op_type="conv2d_1x1",
+        axis_order=("oh", "ow", "ic", "oc"),
+        base_dims={"oh": 16, "ow": 16, "ic": 12, "oc": 16},
         kernel=1,
-        base_oh=16,
-        base_ow=16,
-        base_ic=12,
-        base_oc=16,
         default_sweeps={
-            "oh": [16, 32, 48, 96, 144, 192, 384],
-            "ow": [16, 32, 48, 96, 144, 192, 384],
-            "ic": [12, 24, 36, 48, 60, 72, 84, 96],
-            "oc": [16, 32, 64, 128, 256, 512],
+            "oh": [16, 48, 96, 144],
+            "ow": [16, 32, 64, 128, 192, 384],
+            "ic": [12, 24, 48, 96, 192, 384],
+            "oc": [16, 48, 96, 144],
         },
+        default_scatter_dims=("ic", "ow", "oh_oc_product"),
+        supports_activation=True,
+    ),
+    "gemm": SweepProfile(
+        key="gemm",
+        op_type="gemm",
+        axis_order=("m", "n", "k"),
+        base_dims={"m": 48, "n": 32, "k": 96},
+        default_sweeps={
+            "m": [48, 96, 192, 384, 768],
+            "n": [32, 64, 128, 256, 512],
+            "k": [32, 64, 96],
+        },
+        default_scatter_dims=("m", "n", "k"),
     ),
 }
 
@@ -142,9 +178,9 @@ def _parse_csv_ints(text: str | None, fallback: list[int]) -> list[int]:
     return sorted(dict.fromkeys(values))
 
 
-def _parse_dimensions(text: str | None) -> list[str]:
+def _parse_dimensions(text: str | None, default_dims: list[str]) -> list[str]:
     if text is None or text.strip() == "":
-        return ["oh", "ow", "ic", "oc"]
+        return list(default_dims)
     dims = [_canonical_dimension(piece) for piece in text.split(",") if piece.strip()]
     if not dims:
         raise ValueError("expected at least one sweep dimension")
@@ -159,9 +195,9 @@ def _canonical_scatter_dimension(name: str) -> str:
     return _SCATTER_DIMENSION_ALIASES[key]
 
 
-def _parse_scatter_dimensions(text: str | None) -> list[str]:
+def _parse_scatter_dimensions(text: str | None, default_dims: list[str]) -> list[str]:
     if text is None or text.strip() == "":
-        return ["ic", "ow", "oh_oc_product"]
+        return list(default_dims)
     dims = [_canonical_scatter_dimension(piece) for piece in text.split(",") if piece.strip()]
     if not dims:
         raise ValueError("expected exactly three scatter dimensions")
@@ -203,10 +239,17 @@ def _input_extent_from_output(output_extent: int, kernel: int, stride: int, padd
     return input_extent
 
 
-def _input_hw_from_output(profile: ConvSweepProfile, oh: int, ow: int, stride: int, padding: int) -> tuple[int, int]:
+def _input_hw_from_output(profile: SweepProfile, oh: int, ow: int, stride: int, padding: int) -> tuple[int, int]:
     h = _input_extent_from_output(oh, profile.kernel, stride, padding, "height")
     w = _input_extent_from_output(ow, profile.kernel, stride, padding, "width")
     return h, w
+
+
+def _parse_profile_dim_values(args: argparse.Namespace, profile: SweepProfile) -> dict[str, list[int]]:
+    return {
+        dim: _parse_csv_ints(getattr(args, _DIMENSION_VALUE_ARGUMENTS[dim]), profile.default_sweeps[dim])
+        for dim in profile.axis_order
+    }
 
 
 def _sweep_group_name(dims: list[str]) -> str:
@@ -240,7 +283,7 @@ def _iter_sweep_cases(
     raise ValueError("mode must be one of: product, onehot")
 
 
-def _validate_conv_shape(profile: ConvSweepProfile, h: int, w: int, ic: int, oc: int, stride: int, padding: int) -> tuple[int, int]:
+def _validate_conv_shape(profile: SweepProfile, h: int, w: int, ic: int, oc: int, stride: int, padding: int) -> tuple[int, int]:
     if min(h, w, ic, oc, stride) <= 0:
         raise ValueError("all shape parameters and stride must be positive")
     if padding < 0:
@@ -264,8 +307,15 @@ def _validate_conv_shape(profile: ConvSweepProfile, h: int, w: int, ic: int, oc:
     return out_h, out_w
 
 
+def _validate_gemm_shape(m: int, n: int, k: int) -> None:
+    if min(m, n, k) <= 0:
+        raise ValueError("all GEMM dimensions must be positive")
+    if k % 4 != 0:
+        raise ValueError(f"gemm requires K divisible by 4, got {k}")
+
+
 def _build_conv_workload(
-    profile: ConvSweepProfile,
+    profile: SweepProfile,
     *,
     name: str,
     h: int,
@@ -321,27 +371,64 @@ def _build_conv_workload(
     }
 
 
+def _build_gemm_workload(
+    *,
+    name: str,
+    m: int,
+    n: int,
+    k: int,
+) -> dict[str, Any]:
+    _validate_gemm_shape(m, n, k)
+    return {
+        "name": name,
+        "hardware": {
+            "num_clusters": 1,
+            "num_pes": 48,
+            "num_bus": 3,
+            "spm_banks_per_group": 3,
+            "spm_bank_depth": 8192,
+            "dram_base": 0x80000000,
+        },
+        "tensors": {
+            "A": {
+                "shape": [m, k],
+                "dtype": "fp16",
+            },
+            "B": {
+                "shape": [k, n],
+                "dtype": "fp16",
+            },
+            "C": {
+                "shape": [m, n],
+                "dtype": "fp16",
+            },
+        },
+        "ops": [
+            {
+                "name": "gemm1",
+                "type": "gemm",
+                "inputs": ["A", "B"],
+                "outputs": ["C"],
+            }
+        ],
+    }
+
+
 def _case_stem(
-    profile: ConvSweepProfile,
+    profile: SweepProfile,
     sweep_dim: str,
-    oh: int,
-    ow: int,
-    ic: int,
-    oc: int,
+    case_dims: dict[str, int],
     padding: int,
     activation: str,
 ) -> str:
     parts = [
         profile.key,
         sweep_dim,
-        f"oh{oh}",
-        f"ow{ow}",
-        f"ic{ic}",
-        f"oc{oc}",
     ]
-    if padding > 0:
+    parts.extend(f"{dim}{case_dims[dim]}" for dim in profile.axis_order)
+    if profile.op_type == "conv2d_3x3" and padding > 0:
         parts.append(f"pad{padding}")
-    if activation != "none":
+    if profile.supports_activation and activation != "none":
         parts.append(activation)
     return "_".join(parts)
 
@@ -356,16 +443,22 @@ def _generate_suite(args: argparse.Namespace) -> int:
     activation = args.activation.strip().lower()
     if activation not in {"none", "relu"}:
         raise ValueError("activation must be one of: none, relu")
+    if profile.op_type == "gemm":
+        if activation != "none":
+            raise ValueError("gemm sweeps do not support activation")
+        if args.stride != 1:
+            raise ValueError("gemm sweeps do not support stride; leave --stride at 1")
     if profile.op_type != "conv2d_3x3" and args.padding != 0:
         raise ValueError("only conv2d_3x3 sweeps may set padding")
     if args.mode not in {"product", "onehot"}:
         raise ValueError("mode must be one of: product, onehot")
 
-    dims = _parse_dimensions(args.dimensions)
-    oh_values = _parse_csv_ints(args.oh_values, profile.default_sweeps["oh"])
-    ic_values = _parse_csv_ints(args.ic_values, profile.default_sweeps["ic"])
-    oc_values = _parse_csv_ints(args.oc_values, profile.default_sweeps["oc"])
-    ow_values = _parse_csv_ints(args.ow_values, profile.default_sweeps["ow"])
+    dims = _parse_dimensions(args.dimensions, list(profile.axis_order))
+    unsupported_dims = [dim for dim in dims if dim not in profile.axis_order]
+    if unsupported_dims:
+        supported = ", ".join(profile.axis_order)
+        invalid = ", ".join(unsupported_dims)
+        raise ValueError(f"{profile.key} supports sweep dimensions: {supported}; got unsupported dimensions: {invalid}")
 
     output_dir = args.output_dir.resolve()
     suite_name = args.suite_name or f"{profile.key}_sweeps"
@@ -373,93 +466,90 @@ def _generate_suite(args: argparse.Namespace) -> int:
     list_root = output_dir / "lists"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    dim_to_values = {
-        "oh": oh_values,
-        "ow": ow_values,
-        "ic": ic_values,
-        "oc": oc_values,
-    }
-    base = {
-        "oh": profile.base_oh,
-        "ow": profile.base_ow,
-        "ic": profile.base_ic,
-        "oc": profile.base_oc,
-    }
+    dim_to_values = _parse_profile_dim_values(args, profile)
+    base = dict(profile.base_dims)
 
     manifest_cases: list[dict[str, Any]] = []
     grouped_paths: dict[str, list[Path]] = {}
 
     for sweep_group, sweep_dims, case_dims in _iter_sweep_cases(dims, dim_to_values, base, args.mode):
-        input_h, input_w = _input_hw_from_output(
-            profile,
-            case_dims["oh"],
-            case_dims["ow"],
-            args.stride,
-            args.padding,
-        )
-        out_h, out_w = _validate_conv_shape(
-            profile,
-            input_h,
-            input_w,
-            case_dims["ic"],
-            case_dims["oc"],
-            args.stride,
-            args.padding,
-        )
-        if out_h != case_dims["oh"] or out_w != case_dims["ow"]:
-            raise ValueError(
-                f"derived output shape mismatch: expected OH/OW={case_dims['oh']}/{case_dims['ow']}, got {out_h}/{out_w}"
-            )
         stem = _case_stem(
             profile,
             sweep_group,
-            case_dims["oh"],
-            case_dims["ow"],
-            case_dims["ic"],
-            case_dims["oc"],
+            case_dims,
             args.padding,
             activation,
         )
         yaml_path = (yaml_root / sweep_group / f"{stem}.yaml").resolve()
-        payload = _build_conv_workload(
-            profile,
-            name=stem,
-            h=input_h,
-            w=input_w,
-            ic=case_dims["ic"],
-            oc=case_dims["oc"],
-            stride=args.stride,
-            padding=args.padding,
-            activation=activation,
-        )
+        case_record: dict[str, Any] = {
+            "case_name": stem,
+            "workload_key": profile.key,
+            "op_type": profile.op_type,
+            "sweep_dim": sweep_group,
+            "sweep_dims": sweep_dims,
+            **{dim: case_dims[dim] for dim in profile.axis_order},
+            "yaml_path": str(yaml_path),
+            "yaml_stem": stem,
+            "default_result_dir": str((_DEFAULT_RESULTS_ROOT / f"e2e_{stem}").resolve()),
+        }
+
+        if profile.op_type == "gemm":
+            _validate_gemm_shape(case_dims["m"], case_dims["n"], case_dims["k"])
+            payload = _build_gemm_workload(
+                name=stem,
+                m=case_dims["m"],
+                n=case_dims["n"],
+                k=case_dims["k"],
+            )
+        else:
+            input_h, input_w = _input_hw_from_output(
+                profile,
+                case_dims["oh"],
+                case_dims["ow"],
+                args.stride,
+                args.padding,
+            )
+            out_h, out_w = _validate_conv_shape(
+                profile,
+                input_h,
+                input_w,
+                case_dims["ic"],
+                case_dims["oc"],
+                args.stride,
+                args.padding,
+            )
+            if out_h != case_dims["oh"] or out_w != case_dims["ow"]:
+                raise ValueError(
+                    f"derived output shape mismatch: expected OH/OW={case_dims['oh']}/{case_dims['ow']}, got {out_h}/{out_w}"
+                )
+            payload = _build_conv_workload(
+                profile,
+                name=stem,
+                h=input_h,
+                w=input_w,
+                ic=case_dims["ic"],
+                oc=case_dims["oc"],
+                stride=args.stride,
+                padding=args.padding,
+                activation=activation,
+            )
+            case_record.update(
+                {
+                    "kernel": profile.kernel,
+                    "stride": args.stride,
+                    "padding": args.padding,
+                    "activation": activation,
+                    "h": input_h,
+                    "w": input_w,
+                    "out_h": out_h,
+                    "out_w": out_w,
+                }
+            )
         yaml_path.parent.mkdir(parents=True, exist_ok=True)
         yaml_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
         grouped_paths.setdefault(sweep_group, [])
         grouped_paths[sweep_group].append(yaml_path)
-        manifest_cases.append(
-            {
-                "case_name": stem,
-                "workload_key": profile.key,
-                "op_type": profile.op_type,
-                "sweep_dim": sweep_group,
-            "sweep_dims": sweep_dims,
-                "kernel": profile.kernel,
-                "stride": args.stride,
-                "padding": args.padding,
-                "activation": activation,
-                "oh": case_dims["oh"],
-                "ow": case_dims["ow"],
-                "h": input_h,
-                "w": input_w,
-                "ic": case_dims["ic"],
-                "oc": case_dims["oc"],
-                "out_h": out_h,
-                "out_w": out_w,
-                "yaml_path": str(yaml_path),
-                "yaml_stem": stem,
-                "default_result_dir": str((_DEFAULT_RESULTS_ROOT / f"e2e_{stem}").resolve()),
-            }
-        )
+        manifest_cases.append(case_record)
 
     for group_name, paths in grouped_paths.items():
         list_path = list_root / f"{profile.key}_{group_name}.list"
@@ -476,11 +566,9 @@ def _generate_suite(args: argparse.Namespace) -> int:
         "workload": {
             "key": profile.key,
             "op_type": profile.op_type,
-            "kernel": profile.kernel,
             "mode": args.mode,
-            "stride": args.stride,
-            "padding": args.padding,
-            "activation": activation,
+            "axis_order": list(profile.axis_order),
+            "default_scatter_dims": list(profile.default_scatter_dims),
             "dimensions": dims,
         },
         "cases": manifest_cases,
@@ -489,6 +577,11 @@ def _generate_suite(args: argparse.Namespace) -> int:
             **{group_name: str((list_root / f"{profile.key}_{group_name}.list").resolve()) for group_name in grouped_paths},
         },
     }
+    if profile.kernel is not None:
+        manifest["workload"]["kernel"] = profile.kernel
+        manifest["workload"]["stride"] = args.stride
+        manifest["workload"]["padding"] = args.padding
+        manifest["workload"]["activation"] = activation
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
@@ -577,6 +670,8 @@ def _parse_active_pe_metrics(path: Path) -> dict[str, Any]:
 
 
 def _case_macs(case: dict[str, Any]) -> float:
+    if case["op_type"] == "gemm":
+        return float(case["m"] * case["n"] * case["k"])
     return float(case["out_h"] * case["out_w"] * case["oc"] * case["kernel"] * case["kernel"] * case["ic"])
 
 
@@ -605,6 +700,14 @@ def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) ->
         row.update(sim_metrics)
         row.update(pe_metrics)
         row["macs"] = _case_macs(case)
+        sim_time_ns = row.get("sim_time_ns")
+        # 1 MAC is counted as 2 floating-point operations, and dividing by ns
+        # directly yields GFOPS/sec because the giga and nano scale factors cancel.
+        row["gfops_per_sec"] = (
+            2.0 * row["macs"] / sim_time_ns
+            if isinstance(sim_time_ns, (int, float)) and sim_time_ns and not math.isnan(sim_time_ns)
+            else math.nan
+        )
         active_pes = row.get("active_pes")
         row["macs_per_active_pe"] = row["macs"] / active_pes if isinstance(active_pes, (int, float)) and active_pes and not math.isnan(active_pes) else math.nan
         core_cycles = row.get("ebreak_cycle")
@@ -634,7 +737,7 @@ def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) ->
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
-    order = ["oh", "ow", "ic", "oc"]
+    order = [str(dim) for dim in manifest.get("workload", {}).get("axis_order", ["oh", "ow", "ic", "oc"]) if str(dim) in df.columns]
     df["sweep_sort_key"] = df["sweep_dim"].map({name: idx for idx, name in enumerate(order)}).fillna(len(order))
     return df.sort_values(["sweep_sort_key", "sweep_dim", *order, "case_name"]).drop(columns=["sweep_sort_key"])
 
@@ -755,24 +858,42 @@ def _build_3d_scatter(frame: pd.DataFrame, dims: list[str], color_metric: str, a
     return _figure_data_uri(fig)
 
 
+def _summary_stats(frame: pd.DataFrame) -> dict[str, float | int]:
+    return {
+        "total": len(frame),
+        "passed": int((frame["passed"] == 1.0).sum()),
+        "failed": int((frame["result_state"] == "failed").sum()),
+        "missing": int((frame["result_state"] == "missing").sum()),
+        "avg_time": frame.loc[frame["sim_time_ns"].notna(), "sim_time_ns"].mean(),
+        "avg_gfops": frame.loc[frame["gfops_per_sec"].notna(), "gfops_per_sec"].mean(),
+        "avg_active": frame.loc[frame["active_pes"].notna(), "active_pes"].mean(),
+        "avg_core_util": frame.loc[frame["core_level_macs_utilization_pct"].notna(), "core_level_macs_utilization_pct"].mean(),
+        "avg_cluster_util": frame.loc[frame["cluster_level_macs_utilization_pct"].notna(), "cluster_level_macs_utilization_pct"].mean(),
+        "max_gfops": frame.loc[frame["gfops_per_sec"].notna(), "gfops_per_sec"].max(),
+        "max_core_util": frame.loc[frame["core_level_macs_utilization_pct"].notna(), "core_level_macs_utilization_pct"].max(),
+        "max_cluster_util": frame.loc[frame["cluster_level_macs_utilization_pct"].notna(), "cluster_level_macs_utilization_pct"].max(),
+    }
+
+
+def _format_summary_number(value: float | int, precision: str, suffix: str = "") -> str:
+    return f"{format(float(value), precision)}{suffix}" if not pd.isna(value) else "-"
+
+
 def _summary_cards(frame: pd.DataFrame) -> str:
-    total = len(frame)
-    passed = int((frame["passed"] == 1.0).sum())
-    failed = int((frame["result_state"] == "failed").sum())
-    missing = int((frame["result_state"] == "missing").sum())
-    avg_time = frame.loc[frame["sim_time_ns"].notna(), "sim_time_ns"].mean()
-    avg_active = frame.loc[frame["active_pes"].notna(), "active_pes"].mean()
-    avg_core_util = frame.loc[frame["core_level_macs_utilization_pct"].notna(), "core_level_macs_utilization_pct"].mean()
-    avg_cluster_util = frame.loc[frame["cluster_level_macs_utilization_pct"].notna(), "cluster_level_macs_utilization_pct"].mean()
+    summary = _summary_stats(frame)
     cards = [
-        ("Cases", str(total), "manifest entries"),
-        ("Passed", str(passed), "completed simulations"),
-        ("Failed", str(failed), "sim.log present but not passing"),
-        ("Missing", str(missing), "results directory not found"),
-        ("Avg sim time", f"{avg_time:.0f} ns" if not math.isnan(avg_time) else "-", "passed cases"),
-        ("Avg active PEs", f"{avg_active:.1f}" if not math.isnan(avg_active) else "-", "max enabled per workload"),
-        ("Avg core MAC util", f"{avg_core_util:.2f}%" if not math.isnan(avg_core_util) else "-", "passed cases"),
-        ("Avg cluster MAC util", f"{avg_cluster_util:.2f}%" if not math.isnan(avg_cluster_util) else "-", "passed cases"),
+        ("Cases", str(summary["total"]), "manifest entries"),
+        ("Passed", str(summary["passed"]), "completed simulations"),
+        ("Failed", str(summary["failed"]), "sim.log present but not passing"),
+        ("Missing", str(summary["missing"]), "results directory not found"),
+        ("Avg sim time", _format_summary_number(summary["avg_time"], ".0f", " ns"), "passed cases"),
+        ("Avg GFLOPS/sec", _format_summary_number(summary["avg_gfops"], ".3g"), "modeled sim time"),
+        ("Max GFLOPS/sec", _format_summary_number(summary["max_gfops"], ".3g"), "modeled sim time"),
+        ("Avg active PEs", _format_summary_number(summary["avg_active"], ".1f"), "max enabled per workload"),
+        ("Avg core MAC util", _format_summary_number(summary["avg_core_util"], ".2f", "%"), "passed cases"),
+        ("Max core MAC util", _format_summary_number(summary["max_core_util"], ".2f", "%"), "available runs"),
+        ("Avg cluster MAC util", _format_summary_number(summary["avg_cluster_util"], ".2f", "%"), "passed cases"),
+        ("Max cluster MAC util", _format_summary_number(summary["max_cluster_util"], ".2f", "%"), "available runs"),
     ]
     return "".join(
         f'<div class="card"><div class="label">{escape(label)}</div><div class="value">{escape(value)}</div><div class="sub">{escape(sub)}</div></div>'
@@ -786,7 +907,7 @@ def _format_table(frame: pd.DataFrame, columns: list[str]) -> str:
         if pd.api.types.is_float_dtype(table[column]):
             table[column] = table[column].map(lambda value: "-" if pd.isna(value) else f"{value:.4g}")
     table.columns = [
-        dim.upper() if dim in {"oh", "ow", "ic", "oc"} else _metric_display_label(str(dim))
+        _scatter_dimension_display_label(str(dim)) if str(dim) in _SCATTER_DIMENSION_LABELS else _metric_display_label(str(dim))
         for dim in table.columns
     ]
     return table.to_html(index=False, classes="report-table", border=0, justify="center")
@@ -800,16 +921,18 @@ def _render_report_html(
     scatter_dims: list[str],
     scatter_metrics: list[str],
 ) -> str:
+    summary = _summary_stats(frame)
     sweep_sections = []
     for sweep_dim, group in frame.groupby("sweep_dim", sort=False):
         raw_dims = group.iloc[0].get("sweep_dims", [sweep_dim])
         sweep_dims = [str(dim) for dim in raw_dims if str(dim) in group.columns] if isinstance(raw_dims, list) else [sweep_dim] if sweep_dim in group.columns else []
-        section_title = " x ".join(dim.upper() for dim in sweep_dims) if sweep_dims else sweep_dim.upper()
+        section_title = " x ".join(_scatter_dimension_display_label(dim) for dim in sweep_dims) if sweep_dims else sweep_dim.upper()
         table_columns = [
             *sweep_dims,
             "ebreak_cycle",
             "cluster_run_cycles",
             "sim_time_ns",
+            "gfops_per_sec",
             "active_pes",
             "active_pe_ratio",
             "macs",
@@ -890,6 +1013,7 @@ def _render_report_html(
     .hero h1 {{ margin: 0 0 10px; font-size: 34px; }}
     .hero p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
     .meta {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }}
+    .hero-note {{ margin-top: 16px; max-width: 960px; }}
     .pill {{ border-radius: 999px; padding: 8px 12px; background: rgba(255,255,255,0.7); border: 1px solid var(--line); color: var(--muted); font-size: 13px; }}
     .card-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-top: 22px; }}
     .card {{ background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 16px; box-shadow: var(--shadow); }}
@@ -921,14 +1045,18 @@ def _render_report_html(
     <section class="hero">
       <h1>{escape(manifest['suite_name'])} sweep report</h1>
             <p>Generated from manifest plus e2e output directories. The report summarizes core-level cycles to EBREAK, cluster RUN cycles gathered directly from the simulator, active PE footprint, and both core-level and cluster-level MAC utilization.</p>
-      <div class="meta">
-        <span class="pill">workload={escape(manifest['workload']['key'])}</span>
-        <span class="pill">op={escape(manifest['workload']['op_type'])}</span>
-        <span class="pill">padding={escape(str(manifest['workload']['padding']))}</span>
-        <span class="pill">activation={escape(manifest['workload']['activation'])}</span>
-        <span class="pill">scatter={escape(', '.join(_scatter_dimension_display_label(dim) for dim in scatter_dims))}</span>
-                <span class="pill">scatter metrics={escape(', '.join(_metric_display_label(metric) for metric in scatter_metrics))}</span>
-      </div>
+            <div class="meta">
+                <span class="pill">workload={escape(manifest['workload']['key'])}</span>
+                <span class="pill">op={escape(manifest['workload']['op_type'])}</span>
+                {f'<span class="pill">padding={escape(str(manifest["workload"]["padding"]))}</span>' if 'padding' in manifest['workload'] else ''}
+                {f'<span class="pill">activation={escape(manifest["workload"]["activation"])}</span>' if 'activation' in manifest['workload'] else ''}
+                <span class="pill">scatter={escape(', '.join(_scatter_dimension_display_label(dim) for dim in scatter_dims))}</span>
+                                <span class="pill">scatter metrics={escape(', '.join(_metric_display_label(metric) for metric in scatter_metrics))}</span>
+                                <span class="pill">max core util={escape(_format_summary_number(summary["max_core_util"], ".2f", "%"))}</span>
+                                <span class="pill">max cluster util={escape(_format_summary_number(summary["max_cluster_util"], ".2f", "%"))}</span>
+                                <span class="pill">max GFLOPS/sec={escape(_format_summary_number(summary["max_gfops"], ".3g"))}</span>
+            </div>
+                        <p class="hero-note">Peak observed results: core MAC utilization {escape(_format_summary_number(summary["max_core_util"], ".2f", "%"))}, cluster MAC utilization {escape(_format_summary_number(summary["max_cluster_util"], ".2f", "%"))}, and throughput {escape(_format_summary_number(summary["max_gfops"], ".3g"))} GFLOPS/sec.</p>
       <div class="card-grid">{_summary_cards(frame)}</div>
     </section>
         {scatter_html}
@@ -950,7 +1078,16 @@ def _report_suite(args: argparse.Namespace) -> int:
     csv_path = output_dir / "sweep_metrics.csv"
     frame.to_csv(csv_path, index=False)
 
-    scatter_dims = _parse_scatter_dimensions(args.scatter_dims)
+    workload_key = str(manifest.get("workload", {}).get("key", ""))
+    profile = _PROFILES.get(workload_key)
+    if profile is not None and args.scatter_dims is None:
+        default_scatter_dims = list(profile.default_scatter_dims)
+    else:
+        default_scatter_dims = [
+            str(dim)
+            for dim in manifest.get("workload", {}).get("default_scatter_dims", ["ic", "ow", "oh_oc_product"])
+        ]
+    scatter_dims = _parse_scatter_dimensions(args.scatter_dims, default_scatter_dims)
     if len(scatter_dims) != 3:
         raise ValueError("--scatter-dims expects exactly three comma-separated dimensions")
     scatter_metrics = _parse_metric_names(args.color_metric)
@@ -990,9 +1127,12 @@ def _build_parser() -> argparse.ArgumentParser:
     gen.add_argument("--output-dir", type=Path, required=True, help="Directory for generated YAML/list/manifest files")
     gen.add_argument("--suite-name", type=str, default=None, help="Optional human-readable suite name")
     gen.add_argument("--mode", choices=("product", "onehot"), default="product", help="Sweep expansion mode")
-    gen.add_argument("--dimensions", type=str, default="oh,ow,ic,oc", help="Comma-separated sweep dimensions")
+    gen.add_argument("--dimensions", type=str, default=None, help="Comma-separated sweep dimensions; defaults depend on the workload profile")
     gen.add_argument("--oh-values", "--h-values", dest="oh_values", type=str, default=None, help="Comma-separated OH values")
     gen.add_argument("--ic-values", type=str, default=None, help="Comma-separated IC values")
+    gen.add_argument("--k-values", type=str, default=None, help="Comma-separated K values for GEMM sweeps")
+    gen.add_argument("--m-values", type=str, default=None, help="Comma-separated M values for GEMM sweeps")
+    gen.add_argument("--n-values", type=str, default=None, help="Comma-separated N values for GEMM sweeps")
     gen.add_argument("--oc-values", type=str, default=None, help="Comma-separated OC values")
     gen.add_argument("--ow-values", "--w-values", dest="ow_values", type=str, default=None, help="Comma-separated OW values")
     gen.add_argument("--stride", type=int, default=1, help="Stride value written into attrs")
@@ -1004,7 +1144,7 @@ def _build_parser() -> argparse.ArgumentParser:
     report.add_argument("--manifest", type=Path, required=True, help="Manifest JSON emitted by hacc-sweep gen")
     report.add_argument("--results-root", type=Path, default=None, help="Root directory passed to run_e2e.sh --output-dir")
     report.add_argument("--output-dir", type=Path, required=True, help="Directory for CSV and HTML report")
-    report.add_argument("--scatter-dims", type=str, default="ic,ow,oh*oc", help="Three comma-separated dimensions for the 3D scatter (supports derived OH*OC)")
+    report.add_argument("--scatter-dims", type=str, default=None, help="Three comma-separated dimensions for the 3D scatter; defaults depend on the workload profile")
     report.add_argument("--color-metric", type=str, default="core_level_macs_utilization_pct,cluster_level_macs_utilization_pct", help="Comma-separated metric columns used for 3D scatter colors")
     report.set_defaults(func=_report_suite)
     return parser

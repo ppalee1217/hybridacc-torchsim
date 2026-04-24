@@ -14,12 +14,13 @@ DEFAULT_OUTPUT_DIR="$TOP_DIR/output"
 
 # ── Defaults ───────────────────────────────────────────────────────────────
 SEED=42
-MAX_CYCLES=1000000
+MAX_CYCLES=100000000
 CLOCK_PERIOD_NS="2"
 TOLERANCE=0.99
 SKIP_BUILD=0
 SKIP_COMPILE=0
 SKIP_SIM=0
+RESUME=0
 CORE_DEBUG=0
 FAST_BOOT=0
 TRACE=0
@@ -64,6 +65,7 @@ Options:
   --skip-build        Skip simulator build step
   --skip-compile      Skip hacc-compile (reuse existing firmware)
   --skip-sim          Skip simulation (verify existing DRAM output)
+    --resume            Skip workloads with an existing final e2e result marker
   --core-debug        Enable core pipeline debug trace
   --fast-boot         Preload core SRAM directly and bypass manifest loader
   --trace             Generate Perfetto trace JSON for each workload
@@ -97,6 +99,7 @@ while [[ $# -gt 0 ]]; do
         --skip-build)   SKIP_BUILD=1; shift ;;
         --skip-compile) SKIP_COMPILE=1; shift ;;
         --skip-sim)     SKIP_SIM=1; shift ;;
+        --resume)       RESUME=1; shift ;;
         --core-debug)   CORE_DEBUG=1; shift ;;
         --fast-boot)    FAST_BOOT=1; shift ;;
         --trace)        TRACE=1; shift ;;
@@ -163,6 +166,113 @@ build_dir_for_workload() {
     else
         printf '%s/e2e_%s\n' "$DEFAULT_OUTPUT_DIR" "$basename"
     fi
+}
+
+resume_result_file_for_build_dir() {
+    local build_dir="$1"
+    printf '%s/.e2e.result\n' "$build_dir"
+}
+
+select_build_dir_for_workload() {
+    local yaml="$1"
+    local total="$2"
+    local basename
+    local primary
+    local alternate=""
+    local primary_result
+    local alternate_result
+
+    basename=$(basename "$yaml" .yaml)
+    primary=$(build_dir_for_workload "$yaml" "$total")
+    RESOLVED_BUILD_DIR="$primary"
+
+    if [[ $RESUME -eq 0 ]]; then
+        return 0
+    fi
+
+    if [[ -f "$(resume_result_file_for_build_dir "$primary")" ]]; then
+        return 0
+    fi
+
+    if [[ -n "$OUTPUT_BASE" && $total -eq 1 ]]; then
+        alternate="$OUTPUT_BASE/$basename"
+        primary_result=$(resume_result_file_for_build_dir "$primary")
+        alternate_result=$(resume_result_file_for_build_dir "$alternate")
+        if [[ -f "$alternate_result" ]]; then
+            RESOLVED_BUILD_DIR="$alternate"
+        elif [[ ! -f "$primary_result" && ( -f "$alternate/e2e_run.log" || -f "$alternate/hardware_ir.json" || -f "$alternate/trace.json" ) ]]; then
+            RESOLVED_BUILD_DIR="$alternate"
+        fi
+    fi
+}
+
+read_persistent_result_for_build_dir() {
+    local build_dir="$1"
+    local result_file
+
+    result_file=$(resume_result_file_for_build_dir "$build_dir")
+    [[ -f "$result_file" ]] || return 1
+    read_result_file "$result_file"
+}
+
+write_persistent_result_for_build_dir() {
+    local build_dir="$1"
+    local result="$2"
+    local name="$3"
+    local detail="$4"
+    local log_path="$5"
+
+    mkdir -p "$build_dir"
+    write_result_file "$(resume_result_file_for_build_dir "$build_dir")" "$result" "$name" "$detail" "$log_path"
+}
+
+prepare_workloads_for_execution() {
+    local total="$1"
+    local idx
+    local yaml_input
+    local basename
+    local build_dir
+    local detail
+    local active_workloads=()
+    local active_build_dirs=()
+
+    for ((idx = 0; idx < total; idx++)); do
+        yaml_input="${WORKLOADS[$idx]}"
+        basename=$(basename "$yaml_input" .yaml)
+        select_build_dir_for_workload "$yaml_input" "$total"
+        build_dir="$RESOLVED_BUILD_DIR"
+
+        if [[ $RESUME -eq 1 ]] && read_persistent_result_for_build_dir "$build_dir"; then
+            RESUME_SKIP_COUNT=$((RESUME_SKIP_COUNT + 1))
+            SKIP_COUNT=$((SKIP_COUNT + 1))
+
+            if [[ "$RESULT_VALUE" == "PASS" ]]; then
+                PASS_COUNT=$((PASS_COUNT + 1))
+                RESULTS+=("PASS  $basename  (resume)")
+            else
+                FAIL_COUNT=$((FAIL_COUNT + 1))
+                detail="$RESULT_DETAIL"
+                if [[ -n "$RESULT_LOG_PATH" ]]; then
+                    if [[ -n "$detail" ]]; then
+                        detail="$detail; log=$RESULT_LOG_PATH"
+                    else
+                        detail="log=$RESULT_LOG_PATH"
+                    fi
+                fi
+                if [[ -z "$detail" ]]; then
+                    detail="resume"
+                fi
+                RESULTS+=("FAIL  $basename  ($detail)")
+            fi
+            continue
+        fi
+
+        active_workloads+=("$yaml_input")
+        active_build_dirs+=("$build_dir")
+    done
+
+    WORKLOADS=("${active_workloads[@]}")
+    WORKLOAD_BUILD_DIRS=("${active_build_dirs[@]}")
 }
 
 phase_index() {
@@ -248,10 +358,14 @@ run_workload_sequential() {
     local basename
     local build_dir
     local failed=0
+    local detail=""
     local verify_output=""
 
     basename=$(basename "$yaml_input" .yaml)
-    build_dir=$(build_dir_for_workload "$yaml_input" "$total")
+    build_dir="${WORKLOAD_BUILD_DIRS[$idx]}"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        mkdir -p "$build_dir"
+    fi
 
     echo ""
     info "[$((idx + 1))/$total] ${BOLD}$basename${NC}"
@@ -260,8 +374,12 @@ run_workload_sequential() {
 
     if ! yaml=$(resolve_yaml_path "$yaml_input"); then
         err "  Workload not found: $yaml_input"
+        detail="workload not found"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         RESULTS+=("FAIL  $basename  (workload not found)")
+        if [[ $DRY_RUN -eq 0 ]]; then
+            write_persistent_result_for_build_dir "$build_dir" "FAIL" "$basename" "$detail" ""
+        fi
         return
     fi
 
@@ -275,6 +393,7 @@ run_workload_sequential() {
             else
                 err "  Compilation failed!"
                 failed=1
+                detail="compile"
             fi
         fi
     else
@@ -287,6 +406,7 @@ run_workload_sequential() {
         if [[ ! -f "$ir_path" && $DRY_RUN -eq 0 ]]; then
             err "  hardware_ir.json not found — did compilation succeed with --dump-ir?"
             failed=1
+            detail="hardware_ir missing"
         else
             if [[ $DRY_RUN -eq 1 ]]; then
                 echo "  [DRY-RUN] python -m hybridacc_verify.gen.gen_test_dram --ir $ir_path --workload $yaml --output-dir $build_dir --seed $SEED"
@@ -296,6 +416,7 @@ run_workload_sequential() {
                 else
                     err "  Test data generation failed!"
                     failed=1
+                    detail="gen-test-dram"
                 fi
             fi
         fi
@@ -321,6 +442,7 @@ run_workload_sequential() {
             else
                 err "  Simulation failed or timed out!"
                 failed=1
+                detail="simulation"
             fi
         fi
     elif [[ $SKIP_SIM -eq 1 ]]; then
@@ -334,6 +456,9 @@ run_workload_sequential() {
         else
             verify_output=$(uv run python -m hybridacc_verify.check.compare_golden "$build_dir" --tolerance "$TOLERANCE" 2>&1) || failed=1
             echo "$verify_output" | sed 's/^/    /'
+            if [[ $failed -ne 0 && -z "$detail" ]]; then
+                detail="verification"
+            fi
             if [[ $failed -eq 0 ]]; then
                 succ "  ${BOLD}$basename${NC}: PASS"
                 if [[ $TRACE -eq 1 && -f "$build_dir/trace.json" ]]; then
@@ -343,6 +468,7 @@ run_workload_sequential() {
                     else
                         err "  Trace analysis failed!"
                         failed=1
+                        detail="trace analysis"
                     fi
                 fi
             fi
@@ -358,9 +484,14 @@ run_workload_sequential() {
     if [[ $failed -eq 0 ]]; then
         PASS_COUNT=$((PASS_COUNT + 1))
         RESULTS+=("PASS  $basename")
+        write_persistent_result_for_build_dir "$build_dir" "PASS" "$basename" "" ""
     else
+        if [[ -z "$detail" ]]; then
+            detail="pipeline error"
+        fi
         FAIL_COUNT=$((FAIL_COUNT + 1))
-        RESULTS+=("FAIL  $basename  (pipeline error)")
+        RESULTS+=("FAIL  $basename  ($detail)")
+        write_persistent_result_for_build_dir "$build_dir" "FAIL" "$basename" "$detail" ""
     fi
 }
 
@@ -377,7 +508,7 @@ run_workload_worker() {
     local detail=""
 
     basename=$(basename "$yaml_input" .yaml)
-    build_dir=$(build_dir_for_workload "$yaml_input" "$total")
+    build_dir="${WORKLOAD_BUILD_DIRS[$idx]}"
     task_log="$build_dir/e2e_run.log"
     mkdir -p "$build_dir"
     : > "$task_log"
@@ -385,6 +516,7 @@ run_workload_worker() {
     if ! yaml=$(resolve_yaml_path "$yaml_input"); then
         write_status_file "$status_file" "failed" "$basename" "workload not found"
         write_result_file "$result_file" "FAIL" "$basename" "workload not found" "$task_log"
+        write_persistent_result_for_build_dir "$build_dir" "FAIL" "$basename" "workload not found" "$task_log"
         return 0
     fi
 
@@ -440,9 +572,11 @@ run_workload_worker() {
     if [[ -z "$detail" ]]; then
         write_status_file "$status_file" "done" "$basename" "completed"
         write_result_file "$result_file" "PASS" "$basename" "" "$task_log"
+        write_persistent_result_for_build_dir "$build_dir" "PASS" "$basename" "" "$task_log"
     else
         write_status_file "$status_file" "failed" "$basename" "$detail"
         write_result_file "$result_file" "FAIL" "$basename" "$detail" "$task_log"
+        write_persistent_result_for_build_dir "$build_dir" "FAIL" "$basename" "$detail" "$task_log"
     fi
 }
 
@@ -545,19 +679,18 @@ cleanup_parallel_state() {
 
 trap cleanup_parallel_state EXIT
 
-# ── Step 0: Ensure simulator is built ─────────────────────────────────────
-if [[ $SKIP_BUILD -eq 0 && $SKIP_SIM -eq 0 ]]; then
-    step "Building ESL simulator..."
-    run_cmd "$SCRIPT_DIR/hybridacc_sim.sh" build
-    succ "Simulator built."
-fi
-
 # ── Process workloads ──────────────────────────────────────────────────────
 TOTAL=${#WORKLOADS[@]}
 PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
+RESUME_SKIP_COUNT=0
 RESULTS=()
+WORKLOAD_BUILD_DIRS=()
+
+prepare_workloads_for_execution "$TOTAL"
+ORIGINAL_TOTAL=$TOTAL
+TOTAL=${#WORKLOADS[@]}
 
 if [[ $JOBS -le 0 ]]; then
     if [[ $TOTAL -gt 1 && $DRY_RUN -eq 0 ]]; then
@@ -575,14 +708,30 @@ fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-info "Processing ${BOLD}$TOTAL${NC} workload(s) with seed=$SEED jobs=$JOBS"
+if [[ $RESUME -eq 1 && $RESUME_SKIP_COUNT -gt 0 ]]; then
+    info "Resume mode: reusing ${BOLD}$RESUME_SKIP_COUNT${NC} completed workload(s), ${BOLD}$TOTAL${NC} remaining"
+fi
+if [[ $RESUME -eq 1 ]]; then
+    info "Processing ${BOLD}$TOTAL${NC} remaining workload(s) out of ${BOLD}$ORIGINAL_TOTAL${NC} total with seed=$SEED jobs=$JOBS"
+else
+    info "Processing ${BOLD}$TOTAL${NC} workload(s) with seed=$SEED jobs=$JOBS"
+fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# ── Step 0: Ensure simulator is built ─────────────────────────────────────
+if [[ $TOTAL -gt 0 && $SKIP_BUILD -eq 0 && $SKIP_SIM -eq 0 ]]; then
+    step "Building ESL simulator..."
+    run_cmd "$SCRIPT_DIR/hybridacc_sim.sh" build
+    succ "Simulator built."
+fi
 
 if [[ $TOTAL -gt 1 && $JOBS -gt 1 && $VERBOSE -eq 1 ]]; then
     warn "Batch parallel mode writes detailed logs to each build directory's e2e_run.log; terminal shows the live progress dashboard only."
 fi
 
-if [[ $TOTAL -gt 1 && $JOBS -gt 1 && $DRY_RUN -eq 0 ]]; then
+if [[ $TOTAL -eq 0 ]]; then
+    succ "No remaining workloads to run."
+elif [[ $TOTAL -gt 1 && $JOBS -gt 1 && $DRY_RUN -eq 0 ]]; then
     run_workloads_parallel "$TOTAL"
 else
     for ((idx = 0; idx < TOTAL; idx++)); do
@@ -590,5 +739,5 @@ else
     done
 fi
 
-print_summary "$TOTAL"
+print_summary "$ORIGINAL_TOTAL"
 exit $FAIL_COUNT
