@@ -1,7 +1,7 @@
 /**
  * @file HybridAcc.hpp
- * @brief Top-level HybridAcc SoC module integrating CoreController, CmdToAhbBridge,
- *        and ComputeCluster arrays.
+ * @brief Top-level HybridAcc SoC module integrating CoreController and
+ *        per-cluster ComputeCluster arrays.
  *
  * External interfaces:
  *   - Host AXI4-Lite slave (32-bit control plane)
@@ -21,7 +21,6 @@
 #include <utility>
 
 #include "Core/CoreController.hpp"
-#include "Core/CmdToAhbBridge.hpp"
 #include "ComputeCluster.hpp"
 
 using namespace sc_core;
@@ -97,20 +96,22 @@ SC_MODULE(HybridAcc) {
     // ========================================================================
 
     CoreController<NUM_CLUSTERS, NUM_NLU> core_ctrl;
-    std::unique_ptr<CmdToAhbBridge>   cmd_bridge[NUM_CLUSTERS];
     std::unique_ptr<ComputeCluster<>> cluster[NUM_CLUSTERS];
 
     // ========================================================================
     // Internal signals
     // ========================================================================
 
-    // Core → Bridge cmd signals (per cluster)
+    // Core → Cluster native cmd signals (per cluster)
     sc_signal<bool>         sig_cl_cmd_req_valid[NUM_CLUSTERS];
     sc_signal<bool>         sig_cl_cmd_req_write[NUM_CLUSTERS];
     sc_signal<sc_uint<32>>  sig_cl_cmd_req_addr[NUM_CLUSTERS];
     sc_signal<sc_uint<32>>  sig_cl_cmd_req_wdata[NUM_CLUSTERS];
+    sc_signal<sc_uint<4>>   sig_cl_cmd_req_wstrb[NUM_CLUSTERS];
+    sc_signal<bool>         sig_cl_cmd_req_ready[NUM_CLUSTERS];
     sc_signal<bool>         sig_cl_cmd_resp_valid[NUM_CLUSTERS];
     sc_signal<sc_uint<32>>  sig_cl_cmd_resp_rdata[NUM_CLUSTERS];
+    sc_signal<bool>         sig_cl_cmd_resp_err[NUM_CLUSTERS];
 
     // Bridge → Cluster AHB signals (per cluster)
     sc_signal<bool>         sig_hsel[NUM_CLUSTERS];
@@ -327,18 +328,19 @@ SC_MODULE(HybridAcc) {
 
         // ---- Per-cluster wiring ----
         for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
-            std::string bridge_name = "cmd_bridge_" + std::to_string(c);
             std::string cluster_name = "cluster_" + std::to_string(c);
-            cmd_bridge[c] = std::make_unique<CmdToAhbBridge>(bridge_name.c_str());
             cluster[c]    = std::make_unique<ComputeCluster<>>(cluster_name.c_str(), NetWorkOnChipConfig{4, 32});
 
-            // Core → internal cmd signals
+            // Core → internal native cmd signals
             core_ctrl.cl_cmd_req_valid_o[c](sig_cl_cmd_req_valid[c]);
             core_ctrl.cl_cmd_req_write_o[c](sig_cl_cmd_req_write[c]);
             core_ctrl.cl_cmd_req_addr_o[c](sig_cl_cmd_req_addr[c]);
             core_ctrl.cl_cmd_req_wdata_o[c](sig_cl_cmd_req_wdata[c]);
+            core_ctrl.cl_cmd_req_wstrb_o[c](sig_cl_cmd_req_wstrb[c]);
+            core_ctrl.cl_cmd_req_ready_i[c](sig_cl_cmd_req_ready[c]);
             core_ctrl.cl_cmd_resp_valid_i[c](sig_cl_cmd_resp_valid[c]);
             core_ctrl.cl_cmd_resp_rdata_i[c](sig_cl_cmd_resp_rdata[c]);
+            core_ctrl.cl_cmd_resp_err_i[c](sig_cl_cmd_resp_err[c]);
 
             // Core → internal data AXI signals
             core_ctrl.m_cl_data_aw_valid_o[c](sig_cl_data_aw_valid[c]);
@@ -362,39 +364,24 @@ SC_MODULE(HybridAcc) {
             // Cluster IRQ → Core
             core_ctrl.cluster_irq_i[c](sig_cluster_irq[c]);
 
-            // ---- CmdToAhbBridge wiring ----
-            cmd_bridge[c]->clk(clk);
-            cmd_bridge[c]->reset_n(reset_n);
-
-            // Bridge ← Core cmd
-            cmd_bridge[c]->cmd_req_valid(sig_cl_cmd_req_valid[c]);
-            cmd_bridge[c]->cmd_req_write(sig_cl_cmd_req_write[c]);
-            cmd_bridge[c]->cmd_req_addr(sig_cl_cmd_req_addr[c]);
-            cmd_bridge[c]->cmd_req_wdata(sig_cl_cmd_req_wdata[c]);
-            cmd_bridge[c]->cmd_resp_valid(sig_cl_cmd_resp_valid[c]);
-            cmd_bridge[c]->cmd_resp_rdata(sig_cl_cmd_resp_rdata[c]);
-
-            // Bridge → Cluster AHB
-            cmd_bridge[c]->hsel_o(sig_hsel[c]);
-            cmd_bridge[c]->haddr_o(sig_haddr[c]);
-            cmd_bridge[c]->hwrite_o(sig_hwrite[c]);
-            cmd_bridge[c]->htrans_o(sig_htrans[c]);
-            cmd_bridge[c]->hsize_o(sig_hsize[c]);
-            cmd_bridge[c]->hburst_o(sig_hburst[c]);
-            cmd_bridge[c]->hprot_o(sig_hprot[c]);
-            cmd_bridge[c]->hready_o(sig_hready_m2s[c]);
-            cmd_bridge[c]->hwdata_o(sig_hwdata[c]);
-            cmd_bridge[c]->hready_i(sig_hready_s2m[c]);
-            cmd_bridge[c]->hresp_i(sig_hresp[c]);
-            cmd_bridge[c]->hrdata_i(sig_hrdata[c]);
-
             // ---- ComputeCluster wiring ----
             cluster[c]->clk(clk);
             cluster[c]->reset_n(reset_n);
             cluster[c]->power_enable_i(sig_cluster_power_en[c]);
             cluster[c]->interrupt_o(sig_cluster_irq[c]);
 
-            // Cluster ← Bridge AHB
+            // Cluster ← native command path
+            cluster[c]->cmd_req_valid_i(sig_cl_cmd_req_valid[c]);
+            cluster[c]->cmd_req_write_i(sig_cl_cmd_req_write[c]);
+            cluster[c]->cmd_req_addr_i(sig_cl_cmd_req_addr[c]);
+            cluster[c]->cmd_req_wdata_i(sig_cl_cmd_req_wdata[c]);
+            cluster[c]->cmd_req_wstrb_i(sig_cl_cmd_req_wstrb[c]);
+            cluster[c]->cmd_req_ready_o(sig_cl_cmd_req_ready[c]);
+            cluster[c]->cmd_resp_valid_o(sig_cl_cmd_resp_valid[c]);
+            cluster[c]->cmd_resp_rdata_o(sig_cl_cmd_resp_rdata[c]);
+            cluster[c]->cmd_resp_err_o(sig_cl_cmd_resp_err[c]);
+
+            // Cluster AHB stays bound for standalone legacy tests.
             cluster[c]->hsel_i(sig_hsel[c]);
             cluster[c]->haddr_i(sig_haddr[c]);
             cluster[c]->hwrite_i(sig_hwrite[c]);

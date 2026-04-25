@@ -78,6 +78,17 @@ public:
 
 	sc_out<bool> interrupt_o;
 
+	// Native command frontend used by the active CoreController path.
+	sc_in<bool> cmd_req_valid_i;
+	sc_in<bool> cmd_req_write_i;
+	sc_in<sc_uint<32>> cmd_req_addr_i;
+	sc_in<sc_uint<32>> cmd_req_wdata_i;
+	sc_in<sc_uint<4>> cmd_req_wstrb_i;
+	sc_out<bool> cmd_req_ready_o;
+	sc_out<bool> cmd_resp_valid_o;
+	sc_out<sc_uint<32>> cmd_resp_rdata_o;
+	sc_out<bool> cmd_resp_err_o;
+
 	// AXI4-Lite slave DATA port -> SPM DMA port
 	sc_in<bool> s_axi_awvalid_i;
 	sc_out<bool> s_axi_awready_o;
@@ -150,6 +161,15 @@ public:
 		  reset_n("reset_n"),
 		  power_enable_i("power_enable_i"),
 		  interrupt_o("interrupt_o"),
+		  cmd_req_valid_i("cmd_req_valid_i"),
+		  cmd_req_write_i("cmd_req_write_i"),
+		  cmd_req_addr_i("cmd_req_addr_i"),
+		  cmd_req_wdata_i("cmd_req_wdata_i"),
+		  cmd_req_wstrb_i("cmd_req_wstrb_i"),
+		  cmd_req_ready_o("cmd_req_ready_o"),
+		  cmd_resp_valid_o("cmd_resp_valid_o"),
+		  cmd_resp_rdata_o("cmd_resp_rdata_o"),
+		  cmd_resp_err_o("cmd_resp_err_o"),
 		  s_axi_awvalid_i("s_axi_awvalid_i"),
 		  s_axi_awready_o("s_axi_awready_o"),
 		  s_axi_awaddr_i("s_axi_awaddr_i"),
@@ -226,7 +246,10 @@ public:
 		  ahb_addr_reg("ahb_addr_reg"),
 		  ahb_hsize_reg("ahb_hsize_reg"),
 		  ahb_read_wait_reg("ahb_read_wait_reg"),
-		  ahb_rdata_reg("ahb_rdata_reg")
+		  ahb_rdata_reg("ahb_rdata_reg"),
+		  cmd_read_pending_reg("cmd_read_pending_reg"),
+		  cmd_read_addr_reg("cmd_read_addr_reg"),
+		  cmd_read_err_reg("cmd_read_err_reg")
 	{
 		// Common clock/reset with power-gated local reset
 		spm.clk(clk);
@@ -319,6 +342,7 @@ public:
 		sensitive << spm_axi_arready_sig << spm_axi_rvalid_sig << spm_axi_rdata_sig << spm_axi_rresp_sig;
 		sensitive << hddu_interrupt_sig;
 		sensitive << ahb_active_reg << ahb_addr_reg << ahb_write_reg << ahb_read_wait_reg << hwdata_i;
+		sensitive << hsel_i << hready_i << htrans_i << cmd_read_pending_reg;
 		sensitive << ps_req_sig.ready_sig << pd_req_sig.ready_sig << pli_req_sig.ready_sig;
 		sensitive << plo_resp_sig.valid_sig << plo_resp_sig.data_sig;
 		sensitive << spm_cfg_map_sig << spm_arb_policy_sig << hddu_mmio_rdata_sig;
@@ -490,6 +514,9 @@ private:
 	sc_signal<sc_uint<3>> ahb_hsize_reg;
 	sc_signal<bool> ahb_read_wait_reg;
 	sc_signal<sc_uint<32>> ahb_rdata_reg;
+	sc_signal<bool> cmd_read_pending_reg;
+	sc_signal<sc_uint<32>> cmd_read_addr_reg;
+	sc_signal<bool> cmd_read_err_reg;
 
 	sc_uint<32> noc_last_cmd_reg{};
 	bool hddu_start_pending_ = false;  // AHB pipeline race fix: set on CTRL_START write, cleared when STATUS shows BUSY
@@ -498,6 +525,176 @@ private:
 
 	static bool in_range(uint32_t addr, uint32_t base, uint32_t size) {
 		return addr >= base && addr < (base + size);
+	}
+
+	static uint32_t apply_wstrb(uint32_t current, uint32_t wdata, uint32_t wstrb) {
+		uint32_t merged = current;
+		for (unsigned byte = 0; byte < 4; ++byte) {
+			if ((wstrb & (1u << byte)) == 0u) {
+				continue;
+			}
+			const uint32_t mask = 0xFFu << (byte * 8u);
+			merged = (merged & ~mask) | (wdata & mask);
+		}
+		return merged;
+	}
+
+	bool is_valid_cluster_mmio_addr(uint32_t addr) const {
+		return in_range(addr, kCmdSpmBase, kCmdSpmSize)
+			|| in_range(addr, kCmdHdduBase, kCmdHdduSize)
+			|| in_range(addr, kCmdNocBase, kCmdNocSize)
+			|| in_range(addr, kCmdClusterBase, kCmdClusterSize);
+	}
+
+	void prepare_cluster_mmio_read(uint32_t addr) {
+		if (in_range(addr, kCmdHdduBase, kCmdHdduSize)) {
+			hddu_mmio_addr_sig.write(static_cast<sc_uint<32>>(addr - kCmdHdduBase));
+		}
+	}
+
+	void service_cluster_mmio_write(uint32_t addr, uint32_t wdata, uint32_t wstrb, bool noc_quiesced) {
+		if (in_range(addr, kCmdSpmBase, kCmdSpmSize)) {
+			const uint32_t off = addr - kCmdSpmBase;
+			if (off == kSpmCfgMapOffset) {
+				const uint32_t merged = apply_wstrb(spm_cfg_map_sig.read().to_uint(), wdata, wstrb);
+				spm_cfg_map_sig.write(static_cast<sc_uint<8>>(merged & 0xFFu));
+			} else if (off == kSpmCfgUpdateOffset) {
+				if ((apply_wstrb(0u, wdata, wstrb) & 0x1u) != 0u) {
+					spm_cfg_update_sig.write(true);
+				}
+			} else if (off == kSpmArbPolicyOffset) {
+				const uint32_t merged = apply_wstrb(spm_arb_policy_sig.read() ? 1u : 0u, wdata, wstrb);
+				spm_arb_policy_sig.write((merged & 0x1u) != 0u);
+			} else if (off == kSpmPmuCtrlOffset) {
+				if ((apply_wstrb(0u, wdata, wstrb) & 0x1u) != 0u) {
+					spm_pmu_rst_sig.write(true);
+				}
+			}
+			return;
+		}
+
+		if (in_range(addr, kCmdNocBase, kCmdNocSize)) {
+			const uint32_t off = addr - kCmdNocBase;
+			if (off == kNocCmdDataOffset) {
+				const uint32_t merged = apply_wstrb(noc_last_cmd_reg.to_uint(), wdata, wstrb);
+				issue_noc_command(merged);
+				mirror_cluster_state_from_direct_noc_command(merged);
+			}
+			return;
+		}
+
+		if (in_range(addr, kCmdClusterBase, kCmdClusterSize)) {
+			const uint32_t off = addr - kCmdClusterBase;
+			if (off == cluster::REG_MODE) {
+				const uint32_t merged = apply_wstrb(static_cast<uint32_t>(cluster_ctrl_.mode()), wdata, wstrb);
+				cluster_ctrl_.write_mode(merged);
+			} else if (off == cluster::REG_CTRL) {
+				const uint32_t merged = apply_wstrb(0u, wdata, wstrb);
+				apply_cluster_output(cluster_ctrl_.write_ctrl(merged, noc_quiesced));
+			} else if (off == cluster::REG_ERROR_CODE) {
+				const uint32_t merged = apply_wstrb(cluster_ctrl_.error_code(), wdata, wstrb);
+				cluster_ctrl_.write_error_code(merged);
+			}
+			return;
+		}
+
+		if (in_range(addr, kCmdHdduBase, kCmdHdduSize)) {
+			hddu_mmio_addr_sig.write(static_cast<sc_uint<32>>(addr - kCmdHdduBase));
+			hddu_mmio_wdata_sig.write(static_cast<sc_uint<32>>(wdata));
+			hddu_mmio_write_sig.write(true);
+			if ((addr - kCmdHdduBase) == kHdduCtrlOffset && (wdata & 0x1u) != 0u) {
+				hddu_start_pending_ = true;
+			}
+		}
+	}
+
+	uint32_t service_cluster_mmio_read(uint32_t addr) {
+		if (in_range(addr, kCmdSpmBase, kCmdSpmSize)) {
+			const uint32_t off = addr - kCmdSpmBase;
+			if (off == kSpmCfgMapOffset) {
+				return spm_cfg_map_sig.read().to_uint();
+			}
+			if (off == kSpmCfgUpdateOffset || off == kSpmPmuCtrlOffset) {
+				return 0u;
+			}
+			if (off == kSpmArbPolicyOffset) {
+				return spm_arb_policy_sig.read() ? 1u : 0u;
+			}
+			if (off == kSpmPmuCycleCntLoOffset) {
+				return static_cast<uint32_t>(spm_pmu_cycle_cnt_sig.read().to_uint64() & 0xFFFFFFFFULL);
+			}
+			if (off == kSpmPmuCycleCntHiOffset) {
+				return static_cast<uint32_t>((spm_pmu_cycle_cnt_sig.read().to_uint64() >> 32) & 0xFFFFFFFFULL);
+			}
+			if (off == kSpmPmuArbStallLoOffset) {
+				return static_cast<uint32_t>(spm_pmu_arb_stall_cnt_sig.read().to_uint64() & 0xFFFFFFFFULL);
+			}
+			if (off == kSpmPmuArbStallHiOffset) {
+				return static_cast<uint32_t>((spm_pmu_arb_stall_cnt_sig.read().to_uint64() >> 32) & 0xFFFFFFFFULL);
+			}
+			if (off == kSpmPmuCreditStallLoOffset) {
+				return static_cast<uint32_t>(spm_pmu_credit_stall_cnt_sig.read().to_uint64() & 0xFFFFFFFFULL);
+			}
+			if (off == kSpmPmuCreditStallHiOffset) {
+				return static_cast<uint32_t>((spm_pmu_credit_stall_cnt_sig.read().to_uint64() >> 32) & 0xFFFFFFFFULL);
+			}
+			if (off >= kSpmPmuPortTxnBaseOffset) {
+				const uint32_t rel = off - kSpmPmuPortTxnBaseOffset;
+				const uint32_t idx = rel / kSpmPmuPortTxnStride;
+				const bool high = (rel % kSpmPmuPortTxnStride) == 0x4u;
+				if (idx < SPM_NUM_NOC_CHANNEL && ((rel % kSpmPmuPortTxnStride) == 0x0u || high)) {
+					const uint64_t value = spm_pmu_port_txn_cnt_sig[idx].read().to_uint64();
+					return static_cast<uint32_t>(high ? (value >> 32) : (value & 0xFFFFFFFFULL));
+				}
+			}
+			return 0u;
+		}
+
+		if (in_range(addr, kCmdHdduBase, kCmdHdduSize)) {
+			uint32_t read_value = hddu_mmio_rdata_sig.read().to_uint();
+			if ((addr - kCmdHdduBase) == kHdduStatusOffset) {
+				if (hddu_start_pending_) {
+					read_value |= (1u << 1);
+					read_value &= ~(1u << 0);
+				}
+				if ((read_value & ((1u << 1) | (1u << 4))) != 0u) {
+					hddu_start_pending_ = false;
+				}
+			}
+			return read_value;
+		}
+
+		if (in_range(addr, kCmdNocBase, kCmdNocSize)) {
+			const uint32_t off = addr - kCmdNocBase;
+			if (off == kNocCmdDataOffset) {
+				return noc_last_cmd_reg.to_uint();
+			}
+			if (off == kNocStatusOffset) {
+				return noc.status_word();
+			}
+			return 0u;
+		}
+
+		if (in_range(addr, kCmdClusterBase, kCmdClusterSize)) {
+			const uint32_t off = addr - kCmdClusterBase;
+			if (off == cluster::REG_MODE) {
+				return static_cast<uint32_t>(cluster_ctrl_.mode());
+			}
+			if (off == cluster::REG_CTRL) {
+				return 0u;
+			}
+			if (off == cluster::REG_STATUS) {
+				return cluster_status_word();
+			}
+			if (off == cluster::REG_ERROR_CODE) {
+				return cluster_ctrl_.error_code();
+			}
+			if (off == cluster::REG_SUBSTATE) {
+				return static_cast<uint32_t>(cluster_ctrl_.substate());
+			}
+		}
+
+		return 0u;
 	}
 
 	static uint32_t raw_noc_command(message_command_t cmd) {
@@ -573,7 +770,9 @@ private:
 
 	void comb_power_and_wiring() {
 		const bool power_on = power_enable_i.read();
+		const bool ahb_addr_accept = hsel_i.read() && hready_i.read() && (htrans_i.read()[1] != 0);
 		local_reset_n_sig.write(reset_n.read() && power_on);
+		cmd_req_ready_o.write(power_on && !cmd_read_pending_reg.read() && !ahb_active_reg.read() && !ahb_addr_accept);
 
 		// External AXI4 data slave gating
 		spm_axi_awvalid_sig.write(power_on && s_axi_awvalid_i.read());
@@ -611,6 +810,9 @@ private:
 	}
 
 	void seq_ahb_ctrl() {
+		cmd_resp_valid_o.write(false);
+		cmd_resp_rdata_o.write(0);
+		cmd_resp_err_o.write(false);
 		spm_cfg_map_sig.write(0);
 		spm_cfg_update_sig.write(false);
 		spm_arb_policy_sig.write(false);
@@ -627,6 +829,9 @@ private:
 		ahb_addr_reg.write(0);
 		ahb_read_wait_reg.write(false);
 		ahb_rdata_reg.write(0);
+		cmd_read_pending_reg.write(false);
+		cmd_read_addr_reg.write(0);
+		cmd_read_err_reg.write(false);
 
 		hddu_mmio_addr_sig.write(0);
 		hddu_mmio_wdata_sig.write(0);
@@ -651,6 +856,8 @@ private:
 			hddu_mmio_write_sig.write(false);
 			spm_pmu_rst_sig.write(false);
 			spm_soft_reset_sig.write(false);
+			cmd_resp_valid_o.write(false);
+			cmd_resp_err_o.write(false);
 
 			const bool noc_quiesced = noc_is_quiesced();
 			apply_cluster_output(cluster_ctrl_.background_tick(noc_quiesced));
@@ -672,9 +879,48 @@ private:
 			if (!power_enable_i.read()) {
 				ahb_active_reg.write(false);
 				ahb_read_wait_reg.write(false);
+				cmd_read_pending_reg.write(false);
+				cmd_read_err_reg.write(false);
 				spm_drop_noc_resp_sig.write(false);
 				wait();
 				continue;
+			}
+
+			const bool cmd_req_fire = cmd_req_valid_i.read()
+				&& !cmd_read_pending_reg.read()
+				&& !ahb_active_reg.read()
+				&& !is_trans_pre;
+
+			if (cmd_read_pending_reg.read()) {
+				const uint32_t addr = cmd_read_addr_reg.read().to_uint();
+				const bool err = cmd_read_err_reg.read();
+				cmd_resp_valid_o.write(true);
+				cmd_resp_rdata_o.write(err ? 0u : service_cluster_mmio_read(addr));
+				cmd_resp_err_o.write(err);
+				cmd_read_pending_reg.write(false);
+				cmd_read_err_reg.write(false);
+			} else if (cmd_req_fire) {
+				const uint32_t addr = cmd_req_addr_i.read().to_uint();
+				const bool valid = is_valid_cluster_mmio_addr(addr);
+				if (cmd_req_write_i.read()) {
+					if (valid) {
+						service_cluster_mmio_write(
+							addr,
+							cmd_req_wdata_i.read().to_uint(),
+							cmd_req_wstrb_i.read().to_uint(),
+							noc_quiesced);
+					}
+					cmd_resp_valid_o.write(true);
+					cmd_resp_rdata_o.write(0);
+					cmd_resp_err_o.write(!valid);
+				} else {
+					if (valid) {
+						prepare_cluster_mmio_read(addr);
+					}
+					cmd_read_addr_reg.write(addr);
+					cmd_read_err_reg.write(!valid);
+					cmd_read_pending_reg.write(true);
+				}
 			}
 
 			// HTRANS: 2=NONSEQ, 3=SEQ implies valid transfer
@@ -686,15 +932,8 @@ private:
 				ahb_hsize_reg.write(hsize_i.read());
 				ahb_active_reg.write(true);
 
-				// Pre-set HDDU address during address phase for reads,
-				// so that comb_mmio_read has a full cycle to evaluate
-				// before the data phase captures hddu_mmio_rdata_sig.
 				if (!hwrite_i.read()) {
-					const uint32_t a = haddr_i.read().to_uint();
-					if (in_range(a, kCmdHdduBase, kCmdHdduSize)) {
-						hddu_mmio_addr_sig.write(
-							static_cast<sc_uint<32>>(a - kCmdHdduBase));
-					}
+					prepare_cluster_mmio_read(haddr_i.read().to_uint());
 				}
 			} else {
 				ahb_active_reg.write(false);
@@ -705,117 +944,11 @@ private:
 				const uint32_t addr = ahb_addr_reg.read().to_uint();
 				const bool is_write = ahb_write_reg.read();
 				const uint32_t wdata = hwdata_i.read().to_uint(); // HWDATA valid now
-				sc_uint<32> read_value = 0;
 
 				if (is_write) {
-					if (in_range(addr, kCmdSpmBase, kCmdSpmSize)) {
-						const uint32_t off = addr - kCmdSpmBase;
-						if (off == kSpmCfgMapOffset) {
-							spm_cfg_map_sig.write(static_cast<sc_uint<8>>(wdata & 0xFF));
-						} else if (off == kSpmCfgUpdateOffset) {
-							if ((wdata & 0x1U) != 0U) {
-								spm_cfg_update_sig.write(true);
-							}
-						} else if (off == kSpmArbPolicyOffset) {
-							spm_arb_policy_sig.write((wdata & 0x1U) != 0U);
-						} else if (off == kSpmPmuCtrlOffset) {
-							if ((wdata & 0x1U) != 0U) {
-								spm_pmu_rst_sig.write(true);
-							}
-						}
-					} else if (in_range(addr, kCmdNocBase, kCmdNocSize)) {
-						const uint32_t off = addr - kCmdNocBase;
-						if (off == kNocCmdDataOffset) {
-							issue_noc_command(wdata);
-							mirror_cluster_state_from_direct_noc_command(wdata);
-						}
-					} else if (in_range(addr, kCmdClusterBase, kCmdClusterSize)) {
-						const uint32_t off = addr - kCmdClusterBase;
-						if (off == cluster::REG_MODE) {
-							cluster_ctrl_.write_mode(wdata);
-						} else if (off == cluster::REG_CTRL) {
-							apply_cluster_output(cluster_ctrl_.write_ctrl(wdata, noc_quiesced));
-						} else if (off == cluster::REG_ERROR_CODE) {
-							cluster_ctrl_.write_error_code(wdata);
-						}
-					} else if (in_range(addr, kCmdHdduBase, kCmdHdduSize)) {
-						hddu_mmio_addr_sig.write(static_cast<sc_uint<32>>(addr - kCmdHdduBase));
-						hddu_mmio_wdata_sig.write(static_cast<sc_uint<32>>(wdata));
-						hddu_mmio_write_sig.write(true);
-						// Detect START: HDDU CTRL offset = 0x800, START bit = bit 0
-						if ((addr - kCmdHdduBase) == kHdduCtrlOffset && (wdata & 0x1))
-							hddu_start_pending_ = true;
-					}
+					service_cluster_mmio_write(addr, wdata, 0xFu, noc_quiesced);
 				} else {
-					if (in_range(addr, kCmdSpmBase, kCmdSpmSize)) {
-						const uint32_t off = addr - kCmdSpmBase;
-						if (off == kSpmCfgMapOffset) {
-							read_value = spm_cfg_map_sig.read();
-						} else if (off == kSpmCfgUpdateOffset) {
-							read_value = 0;
-						} else if (off == kSpmArbPolicyOffset) {
-							read_value = spm_arb_policy_sig.read() ? 1U : 0U;
-						} else if (off == kSpmPmuCtrlOffset) {
-							read_value = 0;
-						} else if (off == kSpmPmuCycleCntLoOffset) {
-							read_value = static_cast<uint32_t>(spm_pmu_cycle_cnt_sig.read().to_uint64() & 0xFFFFFFFFULL);
-						} else if (off == kSpmPmuCycleCntHiOffset) {
-							read_value = static_cast<uint32_t>((spm_pmu_cycle_cnt_sig.read().to_uint64() >> 32) & 0xFFFFFFFFULL);
-						} else if (off == kSpmPmuArbStallLoOffset) {
-							read_value = static_cast<uint32_t>(spm_pmu_arb_stall_cnt_sig.read().to_uint64() & 0xFFFFFFFFULL);
-						} else if (off == kSpmPmuArbStallHiOffset) {
-							read_value = static_cast<uint32_t>((spm_pmu_arb_stall_cnt_sig.read().to_uint64() >> 32) & 0xFFFFFFFFULL);
-						} else if (off == kSpmPmuCreditStallLoOffset) {
-							read_value = static_cast<uint32_t>(spm_pmu_credit_stall_cnt_sig.read().to_uint64() & 0xFFFFFFFFULL);
-						} else if (off == kSpmPmuCreditStallHiOffset) {
-							read_value = static_cast<uint32_t>((spm_pmu_credit_stall_cnt_sig.read().to_uint64() >> 32) & 0xFFFFFFFFULL);
-						} else if (off >= kSpmPmuPortTxnBaseOffset) {
-							const uint32_t rel = off - kSpmPmuPortTxnBaseOffset;
-							const uint32_t idx = rel / kSpmPmuPortTxnStride;
-							const bool high = (rel % kSpmPmuPortTxnStride) == 0x4;
-							if (idx < SPM_NUM_NOC_CHANNEL && ((rel % kSpmPmuPortTxnStride) == 0x0 || high)) {
-								const uint64_t v = spm_pmu_port_txn_cnt_sig[idx].read().to_uint64();
-								read_value = static_cast<uint32_t>(high ? (v >> 32) : (v & 0xFFFFFFFFULL));
-							}
-						}
-					} else if (in_range(addr, kCmdHdduBase, kCmdHdduSize)) {
-						// hddu_mmio_addr_sig was pre-set during the address
-						// phase, giving comb_mmio_read a full cycle to produce
-						// the correct rdata. Do NOT write addr_sig again here.
-						read_value = hddu_mmio_rdata_sig.read();
-						// HDDU STATUS offset = 0x804
-						if ((addr - kCmdHdduBase) == kHdduStatusOffset) {
-							if (hddu_start_pending_) {
-								read_value |= (1u << 1);  // force BUSY
-								read_value &= ~(1u << 0); // clear IDLE
-							}
-							// Clear pending once real status shows BUSY or DONE
-							if (read_value & ((1u << 1) | (1u << 4)))
-								hddu_start_pending_ = false;
-
-						}
-					} else if (in_range(addr, kCmdNocBase, kCmdNocSize)) {
-						const uint32_t off = addr - kCmdNocBase;
-						if (off == kNocCmdDataOffset) {
-							read_value = noc_last_cmd_reg;
-						} else if (off == kNocStatusOffset) {
-							read_value = noc.status_word();
-						}
-					} else if (in_range(addr, kCmdClusterBase, kCmdClusterSize)) {
-						const uint32_t off = addr - kCmdClusterBase;
-						if (off == cluster::REG_MODE) {
-							read_value = static_cast<uint32_t>(cluster_ctrl_.mode());
-						} else if (off == cluster::REG_CTRL) {
-							read_value = 0u;
-						} else if (off == cluster::REG_STATUS) {
-							read_value = cluster_status_word();
-						} else if (off == cluster::REG_ERROR_CODE) {
-							read_value = cluster_ctrl_.error_code();
-						} else if (off == cluster::REG_SUBSTATE) {
-							read_value = static_cast<uint32_t>(cluster_ctrl_.substate());
-						}
-					}
-					ahb_rdata_reg.write(read_value);
+					ahb_rdata_reg.write(service_cluster_mmio_read(addr));
 				}
 			}
 

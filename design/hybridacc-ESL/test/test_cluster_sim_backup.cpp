@@ -171,6 +171,15 @@ public:
 	sc_core::sc_signal<bool> hready_o;
 	sc_core::sc_signal<bool> hresp_o;
 	sc_core::sc_signal<sc_dt::sc_uint<32>> hrdata_o;
+	sc_core::sc_signal<bool> cmd_req_valid_i;
+	sc_core::sc_signal<bool> cmd_req_write_i;
+	sc_core::sc_signal<sc_dt::sc_uint<32>> cmd_req_addr_i;
+	sc_core::sc_signal<sc_dt::sc_uint<32>> cmd_req_wdata_i;
+	sc_core::sc_signal<sc_dt::sc_uint<4>> cmd_req_wstrb_i;
+	sc_core::sc_signal<bool> cmd_req_ready_o;
+	sc_core::sc_signal<bool> cmd_resp_valid_o;
+	sc_core::sc_signal<sc_dt::sc_uint<32>> cmd_resp_rdata_o;
+	sc_core::sc_signal<bool> cmd_resp_err_o;
 
 	// DUT instance
 	hybridacc::ComputeCluster<
@@ -224,6 +233,15 @@ private:
 		dut.reset_n(reset_n);
 		dut.power_enable_i(power_enable_i);
 		dut.interrupt_o(interrupt_o);
+		dut.cmd_req_valid_i(cmd_req_valid_i);
+		dut.cmd_req_write_i(cmd_req_write_i);
+		dut.cmd_req_addr_i(cmd_req_addr_i);
+		dut.cmd_req_wdata_i(cmd_req_wdata_i);
+		dut.cmd_req_wstrb_i(cmd_req_wstrb_i);
+		dut.cmd_req_ready_o(cmd_req_ready_o);
+		dut.cmd_resp_valid_o(cmd_resp_valid_o);
+		dut.cmd_resp_rdata_o(cmd_resp_rdata_o);
+		dut.cmd_resp_err_o(cmd_resp_err_o);
 
 		dut.s_axi_awvalid_i(s_axi_awvalid_i);
 		dut.s_axi_awready_o(s_axi_awready_o);

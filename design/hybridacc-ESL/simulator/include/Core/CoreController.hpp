@@ -115,13 +115,16 @@ SC_MODULE(CoreController) {
     sc_in<sc_biguint<kClAxiDataWidth>>          m_cl_data_r_data_i[NUM_CLUSTERS];
     sc_in<sc_uint<2>>    m_cl_data_r_resp_i[NUM_CLUSTERS];
 
-    // --- §7.5 Per-cluster AHB-Lite command masters ---
+    // --- §7.5 Per-cluster native command masters ---
     sc_out<bool>         cl_cmd_req_valid_o[NUM_CLUSTERS];
     sc_out<bool>         cl_cmd_req_write_o[NUM_CLUSTERS];
     sc_out<sc_uint<32>>  cl_cmd_req_addr_o[NUM_CLUSTERS];
     sc_out<sc_uint<32>>  cl_cmd_req_wdata_o[NUM_CLUSTERS];
+    sc_out<sc_uint<4>>   cl_cmd_req_wstrb_o[NUM_CLUSTERS];
+    sc_in<bool>          cl_cmd_req_ready_i[NUM_CLUSTERS];
     sc_in<bool>          cl_cmd_resp_valid_i[NUM_CLUSTERS];
     sc_in<sc_uint<32>>   cl_cmd_resp_rdata_i[NUM_CLUSTERS];
+    sc_in<bool>          cl_cmd_resp_err_i[NUM_CLUSTERS];
 
     // --- §7.6 Per-NLU AHB-Lite command masters ---
     static constexpr unsigned kNluPorts = NUM_NLU > 0 ? NUM_NLU : 1;
@@ -440,8 +443,11 @@ SC_MODULE(CoreController) {
             u_cmd_fabric.cl_cmd_req_write_o[c](cl_cmd_req_write_o[c]);
             u_cmd_fabric.cl_cmd_req_addr_o[c](cl_cmd_req_addr_o[c]);
             u_cmd_fabric.cl_cmd_req_wdata_o[c](cl_cmd_req_wdata_o[c]);
+            u_cmd_fabric.cl_cmd_req_wstrb_o[c](cl_cmd_req_wstrb_o[c]);
+            u_cmd_fabric.cl_cmd_req_ready_i[c](cl_cmd_req_ready_i[c]);
             u_cmd_fabric.cl_cmd_resp_valid_i[c](cl_cmd_resp_valid_i[c]);
             u_cmd_fabric.cl_cmd_resp_rdata_i[c](cl_cmd_resp_rdata_i[c]);
+            u_cmd_fabric.cl_cmd_resp_err_i[c](cl_cmd_resp_err_i[c]);
         }
         // Per-NLU command → external
         for (unsigned n = 0; n < kNluPorts; ++n) {
