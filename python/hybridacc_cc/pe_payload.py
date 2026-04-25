@@ -111,6 +111,16 @@ def generate_patch_entries(json_data: Dict[str, Any],
     return entries
 
 
+def find_patch_offset(json_data: Dict[str, Any], param_name: str) -> int | None:
+    """Return the instruction offset patched by the given template param."""
+    param_defs = json_data["parameters"]
+    for patch in json_data["patches"]:
+        pname = param_defs[patch["param_index"]]["name"]
+        if pname == param_name:
+            return int(patch["offset"])
+    return None
+
+
 # ===================================================================
 # Template context assembly for Jinja2
 # ===================================================================
@@ -175,6 +185,9 @@ def collect_payload_context(
         jdata = load_template_json(tmpl_name, kernel_json_dir)
         patch_entries = generate_patch_entries(jdata, layer.pe_program.params)
         patch_sym = f"patch_{layer.name}"
+        gemm_kernel_prefetch_offset = find_patch_offset(jdata, "NUM_OF_KERNEL_PREFETCH_SETS")
+        gemm_kernel_load_offset = find_patch_offset(jdata, "NUM_OF_KERNEL_LOAD_LOOP")
+        gemm_kernel_reuse_offset = find_patch_offset(jdata, "NUM_OF_KERNEL_REUSE_LOOP")
 
         layer_payloads.append({
             "name": layer.name,
@@ -185,6 +198,9 @@ def collect_payload_context(
             "patch_symbol": patch_sym,
             "patch_entries": patch_entries,
             "patch_count": len(patch_entries),
+            "gemm_kernel_prefetch_offset": gemm_kernel_prefetch_offset,
+            "gemm_kernel_load_offset": gemm_kernel_load_offset,
+            "gemm_kernel_reuse_offset": gemm_kernel_reuse_offset,
         })
 
     return {

@@ -27,7 +27,11 @@ _DEFAULT_RESULTS_ROOT = _REPO_ROOT / "output"
 _METRIC_LABELS = {
     "sim_time_ns": "Simulation Time (ns)",
     "ebreak_cycle": "Core-level cycles (EBREAK)",
-    "cluster_run_cycles": "Cluster RUN cycles",
+    "cluster_run_cycles": "Cluster Busy Cycles (HDDU/AGU)",
+    "dma_active_cycles": "DMA Active Cycles",
+    "compute_dma_overlap_cycles": "Compute/DMA Overlap Cycles",
+    "compute_dma_overlap_pct_of_compute": "Overlap / Compute Busy (%)",
+    "compute_dma_overlap_pct_of_dma": "Overlap / DMA Active (%)",
     "gfops_per_sec": "GFLOPS/sec",
     "active_pes": "Active PEs",
     "active_pe_ratio": "Active PE Ratio",
@@ -111,7 +115,7 @@ _PROFILES = {
         key="conv3x3",
         op_type="conv2d_3x3",
         axis_order=("oh", "ow", "ic", "oc"),
-        base_dims={"oh": 16, "ow": 16, "ic": 4, "oc": 16},
+        base_dims={"oh": 14, "ow": 192, "ic": 4, "oc": 16},
         kernel=3,
         default_sweeps={
             "oh": [16, 32, 64, 128],
@@ -126,7 +130,7 @@ _PROFILES = {
         key="conv1x1",
         op_type="conv2d_1x1",
         axis_order=("oh", "ow", "ic", "oc"),
-        base_dims={"oh": 16, "ow": 16, "ic": 12, "oc": 16},
+        base_dims={"oh": 16, "ow": 64, "ic": 12, "oc": 48},
         kernel=1,
         default_sweeps={
             "oh": [16, 48, 96, 144],
@@ -145,7 +149,7 @@ _PROFILES = {
         default_sweeps={
             "m": [48, 96, 192, 384, 768],
             "n": [32, 64, 128, 256, 512],
-            "k": [32, 64, 96],
+            "k": [32, 64, 96, 192, 384, 768],
         },
         default_scatter_dims=("m", "n", "k"),
     ),
@@ -617,6 +621,8 @@ def _parse_sim_log(path: Path) -> dict[str, Any]:
         "sim_time_ns": math.nan,
         "ebreak_cycle": math.nan,
         "cluster_run_cycles": math.nan,
+        "dma_active_cycles": math.nan,
+        "compute_dma_overlap_cycles": math.nan,
         "timeout": 0.0,
         "passed": 0.0,
     }
@@ -637,6 +643,14 @@ def _parse_sim_log(path: Path) -> dict[str, Any]:
     cluster_match = pd.Series(text.splitlines(), dtype="string").str.extract(r"\[SIM\] Cluster RUN cycles:\s+(\d+)").dropna()
     if not cluster_match.empty:
         metrics["cluster_run_cycles"] = float(cluster_match.iloc[-1, 0])
+
+    dma_match = pd.Series(text.splitlines(), dtype="string").str.extract(r"\[SIM\] DMA active cycles:\s+(\d+)").dropna()
+    if not dma_match.empty:
+        metrics["dma_active_cycles"] = float(dma_match.iloc[-1, 0])
+
+    overlap_match = pd.Series(text.splitlines(), dtype="string").str.extract(r"\[SIM\] Compute/DMA overlap cycles:\s+(\d+)").dropna()
+    if not overlap_match.empty:
+        metrics["compute_dma_overlap_cycles"] = float(overlap_match.iloc[-1, 0])
 
     timeout = "Timeout waiting for EBREAK halt" in text
     passed = "[SIM] ALL TESTS PASSED" in text and "[SIM] SOME TESTS FAILED" not in text and not timeout
@@ -712,6 +726,11 @@ def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) ->
         row["macs_per_active_pe"] = row["macs"] / active_pes if isinstance(active_pes, (int, float)) and active_pes and not math.isnan(active_pes) else math.nan
         core_cycles = row.get("ebreak_cycle")
         cluster_cycles = row.get("cluster_run_cycles")
+        dma_cycles = row.get("dma_active_cycles")
+        overlap_cycles = row.get("compute_dma_overlap_cycles")
+        cluster_cycles_valid = isinstance(cluster_cycles, (int, float)) and not math.isnan(cluster_cycles)
+        dma_cycles_valid = isinstance(dma_cycles, (int, float)) and not math.isnan(dma_cycles)
+        overlap_cycles_valid = isinstance(overlap_cycles, (int, float)) and not math.isnan(overlap_cycles)
         row["core_level_macs_utilization_pct"] = (
             100.0 * row["macs"] / (core_cycles * active_pes * 4.0)
             if isinstance(core_cycles, (int, float))
@@ -730,6 +749,16 @@ def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) ->
             and active_pes
             and not math.isnan(cluster_cycles)
             and not math.isnan(active_pes)
+            else math.nan
+        )
+        row["compute_dma_overlap_pct_of_compute"] = (
+            100.0 * overlap_cycles / cluster_cycles
+            if overlap_cycles_valid and cluster_cycles_valid and cluster_cycles > 0
+            else math.nan
+        )
+        row["compute_dma_overlap_pct_of_dma"] = (
+            100.0 * overlap_cycles / dma_cycles
+            if overlap_cycles_valid and dma_cycles_valid and dma_cycles > 0
             else math.nan
         )
         row["macs_utilization_pct"] = row["core_level_macs_utilization_pct"]
@@ -761,13 +790,17 @@ def _build_1d_sweep_plot(frame: pd.DataFrame, sweep_dim: str) -> str | None:
         ("sim_time_ns", _metric_display_label("sim_time_ns")),
         ("ebreak_cycle", _metric_display_label("ebreak_cycle")),
         ("cluster_run_cycles", _metric_display_label("cluster_run_cycles")),
+        ("dma_active_cycles", _metric_display_label("dma_active_cycles")),
+        ("compute_dma_overlap_cycles", _metric_display_label("compute_dma_overlap_cycles")),
+        ("compute_dma_overlap_pct_of_compute", _metric_display_label("compute_dma_overlap_pct_of_compute")),
+        ("compute_dma_overlap_pct_of_dma", _metric_display_label("compute_dma_overlap_pct_of_dma")),
         ("active_pes", _metric_display_label("active_pes")),
-        ("active_pe_ratio", _metric_display_label("active_pe_ratio")),
         ("macs", _metric_display_label("macs")),
+        ("gfops_per_sec", _metric_display_label("gfops_per_sec")),
         ("core_level_macs_utilization_pct", _metric_display_label("core_level_macs_utilization_pct")),
         ("cluster_level_macs_utilization_pct", _metric_display_label("cluster_level_macs_utilization_pct")),
     ]
-    fig, axes = plt.subplots(4, 2, figsize=(12, 13), facecolor="#f7f2e8")
+    fig, axes = plt.subplots(6, 2, figsize=(12, 19), facecolor="#f7f2e8")
     axes_list = list(axes.flat)
     x = passed[sweep_dim]
     for axis, (metric, label) in zip(axes_list, metrics):
@@ -829,7 +862,7 @@ def _build_3d_scatter(frame: pd.DataFrame, dims: list[str], color_metric: str, a
         y,
         z,
         c=plot_frame[color_metric],
-        cmap=cm.get_cmap("RdYlGn"),
+        cmap=cm.magma,
         s=70,
         edgecolors="#3d2d1f",
         linewidths=0.5,
@@ -865,6 +898,10 @@ def _summary_stats(frame: pd.DataFrame) -> dict[str, float | int]:
         "failed": int((frame["result_state"] == "failed").sum()),
         "missing": int((frame["result_state"] == "missing").sum()),
         "avg_time": frame.loc[frame["sim_time_ns"].notna(), "sim_time_ns"].mean(),
+        "avg_dma_active_cycles": frame.loc[frame["dma_active_cycles"].notna(), "dma_active_cycles"].mean(),
+        "avg_overlap_cycles": frame.loc[frame["compute_dma_overlap_cycles"].notna(), "compute_dma_overlap_cycles"].mean(),
+        "avg_overlap_compute_pct": frame.loc[frame["compute_dma_overlap_pct_of_compute"].notna(), "compute_dma_overlap_pct_of_compute"].mean(),
+        "avg_overlap_dma_pct": frame.loc[frame["compute_dma_overlap_pct_of_dma"].notna(), "compute_dma_overlap_pct_of_dma"].mean(),
         "avg_gfops": frame.loc[frame["gfops_per_sec"].notna(), "gfops_per_sec"].mean(),
         "avg_active": frame.loc[frame["active_pes"].notna(), "active_pes"].mean(),
         "avg_core_util": frame.loc[frame["core_level_macs_utilization_pct"].notna(), "core_level_macs_utilization_pct"].mean(),
@@ -872,6 +909,8 @@ def _summary_stats(frame: pd.DataFrame) -> dict[str, float | int]:
         "max_gfops": frame.loc[frame["gfops_per_sec"].notna(), "gfops_per_sec"].max(),
         "max_core_util": frame.loc[frame["core_level_macs_utilization_pct"].notna(), "core_level_macs_utilization_pct"].max(),
         "max_cluster_util": frame.loc[frame["cluster_level_macs_utilization_pct"].notna(), "cluster_level_macs_utilization_pct"].max(),
+        "max_overlap_compute_pct": frame.loc[frame["compute_dma_overlap_pct_of_compute"].notna(), "compute_dma_overlap_pct_of_compute"].max(),
+        "max_overlap_dma_pct": frame.loc[frame["compute_dma_overlap_pct_of_dma"].notna(), "compute_dma_overlap_pct_of_dma"].max(),
     }
 
 
@@ -887,6 +926,10 @@ def _summary_cards(frame: pd.DataFrame) -> str:
         ("Failed", str(summary["failed"]), "sim.log present but not passing"),
         ("Missing", str(summary["missing"]), "results directory not found"),
         ("Avg sim time", _format_summary_number(summary["avg_time"], ".0f", " ns"), "passed cases"),
+        ("Avg DMA active", _format_summary_number(summary["avg_dma_active_cycles"], ".0f"), "live simulator counter"),
+        ("Avg overlap cycles", _format_summary_number(summary["avg_overlap_cycles"], ".0f"), "compute and DMA overlap"),
+        ("Avg overlap/compute", _format_summary_number(summary["avg_overlap_compute_pct"], ".2f", "%"), "live simulator counter"),
+        ("Avg overlap/DMA", _format_summary_number(summary["avg_overlap_dma_pct"], ".2f", "%"), "live simulator counter"),
         ("Avg GFLOPS/sec", _format_summary_number(summary["avg_gfops"], ".3g"), "modeled sim time"),
         ("Max GFLOPS/sec", _format_summary_number(summary["max_gfops"], ".3g"), "modeled sim time"),
         ("Avg active PEs", _format_summary_number(summary["avg_active"], ".1f"), "max enabled per workload"),
@@ -894,6 +937,8 @@ def _summary_cards(frame: pd.DataFrame) -> str:
         ("Max core MAC util", _format_summary_number(summary["max_core_util"], ".2f", "%"), "available runs"),
         ("Avg cluster MAC util", _format_summary_number(summary["avg_cluster_util"], ".2f", "%"), "passed cases"),
         ("Max cluster MAC util", _format_summary_number(summary["max_cluster_util"], ".2f", "%"), "available runs"),
+        ("Max overlap/compute", _format_summary_number(summary["max_overlap_compute_pct"], ".2f", "%"), "available runs"),
+        ("Max overlap/DMA", _format_summary_number(summary["max_overlap_dma_pct"], ".2f", "%"), "available runs"),
     ]
     return "".join(
         f'<div class="card"><div class="label">{escape(label)}</div><div class="value">{escape(value)}</div><div class="sub">{escape(sub)}</div></div>'
@@ -931,6 +976,10 @@ def _render_report_html(
             *sweep_dims,
             "ebreak_cycle",
             "cluster_run_cycles",
+            "dma_active_cycles",
+            "compute_dma_overlap_cycles",
+            "compute_dma_overlap_pct_of_compute",
+            "compute_dma_overlap_pct_of_dma",
             "sim_time_ns",
             "gfops_per_sec",
             "active_pes",
@@ -1044,7 +1093,7 @@ def _render_report_html(
   <main>
     <section class="hero">
       <h1>{escape(manifest['suite_name'])} sweep report</h1>
-            <p>Generated from manifest plus e2e output directories. The report summarizes core-level cycles to EBREAK, cluster RUN cycles gathered directly from the simulator, active PE footprint, and both core-level and cluster-level MAC utilization.</p>
+                        <p>Generated from manifest plus e2e output directories. The report summarizes core-level cycles to EBREAK, cluster busy cycles gathered directly from simulator HDDU/AGU activity, DMA active cycles, compute/DMA overlap gathered live during simulation, active PE footprint, and both core-level and cluster-level MAC utilization.</p>
             <div class="meta">
                 <span class="pill">workload={escape(manifest['workload']['key'])}</span>
                 <span class="pill">op={escape(manifest['workload']['op_type'])}</span>
@@ -1054,9 +1103,11 @@ def _render_report_html(
                                 <span class="pill">scatter metrics={escape(', '.join(_metric_display_label(metric) for metric in scatter_metrics))}</span>
                                 <span class="pill">max core util={escape(_format_summary_number(summary["max_core_util"], ".2f", "%"))}</span>
                                 <span class="pill">max cluster util={escape(_format_summary_number(summary["max_cluster_util"], ".2f", "%"))}</span>
+                                                                <span class="pill">max overlap/compute={escape(_format_summary_number(summary["max_overlap_compute_pct"], ".2f", "%"))}</span>
+                                                                <span class="pill">max overlap/DMA={escape(_format_summary_number(summary["max_overlap_dma_pct"], ".2f", "%"))}</span>
                                 <span class="pill">max GFLOPS/sec={escape(_format_summary_number(summary["max_gfops"], ".3g"))}</span>
             </div>
-                        <p class="hero-note">Peak observed results: core MAC utilization {escape(_format_summary_number(summary["max_core_util"], ".2f", "%"))}, cluster MAC utilization {escape(_format_summary_number(summary["max_cluster_util"], ".2f", "%"))}, and throughput {escape(_format_summary_number(summary["max_gfops"], ".3g"))} GFLOPS/sec.</p>
+                                                                                                <p class="hero-note">Peak observed results: core MAC utilization {escape(_format_summary_number(summary["max_core_util"], ".2f", "%"))}, cluster MAC utilization {escape(_format_summary_number(summary["max_cluster_util"], ".2f", "%"))}, overlap/compute ratio {escape(_format_summary_number(summary["max_overlap_compute_pct"], ".2f", "%"))}, overlap/DMA ratio {escape(_format_summary_number(summary["max_overlap_dma_pct"], ".2f", "%"))}, and throughput {escape(_format_summary_number(summary["max_gfops"], ".3g"))} GFLOPS/sec.</p>
       <div class="card-grid">{_summary_cards(frame)}</div>
     </section>
         {scatter_html}

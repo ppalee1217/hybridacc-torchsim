@@ -72,6 +72,18 @@ def _conv1x1_multi_bus(layer: LayerHwConfig) -> bool:
     return _has_duplicate_enabled_ids(layer.scan_chain, "pli_id")
 
 
+def _conv1x1_resident_oc_tiles(layer: LayerHwConfig) -> int:
+    return max(1, layer.tiling_params.conv1x1_resident_oc_tiles)
+
+
+def _choose_conv1x1_resident_oc_tiles(num_oc_tiles: int, num_bus: int) -> int:
+    upper = min(num_oc_tiles, num_bus)
+    for candidate in range(upper, 1, -1):
+        if num_oc_tiles % candidate == 0:
+            return candidate
+    return 1
+
+
 def _coerce_bool_attr(value: object, op_name: str, attr_name: str) -> bool:
     if isinstance(value, bool):
         return value
@@ -115,6 +127,14 @@ def _resolve_output_epilogue(op: OpDesc) -> int:
 
 def _expected_spm_modes(layer: LayerHwConfig) -> Dict[str, str]:
     if layer.op_type == "conv2d_1x1":
+        resident_oc_tiles = _conv1x1_resident_oc_tiles(layer)
+        if resident_oc_tiles > 1:
+            return {
+                "ps": "parallel",
+                "pd": "linear",
+                "pli": "parallel",
+                "plo": "parallel",
+            }
         multi_bus = _conv1x1_multi_bus(layer)
         return {
             "ps": "linear",
@@ -139,6 +159,14 @@ def _expected_agu_ultra(layer: LayerHwConfig) -> Dict[str, bool]:
     if layer.op_type == "conv2d_3x3":
         use_ultra = False
     elif layer.op_type == "conv2d_1x1":
+        resident_oc_tiles = _conv1x1_resident_oc_tiles(layer)
+        if resident_oc_tiles > 1:
+            return {
+                "ps": True,
+                "pd": False,
+                "pli": True,
+                "plo": True,
+            }
         use_ultra = _conv1x1_multi_bus(layer)
         return {
             "ps": False,
@@ -933,7 +961,9 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     # - "ultra path"  (use_ultra=True ): multiple buses are active in
     #   parallel; each bus carries up to pes_per_bus rows.
     # ----------------------------------------------------------------
-    use_ultra = H_out > pes_per_bus
+    resident_oc_tiles = _choose_conv1x1_resident_oc_tiles(num_oc_tiles, num_bus)
+    oc_parallel = resident_oc_tiles > 1
+    use_ultra = (not oc_parallel) and (H_out > pes_per_bus)
 
     if padding > 0 and use_ultra:
         raise TilingFailed(
@@ -941,27 +971,32 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
             f"requires multi-bus ultra transport"
         )
 
-    if use_ultra:
+    if oc_parallel:
+        active_buses = resident_oc_tiles
+        tile_h_per_bus = min(H_out, pes_per_bus)
+    elif use_ultra:
         active_buses = min(num_bus, math.ceil(H_out / pes_per_bus))
         tile_h_per_bus = pes_per_bus
     else:
         active_buses = 1
         tile_h_per_bus = min(H_out, pes_per_bus)
 
-    rows_per_wave = tile_h_per_bus * active_buses
+    rows_per_wave = tile_h_per_bus if oc_parallel else tile_h_per_bus * active_buses
     tile_h = rows_per_wave        # wave-level "logical" H rows
 
-    per_bank_cap = hw.half_parallel if use_ultra else half_cap
     pd_bytes_per_w = tile_h_per_bus * ic_words_per_pe * PKT_SIZE
     pli_bytes_per_w = tile_h_per_bus * out_ch_pack * PKT_SIZE
-    max_tile_w_pd = per_bank_cap // pd_bytes_per_w if pd_bytes_per_w > 0 else 0
-    max_tile_w_pli = per_bank_cap // pli_bytes_per_w if pli_bytes_per_w > 0 else 0
+    pd_cap = half_cap
+    pli_cap = hw.half_parallel if (use_ultra or oc_parallel) else half_cap
+    max_tile_w_pd = pd_cap // pd_bytes_per_w if pd_bytes_per_w > 0 else 0
+    max_tile_w_pli = pli_cap // pli_bytes_per_w if pli_bytes_per_w > 0 else 0
     tile_w = min(W_out, max_tile_w_pd, max_tile_w_pli)
     if tile_w <= 0:
-        overflow_kind = "bank half_cap" if use_ultra else "half_cap"
+        overflow_kind = "bank half_cap" if (use_ultra or oc_parallel) else "half_cap"
         raise TilingFailed(
             f"{op.name}: conv1x1 cannot fit even tile_w=1 "
-            f"(PD bytes/step={pd_bytes_per_w}, PLI bytes/step={pli_bytes_per_w}, {overflow_kind}={per_bank_cap})"
+            f"(PD bytes/step={pd_bytes_per_w}, PLI bytes/step={pli_bytes_per_w}, "
+            f"PD cap={pd_cap}, PLI cap={pli_cap}, mode={overflow_kind})"
         )
 
     pd_wave = tile_h_per_bus * tile_w * ic_words_per_pe * PKT_SIZE
@@ -971,44 +1006,67 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     num_w_tiles = math.ceil(W_out / tile_w)
     last_h_out = H_out - (num_h_tiles - 1) * tile_h
     last_w_out = W_out - (num_w_tiles - 1) * tile_w
-    total_waves = num_oc_tiles * num_h_tiles * num_w_tiles * num_ic_tiles
+    num_oc_wave_groups = num_oc_tiles // resident_oc_tiles
+    total_waves = num_oc_wave_groups * num_h_tiles * num_w_tiles * num_ic_tiles
 
     tiling = TilingResult(
         loop_dims=["oc_tile", "h_tile", "w_tile", "ic_tile"],
         loop_bounds={
-            "oc_tile": num_oc_tiles, "h_tile": num_h_tiles,
+            "oc_tile": num_oc_wave_groups, "h_tile": num_h_tiles,
             "w_tile": num_w_tiles, "ic_tile": num_ic_tiles,
         },
         total_waves=total_waves,
         reduction_dims=["ic_tile"],
     )
 
-    # SPM layout follows the cluster_gen conv1x1 policy:
-    # - PS is shared across buses -> group/linear + normal mode.
-    # - PD/PLI/PLO become bank/parallel only when multiple buses are active.
-    pd_pli_plo_mode = "parallel" if use_ultra else "linear"
-    pd_pli_plo_ping = pp if use_ultra else 0
-    pd_pli_plo_pong = ppong if use_ultra else half_cap
-    ultra_ctrl = 0x8 if use_ultra else 0x0
+    ps_parallel = oc_parallel
+    pd_parallel = use_ultra
+    out_parallel = use_ultra or oc_parallel
+    ps_mode = "parallel" if ps_parallel else "linear"
+    pd_mode = "parallel" if pd_parallel else "linear"
+    out_mode = "parallel" if out_parallel else "linear"
+    ps_ctrl = 0x8 if ps_parallel else 0x0
+    pd_ctrl = 0x8 if pd_parallel else 0x0
+    out_ctrl = 0x8 if out_parallel else 0x0
 
     spm_layout = SpmPerGroupLayout(
-        ps=SpmGroupLayout(ping_base=0, pong_base=half_cap, size=ps_wave, spm_mode="linear"),
-        pd=SpmGroupLayout(ping_base=pd_pli_plo_ping, pong_base=pd_pli_plo_pong, size=pd_wave, spm_mode=pd_pli_plo_mode),
-        pli=SpmGroupLayout(ping_base=pd_pli_plo_ping, pong_base=pd_pli_plo_pong, size=pli_wave, spm_mode=pd_pli_plo_mode),
-        plo=SpmGroupLayout(ping_base=pd_pli_plo_ping, pong_base=pd_pli_plo_pong, size=pli_wave, spm_mode=pd_pli_plo_mode),
+        ps=SpmGroupLayout(
+            ping_base=pp if ps_parallel else 0,
+            pong_base=ppong if ps_parallel else half_cap,
+            size=ps_wave,
+            spm_mode=ps_mode,
+        ),
+        pd=SpmGroupLayout(
+            ping_base=pp if pd_parallel else 0,
+            pong_base=ppong if pd_parallel else half_cap,
+            size=pd_wave,
+            spm_mode=pd_mode,
+        ),
+        pli=SpmGroupLayout(
+            ping_base=pp if out_parallel else 0,
+            pong_base=ppong if out_parallel else half_cap,
+            size=pli_wave,
+            spm_mode=out_mode,
+        ),
+        plo=SpmGroupLayout(
+            ping_base=pp if out_parallel else 0,
+            pong_base=ppong if out_parallel else half_cap,
+            size=pli_wave,
+            spm_mode=out_mode,
+        ),
     )
 
-    # AGU - PS: shared weight broadcast, always normal/linear.
+    # AGU - PS: och-resident path banks weights per bus; otherwise shared broadcast.
     pp_w = hw.parallel_ping_words
     ppong_w = hw.parallel_pong_words
     half_words = hw.half_group_words
 
     agu_ps = AguBankConfig(
-        base_addr=0, base_addr_h=0,
+        base_addr=pp_w if ps_parallel else 0, base_addr_h=0,
         iter0=ic_words_per_pe, iter1=1, iter2=1, iter3=tile_oc,
         stride0=1, stride1=0, stride2=0,
         stride3=ic_words_per_pe,
-        ctrl=0x0, lane_cfg=0,
+        ctrl=ps_ctrl, lane_cfg=0,
         tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=2,
         mask_cfg=0xF,
     )
@@ -1026,37 +1084,36 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
         pd_stride2 = input_nhwc_packs
 
     agu_pd = AguBankConfig(
-        base_addr=pp_w if use_ultra else 0, base_addr_h=0,
+        base_addr=pp_w if pd_parallel else 0, base_addr_h=0,
         iter0=ic_words_per_pe, iter1=tile_h_per_bus, iter2=tile_w, iter3=1,
         stride0=1,
         stride1=pd_stride1,
         stride2=pd_stride2,
         stride3=0,
-        ctrl=ultra_ctrl, lane_cfg=0,
+        ctrl=pd_ctrl, lane_cfg=0,
         tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=1,
         mask_cfg=0xF,
     )
-    # AGU - PLI: Parallel; ultra only when multiple buses are active.
+    # AGU - PLI/PLO: bus-local oc tiles on och-resident path, or H stripes on ultra path.
     agu_pli = AguBankConfig(
-        base_addr=pp_w if use_ultra else 0, base_addr_h=0,
+        base_addr=pp_w if out_parallel else 0, base_addr_h=0,
         iter0=out_ch_pack, iter1=tile_h_per_bus, iter2=tile_w, iter3=1,
         stride0=1,
         stride1=tile_w * out_ch_pack,
         stride2=out_ch_pack,
         stride3=0,
-        ctrl=ultra_ctrl, lane_cfg=0,
+        ctrl=out_ctrl, lane_cfg=0,
         tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=1,
         mask_cfg=0xF,
     )
-    # AGU - PLO: Parallel; ultra only when multiple buses are active.
     agu_plo = AguBankConfig(
-        base_addr=pp_w if use_ultra else 0, base_addr_h=0,
+        base_addr=pp_w if out_parallel else 0, base_addr_h=0,
         iter0=out_ch_pack, iter1=tile_h_per_bus, iter2=tile_w, iter3=1,
         stride0=1,
         stride1=tile_w * out_ch_pack,
         stride2=out_ch_pack,
         stride3=0,
-        ctrl=ultra_ctrl, lane_cfg=0,
+        ctrl=out_ctrl, lane_cfg=0,
         tag_base=0, tag_stride0=1, tag_stride1=1, tag_ctrl=1,
         mask_cfg=0xF,
     )
@@ -1067,13 +1124,12 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
         "OUTPUT_WINDOW_CNT_MINUS_ONE": tile_w - 1,
         "KERNEL_COUNT": tile_oc,
         "KERNEL_LOOP_INNER": num_ic_tiles,
-        "KERNEL_LOOP_OUTER": num_oc_tiles * num_h_tiles * num_w_tiles,
+        "KERNEL_LOOP_OUTER": num_oc_wave_groups * num_h_tiles * num_w_tiles,
     }
     pe_prog = PeProgramRef(template_name="conv1d_k1c12s1_template", params=pe_params)
     hddu = HdduConfig(plane_en=0xF, plane_mode=0x1)
-    # H-lane scan-chain: normal path activates only bus 0; ultra path
-    # activates active_buses buses in parallel. Single-row case naturally
-    # uses (IB, OB) per the open-issue-1 resolution.
+    # Conv1x1 scan-chain always maps one active PE to one H row.
+    # Och-resident waves simply duplicate the same H rows across multiple buses.
     scan_chain = compute_scan_chain_conv1x1(
         hw.num_pes, hw.num_bus,
         tile_h_per_bus=tile_h_per_bus,
@@ -1138,9 +1194,18 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
         last_h_out=last_h_out,
         last_w_out=last_w_out,
         spm_ping=[g0_dma,            g1_dma,                          g2_dma,                          g3_dma],
-        spm_pong=[g0_dma + half_cap, g1_dma + (hw.half_parallel if use_ultra else half_cap), g3_dma, g2_dma],
-        agu_ping=[0,                 pp_w if use_ultra else 0,        pp_w if use_ultra else 0,        pp_w if use_ultra else 0],
-        agu_pong=[half_words,        ppong_w if use_ultra else half_words, pp_w if use_ultra else 0,  pp_w if use_ultra else 0],
+        spm_pong=[g0_dma + (hw.half_parallel if ps_parallel else half_cap),
+                  g1_dma + (hw.half_parallel if pd_parallel else half_cap),
+                  g3_dma,
+                  g2_dma],
+        agu_ping=[pp_w if ps_parallel else 0,
+                  pp_w if pd_parallel else 0,
+                  pp_w if out_parallel else 0,
+                  pp_w if out_parallel else 0],
+        agu_pong=[ppong_w if ps_parallel else half_words,
+                  ppong_w if pd_parallel else half_words,
+                  pp_w if out_parallel else 0,
+                  pp_w if out_parallel else 0],
         spm_map_even=_SPM_MAP_EVEN, spm_map_odd=_SPM_MAP_ODD,
         dram_weight_base=dram_weight_base,
         dram_input_base=dram_input_base,
@@ -1156,7 +1221,7 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
         dram_out_h_stride=dram_out_h_stride,
         dram_out_w_stride=dram_out_w_stride,
         dram_out_row_stride=dram_out_row_stride,
-        dma_ps_words=ps_wave // PKT_SIZE,
+        dma_ps_words=(resident_oc_tiles * ps_wave) // PKT_SIZE if ps_parallel else ps_wave // PKT_SIZE,
         dma_pd_words=pd_wave // PKT_SIZE,
         dma_plo_words=pli_wave // PKT_SIZE,
         dram_bias_base=dram_bias_base,
@@ -1177,13 +1242,14 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
         output_epilogue_param0=0,
         pd_ic_agu_offset=pd_ic_agu_offset,
         bank_depth_bytes=bdb,
-        parallel_groups=0xE if use_ultra else 0x0,  # PD, PLI, PLO (groups 1, 2, 3)
-        dma_pd_rows_per_bank=tile_h_per_bus if use_ultra else 0,
+        parallel_groups=0xD if oc_parallel else (0xE if use_ultra else 0x0),
+        dma_pd_rows_per_bank=tile_h_per_bus if pd_parallel else 0,
         dma_pli_rows_per_bank=tile_h_per_bus if use_ultra else 0,
         dma_plo_rows_per_bank=tile_h_per_bus if use_ultra else 0,
-        dma_ps_words_per_bank=0,
+        dma_ps_words_per_bank=ps_wave // PKT_SIZE if ps_parallel else 0,
         dma_pd_words_per_bank=0,
-        dma_plo_words_per_bank=pli_wave // PKT_SIZE,
+        dma_plo_words_per_bank=pli_wave // PKT_SIZE if use_ultra else 0,
+        conv1x1_resident_oc_tiles=resident_oc_tiles,
     )
 
     return LayerHwConfig(
@@ -1235,6 +1301,8 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
     grid_m = math.ceil(M / PE_M)
     grid_n = math.ceil(N / PE_N)
     grid_k = math.ceil(K / PE_K)
+    tile_w_words = PE_N // ep
+    tile_d_words = math.ceil(PE_M / ep)
 
     # ----------------------------------------------------------------
     # Spatial tile selection:
@@ -1245,6 +1313,8 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
     # ----------------------------------------------------------------
     def _choose_mn_tiles(gm: int, gn: int, budget: int):
         best = None
+        prefer_n_cap = max(1, budget // 2)
+        single_k_wave = grid_k <= num_bus
         for mt in range(min(gm, budget), 0, -1):
             max_nt = min(gn, budget // mt)
             for nt in range(max_nt, 0, -1):
@@ -1254,10 +1324,37 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
                 area = mt * nt
                 aspect = abs((gm / max(gn, 1)) - (mt / max(nt, 1)))
                 balance = abs(wm - wn)
-                # Prefer square-ish temporal tiling when multiple M/N factorizations
-                # have the same total wave count. This keeps the per-wave PE grid
-                # balanced across M/N instead of collapsing all waves into one axis.
-                score = (waves, balance, aspect, -area, -min(mt, nt), -max(mt, nt))
+                if single_k_wave:
+                    ps_wave_candidate = K * (nt * tile_w_words) * PKT_SIZE
+                    pd_wave_candidate = (mt * tile_d_words * K) * PKT_SIZE
+                    pli_wave_candidate = (mt * nt * PE_N * tile_d_words) * PKT_SIZE
+                    ps_resident_bytes = wn * ps_wave_candidate
+                    out_row_resident_bytes = wn * pli_wave_candidate
+                    resident_full_n = 0
+                    if (ps_resident_bytes <= half_cap) and (out_row_resident_bytes <= half_cap):
+                        resident_m = min(
+                            wm,
+                            half_cap // max(pd_wave_candidate, 1),
+                            half_cap // max(out_row_resident_bytes, 1),
+                        )
+                        if resident_m == wm:
+                            resident_full_n = 1
+                    single_n_resident = 1 if resident_full_n and wn == 1 else 0
+                    n_bias = min(nt, prefer_n_cap)
+                    # Single-K GEMM advances M before N at runtime. Reward
+                    # wider N waves, but cap that bias at half the PE budget
+                    # so we do not collapse equal-wave generic candidates into
+                    # 1xN. If a candidate can already run fully resident,
+                    # prefer that fast path first, and give extra weight to a
+                    # single-N resident sweep because the runtime hides the
+                    # deferred PD fill only during the first N tile.
+                    score = (waves, -single_n_resident, -resident_full_n,
+                             -n_bias, -mt, balance, aspect,
+                             -area, -min(mt, nt), -max(mt, nt))
+                else:
+                    # For multi-K waves keep the older square-ish preference.
+                    score = (waves, balance, aspect,
+                             -area, -min(mt, nt), -max(mt, nt))
                 if best is None or score < best[0]:
                     best = (score, mt, nt, wm, wn)
         if best is None:
@@ -1286,8 +1383,6 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
     # SPM wave footprints (bytes).
     # GEMM planes are DMA-visible as one packed wave tile per relevant wave
     # coordinate pair, not as raw row-major tensor slices.
-    tile_w_words = PE_N // ep
-    tile_d_words = math.ceil(PE_M / ep)
     ps_row_words = grid_n_per_wave * tile_w_words
 
     ps_wave = K_tile_eff * ps_row_words * PKT_SIZE      # PS = B[K_tile, N_wave]
@@ -1328,7 +1423,7 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
             half_cap // max(pd_wave, 1),
             half_cap // max(out_row_resident_bytes, 1),
         )
-        if resident_m != num_m_tiles:
+        if resident_m == 0:
             return 0, 0
         return resident_m, resident_n
 
@@ -1341,10 +1436,23 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
         return min(resident_m, max(1, (resident_m + 1) // 2))
 
     resident_m_tiles, resident_n_tiles = _choose_full_n_resident_tiles()
+    if resident_n_tiles == 1 and resident_m_tiles < num_m_tiles:
+        # Partial resident mode only pays off when a resident PD slab can be
+        # reused by later N waves. With a single N wave it reloads PS across
+        # M chunks without reducing total PD traffic, so fall back to generic.
+        # Keep the computed M-chunk capacity as a runtime hint so generic
+        # single-N execution can still batch multiple M waves per HDDU run
+        # without reloading PS for every chunk.
+        resident_n_tiles = 0
     pd_preload_m_tiles = _choose_gemm_pd_preload_m_tiles(resident_m_tiles)
     ps_spm_bytes = resident_n_tiles * ps_wave if resident_n_tiles else ps_wave
     pd_spm_bytes = resident_m_tiles * pd_wave if resident_m_tiles else pd_wave
-    out_spm_bytes = resident_m_tiles * resident_n_tiles * pli_wave if resident_m_tiles and resident_n_tiles else pli_wave
+    out_spm_bytes = pli_wave
+    if resident_m_tiles:
+        if resident_n_tiles:
+            out_spm_bytes = resident_m_tiles * resident_n_tiles * pli_wave
+        elif num_n_tiles == 1:
+            out_spm_bytes = resident_m_tiles * pli_wave
 
     # Map GEMM dims to generic 4D loop: oc→M, h→N, w=1, ic→K
     tiling = TilingResult(
@@ -1475,9 +1583,9 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
         "INPUT_DIM": pe_k_eff,
         "OUTPUT_DIM_MINUS_ONE": min(PE_N, N_tile_eff) - 1,
         "PSUM_COUNT": (PE_M * PE_N) // ep,
-        "NUM_OF_KERNEL_SETS": num_k_tiles*num_n_tiles,  # total K*N tiles across which we iterate
-        "NUM_OF_N_TILES": num_n_tiles,
-        "NUM_OF_M_TILES": num_m_tiles,
+        "NUM_OF_KERNEL_PREFETCH_SETS": num_k_tiles * num_n_tiles,
+        "NUM_OF_KERNEL_LOAD_LOOP": num_n_tiles,
+        "NUM_OF_KERNEL_REUSE_LOOP": num_m_tiles,
         "K_TILE_DIM": pe_k_eff,
         # GEMM PE-grid metadata (inspectable from IR for verification)
         "GRID_M": grid_m,

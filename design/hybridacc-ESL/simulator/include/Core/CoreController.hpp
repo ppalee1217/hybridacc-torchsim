@@ -685,6 +685,8 @@ SC_MODULE(CoreController) {
 
     bool core_halted() const { return sig_core_halted.read(); }
 
+    bool dma_active() const { return u_dma_engine.is_active(); }
+
     uint32_t irq_summary() const { return u_boot_host_if.debug_irq_summary(); }
 
     bool fast_load_section(SectionKind kind,

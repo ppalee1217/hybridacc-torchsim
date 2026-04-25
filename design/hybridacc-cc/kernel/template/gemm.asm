@@ -18,8 +18,12 @@
 #
 # PSUM_COUNT            | int     | Number of partial sums to compute    | 24
 #
-# NUM_OF_KERNEL_SETS    | int     | Number of kernel sets to process      | 2
-#                       |         | (for double buffering)                |
+# NUM_OF_KERNEL_PREFETCH_SETS | int | Number of kernel payload prefetch sets | 2
+#                            |     | (typically K-tile sets per load loop) |
+#
+# NUM_OF_KERNEL_LOAD_LOOP | int   | Number of kernel payload load loops    | 2
+#
+# NUM_OF_KERNEL_REUSE_LOOP | int  | Number of compute reuse loops per load | 2
 
 ##############################################################################
 # Usage Example:
@@ -28,13 +32,13 @@
 ##############################################################################
 
 .template
-gemm_template(KERNEL_DMA_STORE_LEN=64, KERNEL_DMA_LOAD_LEN=256, INPUT_DIM=32, OUTPUT_DIM_MINUS_ONE=7, PSUM_COUNT=24, NUM_OF_KERNEL_SETS=32, NUM_OF_N_TILES=2, NUM_OF_M_TILES=2, K_TILE_DIM=32):
+gemm_template(KERNEL_DMA_STORE_LEN=64, KERNEL_DMA_LOAD_LEN=256, INPUT_DIM=32, OUTPUT_DIM_MINUS_ONE=7, PSUM_COUNT=24, NUM_OF_KERNEL_PREFETCH_SETS=32, NUM_OF_KERNEL_LOAD_LOOP=2, NUM_OF_KERNEL_REUSE_LOOP=2, K_TILE_DIM=32):
     # Initialize vector registers for partial sums
     SYS.CTRL (CLEAR.P)
 
 setup:
     # 1) C tile store prefetch
-    SDMA.LOOP $(NUM_OF_KERNEL_SETS)  # loop for $(NUM_OF_KERNEL_SETS) kernel sets
+    SDMA.LOOP $(NUM_OF_KERNEL_PREFETCH_SETS)  # loop for $(NUM_OF_KERNEL_PREFETCH_SETS) kernel payload sets
     SDMA.ADDR 0
     SDMA.LEN $(KERNEL_DMA_STORE_LEN)  # STORE C-tile (example: 4out * 2vector * 32dim)
     SDMA.SD 4 # start DMA store operation
@@ -46,11 +50,11 @@ setup:
 
     SYS.CTRL (SDMA.ACT)
 load_ab_tile:
-    # Global tile loop: iterate over M tiles for a fixed (N,K) tile
-    LOOPIN $(NUM_OF_N_TILES)  # N-tiles (example: 2)
+    # Kernel payload load loop: each iteration consumes one SWAPDM-ready payload
+    LOOPIN $(NUM_OF_KERNEL_LOAD_LOOP)  # kernel payload load loops (example: 2)
     SYS.SYNC (SWAPDM) # Wait for A/B tile to be ready
 
-    LOOPIN $(NUM_OF_M_TILES)  # M-tiles (example: 2)
+    LOOPIN $(NUM_OF_KERNEL_REUSE_LOOP)  # compute reuse loops per payload (example: 2)
     SYS.CTRL (CLEAR.P, RST.PID, RST.TID, LDMA.ACT) # Start loading next A/B slice
 
     loop_k_dim:

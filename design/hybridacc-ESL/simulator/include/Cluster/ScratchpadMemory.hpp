@@ -695,8 +695,12 @@ private:
     // =========================================================================
     // comb_bank_req_arb
     //
-    // Priority arbitration across NoC ports (0 = highest) and DMA.  For each
-    // group at most one request is issued per cycle (group_busy[]).
+    // Priority arbitration across NoC ports (0 = highest) and DMA. Linear
+    // accesses arbitrate at bank granularity so a read and a write to
+    // different banks in the same group may issue in parallel. Read traffic
+    // still reserves one metadata slot per group per cycle because each
+    // group_meta_fifo has a single push port. Parallel accesses continue to
+    // claim the entire group.
     //
     // Drives:
     //   bank_req_valid_sig[], bank_req_addr_sig[]
@@ -736,10 +740,24 @@ private:
         credit_stall_sig.write(false);
         arb_stall_sig.write(false);
 
-        std::array<bool, NUM_GROUPS> group_busy{};
-        group_busy.fill(false);
+        std::array<bool, TOTAL_BANKS> bank_busy{};
+        bank_busy.fill(false);
+        std::array<bool, NUM_GROUPS> read_meta_busy{};
+        read_meta_busy.fill(false);
         bool local_credit_stall = false;
         bool local_arb_stall    = false;
+
+        auto bank_claimed = [&](unsigned bank_idx) -> bool {
+            return (bank_idx >= TOTAL_BANKS) ? true : bank_busy[bank_idx];
+        };
+        auto claim_bank = [&](unsigned bank_idx) {
+            if (bank_idx < TOTAL_BANKS)
+                bank_busy[bank_idx] = true;
+        };
+        auto claim_group = [&](unsigned base_bank_idx) {
+            for (unsigned k = 0; k < BANKS_PER_GROUP; ++k)
+                bank_busy[base_bank_idx + k] = true;
+        };
 
         // --- NoC ports (static priority 0 = highest) ---
         for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) {
@@ -762,11 +780,10 @@ private:
                 continue;
             }
 
-            // Group-busy / meta-FIFO-full check
+            // Config validity; bank / metadata hazards are checked per mode.
             unsigned g = active_map_reg[p].read().to_uint();
-            if (g >= NUM_GROUPS || group_busy[g] ||
-                (!req.wen && group_meta_fifo_full[g].read())) {
-                DEBUG_MSG(" stall p=" << p << " g=" << g << " busy=" << group_busy[g] << " full=" << group_meta_fifo_full[g].read(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
+            if (g >= NUM_GROUPS) {
+                DEBUG_MSG(" stall p=" << p << " invalid_group=" << g, DEBUG_LEVEL_CLUSTER_COMPONENTS);
                 local_arb_stall = true;
                 continue;
             }
@@ -780,6 +797,17 @@ private:
             if (is_par) {
                 uint32_t row = laddr - GROUP_LINEAR_WORDS;
                 if (req.wen) {
+                    bool any_bank_busy = false;
+                    for (unsigned k = 0; k < BANKS_PER_GROUP; ++k) {
+                        if (bank_claimed(base_bank + k)) {
+                            any_bank_busy = true;
+                            break;
+                        }
+                    }
+                    if (any_bank_busy) {
+                        local_arb_stall = true;
+                        continue;
+                    }
                     for (unsigned k = 0; k < BANKS_PER_GROUP; ++k) {
                         bank_write_en_sig[base_bank+k].write(true);
                         bank_write_addr_sig[base_bank+k].write(
@@ -791,11 +819,20 @@ private:
                         bank_write_mask_sig[base_bank+k].write(
                             sc_uint<BANK_DATA_WIDTH/8>(BANK_BYTE_MASK));
                     }
+                    claim_group(base_bank);
                 } else {
-                    // Back pressure: all banks in group must be ready
+                    if (read_meta_busy[g] || group_meta_fifo_full[g].read()) {
+                        local_arb_stall = true;
+                        continue;
+                    }
+                    // Back pressure: all banks in group must be ready and free
                     bool all_banks_ready = true;
                     for (unsigned k = 0; k < BANKS_PER_GROUP; ++k)
-                        if (!bank_req_ready_sig[base_bank+k].read()) { all_banks_ready = false; break; }
+                        if (bank_claimed(base_bank + k) ||
+                            !bank_req_ready_sig[base_bank+k].read()) {
+                            all_banks_ready = false;
+                            break;
+                        }
                     if (!all_banks_ready) {
                         local_arb_stall = true;
                         continue;
@@ -812,12 +849,18 @@ private:
                     meta.addr    = laddr;
                     group_meta_fifo_push[g].write(true);
                     group_meta_fifo_din[g].write(meta);
+                    read_meta_busy[g] = true;
+                    claim_group(base_bank);
                     DEBUG_MSG(" META_PUSH PAR p=" << p << " g=" << g << " laddr=" << laddr << " @" << sc_time_stamp(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
                 }
             } else {
                 unsigned bidx = (laddr / BANK_DEPTH) + base_bank;
                 uint32_t row  = laddr % BANK_DEPTH;
                 if (req.wen) {
+                    if (bank_claimed(bidx)) {
+                        local_arb_stall = true;
+                        continue;
+                    }
                     bank_write_en_sig[bidx].write(true);
                     bank_write_addr_sig[bidx].write(
                         sc_uint<ADDR_WIDTH>(row * BYTES_PER_BANK_WORD));
@@ -825,7 +868,13 @@ private:
                         sc_biguint<BANK_DATA_WIDTH>(req.wdata.range(BANK_DATA_WIDTH-1, 0)));
                     bank_write_mask_sig[bidx].write(
                         sc_uint<BANK_DATA_WIDTH/8>(BANK_BYTE_MASK));
+                    claim_bank(bidx);
                 } else {
+                    if (read_meta_busy[g] || group_meta_fifo_full[g].read() ||
+                        bank_claimed(bidx)) {
+                        local_arb_stall = true;
+                        continue;
+                    }
                     // Back pressure: bank pipeline must be ready
                     if (!bank_req_ready_sig[bidx].read()) {
                         local_arb_stall = true;
@@ -841,6 +890,8 @@ private:
                     meta.addr    = laddr;
                     group_meta_fifo_push[g].write(true);
                     group_meta_fifo_din[g].write(meta);
+                    read_meta_busy[g] = true;
+                    claim_bank(bidx);
                     DEBUG_MSG(" META_PUSH LIN p=" << p << " g=" << g << " laddr=" << laddr << " @" << sc_time_stamp(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
                 }
             }
@@ -854,7 +905,6 @@ private:
                 wr_resp_data_sig[p].write(wr);
             }
 
-            group_busy[g] = true;
             port_req_fire_sig[p].write(true);
             port_req_is_write_sig[p].write(req.wen ? true : false);
         }
@@ -867,19 +917,21 @@ private:
             uint32_t  gwaddr     = wr.addr.to_uint() / BYTES_PER_BANK_WORD;
             unsigned  grp        = gwaddr / GROUP_SPAN_WORDS;
 
-            if (grp < NUM_GROUPS && !group_busy[grp]) {
+            if (grp < NUM_GROUPS) {
                 unsigned lidx = gwaddr % GROUP_SPAN_WORDS;
                 unsigned bidx = (lidx / BANK_DEPTH) + grp * BANKS_PER_GROUP;
                 uint32_t row  = lidx % BANK_DEPTH;
 
-                bank_write_en_sig[bidx].write(true);
-                bank_write_addr_sig[bidx].write(sc_uint<ADDR_WIDTH>(row * BYTES_PER_BANK_WORD));
-                bank_write_data_sig[bidx].write(wr.data);
-                bank_write_mask_sig[bidx].write(wr.strb);
+                if (!bank_claimed(bidx)) {
+                    bank_write_en_sig[bidx].write(true);
+                    bank_write_addr_sig[bidx].write(sc_uint<ADDR_WIDTH>(row * BYTES_PER_BANK_WORD));
+                    bank_write_data_sig[bidx].write(wr.data);
+                    bank_write_mask_sig[bidx].write(wr.strb);
 
-                dma_write_req_fifo_pop.write(true);
-                dma_write_fire_sig.write(true);
-                group_busy[grp] = true;
+                    dma_write_req_fifo_pop.write(true);
+                    dma_write_fire_sig.write(true);
+                    claim_bank(bidx);
+                }
             }
         }
 
@@ -898,23 +950,25 @@ private:
             unsigned  grp    = gwaddr / GROUP_SPAN_WORDS;
 
             DEBUG_MSG(" DMA_RD_ARB: gwaddr=" << gwaddr << " grp=" << grp
-                      << " group_busy=" << group_busy[grp]
+                      << " read_meta_busy=" << (grp < NUM_GROUPS ? read_meta_busy[grp] : true)
                       << " meta_full=" << (grp < NUM_GROUPS ? group_meta_fifo_full[grp].read() : true)
                       << " @" << sc_time_stamp(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
 
-            if (grp < NUM_GROUPS && !group_busy[grp] &&
+            if (grp < NUM_GROUPS && !read_meta_busy[grp] &&
                 !group_meta_fifo_full[grp].read()) {
 
                 unsigned lidx = gwaddr % GROUP_SPAN_WORDS;
                 unsigned bidx = (lidx / BANK_DEPTH) + grp * BANKS_PER_GROUP;
                 uint32_t row  = lidx % BANK_DEPTH;
+                bool     bank_valid = (bidx < TOTAL_BANKS);
 
                 DEBUG_MSG(" DMA_RD_ARB: lidx=" << lidx << " bidx=" << bidx << " row=" << row
-                          << " bank_ready=" << bank_req_ready_sig[bidx].read()
+                          << " bank_busy=" << bank_claimed(bidx)
+                          << " bank_ready=" << (bank_valid ? bank_req_ready_sig[bidx].read() : false)
                           << " @" << sc_time_stamp(), DEBUG_LEVEL_CLUSTER_COMPONENTS);
 
                 // Back pressure: bank pipeline must be ready
-                if (bank_req_ready_sig[bidx].read()) {
+                if (bank_valid && !bank_claimed(bidx) && bank_req_ready_sig[bidx].read()) {
                     bank_req_valid_sig[bidx].write(true);
                     bank_req_addr_sig[bidx].write(sc_uint<ADDR_WIDTH>(row * BYTES_PER_BANK_WORD));
 
@@ -929,7 +983,8 @@ private:
 
                     dma_read_req_fifo_pop.write(true);
                     dma_read_fire_sig.write(true);
-                    group_busy[grp] = true;
+                    read_meta_busy[grp] = true;
+                    claim_bank(bidx);
                 }
             }
         }

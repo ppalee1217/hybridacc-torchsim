@@ -736,7 +736,26 @@ int sc_main(int argc, char* argv[]) {
         sc_start();
     }
 
-    std::cout << "[SIM] Cluster RUN cycles: " << dut.cluster_run_cycles(0) << std::endl;
+    const uint64_t cluster_run_cycles = dut.cluster_run_cycles(0);
+    const uint64_t dma_active_cycles = dut.dma_active_cycles();
+    const uint64_t overlap_cycles = dut.cluster_dma_overlap_cycles(0);
+    const double overlap_vs_compute_pct = cluster_run_cycles == 0
+        ? 0.0
+        : (100.0 * static_cast<double>(overlap_cycles) / static_cast<double>(cluster_run_cycles));
+    const double overlap_vs_dma_pct = dma_active_cycles == 0
+        ? 0.0
+        : (100.0 * static_cast<double>(overlap_cycles) / static_cast<double>(dma_active_cycles));
+
+    std::cout << "[SIM] Cluster RUN cycles source: HDDU/AGU busy" << std::endl;
+    std::cout << "[SIM] Cluster RUN cycles: " << cluster_run_cycles << std::endl;
+    std::cout << "[SIM] DMA active cycles: " << dma_active_cycles << std::endl;
+    std::cout << "[SIM] Compute/DMA overlap cycles: " << overlap_cycles << std::endl;
+    std::cout << std::fixed << std::setprecision(2)
+              << "[SIM] Compute/DMA overlap ratio (vs compute): "
+              << overlap_vs_compute_pct << "%" << std::endl
+              << "[SIM] Compute/DMA overlap ratio (vs DMA): "
+              << overlap_vs_dma_pct << "%" << std::endl
+              << std::defaultfloat;
     std::cout << "[SIM] Simulation ended at " << sc_time_stamp() << std::endl;
     dram.print_oob_summary();
 

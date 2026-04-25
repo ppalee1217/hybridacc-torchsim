@@ -1822,12 +1822,10 @@ def compute_gemm_pe_params(
         # partial sum 累加次數
         "PSUM_COUNT": M * N // ep,
 
-        # K 維度的 tile 數（reduction loop 在 PE 內部 or firmware 控制）
-        "NUM_OF_KERNEL_SETS": tiling.num_k_tiles,
-
-        # spatial tile 數（用於 firmware temporal loop）
-        "NUM_OF_N_TILES": tiling.num_n_tiles,
-        "NUM_OF_M_TILES": tiling.num_m_tiles,
+        # GEMM PE payload loop contract
+        "NUM_OF_KERNEL_PREFETCH_SETS": tiling.num_k_tiles * tiling.num_n_tiles,
+        "NUM_OF_KERNEL_LOAD_LOOP": tiling.num_n_tiles,
+        "NUM_OF_KERNEL_REUSE_LOOP": tiling.num_m_tiles,
 
         # K tile dimension
         "K_TILE_DIM": K,

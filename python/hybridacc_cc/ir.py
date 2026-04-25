@@ -312,6 +312,9 @@ class TilingParams:
     dma_pd_words_per_bank: int
     dma_plo_words_per_bank: int
 
+    # Conv1x1 och-resident mode
+    conv1x1_resident_oc_tiles: int = 1
+
     # GEMM resident-slab mode
     gemm_resident_m_tiles: int = 0
     gemm_resident_n_tiles: int = 0

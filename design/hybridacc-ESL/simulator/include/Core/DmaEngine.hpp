@@ -210,6 +210,10 @@ SC_MODULE(DmaEngine) {
         reset_signal_is(reset_n, false);
     }
 
+    bool is_active() const {
+        return state_reg == DmaState::RUN || state_reg == DmaState::DRAIN;
+    }
+
 private:
     std::deque<DmaCommand> cmd_fifo_reg;
     DmaCommand active_cmd_reg;

@@ -244,7 +244,7 @@ PE program 以 JSON template 格式管理，包含：
 |----------|----------|------|
 | `conv1d_k3c4s1` | conv2d 3×3（kernel_size=3, channels_per_cycle=4） | KERNEL_DMA_LEN, OUTPUT_WINDOW_CNT_MINUS_ONE, KERNEL_COUNT, KERNEL_LOOP_INNER, KERNEL_LOOP_OUTER |
 | `conv1d_k1c12s1` | conv2d 1×1（kernel_size=1, channels_per_cycle=12） | 同上 |
-| `gemm` | GEMM | KERNEL_DMA_STORE_LEN, KERNEL_DMA_LOAD_LEN, INPUT_DIM, OUTPUT_DIM, PSUM_COUNT, NUM_OF_KERNEL_SETS, NUM_OF_N_TILES, NUM_OF_M_TILES, K_TILE_DIM |
+| `gemm` | GEMM | KERNEL_DMA_STORE_LEN, KERNEL_DMA_LOAD_LEN, INPUT_DIM, OUTPUT_DIM, PSUM_COUNT, NUM_OF_KERNEL_PREFETCH_SETS, NUM_OF_KERNEL_LOAD_LOOP, NUM_OF_KERNEL_REUSE_LOOP, K_TILE_DIM |
 
 ### 3.6 Local Control MMIO
 

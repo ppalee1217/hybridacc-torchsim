@@ -787,6 +787,8 @@ typedef struct {
     uint32_t dma_pd_words_per_bank;
     uint32_t dma_plo_words_per_bank;
 
+    uint16_t conv1x1_resident_oc_tiles;
+
     uint16_t gemm_resident_m_tiles;
     uint16_t gemm_resident_n_tiles;
     uint16_t gemm_pd_preload_m_tiles;
@@ -812,6 +814,9 @@ typedef struct {
     uint16_t pe_template_len;
     const PePatchEntry* patches;
     uint8_t patch_count;
+    uint16_t gemm_kernel_prefetch_patch_offset;
+    uint16_t gemm_kernel_load_patch_offset;
+    uint16_t gemm_kernel_reuse_patch_offset;
 
     TilingParams tiling;
 } LayerConfig;

@@ -139,6 +139,7 @@ public:
 		NOC_NUM_PES_PER_PORT> noc;
 
 	cluster::ClusterSubstate substate() const { return cluster_ctrl_.substate(); }
+	bool hddu_busy() const { return hddu.busy(); }
 	uint64_t run_cycles() const { return cluster_run_cycles_; }
 
 	SC_HAS_PROCESS(ComputeCluster);
@@ -859,7 +860,7 @@ private:
 				prev_substate = debug_substate;
 			}
 
-			if (power_enable_i.read() && cluster_ctrl_.substate() == cluster::ClusterSubstate::RUNNING) {
+			if (power_enable_i.read() && hddu.busy()) {
 				++cluster_run_cycles_;
 			}
 

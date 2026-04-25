@@ -1734,6 +1734,8 @@ def generate_gemm_test(config: ClusterGemmConfig, assembler_exe: str = "ha-asm")
     # Choose M/N tile shape per wave to fit PE budget
     def choose_mn_tiles(grid_m: int, grid_n: int, pe_budget: int):
         best = None
+        prefer_n_cap = max(1, pe_budget // 2)
+        single_k_wave = grid_k <= num_bus
         for m_tiles in range(min(grid_m, pe_budget), 0, -1):
             max_n = min(grid_n, pe_budget // m_tiles)
             for n_tiles in range(max_n, 0, -1):
@@ -1742,7 +1744,12 @@ def generate_gemm_test(config: ClusterGemmConfig, assembler_exe: str = "ha-asm")
                 waves = waves_m * waves_n
                 area = m_tiles * n_tiles
                 aspect = abs((grid_m / max(grid_n, 1)) - (m_tiles / max(n_tiles, 1)))
-                score = (waves, -n_tiles, -m_tiles, -area, aspect)
+                balance = abs(waves_m - waves_n)
+                if single_k_wave:
+                    n_bias = min(n_tiles, prefer_n_cap)
+                    score = (waves, -n_bias, -m_tiles, balance, aspect, -area)
+                else:
+                    score = (waves, -n_tiles, -m_tiles, -area, aspect)
                 if best is None or score < best[0]:
                     best = (score, m_tiles, n_tiles, waves_m, waves_n)
         if best is None:

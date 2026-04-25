@@ -28,7 +28,7 @@ static constexpr unsigned kCoreXlen           = 32;
 static constexpr unsigned kCoreGprNum         = 32;
 static constexpr unsigned kCorePipeStages     = 5;
 
-static constexpr unsigned kIsramBytes         = 16384; ///< 16 KB instruction SRAM
+static constexpr unsigned kIsramBytes         = 65536; ///< 64 KB instruction SRAM
 static constexpr unsigned kDataSramBytes      = 65536; ///< 64 KB data SRAM
 static constexpr unsigned kBootRomBytes       = 4096;  ///< 4 KB optional boot ROM
 

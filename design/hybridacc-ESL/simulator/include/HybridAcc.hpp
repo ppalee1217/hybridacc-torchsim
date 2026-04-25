@@ -177,6 +177,10 @@ SC_MODULE(HybridAcc) {
     sc_signal<sc_biguint<kClAxiDataWidth>> sig_nlu_data_axi_r_data;
     sc_signal<sc_uint<2>>   sig_nlu_data_axi_r_resp;
 
+    uint64_t cluster_hddu_busy_cycles_[NUM_CLUSTERS] = {};
+    uint64_t cluster_dma_overlap_cycles_[NUM_CLUSTERS] = {};
+    uint64_t dma_active_cycles_ = 0;
+
     // ========================================================================
     // Constructor
     // ========================================================================
@@ -326,7 +330,7 @@ SC_MODULE(HybridAcc) {
             std::string bridge_name = "cmd_bridge_" + std::to_string(c);
             std::string cluster_name = "cluster_" + std::to_string(c);
             cmd_bridge[c] = std::make_unique<CmdToAhbBridge>(bridge_name.c_str());
-            cluster[c]    = std::make_unique<ComputeCluster<>>(cluster_name.c_str(), NetWorkOnChipConfig{4, 4});
+            cluster[c]    = std::make_unique<ComputeCluster<>>(cluster_name.c_str(), NetWorkOnChipConfig{4, 32});
 
             // Core → internal cmd signals
             core_ctrl.cl_cmd_req_valid_o[c](sig_cl_cmd_req_valid[c]);
@@ -427,6 +431,9 @@ SC_MODULE(HybridAcc) {
         // NLU tie-off: keep resp_valid=false, irq=false
         SC_METHOD(nlu_tieoff);
         sensitive << clk.pos();
+
+        SC_CTHREAD(stats_thread, clk.neg());
+        reset_signal_is(reset_n, false);
     }
 
     // ========================================================================
@@ -442,10 +449,19 @@ SC_MODULE(HybridAcc) {
     uint32_t irq_summary() const { return core_ctrl.irq_summary(); }
 
     uint64_t cluster_run_cycles(unsigned c = 0) const {
-        if (c >= NUM_CLUSTERS || !cluster[c]) {
+        if (c >= NUM_CLUSTERS) {
             return 0;
         }
-        return cluster[c]->run_cycles();
+        return cluster_hddu_busy_cycles_[c];
+    }
+
+    uint64_t dma_active_cycles() const { return dma_active_cycles_; }
+
+    uint64_t cluster_dma_overlap_cycles(unsigned c = 0) const {
+        if (c >= NUM_CLUSTERS) {
+            return 0;
+        }
+        return cluster_dma_overlap_cycles_[c];
     }
 
     bool fast_load_section(SectionKind kind,
@@ -477,6 +493,38 @@ SC_MODULE(HybridAcc) {
     }
 
 private:
+    void stats_thread() {
+        for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
+            cluster_hddu_busy_cycles_[c] = 0;
+            cluster_dma_overlap_cycles_[c] = 0;
+        }
+        dma_active_cycles_ = 0;
+        wait();
+
+        while (true) {
+            const bool dma_active = core_ctrl.dma_active();
+            if (dma_active) {
+                ++dma_active_cycles_;
+            }
+
+            for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
+                const bool compute_busy = cluster[c]
+                    && sig_cluster_power_en[c].read()
+                    && cluster[c]->hddu_busy();
+                if (!compute_busy) {
+                    continue;
+                }
+
+                ++cluster_hddu_busy_cycles_[c];
+                if (dma_active) {
+                    ++cluster_dma_overlap_cycles_[c];
+                }
+            }
+
+            wait();
+        }
+    }
+
     void nlu_tieoff() {
         for (unsigned n = 0; n < kNluPorts; ++n) {
             sig_nlu_cmd_resp_valid[n].write(false);

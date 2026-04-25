@@ -93,6 +93,10 @@ public:
 	using spm_req_payload_t = spm_request_t<SPM_ADDR_BITS, DATA_BITS>;
 	using spm_resp_payload_t = spm_response_t<DATA_BITS>;
 
+	bool busy() const {
+		return global_status_reg.read()[(int)HdduStatusBit::BUSY];
+	}
+
 	// --- Clock / Reset ---
 	sc_in<bool> clk;
 	sc_in<bool> reset_n;
