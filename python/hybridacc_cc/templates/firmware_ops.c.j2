@@ -1962,6 +1962,7 @@ static inline void issue_dma_load_async(uint32_t dram_addr,
                                         uint32_t spm_offset,
                                         uint32_t beat_count,
                                         uint32_t* last_tag) {
+    dma_wait_done();
     dma_tag++;
     dma_load(dram_addr, spm_offset, 0, beat_count, dma_tag);
     *last_tag = dma_tag;
@@ -1974,6 +1975,7 @@ static inline void issue_dma_load_2d_async(uint32_t dram_addr,
                                            uint32_t src_row_stride,
                                            uint32_t dst_row_stride,
                                            uint32_t* last_tag) {
+    dma_wait_done();
     dma_tag++;
     dma_load_2d(dram_addr, spm_offset, 0,
                 row_beats, row_count,
@@ -1989,6 +1991,7 @@ static inline void issue_dma_store_2d_async(uint32_t spm_offset,
                                             uint32_t src_row_stride,
                                             uint32_t dst_row_stride,
                                             uint32_t* last_tag) {
+    dma_wait_done();
     dma_tag++;
     dma_store_2d(spm_offset, dram_addr, 0,
                  row_beats, row_count,

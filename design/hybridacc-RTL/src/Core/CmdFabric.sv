@@ -344,4 +344,22 @@ module CmdFabric #(
         end
     end
 
+    // synopsys translate_off
+    always_ff @(posedge clk) begin
+        if (reset_n && request_fire_w
+            && ((req_target_w == TARGET_CLUSTER) || (req_target_w == TARGET_CLUSTER_BC))
+            && ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_MMIO"))) begin
+            $display("[%0t] [TRACE][CMD] cluster_mmio bcast=%0b target=%0d write=%0b addr=0x%08x off=0x%08x wdata=0x%08x wstrb=0x%1x",
+                     $time,
+                     (req_target_w == TARGET_CLUSTER_BC),
+                     req_target_id_w,
+                     req_write_w,
+                     req_addr_w,
+                     req_offset_w,
+                     req_wdata_w,
+                     req_wstrb_w);
+        end
+    end
+    // synopsys translate_on
+
 endmodule

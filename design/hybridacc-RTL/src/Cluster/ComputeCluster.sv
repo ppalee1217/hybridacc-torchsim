@@ -165,6 +165,7 @@ module ComputeCluster #(
     NOC_RESPONSE_STATUS        hddu_noc_plo_resp_status;
     logic                      hddu_noc_plo_resp_valid;
     logic                      hddu_noc_plo_resp_ready;
+    logic                      noc_hw_quiesced_sig;
 
     logic noc_command_mode_sig;
     logic [31:0] noc_command_data_sig;
@@ -323,7 +324,7 @@ module ComputeCluster #(
                                || (wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && ((wr_addr_w - K_CMD_NOC_BASE) == K_NOC_CMD_DATA));
     assign noc_command_data_sig = (ccu_noc_action_sig != CLUSTER_ACTION_NONE) ? compose_noc_cmd(ccu_noc_action_sig) : wr_data_w;
 
-    assign noc_quiesced_w = !(hddu_noc_ps_valid || hddu_noc_pd_valid || hddu_noc_pli_valid || hddu_noc_plo_valid || hddu_noc_plo_resp_valid || hddu_interrupt_sig);
+    assign noc_quiesced_w = noc_hw_quiesced_sig;
     assign spm_quiesced_w = !(hddu_spm_req_valid_sig[0] || hddu_spm_req_valid_sig[1] || hddu_spm_req_valid_sig[2] || hddu_spm_req_valid_sig[3]
                            || hddu_spm_resp_valid_sig[0] || hddu_spm_resp_valid_sig[1] || hddu_spm_resp_valid_sig[2] || hddu_spm_resp_valid_sig[3]
                            || s_axi_bvalid_sig || s_axi_rvalid_sig);
@@ -399,6 +400,40 @@ module ComputeCluster #(
             end
         end
     end
+
+    // synopsys translate_off
+    always_ff @(posedge clk) begin
+        if (local_reset_n) begin
+            if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_MMIO")) && wr_valid_w) begin
+                if (in_range(wr_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE)) begin
+                    $display("[%0t] [TRACE][CLUSTER][MMIO][SPM] addr=0x%08x off=0x%08x data=0x%08x",
+                             $time, wr_addr_w, wr_addr_w - K_CMD_SPM_BASE, wr_data_w);
+                end else if (in_range(wr_addr_w, K_CMD_HDDU_BASE, K_CMD_HDDU_SIZE)) begin
+                    $display("[%0t] [TRACE][CLUSTER][MMIO][HDDU] addr=0x%08x off=0x%08x data=0x%08x",
+                             $time, wr_addr_w, wr_addr_w - K_CMD_HDDU_BASE, wr_data_w);
+                end else if (in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE)) begin
+                    $display("[%0t] [TRACE][CLUSTER][MMIO][NOC] addr=0x%08x off=0x%08x data=0x%08x cmd=0x%01x",
+                             $time, wr_addr_w, wr_addr_w - K_CMD_NOC_BASE, wr_data_w, wr_data_w[3:0]);
+                end else if (in_range(wr_addr_w, K_CMD_CLUSTER_BASE, K_CMD_CLUSTER_SIZE)) begin
+                    $display("[%0t] [TRACE][CLUSTER][MMIO][CTRL] addr=0x%08x off=0x%08x data=0x%08x",
+                             $time, wr_addr_w, wr_addr_w - K_CMD_CLUSTER_BASE, wr_data_w);
+                end
+            end
+
+            if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
+                && (ccu_noc_action_sig != CLUSTER_ACTION_NONE)) begin
+                $display("[%0t] [TRACE][CLUSTER][CCU] noc_action=%0d layer_active=%0b stop_pending=%0b soft_reset_pending=%0b noc_quiesced=%0b spm_quiesced=%0b",
+                         $time,
+                         ccu_noc_action_sig,
+                         ccu_layer_active_sig,
+                         ccu_stop_pending_sig,
+                         ccu_soft_reset_pending_sig,
+                         noc_quiesced_w,
+                         spm_quiesced_w);
+            end
+        end
+    end
+    // synopsys translate_on
 
     ScratchpadMemory #(
         .NUM_NOC_PORTS(SPM_NUM_NOC_CHANNEL),
@@ -481,6 +516,7 @@ module ComputeCluster #(
         .noc_plo_in_status(hddu_noc_plo_resp_status),
         .noc_plo_in_valid(hddu_noc_plo_resp_valid),
         .noc_plo_in_ready(hddu_noc_plo_resp_ready),
+        .noc_quiesced_i(noc_hw_quiesced_sig),
         .mmio_addr(hddu_mmio_addr_sig),
         .mmio_write(hddu_mmio_write_sig),
         .mmio_wdata(hddu_mmio_wdata_sig),
@@ -520,7 +556,8 @@ module ComputeCluster #(
         .noc_plo_out_data(hddu_noc_plo_resp_data),
         .noc_plo_out_status(hddu_noc_plo_resp_status),
         .noc_plo_out_valid(hddu_noc_plo_resp_valid),
-        .noc_plo_out_ready(hddu_noc_plo_resp_ready)
+        .noc_plo_out_ready(hddu_noc_plo_resp_ready),
+        .quiesced_o(noc_hw_quiesced_sig)
     );
 
     ClusterControlUnit ccu (

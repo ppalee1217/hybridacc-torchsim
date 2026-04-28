@@ -24,7 +24,9 @@
 
 module AddressGenerateUnit
     import cluster_pkg::*;
-(
+#(
+    parameter int unsigned AGU_INDEX = 0
+) (
     input  logic        clk,
     input  logic        reset_n,
 
@@ -368,6 +370,15 @@ module AddressGenerateUnit
             // 1) MMIO write decode
             // ---------------------------------------------------------
             if (cfg_write) begin
+                // synopsys translate_off
+                if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_MMIO")) begin
+                    $display("[%0t] [TRACE][AGU%0d][MMIO] off=0x%02x data=0x%08x",
+                             $time,
+                             AGU_INDEX,
+                             cfg_addr,
+                             cfg_wdata);
+                end
+                // synopsys translate_on
                 unique case (cfg_addr)
                     AGU_REG_BASE_ADDR:    base_addr_reg   <= cfg_wdata;
                     AGU_REG_BASE_ADDR_H:  base_addr_h_reg <= cfg_wdata;
@@ -399,6 +410,13 @@ module AddressGenerateUnit
             // 2) Soft reset (CTRL.bit2): keep config, clear FSM/pipeline
             // ---------------------------------------------------------
             if (soft_reset_req) begin
+                // synopsys translate_off
+                if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                    $display("[%0t] [TRACE][AGU%0d] soft_reset",
+                             $time,
+                             AGU_INDEX);
+                end
+                // synopsys translate_on
                 for (int i = 0; i < 4; i++) idx_reg[i] <= 16'h0;
                 s0_reg              <= '0;
                 s1_reg              <= '0;
@@ -414,6 +432,15 @@ module AddressGenerateUnit
             // 3) Stop request
             // ---------------------------------------------------------
             if (stop_req) begin
+                // synopsys translate_off
+                if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                    $display("[%0t] [TRACE][AGU%0d] stop_req ctrl=0x%08x busy=%0b",
+                             $time,
+                             AGU_INDEX,
+                             ctrl_reg,
+                             busy_reg);
+                end
+                // synopsys translate_on
                 state_reg           <= AGU_FSM_IDLE;
                 s0_reg              <= '0;
                 s1_reg              <= '0;
@@ -431,6 +458,26 @@ module AddressGenerateUnit
             // 4) Start request
             // ---------------------------------------------------------
             if (!stop_req && start_req && (state_reg == AGU_FSM_IDLE)) begin
+                // synopsys translate_off
+                if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                    $display("[%0t] [TRACE][AGU%0d] start base=0x%08x iter={%0d,%0d,%0d,%0d} stride={0x%08x,0x%08x,0x%08x,0x%08x} tag_base=0x%02x tag_ctrl=0x%08x mask=0x%04x ultra=%0b",
+                             $time,
+                             AGU_INDEX,
+                             base_addr_reg,
+                             iter_reg[0],
+                             iter_reg[1],
+                             iter_reg[2],
+                             iter_reg[3],
+                             stride_reg[0],
+                             stride_reg[1],
+                             stride_reg[2],
+                             stride_reg[3],
+                             tag_base_reg[7:0],
+                             tag_ctrl_reg,
+                             mask_cfg_reg[15:0],
+                             ctrl_reg[AGU_CTRL_ULTRA_BIT]);
+                end
+                // synopsys translate_on
                 for (int i = 0; i < 4; i++) idx_reg[i] <= 16'h0;
                 s0_reg              <= '0;
                 s1_reg              <= '0;
@@ -632,6 +679,18 @@ module AddressGenerateUnit
                     dbg_last_addr_reg <= s2_reg.addr;
                     dbg_last_tag_reg  <= {16'd0, s2_reg.tag};
                 end
+
+                // synopsys translate_off
+                if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
+                    && out_fire && s2_reg.last) begin
+                    $display("[%0t] [TRACE][AGU%0d] done last_addr=0x%08x last_tag=0x%04x mask=0x%04x",
+                             $time,
+                             AGU_INDEX,
+                             s2_reg.addr,
+                             s2_reg.tag,
+                             s2_reg.mask);
+                end
+                // synopsys translate_on
             end else if (state_reg != AGU_FSM_RUN) begin
                 // Outside RUN: clear pipeline + outputs
                 s0_reg   <= '0;

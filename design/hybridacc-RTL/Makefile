@@ -6,25 +6,58 @@ sim_bld_dir := $(sim_dir)/build
 sim_log_dir := $(sim_dir)/log
 gate_sim_bld_dir := $(sim_dir)/gate_build
 gate_sim_log_dir := $(sim_dir)/gate_log
+REPO_ROOT := $(abspath ../..)
 
 VCS ?= vcs
 DW_SIM_VER := /usr/cad/synopsys/synthesis/2024.09-sp2/dw/sim_ver
-# Behavioral SRAM model for pre-synthesis simulation (replaces TSMC hard macro)
-SRAM_SIM_MODEL := src/PE/SRAM_SP_BWEB.sv
-# Standard cell and SRAM Verilog simulation models for gate-level simulation
+# Standard cell and TSMC SRAM Verilog simulation models
 STDCELL_V := /cad/process/ADFP/Executable_Package/Collaterals/IP/stdcell/N16ADFP_StdCell/VERILOG/N16ADFP_StdCell.v
 SRAM_V    := /cad/process/ADFP/Executable_Package/Collaterals/IP/sram/N16ADFP_SRAM/VERILOG/N16ADFP_SRAM_100a.v
+TSMC_SRAM_MODEL_DEFINE := +define+TSMC_SRAM_MODEL_LOADED
+RTL_MACRO_SIM_FLAGS := +no_notifier +notimingcheck
 
 VCS_FLAGS ?= -full64 -sverilog -debug_access+all -timescale=1ns/1ps \
+	$(TSMC_SRAM_MODEL_DEFINE) $(RTL_MACRO_SIM_FLAGS) -v $(SRAM_V) \
 	-y $(DW_SIM_VER) +libext+.v
 GATE_VCS_FLAGS := -full64 -sverilog -debug_access+all -timescale=1ns/1ps \
-	+define+GATE_SIM +neg_tchk +sdfverbose +no_notifier +notimingcheck \
+	+define+GATE_SIM $(TSMC_SRAM_MODEL_DEFINE) +neg_tchk +sdfverbose +no_notifier +notimingcheck \
 	-v $(STDCELL_V) -v $(SRAM_V) \
 	-y $(DW_SIM_VER) +libext+.v
 RTL_INCDIRS := +incdir+tb +incdir+src +incdir+src/Cluster +incdir+src/Core +incdir+src/PE +incdir+src/NoC
 SIM_PLUSARGS := $(if $(TEST_DATA_DIR),+DATA_DIR=$(TEST_DATA_DIR),) \
 	$(if $(VERIFY_TOL),+VERIFY_TOL=$(VERIFY_TOL),) \
 	$(if $(CLOCK_PERIOD_NS),+CLOCK_PERIOD_NS=$(CLOCK_PERIOD_NS),)
+UV ?= uv
+HACC_COMPILE := $(UV) run hacc-compile
+RISCV_TOOL_PREFIX ?= riscv32-unknown-elf-
+RISCV_OBJCOPY ?= $(RISCV_TOOL_PREFIX)objcopy
+RISCV_OBJDUMP ?= $(RISCV_TOOL_PREFIX)objdump
+RISCV_SIZE ?= $(RISCV_TOOL_PREFIX)size
+RTL_FW_REGRESS_ROOT ?= $(REPO_ROOT)/output/rtl-fw-regress
+RTL_FW_IMAGE_TOOL := $(REPO_ROOT)/scripts/gen_flat_fw_mem.py
+RTL_FW_ISRAM_BYTES ?= 65536
+RTL_FW_DSRAM_BASE ?= 0x10000000
+RTL_FW_DSRAM_BYTES ?= 65536
+RTL_FW_MAX_LOADER_CYCLES ?= 262144
+RTL_FW_MAX_CORE_CYCLES ?= 500000
+RTL_FW_TEST_SEED ?= 42
+# Leave empty to suppress trace display.
+# Example: RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_RUNTIME +TRACE_CLUSTER_MMIO"
+# Example: RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_DEBUG"
+RTL_FW_DEBUG_PLUSARGS ?=
+RTL_FW_COMPARE_RTOL ?= 3e-2
+RTL_FW_COMPARE_ATOL ?= 1.5e-2
+RTL_FW_COMPARE_SHOW ?= 10
+HACC_CC_EXAMPLE_ROOT := $(REPO_ROOT)/design/hybridacc-cc/example
+RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_YAML := $(HACC_CC_EXAMPLE_ROOT)/conv1x1/conv2d_1x1_single_wave.yaml
+RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_YAML := $(HACC_CC_EXAMPLE_ROOT)/conv3x3/conv2d_3x3_single_wave.yaml
+RTL_REGRESS_GEMM_SINGLE_WAVE_YAML := $(HACC_CC_EXAMPLE_ROOT)/gemm/gemm_single_wave.yaml
+RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_OUT := $(RTL_FW_REGRESS_ROOT)/conv2d_1x1_single_wave
+RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_OUT := $(RTL_FW_REGRESS_ROOT)/conv2d_3x3_single_wave
+RTL_REGRESS_GEMM_SINGLE_WAVE_OUT := $(RTL_FW_REGRESS_ROOT)/gemm_single_wave
+RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim_conv2d_1x1_single_wave
+RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim_conv2d_3x3_single_wave
+RTL_REGRESS_GEMM_SINGLE_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim_gemm_single_wave
 
 TB_ALL := $(shell find tb -type f -name 'tb_*.sv')
 TB_PE := $(shell find tb/PE -type f -name 'tb_*.sv' 2>/dev/null)
@@ -56,6 +89,10 @@ help:
 	@echo "  sim_noc_sim          - Pre-sim: full NoC system sim with ESL test data"
 	@echo "  sim_noc_sim_all      - Pre-sim: run all NoC test cases under output/noc-sim/"
 	@echo "  sim_cluster          - Pre-sim: run all testbenches under tb/Cluster/"
+	@echo "  rtl_regress_single_wave             - Compile 3 hybridacc-cc single-wave YAMLs and run RTL/VCS firmware regression"
+	@echo "  rtl_regress_conv2d_1x1_single_wave  - Run RTL/VCS firmware regression for conv2d_1x1_single_wave.yaml"
+	@echo "  rtl_regress_conv2d_3x3_single_wave  - Run RTL/VCS firmware regression for conv2d_3x3_single_wave.yaml"
+	@echo "  rtl_regress_gemm_single_wave        - Run RTL/VCS firmware regression for gemm_single_wave.yaml"
 	@echo "  gate_sim_<tb|module> - Post-sim: compile and run a testbench (gate-level + SDF)"
 	@echo "  gate_sim_pe          - Post-sim: run all PE testbenches (gate-level + SDF)"
 	@echo "  gate_sim_noc         - Post-sim: run all NoC testbenches (gate-level + SDF)"
@@ -72,7 +109,7 @@ help:
 	@echo "  gate_sim_report      - Generate a post-sim report from sim/gate_log/"
 	@echo "  clean                - Remove simulation build artifacts"
 	@echo "  clean_syn            - Remove synthesized files and reports"
-	@echo "Variables: TEST_DATA_DIR=... VERIFY_TOL=... CLOCK_PERIOD_NS=..."
+	@echo "Variables: TEST_DATA_DIR=... VERIFY_TOL=... CLOCK_PERIOD_NS=... RTL_FW_REGRESS_ROOT=... RTL_FW_DEBUG_PLUSARGS='+TRACE_CLUSTER_DEBUG' RTL_FW_TEST_SEED=... UV=... RISCV_TOOL_PREFIX=..."
 
 $(bld_dir):
 	mkdir -p $(bld_dir)
@@ -104,7 +141,7 @@ define run_tb
 	tb_base=$$(basename $$tb_file .sv); \
 	tb_dir=$$(dirname $$tb_file); \
 	echo "[SIM] Compiling $$tb_file ..."; \
-	$(VCS) $(VCS_FLAGS) +incdir+$$tb_dir $(RTL_INCDIRS) $(SRAM_SIM_MODEL) $$tb_file -o $(sim_bld_dir)/$$tb_base.simv > $(sim_log_dir)/$$tb_base.compile.log 2>&1 || \
+	$(VCS) $(VCS_FLAGS) +incdir+$$tb_dir $(RTL_INCDIRS) $$tb_file -o $(sim_bld_dir)/$$tb_base.simv > $(sim_log_dir)/$$tb_base.compile.log 2>&1 || \
 		{ echo "[SIM] ERROR: VCS compile failed. See $(sim_log_dir)/$$tb_base.compile.log"; exit 1; }; \
 	if [ ! -x $(sim_bld_dir)/$$tb_base.simv ]; then \
 		echo "[SIM] ERROR: simv was not generated. See $(sim_log_dir)/$$tb_base.compile.log"; \
@@ -113,6 +150,11 @@ define run_tb
 	echo "[SIM] Running $$tb_base ..."; \
 	$(sim_bld_dir)/$$tb_base.simv $(SIM_PLUSARGS) > $(sim_log_dir)/$$tb_base.run.log 2>&1 || \
 		{ echo "[SIM] ERROR: Simulation failed. See $(sim_log_dir)/$$tb_base.run.log"; exit 1; }; \
+	if grep -Eq 'Fatal:|\[FAIL|\[TB_TIMEOUT\]| FAIL \(' $(sim_log_dir)/$$tb_base.run.log; then \
+		echo "[SIM] ERROR: Simulation log indicates failure. See $(sim_log_dir)/$$tb_base.run.log"; \
+		tail -40 $(sim_log_dir)/$$tb_base.run.log; \
+		exit 1; \
+	fi; \
 	echo "[SIM] Logs: $(sim_log_dir)/$$tb_base.compile.log $(sim_log_dir)/$$tb_base.run.log"
 endef
 
@@ -162,6 +204,87 @@ sim_cluster: | $(sim_bld_dir) $(sim_log_dir)
 		tb_base=$$(basename $$tb_file .sv); \
 		$(MAKE) sim_$$tb_base TEST_DATA_DIR="$(TEST_DATA_DIR)" VERIFY_TOL="$(VERIFY_TOL)" CLOCK_PERIOD_NS="$(CLOCK_PERIOD_NS)"; \
 	done
+
+define run_rtl_fw_regress
+.PHONY: rtl_regress_$(1)
+rtl_regress_$(1): | $(sim_bld_dir) $(sim_log_dir)
+	@set -e; \
+	echo "[RTL_REGRESS] [$(1)] Compiling $(2) -> $(3)"; \
+	mkdir -p "$(3)"; \
+	cd $(REPO_ROOT) && $(HACC_COMPILE) "$(2)" -o "$(3)" --dump-ir; \
+	cd "$(CURDIR)"; \
+	echo "[RTL_REGRESS] [$(1)] Generating $(3)/firmware.mem"; \
+	fw_bytes=`cd $(REPO_ROOT) && $(UV) run python "$(RTL_FW_IMAGE_TOOL)" \
+		--elf "$(3)/firmware.elf" \
+		--output "$(3)/firmware.mem" \
+		--objcopy "$(RISCV_OBJCOPY)" \
+		--objdump "$(RISCV_OBJDUMP)" \
+		--isram-bytes "$(RTL_FW_ISRAM_BYTES)" \
+		--dsram-base "$(RTL_FW_DSRAM_BASE)" \
+		--dsram-bytes "$(RTL_FW_DSRAM_BYTES)"`; \
+	echo "[RTL_REGRESS] [$(1)] Generating $(3)/dram_init.bin + golden_output.bin"; \
+	cd $(REPO_ROOT) && $(UV) run python -m hybridacc_verify.gen.gen_test_dram \
+		--ir "$(3)/hardware_ir.json" \
+		--workload "$(2)" \
+		--output-dir "$(3)" \
+		--seed "$(RTL_FW_TEST_SEED)"; \
+	cd "$(CURDIR)"; \
+	dram_bytes=`wc -c < "$(3)/dram_init.bin" | tr -d '[:space:]'`; \
+	golden_bytes=`wc -c < "$(3)/golden_output.bin" | tr -d '[:space:]'`; \
+	dram_base=`sed -n 's/^dram_base=0x//p' "$(3)/golden_meta.txt"`; \
+	golden_base=`sed -n 's/^dram_output_base=0x//p' "$(3)/golden_meta.txt"`; \
+	if [ -z "$$$$dram_base" ] || [ -z "$$$$golden_base" ]; then \
+		echo "[RTL_REGRESS] [$(1)] ERROR: failed to parse DRAM base metadata"; \
+		exit 1; \
+	fi; \
+	actual_output="$(3)/rtl_actual_output.bin"; \
+	echo "[RTL_REGRESS] [$(1)] Running tb_hybridacc_sim (FW_BYTES=$$$$fw_bytes DRAM_BYTES=$$$$dram_bytes GOLDEN_BYTES=$$$$golden_bytes)"; \
+	set +e; \
+	$(MAKE) -C "$(CURDIR)" sim_tb_hybridacc_sim TEST_DATA_DIR= VERIFY_TOL= CLOCK_PERIOD_NS= \
+		SIM_PLUSARGS="+FW_MEM=$(3)/firmware.mem +FW_BYTES=$$$$fw_bytes +DRAM_MIRROR=$(3)/dram_init.bin +DRAM_MIRROR_BYTES=$$$$dram_bytes +DRAM_MIRROR_BASE=$$$$dram_base +GOLDEN_OUTPUT=$(3)/golden_output.bin +GOLDEN_OUTPUT_BYTES=$$$$golden_bytes +GOLDEN_OUTPUT_BASE=$$$$golden_base +ACTUAL_OUTPUT_DUMP=$$$$actual_output +SKIP_FW_TEST_SUMMARY +SKIP_GOLDEN_EXACT_CHECK +MAX_LOADER_CYCLES=$(RTL_FW_MAX_LOADER_CYCLES) +MAX_CORE_CYCLES=$(RTL_FW_MAX_CORE_CYCLES) $(RTL_FW_DEBUG_PLUSARGS)"; \
+	rc=$$$$?; \
+	if [ $$$$rc -eq 0 ]; then \
+		echo "[RTL_REGRESS] [$(1)] Comparing rtl_actual_output.bin against golden_output.bin"; \
+		cd $(REPO_ROOT) && $(UV) run python -m hybridacc_verify.check.comparator \
+			--sim "$$$$actual_output" \
+			--expected "$(3)/golden_output.bin" \
+			--rtol "$(RTL_FW_COMPARE_RTOL)" \
+			--atol "$(RTL_FW_COMPARE_ATOL)" \
+			--show "$(RTL_FW_COMPARE_SHOW)" \
+			> "$(CURDIR)/$(4).compare.log" 2>&1; \
+		rc=$$$$?; \
+		cd "$(CURDIR)"; \
+		cat "$(CURDIR)/$(4).compare.log"; \
+	fi; \
+	set -e; \
+	cp "$(CURDIR)"/$(sim_log_dir)/tb_hybridacc_sim.compile.log "$(4).compile.log"; \
+	cp "$(CURDIR)"/$(sim_log_dir)/tb_hybridacc_sim.run.log "$(4).run.log"; \
+	echo "[RTL_REGRESS] [$(1)] Logs: $(4).compile.log $(4).run.log $(4).compare.log"; \
+	if [ $$$$rc -ne 0 ]; then \
+		exit $$$$rc; \
+	fi
+endef
+
+$(eval $(call run_rtl_fw_regress,conv2d_1x1_single_wave,$(RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_YAML),$(RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_OUT),$(RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_LOG_PREFIX)))
+$(eval $(call run_rtl_fw_regress,conv2d_3x3_single_wave,$(RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_YAML),$(RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_OUT),$(RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_LOG_PREFIX)))
+$(eval $(call run_rtl_fw_regress,gemm_single_wave,$(RTL_REGRESS_GEMM_SINGLE_WAVE_YAML),$(RTL_REGRESS_GEMM_SINGLE_WAVE_OUT),$(RTL_REGRESS_GEMM_SINGLE_WAVE_LOG_PREFIX)))
+
+.PHONY: rtl_regress_single_wave
+rtl_regress_single_wave:
+	@set -e; \
+	fail=0; \
+	for target in \
+		rtl_regress_conv2d_1x1_single_wave \
+		rtl_regress_conv2d_3x3_single_wave \
+		rtl_regress_gemm_single_wave; do \
+		if ! $(MAKE) $$target; then \
+			fail=$$((fail + 1)); \
+		fi; \
+	done; \
+	if [ $$fail -ne 0 ]; then \
+		echo "[RTL_REGRESS] ERROR: $$fail case(s) failed. Inspect case-specific logs under $(sim_log_dir)."; \
+		exit 1; \
+	fi
 
 # --- Gate-level (post-synthesis) simulation ---
 # MOD_NAME must be set to resolve the gate netlist path, e.g.:
@@ -222,7 +345,7 @@ define run_gate_tb
 	fi; \
 	echo "[GATE_SIM] Compiling $$tb_file (gate: $$mod_name) ..."; \
 	$(VCS) $(GATE_VCS_FLAGS) +incdir+$$tb_dir $(RTL_INCDIRS) \
-		$(SRAM_SIM_MODEL) $$netlist $$tb_file \
+		$$netlist $$tb_file \
 		-o $(gate_sim_bld_dir)/$$tb_base.gate.simv \
 		> $(gate_sim_log_dir)/$$tb_base.compile.log 2>&1 || \
 		{ echo "[GATE_SIM] ERROR: VCS compile failed. See $(gate_sim_log_dir)/$$tb_base.compile.log"; exit 1; }; \
@@ -234,6 +357,11 @@ define run_gate_tb
 	$(gate_sim_bld_dir)/$$tb_base.gate.simv $(SIM_PLUSARGS) \
 		> $(gate_sim_log_dir)/$$tb_base.run.log 2>&1 || \
 		{ echo "[GATE_SIM] ERROR: Simulation failed. See $(gate_sim_log_dir)/$$tb_base.run.log"; exit 1; }; \
+	if grep -Eq 'Fatal:|\[FAIL|\[TB_TIMEOUT\]| FAIL \(' $(gate_sim_log_dir)/$$tb_base.run.log; then \
+		echo "[GATE_SIM] ERROR: Simulation log indicates failure. See $(gate_sim_log_dir)/$$tb_base.run.log"; \
+		tail -40 $(gate_sim_log_dir)/$$tb_base.run.log; \
+		exit 1; \
+	fi; \
 	echo "[GATE_SIM] Logs: $(gate_sim_log_dir)/$$tb_base.compile.log $(gate_sim_log_dir)/$$tb_base.run.log"
 endef
 
@@ -381,7 +509,7 @@ clean_syn:
 sim_noc_sim: | $(sim_bld_dir) $(sim_log_dir)
 	@echo "[NOC_SIM] Compiling tb_noc_sim.sv ..."; \
 	$(VCS) $(VCS_FLAGS) +incdir+tb/NoC +incdir+tb \
-		$(SRAM_SIM_MODEL) tb/NoC/tb_noc_sim.sv \
+		tb/NoC/tb_noc_sim.sv \
 		-o $(sim_bld_dir)/tb_noc_sim.simv \
 		> $(sim_log_dir)/tb_noc_sim.compile.log 2>&1; \
 	if [ $$? -ne 0 ]; then \
@@ -392,13 +520,18 @@ sim_noc_sim: | $(sim_bld_dir) $(sim_log_dir)
 	echo "[NOC_SIM] Running tb_noc_sim (data=$(TEST_DATA_DIR)) ..."; \
 	$(sim_bld_dir)/tb_noc_sim.simv $(SIM_PLUSARGS) \
 		> $(sim_log_dir)/tb_noc_sim.run.log 2>&1; \
+	if grep -Eq 'Fatal:|\[FAIL|\[TB_TIMEOUT\]| FAIL \(' $(sim_log_dir)/tb_noc_sim.run.log; then \
+		echo "[NOC_SIM] ERROR: Simulation log indicates failure. See $(sim_log_dir)/tb_noc_sim.run.log"; \
+		tail -40 $(sim_log_dir)/tb_noc_sim.run.log; \
+		exit 1; \
+	fi; \
 	echo "[NOC_SIM] Logs: $(sim_log_dir)/tb_noc_sim.compile.log $(sim_log_dir)/tb_noc_sim.run.log"; \
 	tail -30 $(sim_log_dir)/tb_noc_sim.run.log
 
 sim_noc_sim_all: | $(sim_bld_dir) $(sim_log_dir)
 	@echo "[NOC_SIM] Compiling tb_noc_sim.sv ..."; \
 	$(VCS) $(VCS_FLAGS) +incdir+tb/NoC +incdir+tb \
-		$(SRAM_SIM_MODEL) tb/NoC/tb_noc_sim.sv \
+		tb/NoC/tb_noc_sim.sv \
 		-o $(sim_bld_dir)/tb_noc_sim.simv \
 		> $(sim_log_dir)/tb_noc_sim.compile.log 2>&1; \
 	if [ $$? -ne 0 ]; then \
@@ -422,4 +555,4 @@ sim_noc_sim_all: | $(sim_bld_dir) $(sim_log_dir)
 	done; \
 	echo "[NOC_SIM] Summary: $$pass PASSED, $$fail FAILED"
 
-.PHONY: help sim_all sim_pe sim_noc sim_cluster sim_noc_fast sim_noc_sim sim_noc_sim_all synall syn_pe_all syn_noc_all syn_cluster_all syn_report sim_report gate_sim_report gate_sim_pe gate_sim_noc postsim_all clean clean_syn
+.PHONY: help sim_all sim_pe sim_noc sim_cluster sim_noc_fast sim_noc_sim sim_noc_sim_all synall syn_pe_all syn_noc_all syn_cluster_all syn_report sim_report gate_sim_report gate_sim_pe gate_sim_noc postsim_all clean clean_syn rtl_regress_single_wave rtl_regress_conv2d_1x1_single_wave rtl_regress_conv2d_3x3_single_wave rtl_regress_gemm_single_wave

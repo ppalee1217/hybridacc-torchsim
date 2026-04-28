@@ -109,6 +109,22 @@ module MBUS #(
         end
     end
 
+    // synopsys translate_off
+    always_ff @(posedge clk) begin
+        if (reset_n && scan_chain_enable
+            && ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))) begin
+            $display("[%0t] [TRACE][MBUS] scan_shift enable=%0b ps=%0d pd=%0d pli=%0d plo=%0d route=%0d",
+                     $time,
+                     scan_chain_in.enable,
+                     scan_chain_in.ps_id,
+                     scan_chain_in.pd_id,
+                     scan_chain_in.pli_id,
+                     scan_chain_in.plo_id,
+                     scan_chain_in.route_mode);
+        end
+    end
+    // synopsys translate_on
+
     always_comb begin
         logic [NUM_PES-1:0] mask_ps, mask_pd, mask_pli, mask_plo;
         logic all_ready;

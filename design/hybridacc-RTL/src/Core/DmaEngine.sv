@@ -104,7 +104,10 @@ module DmaEngine (
 
     logic [31:0] current_src_addr_reg;
     logic [31:0] current_dst_addr_reg;
+    logic [31:0] current_src_row_base_reg;
+    logic [31:0] current_dst_row_base_reg;
     logic [31:0] remaining_beats_reg;
+    logic [31:0] remaining_rows_reg;
     logic [63:0] read_data_reg;
     logic [1:0]  read_resp_reg;
 
@@ -241,7 +244,10 @@ module DmaEngine (
             ctrl_reg <= 32'h0;
             current_src_addr_reg <= 32'h0;
             current_dst_addr_reg <= 32'h0;
+            current_src_row_base_reg <= 32'h0;
+            current_dst_row_base_reg <= 32'h0;
             remaining_beats_reg <= 32'h0;
+            remaining_rows_reg <= 32'h0;
             read_data_reg <= 64'h0;
             read_resp_reg <= 2'b00;
             mem_aw_sent_reg <= 1'b0;
@@ -252,6 +258,35 @@ module DmaEngine (
             state_reg <= DMA_ST_IDLE;
         end else begin
             irq_pulse_reg <= 1'b0;
+
+            // synopsys translate_off
+            if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_MMIO"))
+                && mmio_req_valid_i && mmio_req_write_i) begin
+                $display("[%0t] [TRACE][DMA][MMIO] off=0x%03x data=0x%08x state=%0d",
+                         $time,
+                         mmio_req_addr_i[11:0],
+                         mmio_req_wdata_i,
+                         state_reg);
+            end
+            if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
+                && dma_start_pulse_w) begin
+                $display("[%0t] [TRACE][DMA] submit src_kind=%0d dst_kind=%0d src=0x%08x dst=0x%08x src_cluster=%0d dst_cluster=%0d beats=%0d rows=%0d src_stride={%0d,%0d} dst_stride={%0d,%0d} tag=0x%08x",
+                         $time,
+                         src_kind_reg,
+                         dst_kind_reg,
+                         src_addr_lo_reg,
+                         dst_addr_lo_reg,
+                         src_cluster_id_reg,
+                         dst_cluster_id_reg,
+                         count_d0_reg,
+                         count_d1_reg,
+                         src_stride_d0_reg,
+                         src_stride_d1_reg,
+                         dst_stride_d0_reg,
+                         dst_stride_d1_reg,
+                         cmd_tag_reg);
+            end
+            // synopsys translate_on
 
             if (mmio_req_valid_i && mmio_req_write_i) begin
                 unique case (mmio_req_addr_i)
@@ -305,7 +340,10 @@ module DmaEngine (
                         end else begin
                             current_src_addr_reg <= src_addr_lo_reg;
                             current_dst_addr_reg <= dst_addr_lo_reg;
+                            current_src_row_base_reg <= src_addr_lo_reg;
+                            current_dst_row_base_reg <= dst_addr_lo_reg;
                             remaining_beats_reg <= count_d0_reg;
+                            remaining_rows_reg <= count_d1_reg;
                             done_tag_reg <= 32'h0;
                             err_code_reg <= DMA_ERR_NONE;
                             err_info_reg <= 32'h0;
@@ -314,6 +352,16 @@ module DmaEngine (
                     end
                 end
                 DMA_ST_READ_REQ: begin
+                    // synopsys translate_off
+                    if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
+                        && ((src_kind_reg == DMA_EP_DRAM && m_mem_axi_ar_ready_i)
+                            || (src_kind_reg == DMA_EP_CLUSTER_SPM && m_cl_axi_ar_ready_i))) begin
+                        $display("[%0t] [TRACE][DMA] read_req kind=%0d addr=0x%08x",
+                                 $time,
+                                 src_kind_reg,
+                                 current_src_addr_reg);
+                    end
+                    // synopsys translate_on
                     if ((src_kind_reg == DMA_EP_DRAM) && m_mem_axi_ar_ready_i) begin
                         state_reg <= DMA_ST_READ_WAIT;
                     end else if ((src_kind_reg == DMA_EP_CLUSTER_SPM) && m_cl_axi_ar_ready_i) begin
@@ -322,6 +370,15 @@ module DmaEngine (
                 end
                 DMA_ST_READ_WAIT: begin
                     if ((src_kind_reg == DMA_EP_DRAM) && m_mem_axi_r_valid_i) begin
+                        // synopsys translate_off
+                        if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                            $display("[%0t] [TRACE][DMA] read_resp kind=dram addr=0x%08x resp=%0d data=0x%016x",
+                                     $time,
+                                     current_src_addr_reg,
+                                     m_mem_axi_r_resp_i,
+                                     m_mem_axi_r_data_i);
+                        end
+                        // synopsys translate_on
                         read_data_reg <= m_mem_axi_r_data_i;
                         read_resp_reg <= m_mem_axi_r_resp_i;
                         if (m_mem_axi_r_resp_i != 2'b00) begin
@@ -335,6 +392,15 @@ module DmaEngine (
                             state_reg <= DMA_ST_WRITE_REQ;
                         end
                     end else if ((src_kind_reg == DMA_EP_CLUSTER_SPM) && m_cl_axi_r_valid_i) begin
+                        // synopsys translate_off
+                        if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                            $display("[%0t] [TRACE][DMA] read_resp kind=cluster addr=0x%08x resp=%0d data=0x%016x",
+                                     $time,
+                                     current_src_addr_reg,
+                                     m_cl_axi_r_resp_i,
+                                     m_cl_axi_r_data_i);
+                        end
+                        // synopsys translate_on
                         read_data_reg <= m_cl_axi_r_data_i;
                         read_resp_reg <= m_cl_axi_r_resp_i;
                         if (m_cl_axi_r_resp_i != 2'b00) begin
@@ -351,12 +417,31 @@ module DmaEngine (
                 end
                 DMA_ST_WRITE_REQ: begin
                     if (dst_kind_reg == DMA_EP_DRAM) begin
+                        // synopsys translate_off
+                        if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
+                            && ((m_mem_axi_aw_ready_i || mem_aw_sent_reg) && (m_mem_axi_w_ready_i || mem_w_sent_reg))) begin
+                            $display("[%0t] [TRACE][DMA] write_req kind=dram addr=0x%08x data=0x%016x",
+                                     $time,
+                                     current_dst_addr_reg,
+                                     read_data_reg);
+                        end
+                        // synopsys translate_on
                         if (m_mem_axi_aw_ready_i) mem_aw_sent_reg <= 1'b1;
                         if (m_mem_axi_w_ready_i)  mem_w_sent_reg <= 1'b1;
                         if ((m_mem_axi_aw_ready_i || mem_aw_sent_reg) && (m_mem_axi_w_ready_i || mem_w_sent_reg)) begin
                             state_reg <= DMA_ST_WRITE_WAIT;
                         end
                     end else begin
+                        // synopsys translate_off
+                        if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
+                            && ((m_cl_axi_aw_ready_i || cl_aw_sent_reg) && (m_cl_axi_w_ready_i || cl_w_sent_reg))) begin
+                            $display("[%0t] [TRACE][DMA] write_req kind=cluster cluster=%0d addr=0x%08x data=0x%016x",
+                                     $time,
+                                     dst_cluster_id_reg,
+                                     current_dst_addr_reg,
+                                     read_data_reg);
+                        end
+                        // synopsys translate_on
                         if (m_cl_axi_aw_ready_i) cl_aw_sent_reg <= 1'b1;
                         if (m_cl_axi_w_ready_i)  cl_w_sent_reg <= 1'b1;
                         if ((m_cl_axi_aw_ready_i || cl_aw_sent_reg) && (m_cl_axi_w_ready_i || cl_w_sent_reg)) begin
@@ -366,14 +451,35 @@ module DmaEngine (
                 end
                 DMA_ST_WRITE_WAIT: begin
                     if ((dst_kind_reg == DMA_EP_DRAM) && m_mem_axi_b_valid_i) begin
+                        // synopsys translate_off
+                        if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                            $display("[%0t] [TRACE][DMA] write_resp kind=dram addr=0x%08x resp=%0d remain=%0d",
+                                     $time,
+                                     current_dst_addr_reg,
+                                     m_mem_axi_b_resp_i,
+                                     remaining_beats_reg);
+                        end
+                        // synopsys translate_on
                         if (m_mem_axi_b_resp_i != 2'b00) begin
                             err_code_reg <= DMA_ERR_DRAM_AXI;
                             irq_pulse_reg <= ctrl_reg[3];
                             state_reg <= DMA_ST_ERROR;
                         end else if (remaining_beats_reg <= 32'd1) begin
-                            done_tag_reg <= cmd_tag_reg;
-                            irq_pulse_reg <= ctrl_reg[3];
-                            state_reg <= DMA_ST_DONE;
+                            if (remaining_rows_reg <= 32'd1) begin
+                                done_tag_reg <= cmd_tag_reg;
+                                irq_pulse_reg <= ctrl_reg[3];
+                                state_reg <= DMA_ST_DONE;
+                            end else begin
+                                remaining_rows_reg <= remaining_rows_reg - 32'd1;
+                                current_src_row_base_reg <= current_src_row_base_reg + src_stride_d1_reg;
+                                current_dst_row_base_reg <= current_dst_row_base_reg + dst_stride_d1_reg;
+                                current_src_addr_reg <= current_src_row_base_reg + src_stride_d1_reg;
+                                current_dst_addr_reg <= current_dst_row_base_reg + dst_stride_d1_reg;
+                                remaining_beats_reg <= count_d0_reg;
+                                mem_aw_sent_reg <= 1'b0;
+                                mem_w_sent_reg <= 1'b0;
+                                state_reg <= DMA_ST_READ_REQ;
+                            end
                         end else begin
                             remaining_beats_reg <= remaining_beats_reg - 32'd1;
                             current_src_addr_reg <= current_src_addr_reg + src_stride_d0_reg;
@@ -383,14 +489,36 @@ module DmaEngine (
                             state_reg <= DMA_ST_READ_REQ;
                         end
                     end else if ((dst_kind_reg == DMA_EP_CLUSTER_SPM) && m_cl_axi_b_valid_i) begin
+                        // synopsys translate_off
+                        if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                            $display("[%0t] [TRACE][DMA] write_resp kind=cluster cluster=%0d addr=0x%08x resp=%0d remain=%0d",
+                                     $time,
+                                     dst_cluster_id_reg,
+                                     current_dst_addr_reg,
+                                     m_cl_axi_b_resp_i,
+                                     remaining_beats_reg);
+                        end
+                        // synopsys translate_on
                         if (m_cl_axi_b_resp_i != 2'b00) begin
                             err_code_reg <= DMA_ERR_CLUSTER_RESP;
                             irq_pulse_reg <= ctrl_reg[3];
                             state_reg <= DMA_ST_ERROR;
                         end else if (remaining_beats_reg <= 32'd1) begin
-                            done_tag_reg <= cmd_tag_reg;
-                            irq_pulse_reg <= ctrl_reg[3];
-                            state_reg <= DMA_ST_DONE;
+                            if (remaining_rows_reg <= 32'd1) begin
+                                done_tag_reg <= cmd_tag_reg;
+                                irq_pulse_reg <= ctrl_reg[3];
+                                state_reg <= DMA_ST_DONE;
+                            end else begin
+                                remaining_rows_reg <= remaining_rows_reg - 32'd1;
+                                current_src_row_base_reg <= current_src_row_base_reg + src_stride_d1_reg;
+                                current_dst_row_base_reg <= current_dst_row_base_reg + dst_stride_d1_reg;
+                                current_src_addr_reg <= current_src_row_base_reg + src_stride_d1_reg;
+                                current_dst_addr_reg <= current_dst_row_base_reg + dst_stride_d1_reg;
+                                remaining_beats_reg <= count_d0_reg;
+                                cl_aw_sent_reg <= 1'b0;
+                                cl_w_sent_reg <= 1'b0;
+                                state_reg <= DMA_ST_READ_REQ;
+                            end
                         end else begin
                             remaining_beats_reg <= remaining_beats_reg - 32'd1;
                             current_src_addr_reg <= current_src_addr_reg + src_stride_d0_reg;
@@ -402,12 +530,24 @@ module DmaEngine (
                     end
                 end
                 DMA_ST_DONE: begin
+                    // synopsys translate_off
+                    if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
+                        && !dma_start_pulse_w && !dma_clear_done_w) begin
+                        $display("[%0t] [TRACE][DMA] done tag=0x%08x err=0x%08x",
+                                 $time,
+                                 done_tag_reg,
+                                 err_code_reg);
+                    end
+                    // synopsys translate_on
                     if (dma_clear_done_w) begin
                         state_reg <= DMA_ST_IDLE;
                     end else if (dma_start_pulse_w) begin
                         current_src_addr_reg <= src_addr_lo_reg;
                         current_dst_addr_reg <= dst_addr_lo_reg;
+                        current_src_row_base_reg <= src_addr_lo_reg;
+                        current_dst_row_base_reg <= dst_addr_lo_reg;
                         remaining_beats_reg <= count_d0_reg;
+                        remaining_rows_reg <= count_d1_reg;
                         done_tag_reg <= 32'h0;
                         err_code_reg <= DMA_ERR_NONE;
                         err_info_reg <= 32'h0;
@@ -425,6 +565,17 @@ module DmaEngine (
                     end
                 end
                 DMA_ST_ERROR: begin
+                    // synopsys translate_off
+                    if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
+                        && !dma_start_pulse_w && !dma_clear_done_w) begin
+                        $display("[%0t] [TRACE][DMA] error code=0x%08x info=0x%08x src=0x%08x dst=0x%08x",
+                                 $time,
+                                 err_code_reg,
+                                 err_info_reg,
+                                 current_src_addr_reg,
+                                 current_dst_addr_reg);
+                    end
+                    // synopsys translate_on
                     if (dma_clear_done_w) begin
                         state_reg <= DMA_ST_IDLE;
                         err_code_reg <= DMA_ERR_NONE;
@@ -432,7 +583,10 @@ module DmaEngine (
                     end else if (dma_start_pulse_w) begin
                         current_src_addr_reg <= src_addr_lo_reg;
                         current_dst_addr_reg <= dst_addr_lo_reg;
+                        current_src_row_base_reg <= src_addr_lo_reg;
+                        current_dst_row_base_reg <= dst_addr_lo_reg;
                         remaining_beats_reg <= count_d0_reg;
+                        remaining_rows_reg <= count_d1_reg;
                         done_tag_reg <= 32'h0;
                         err_code_reg <= DMA_ERR_NONE;
                         err_info_reg <= 32'h0;

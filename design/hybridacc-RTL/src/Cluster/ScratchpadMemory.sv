@@ -446,12 +446,25 @@ module ScratchpadMemory #(
             end
 
             if (config_update_i) begin
+                // synopsys translate_off
+                if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_MMIO")) begin
+                    $display("[%0t] [TRACE][SPM] config_update map=0x%02x arb_policy=%0b",
+                             $time,
+                             config_map_i,
+                             arb_policy_i);
+                end
+                // synopsys translate_on
                 for (int p = 0; p < NUM_NOC_PORTS; p++) begin
                     active_map_reg[p] <= config_map_i[p*2 +: 2];
                 end
             end
 
             if (soft_reset_i) begin
+                // synopsys translate_off
+                if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                    $display("[%0t] [TRACE][SPM] soft_reset", $time);
+                end
+                // synopsys translate_on
                 for (int p = 0; p < NUM_NOC_PORTS; p++) begin
                     resp_valid_reg[p] <= 1'b0;
                     resp_data_reg[p]  <= '0;
@@ -465,6 +478,44 @@ module ScratchpadMemory #(
                 rvalid_reg           <= 1'b0;
                 dma_read_pending_reg <= 1'b0;
             end else begin
+                // synopsys translate_off
+                if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
+                    && s_axi_awvalid_i && s_axi_awready_o) begin
+                    $display("[%0t] [TRACE][SPM][AXI] aw addr=0x%08x",
+                             $time,
+                             s_axi_awaddr_i);
+                end
+                if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
+                    && s_axi_wvalid_i && s_axi_wready_o) begin
+                    $display("[%0t] [TRACE][SPM][AXI] w data=0x%016x strb=0x%02x",
+                             $time,
+                             s_axi_wdata_i,
+                             s_axi_wstrb_i);
+                end
+                if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
+                    && s_axi_arvalid_i && s_axi_arready_o) begin
+                    $display("[%0t] [TRACE][SPM][AXI] ar addr=0x%08x",
+                             $time,
+                             s_axi_araddr_i);
+                end
+                if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
+                    && dma_write_issue_w) begin
+                    $display("[%0t] [TRACE][SPM][AXI] write_issue bank=%0d row=%0d data=0x%016x strb=0x%02x",
+                             $time,
+                             dma_write_bank_idx_w,
+                             dma_write_row_w,
+                             w_pending_data_reg,
+                             w_pending_strb_reg);
+                end
+                if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
+                    && dma_read_issue_w) begin
+                    $display("[%0t] [TRACE][SPM][AXI] read_issue bank=%0d row=%0d",
+                             $time,
+                             dma_read_bank_idx_w,
+                             dma_read_row_w);
+                end
+                // synopsys translate_on
+
                 // Response retirement
                 for (int p = 0; p < NUM_NOC_PORTS; p++) begin
                     if (resp_valid_reg[p] && spm_resp_ready_i[p]) begin
@@ -485,6 +536,19 @@ module ScratchpadMemory #(
                 for (int p = 0; p < NUM_NOC_PORTS; p++) begin
                     if (noc_read_pending_reg[p]) begin
                         macro_sel_t macro_sel;
+
+                        // synopsys translate_off
+                        if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                            $display("[%0t] [TRACE][SPM][P%0d] read_complete parallel=%0b group=%0d bank=%0d row=%0d data_lo=0x%016x",
+                                     $time,
+                                     p,
+                                     noc_read_parallel_reg[p],
+                                     noc_read_group_reg[p],
+                                     noc_read_bank_reg[p],
+                                     noc_read_row_reg[p],
+                                     sram_q[noc_read_parallel_reg[p] ? (noc_read_group_reg[p] * BANKS_PER_GROUP) : noc_read_bank_reg[p]][row_to_macro_sel(noc_read_row_reg[p])]);
+                        end
+                        // synopsys translate_on
 
                         macro_sel = row_to_macro_sel(noc_read_row_reg[p]);
                         resp_valid_reg[p]     <= 1'b1;
@@ -535,6 +599,21 @@ module ScratchpadMemory #(
                         group_idx = active_map_reg[p];
                         laddr     = spm_req_i[p].addr;
                         bank_base = group_idx * BANKS_PER_GROUP;
+
+                        // synopsys translate_off
+                        if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                            $display("[%0t] [TRACE][SPM][P%0d] accept wen=%0b addr=0x%08x parallel=%0b group=%0d bank=%0d row=%0d data_lo=0x%016x",
+                                     $time,
+                                     p,
+                                     spm_req_i[p].wen,
+                                     laddr,
+                                     noc_parallel_w[p],
+                                     noc_group_w[p],
+                                     noc_bank_idx_w[p],
+                                     noc_row_w[p],
+                                     spm_req_i[p].wdata[63:0]);
+                        end
+                        // synopsys translate_on
 
                         if (laddr >= GROUP_LINEAR_WORDS) begin
                             if (spm_req_i[p].wen) begin

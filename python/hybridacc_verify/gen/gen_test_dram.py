@@ -22,8 +22,6 @@ import os
 import sys
 
 import numpy as np
-import torch
-import torch.nn.functional as F
 import yaml
 
 
@@ -31,7 +29,7 @@ HARDWARE_PAD_EPS = np.float16(np.nextafter(np.float16(0), np.float16(1)))
 
 
 # ---------------------------------------------------------------------------
-# Golden computations (fp16 arithmetic via fp32 accumulation → fp16 cast)
+# Golden computations (match RTL fp16 multiply + fp16 accumulate semantics)
 # ---------------------------------------------------------------------------
 
 def fp16_conv2d_golden(inp: np.ndarray, weight: np.ndarray,
@@ -49,13 +47,35 @@ def fp16_conv2d_golden(inp: np.ndarray, weight: np.ndarray,
     OC, KH, KW, IC2 = weight.shape
     assert IC == IC2, f"IC mismatch: input {IC} vs weight {IC2}"
 
-    input_nchw = torch.from_numpy(inp.astype(np.float32, copy=False)).permute(0, 3, 1, 2).contiguous()
-    weight_oihw = torch.from_numpy(weight.astype(np.float32, copy=False)).permute(0, 3, 1, 2).contiguous()
+    inp16 = inp.astype(np.float16, copy=False)
+    weight16 = weight.astype(np.float16, copy=False)
 
-    with torch.no_grad():
-        out = F.conv2d(input_nchw, weight_oihw, stride=stride, padding=padding)
+    if padding > 0:
+        inp16 = np.pad(
+            inp16,
+            ((0, 0), (padding, padding), (padding, padding), (0, 0)),
+            mode="constant",
+            constant_values=np.float16(0.0),
+        )
 
-    return out.permute(0, 2, 3, 1).contiguous().numpy().astype(np.float16, copy=False)
+    OH = ((H + 2 * padding - KH) // stride) + 1
+    OW = ((W + 2 * padding - KW) // stride) + 1
+    out = np.zeros((N, OH, OW, OC), dtype=np.float16)
+
+    for kh in range(KH):
+        h_slice = slice(kh, kh + OH * stride, stride)
+        for kw in range(KW):
+            w_slice = slice(kw, kw + OW * stride, stride)
+            input_patch = inp16[:, h_slice, w_slice, :]
+
+            for ic in range(IC):
+                prod = (
+                    input_patch[..., ic:ic + 1]
+                    * weight16[:, kh, kw, ic].reshape(1, 1, 1, OC)
+                ).astype(np.float16, copy=False)
+                out = (out + prod).astype(np.float16, copy=False)
+
+    return out
 
 
 def fp16_gemm_golden(A: np.ndarray, B: np.ndarray) -> np.ndarray:
@@ -69,13 +89,15 @@ def fp16_gemm_golden(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     K2, N = B.shape
     assert K == K2, f"K mismatch: A {K} vs B {K2}"
 
-    a32 = torch.from_numpy(A.astype(np.float32, copy=False))
-    b32 = torch.from_numpy(B.astype(np.float32, copy=False))
+    a16 = A.astype(np.float16, copy=False)
+    b16 = B.astype(np.float16, copy=False)
+    out = np.zeros((M, N), dtype=np.float16)
 
-    with torch.no_grad():
-        out = torch.matmul(a32, b32)
+    for k in range(K):
+        prod = (a16[:, k:k + 1] * b16[k:k + 1, :]).astype(np.float16, copy=False)
+        out = (out + prod).astype(np.float16, copy=False)
 
-    return out.numpy().astype(np.float16, copy=False)
+    return out
 
 
 def _coerce_bool_attr(value, attr_name: str) -> bool:

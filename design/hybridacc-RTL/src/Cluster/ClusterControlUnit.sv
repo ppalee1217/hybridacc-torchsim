@@ -112,6 +112,13 @@ module ClusterControlUnit (
             done_sticky_reg        <= 1'b0;
         end else begin
             if (stop_pending_reg && noc_quiesced_i) begin
+                // synopsys translate_off
+                if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                    $display("[%0t] [TRACE][CCU] quiesced_complete soft_reset=%0b done_sticky->1",
+                             $time,
+                             soft_reset_pending_reg);
+                end
+                // synopsys translate_on
                 if (soft_reset_pending_reg) begin
                     soft_reset_pending_reg <= 1'b0;
                 end
@@ -123,6 +130,14 @@ module ClusterControlUnit (
             end
 
             if (write_mode_i) begin
+                // synopsys translate_off
+                if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_MMIO")) begin
+                    $display("[%0t] [TRACE][CCU] write_mode old=%0d new=%0d",
+                             $time,
+                             mode_reg,
+                             (mode_wdata_i == MODE_LAYER_MANAGED) ? MODE_LAYER_MANAGED : MODE_DIRECT_DEBUG);
+                end
+                // synopsys translate_on
                 if (mode_wdata_i == MODE_LAYER_MANAGED) begin
                     mode_reg <= MODE_LAYER_MANAGED;
                 end else begin
@@ -131,6 +146,16 @@ module ClusterControlUnit (
             end
 
             if (write_ctrl_i && (mode_reg == MODE_LAYER_MANAGED)) begin
+                // synopsys translate_off
+                if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_MMIO")) begin
+                    $display("[%0t] [TRACE][CCU] write_ctrl data=0x%08x start=%0b stop=%0b soft_reset=%0b",
+                             $time,
+                             ctrl_wdata_i,
+                             ctrl_wdata_i[CTRL_START],
+                             ctrl_wdata_i[CTRL_STOP],
+                             ctrl_wdata_i[CTRL_SOFT_RESET]);
+                end
+                // synopsys translate_on
                 if (ctrl_wdata_i[CTRL_SOFT_RESET]) begin
                     done_sticky_reg <= 1'b0;
                     if (layer_active_reg || !noc_quiesced_i) begin
@@ -161,10 +186,20 @@ module ClusterControlUnit (
             end
 
             if (write_error_i && (error_wdata_i == 32'h0)) begin
+                // synopsys translate_off
+                if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_MMIO")) begin
+                    $display("[%0t] [TRACE][CCU] clear_error", $time);
+                end
+                // synopsys translate_on
                 error_code_reg <= 32'h0;
             end
 
             if (notify_direct_start_i) begin
+                // synopsys translate_off
+                if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                    $display("[%0t] [TRACE][CCU] direct_start", $time);
+                end
+                // synopsys translate_on
                 layer_active_reg       <= 1'b1;
                 stop_pending_reg       <= 1'b0;
                 soft_reset_pending_reg <= 1'b0;
@@ -173,11 +208,21 @@ module ClusterControlUnit (
                 error_code_reg         <= 32'h0;
             end
             if (notify_direct_stop_i) begin
+                // synopsys translate_off
+                if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                    $display("[%0t] [TRACE][CCU] direct_stop", $time);
+                end
+                // synopsys translate_on
                 stop_pending_reg <= 1'b1;
                 done_sticky_reg  <= 1'b0;
                 substate_reg     <= SUBSTATE_STOPPING;
             end
             if (notify_direct_reset_i) begin
+                // synopsys translate_off
+                if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                    $display("[%0t] [TRACE][CCU] direct_reset", $time);
+                end
+                // synopsys translate_on
                 layer_active_reg       <= 1'b0;
                 stop_pending_reg       <= 1'b0;
                 soft_reset_pending_reg <= 1'b0;

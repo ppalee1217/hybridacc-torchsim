@@ -57,7 +57,8 @@ module NetworkOnChip #(
     output logic [NUM_PORTS*PORT_WIDTH_BITS-1:0] noc_plo_out_data,
     output NOC_RESPONSE_STATUS noc_plo_out_status,
     output logic noc_plo_out_valid,
-    input  logic noc_plo_out_ready
+    input  logic noc_plo_out_ready,
+    output logic quiesced_o
 );
     noc_request_t noc_ps_to_bus_data [NUM_PORTS];
     logic         noc_ps_to_bus_valid[NUM_PORTS];
@@ -112,6 +113,27 @@ module NetworkOnChip #(
     logic [63:0] ln_data [NUM_PORTS+1][NUM_PES_PER_PORT];
     logic        ln_valid[NUM_PORTS+1][NUM_PES_PER_PORT];
     logic        ln_ready[NUM_PORTS+1][NUM_PES_PER_PORT];
+
+    always_comb begin
+        logic noc_activity_w;
+
+        noc_activity_w = noc_ps_in_valid || noc_pd_in_valid || noc_pli_in_valid || noc_plo_in_valid || noc_plo_out_valid;
+
+        for (int port_idx = 0; port_idx < NUM_PORTS; port_idx++) begin
+            noc_activity_w |= noc_ps_to_bus_valid[port_idx] || noc_pd_to_bus_valid[port_idx]
+                           || noc_pli_to_bus_valid[port_idx] || noc_plo_to_bus_valid[port_idx]
+                           || bus_to_noc_resp_valid[port_idx];
+
+            for (int pe_idx = 0; pe_idx < NUM_PES_PER_PORT; pe_idx++) begin
+                noc_activity_w |= bus_to_pe_ps_valid[port_idx][pe_idx] || bus_to_pe_pd_valid[port_idx][pe_idx]
+                               || bus_to_pe_pli_valid[port_idx][pe_idx] || bus_to_pe_plo_valid[port_idx][pe_idx]
+                               || pe_to_bus_plo_valid[port_idx][pe_idx] || pe_busy_sig[port_idx][pe_idx]
+                               || ln_valid[port_idx][pe_idx] || ln_valid[port_idx + 1][pe_idx];
+            end
+        end
+
+        quiesced_o = !noc_activity_w;
+    end
 
     // Tie off unconnected LN chain endpoints to avoid X propagation
     // ln_data/valid[0]  = entry of chain (no upstream PE drives these)

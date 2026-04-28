@@ -62,6 +62,7 @@ module HybridDataDeliverUnit #(
     input  NOC_RESPONSE_STATUS   noc_plo_in_status,
     input  logic                 noc_plo_in_valid,
     output logic                 noc_plo_in_ready,
+    input  logic                 noc_quiesced_i,
 
     input  logic [31:0]          mmio_addr,
     input  logic                 mmio_write,
@@ -146,7 +147,9 @@ module HybridDataDeliverUnit #(
     genvar g;
     generate
         for (g = 0; g < NUM_AGU; g++) begin : gen_agu
-            AddressGenerateUnit agu (
+            AddressGenerateUnit #(
+                .AGU_INDEX(g)
+            ) agu (
                 .clk(clk),
                 .reset_n(reset_n),
                 .cfg_write(agu_cfg_write_sig[g]),
@@ -194,7 +197,7 @@ module HybridDataDeliverUnit #(
         status_word[STATUS_IDLE]     = !hddu_busy_w;
         status_word[STATUS_BUSY]     = hddu_busy_w;
         status_word[STATUS_DONE]     = done_sticky_reg;
-        status_word[STATUS_QUIESCED] = !hddu_busy_w;
+        status_word[STATUS_QUIESCED] = !hddu_busy_w && noc_quiesced_i;
         status_word[STATUS_ERROR]    = (err_code_reg != 32'h0);
 
         mmio_rdata = 32'h0;
@@ -403,12 +406,112 @@ module HybridDataDeliverUnit #(
             end
 
             // Sticky done when quiesced after AGU work drained.
-            if (!hddu_busy_w && done_pending_reg) begin
+            if (!hddu_busy_w && done_pending_reg && noc_quiesced_i) begin
                 done_sticky_reg <= 1'b1;
                 done_pending_reg <= 1'b0;
             end
         end
     end
+
+    // synopsys translate_off
+    always_ff @(posedge clk) begin
+        if (reset_n) begin
+            if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_MMIO")) && mmio_write) begin
+                if (mmio_addr < MMIO_AGU_SIZE) begin
+                    $display("[%0t] [TRACE][HDDU][MMIO][AGU%0d] off=0x%02x data=0x%08x",
+                             $time,
+                             mmio_addr[9:8],
+                             mmio_addr[7:0],
+                             mmio_wdata);
+                end else begin
+                    $display("[%0t] [TRACE][HDDU][MMIO][GLOBAL] addr=0x%08x data=0x%08x start=%0b stop=%0b soft_reset=%0b plane_en=0x%01x",
+                             $time,
+                             mmio_addr,
+                             mmio_wdata,
+                             (mmio_addr == MMIO_GLOBAL_CTRL) ? mmio_wdata[CTRL_START] : 1'b0,
+                             (mmio_addr == MMIO_GLOBAL_CTRL) ? mmio_wdata[CTRL_STOP] : 1'b0,
+                             (mmio_addr == MMIO_GLOBAL_CTRL) ? mmio_wdata[CTRL_SOFT_RESET] : 1'b0,
+                             plane_en_reg[3:0]);
+                end
+            end
+
+            if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                for (int i = 0; i < NUM_SEND_PLANES; i++) begin
+                    logic noc_ready;
+
+                    noc_ready = (i == 0) ? noc_ps_out_ready
+                             : (i == 1) ? noc_pd_out_ready
+                             :            noc_pli_out_ready;
+
+                    if (plane_en_reg[i] && agu_gen_valid_sig[i] && agu_gen_ready_sig[i]) begin
+                        $display("[%0t] [TRACE][HDDU][SEND%0d] agu_issue addr=0x%08x tag=0x%04x ultra=%0b mask=0x%04x",
+                                 $time,
+                                 i,
+                                 agu_gen_addr_sig[i],
+                                 agu_gen_tag_sig[i],
+                                 agu_gen_ultra_sig[i],
+                                 agu_gen_mask_sig[i]);
+                    end
+
+                    if (spm_resp_valid[i] && spm_resp_ready[i]) begin
+                        $display("[%0t] [TRACE][HDDU][SEND%0d] spm_resp code=%0d hold_addr=0x%04x hold_mask=0x%016x data_lo=0x%016x",
+                                 $time,
+                                 i,
+                                 spm_resp_payload[i].code,
+                                 send_wait_addr_reg[i],
+                                 send_wait_mask_reg[i],
+                                 spm_resp_payload[i].rdata[63:0]);
+                    end
+
+                    if (send_hold_valid_reg[i] && plane_en_reg[i] && noc_ready) begin
+                        $display("[%0t] [TRACE][HDDU][SEND%0d] noc_tx addr=0x%04x mask=0x%016x data_lo=0x%016x",
+                                 $time,
+                                 i,
+                                 send_hold_addr_reg[i],
+                                 send_hold_mask_reg[i],
+                                 send_hold_data_reg[i][63:0]);
+                    end
+
+                    if (agu_done_sig[i]) begin
+                        $display("[%0t] [TRACE][HDDU][SEND%0d] agu_done fsm=%0d busy=%0b",
+                                 $time,
+                                 i,
+                                 agu_fsm_state_sig[i],
+                                 agu_busy_sig[i]);
+                    end
+                end
+
+                if (plane_en_reg[RECV_PLANE] && !recv_addr_pending_reg
+                    && agu_gen_valid_sig[RECV_PLANE] && agu_gen_ready_sig[RECV_PLANE]) begin
+                    $display("[%0t] [TRACE][HDDU][RECV] noc_read_issue writeback_addr=0x%08x req_addr=0x%04x tag=0x%04x ultra=%0b",
+                             $time,
+                             agu_gen_addr_sig[RECV_PLANE],
+                             {9'd0, agu_gen_ultra_sig[RECV_PLANE], agu_gen_tag_sig[RECV_PLANE][5:0]},
+                             agu_gen_tag_sig[RECV_PLANE],
+                             agu_gen_ultra_sig[RECV_PLANE]);
+                end
+
+                if (noc_plo_in_valid && noc_plo_in_ready) begin
+                    $display("[%0t] [TRACE][HDDU][RECV] noc_read_resp status=%0d writeback_addr=0x%08x data_lo=0x%016x",
+                             $time,
+                             noc_plo_in_status,
+                             recv_write_addr_reg,
+                             noc_plo_in_data[63:0]);
+                end
+
+                if (!hddu_busy_w && done_pending_reg && noc_quiesced_i) begin
+                    $display("[%0t] [TRACE][HDDU] done_sticky tx_pkt=%0d tx_byte=%0d rx_byte=%0d stall=%0d err=0x%08x",
+                             $time,
+                             counter_tx_pkt_reg,
+                             counter_tx_byte_reg,
+                             counter_rx_byte_reg,
+                             counter_stall_reg,
+                             err_code_reg);
+                end
+            end
+        end
+    end
+    // synopsys translate_on
 
     initial begin
         if ((SPM_ADDR_BITS != CLUSTER_ADDR_WIDTH) || (DATA_BITS != CLUSTER_DATA_WIDTH) || (NOC_TAG_BITS != 6)) begin

@@ -471,4 +471,30 @@ module NoCRouter #(
         end
     end
 
+    // synopsys translate_off
+    always_ff @(posedge clk) begin
+        if (reset_n && ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))) begin
+            if (command_mode && (message_command_t'(command_data[3:0]) != CMD_NOC_SCAN_CHAIN)) begin
+                $display("[%0t] [TRACE][NOC] sideband_cmd data=0x%08x opcode=0x%01x",
+                         $time,
+                         command_data,
+                         command_data[3:0]);
+            end
+            if (command_mode && (message_command_t'(command_data[3:0]) == CMD_NOC_SCAN_CHAIN)) begin
+                automatic ScanChainFormat trace_fmt;
+
+                trace_fmt = parse_scan_chain_data(command_data);
+                $display("[%0t] [TRACE][NOC] scan_chain enable=%0b ps=%0d pd=%0d pli=%0d plo=%0d route=%0d",
+                         $time,
+                         trace_fmt.enable,
+                         trace_fmt.ps_id,
+                         trace_fmt.pd_id,
+                         trace_fmt.pli_id,
+                         trace_fmt.plo_id,
+                         trace_fmt.route_mode);
+            end
+        end
+    end
+    // synopsys translate_on
+
 endmodule

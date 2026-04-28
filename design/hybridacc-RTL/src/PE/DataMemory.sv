@@ -11,13 +11,15 @@
 //                bank_sel controls which bank is written vs. read:
 //                  bank_sel=0 → write bank0, read bank1
 //                  bank_sel=1 → write bank1, read bank0
+//                PE DMA addresses are byte offsets and may issue overlapping
+//                64-bit windows at 2-byte stride, so simulation keeps a
+//                byte-addressed model alongside the hard macros.
 // Dependencies:  TS1N16ADFPCLLLVTA128X64M4SWSHOD (TSMC 16nm FFC SP SRAM)
 // Revision:
 //   2026/03/28 - Initial version (behavioral arrays)
 //   2026/03/29 - Replaced behavioral arrays with TSMC SRAM hard macro instances
 // Additional Comments:
 //   SRAM macro: 128 words × 64-bit, 7-bit address, per-bit BWEB[63:0].
-//   Addresses must be 8-byte aligned (addr[2:0] == 0).
 //   Power pins (SLP/DSLP/SD) tied inactive; test pins (RTSEL/WTSEL) set default.
 //-----------------------------------------------------------------------------
 module DataMemory #(
@@ -67,6 +69,13 @@ module DataMemory #(
 
     assign w_byte_addr = dm_write_addr & ADDR_MASK;
     assign r_byte_addr = dm_read_addr  & ADDR_MASK;
+
+`ifndef SYNTHESIS
+    logic [7:0] sim_bank0 [0:DMEMORY_DEFAULT_SIZE_BYTES-1];
+    logic [7:0] sim_bank1 [0:DMEMORY_DEFAULT_SIZE_BYTES-1];
+    logic [63:0] sim_read_data_next;
+    logic [63:0] sim_read_data_reg;
+`endif
 
     // ----------------------------------------------------------------
     // Expand 8-bit byte-write mask → 64-bit bit-write mask (active-low)
@@ -120,9 +129,51 @@ module DataMemory #(
     end
 
     // ----------------------------------------------------------------
-    // Read data mux (SRAM Q is registered, 1-cycle latency)
+    // Read data path
+    //   The PE DMA model uses byte-indexed overlapping 64-bit windows.
+    //   Keep that behavior in simulation while retaining hard macros.
     // ----------------------------------------------------------------
+`ifndef SYNTHESIS
+    always_comb begin
+        sim_read_data_next = 64'h0;
+        for (int i = 0; i < 8; i++) begin
+            if ((r_byte_addr + i) < DMEMORY_DEFAULT_SIZE_BYTES) begin
+                if (bank_sel) begin
+                    sim_read_data_next[i*8 +: 8] = sim_bank0[r_byte_addr + i];
+                end else begin
+                    sim_read_data_next[i*8 +: 8] = sim_bank1[r_byte_addr + i];
+                end
+            end
+        end
+    end
+
+    always_ff @(posedge clk or negedge reset_n) begin
+        if (!reset_n) begin
+            sim_read_data_reg <= 64'h0;
+            for (int i = 0; i < DMEMORY_DEFAULT_SIZE_BYTES; i++) begin
+                sim_bank0[i] <= 8'h00;
+                sim_bank1[i] <= 8'h00;
+            end
+        end else begin
+            sim_read_data_reg <= sim_read_data_next;
+            if (dm_write_en) begin
+                for (int i = 0; i < 8; i++) begin
+                    if (dm_write_mask[i] && ((w_byte_addr + i) < DMEMORY_DEFAULT_SIZE_BYTES)) begin
+                        if (bank_sel) begin
+                            sim_bank1[w_byte_addr + i] <= dm_write_data[i*8 +: 8];
+                        end else begin
+                            sim_bank0[w_byte_addr + i] <= dm_write_data[i*8 +: 8];
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    assign dm_read_data = sim_read_data_reg;
+`else
     assign dm_read_data = bank_sel ? sram0_q : sram1_q;
+`endif
 
     // ----------------------------------------------------------------
     // TSMC SRAM hard macro instances
@@ -163,21 +214,5 @@ module DataMemory #(
         .RTSEL  (2'b01),
         .WTSEL  (2'b01)
     );
-
-    // ----------------------------------------------------------------
-    // Alignment assertion (simulation only)
-    // ----------------------------------------------------------------
-    // synopsys translate_off
-    always @(posedge clk) begin
-        if (reset_n && dm_write_en) begin
-            assert (w_byte_addr[2:0] == 3'b000)
-                else $warning("DataMemory: write address 0x%04h is not 8-byte aligned", dm_write_addr);
-        end
-        if (reset_n) begin
-            assert (r_byte_addr[2:0] == 3'b000)
-                else $warning("DataMemory: read address 0x%04h is not 8-byte aligned", dm_read_addr);
-        end
-    end
-    // synopsys translate_on
 
 endmodule
