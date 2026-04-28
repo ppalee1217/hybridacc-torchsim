@@ -64,3 +64,6 @@ design/hybridacc-RTL/report/**
 design/hybridacc-RTL/syn/**
 design/hybridacc-RTL/output/**
 design/hybridacc-RTL/ucli.key
+
+## firmware .mem files
+**/firmware/**/*.mem
