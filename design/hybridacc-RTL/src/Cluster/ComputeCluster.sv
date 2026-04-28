@@ -1,13 +1,28 @@
 //-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/04/27
+// Design Name:   HybridAcc
 // Module Name:   ComputeCluster
-// Description:   RTL conversion of ESL ComputeCluster.hpp
-//                Top-level integration: SPM + HDDU + NetworkOnChip
-//                AXI4-Lite DMA slave + AHB-Lite command interface
-//                Power gating logic
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Cluster top-level functional RTL baseline.
+//                Integrates SPM, HDDU, existing NoC, direct/native command,
+//                AHB-lite MMIO path, and 64-bit DMA data slave.
+// Dependencies:  src/hybridacc_utils_pkg.sv, src/Cluster/cluster_pkg.sv,
+//                src/Cluster/ScratchpadMemory.sv,
+//                src/Cluster/HybridDataDeliverUnit.sv,
+//                src/Cluster/ClusterControlUnit.sv,
+//                src/NetworkOnChip.sv
+// Revision:
+//   2026/04/27 - Initial version (M2 cluster integration baseline)
+// Additional Comments:
+//   None
 //-----------------------------------------------------------------------------
-module ComputeCluster
-    import hybridacc_utils_pkg::*;
-#(
+import hybridacc_utils_pkg::*;
+import cluster_pkg::*;
+
+module ComputeCluster #(
     parameter int unsigned SPM_NUM_NOC_CHANNEL         = 4,
     parameter int unsigned SPM_NUM_BANKS_PER_GROUP     = 3,
     parameter int unsigned SPM_SRAM_BANK_WIDTH_BITS    = 64,
@@ -17,396 +32,521 @@ module ComputeCluster
     parameter int unsigned SPM_ADDR_WIDTH              = 32,
     parameter int unsigned NOC_NUM_PORTS               = 3,
     parameter int unsigned NOC_PORT_WIDTH_BITS         = 64,
-    parameter int unsigned NOC_NUM_PES_PER_PORT        = 16
+    parameter int unsigned NOC_NUM_PES_PER_PORT        = 16,
+    parameter int unsigned PE_FIFO_DEPTH               = 4,
+    parameter int unsigned NOC_FIFO_DEPTH              = 4
 ) (
-    input  logic        clk,
-    input  logic        reset_n,
-    input  logic        power_enable_i,
-    output logic        interrupt_o,
+    input  logic             clk,
+    input  logic             reset_n,
+    input  logic             power_enable_i,
+    output logic             interrupt_o,
 
-    // AXI4-Lite slave DATA port -> SPM DMA
-    input  logic                                   s_axi_awvalid_i,
-    output logic                                   s_axi_awready_o,
-    input  logic [SPM_ADDR_WIDTH-1:0]              s_axi_awaddr_i,
+    input  logic             cmd_req_valid_i,
+    input  logic             cmd_req_write_i,
+    input  logic [31:0]      cmd_req_addr_i,
+    input  logic [31:0]      cmd_req_wdata_i,
+    input  logic [3:0]       cmd_req_wstrb_i,
+    output logic             cmd_req_ready_o,
+    output logic             cmd_resp_valid_o,
+    output logic [31:0]      cmd_resp_rdata_o,
+    output logic             cmd_resp_err_o,
 
-    input  logic                                   s_axi_wvalid_i,
-    output logic                                   s_axi_wready_o,
-    input  logic [SPM_SRAM_BANK_WIDTH_BITS-1:0]    s_axi_wdata_i,
-    input  logic [SPM_SRAM_BANK_WIDTH_BITS/8-1:0]  s_axi_wstrb_i,
+    input  logic             s_axi_awvalid_i,
+    output logic             s_axi_awready_o,
+    input  logic [SPM_ADDR_WIDTH-1:0] s_axi_awaddr_i,
+    input  logic             s_axi_wvalid_i,
+    output logic             s_axi_wready_o,
+    input  logic [SPM_SRAM_BANK_WIDTH_BITS-1:0] s_axi_wdata_i,
+    input  logic [SPM_SRAM_BANK_WIDTH_BITS/8-1:0] s_axi_wstrb_i,
+    output logic             s_axi_bvalid_o,
+    input  logic             s_axi_bready_i,
+    output logic [1:0]       s_axi_bresp_o,
+    input  logic             s_axi_arvalid_i,
+    output logic             s_axi_arready_o,
+    input  logic [SPM_ADDR_WIDTH-1:0] s_axi_araddr_i,
+    output logic             s_axi_rvalid_o,
+    input  logic             s_axi_rready_i,
+    output logic [SPM_SRAM_BANK_WIDTH_BITS-1:0] s_axi_rdata_o,
+    output logic [1:0]       s_axi_rresp_o,
 
-    output logic                                   s_axi_bvalid_o,
-    input  logic                                   s_axi_bready_i,
-    output logic [1:0]                             s_axi_bresp_o,
-
-    input  logic                                   s_axi_arvalid_i,
-    output logic                                   s_axi_arready_o,
-    input  logic [SPM_ADDR_WIDTH-1:0]              s_axi_araddr_i,
-
-    output logic                                   s_axi_rvalid_o,
-    input  logic                                   s_axi_rready_i,
-    output logic [SPM_SRAM_BANK_WIDTH_BITS-1:0]    s_axi_rdata_o,
-    output logic [1:0]                             s_axi_rresp_o,
-
-    // AHB-Lite Slave Port
-    input  logic        hsel_i,
-    input  logic [31:0] haddr_i,
-    input  logic        hwrite_i,
-    input  logic [1:0]  htrans_i,
-    input  logic [2:0]  hsize_i,
-    input  logic [2:0]  hburst_i,
-    input  logic [3:0]  hprot_i,
-    input  logic        hready_i,
-    input  logic [31:0] hwdata_i,
-    output logic        hready_o,
-    output logic        hresp_o,
-    output logic [31:0] hrdata_o
+    input  logic             hsel_i,
+    input  logic [31:0]      haddr_i,
+    input  logic             hwrite_i,
+    input  logic [1:0]       htrans_i,
+    input  logic [2:0]       hsize_i,
+    input  logic [2:0]       hburst_i,
+    input  logic [3:0]       hprot_i,
+    input  logic             hready_i,
+    input  logic [31:0]      hwdata_i,
+    output logic             hready_o,
+    output logic             hresp_o,
+    output logic [31:0]      hrdata_o
 );
+    localparam int unsigned HDDU_DATA_BITS = NOC_NUM_PORTS * NOC_PORT_WIDTH_BITS;
 
-    localparam int unsigned HDDU_DATA_BITS     = NOC_NUM_PORTS * NOC_PORT_WIDTH_BITS;
-    localparam int unsigned HDDU_NOC_TAG_BITS  = 6;
+    localparam logic [31:0] K_CMD_SPM_BASE      = 32'h0000_0000;
+    localparam logic [31:0] K_CMD_SPM_SIZE      = 32'h0000_0100;
+    localparam logic [31:0] K_CMD_HDDU_BASE     = 32'h0000_1000;
+    localparam logic [31:0] K_CMD_HDDU_SIZE     = 32'h0000_1000;
+    localparam logic [31:0] K_CMD_NOC_BASE      = 32'h0000_2000;
+    localparam logic [31:0] K_CMD_NOC_SIZE      = 32'h0000_0100;
+    localparam logic [31:0] K_CMD_CLUSTER_BASE  = CLUSTER_MMIO_BASE;
+    localparam logic [31:0] K_CMD_CLUSTER_SIZE  = CLUSTER_MMIO_SIZE;
 
-    localparam logic [31:0] CMD_SPM_BASE  = 32'h0000;
-    localparam logic [31:0] CMD_SPM_SIZE  = 32'h0100;
-    localparam logic [31:0] CMD_HDDU_BASE = 32'h1000;
-    localparam logic [31:0] CMD_HDDU_SIZE = 32'h1000;
-    localparam logic [31:0] CMD_NOC_BASE  = 32'h2000;
-    localparam logic [31:0] CMD_NOC_SIZE  = 32'h0100;
+    localparam logic [31:0] K_SPM_CFG_MAP       = 32'h0000_0000;
+    localparam logic [31:0] K_SPM_CFG_UPDATE    = 32'h0000_0004;
+    localparam logic [31:0] K_SPM_ARB_POLICY    = 32'h0000_0008;
+    localparam logic [31:0] K_SPM_PMU_CTRL      = 32'h0000_000C;
+    localparam logic [31:0] K_SPM_PMU_CYCLE_LO  = 32'h0000_0010;
+    localparam logic [31:0] K_SPM_PMU_CYCLE_HI  = 32'h0000_0014;
+    localparam logic [31:0] K_SPM_PMU_ARB_LO    = 32'h0000_0018;
+    localparam logic [31:0] K_SPM_PMU_ARB_HI    = 32'h0000_001C;
+    localparam logic [31:0] K_SPM_PMU_CREDIT_LO = 32'h0000_0020;
+    localparam logic [31:0] K_SPM_PMU_CREDIT_HI = 32'h0000_0024;
+    localparam logic [31:0] K_SPM_PMU_PORT_BASE = 32'h0000_0040;
 
-    localparam logic [31:0] SPM_CFG_MAP_OFF        = 32'h00;
-    localparam logic [31:0] SPM_CFG_UPDATE_OFF     = 32'h04;
-    localparam logic [31:0] SPM_ARB_POLICY_OFF     = 32'h08;
-    localparam logic [31:0] SPM_PMU_CTRL_OFF       = 32'h0C;
-    localparam logic [31:0] SPM_PMU_CYCLE_LO_OFF   = 32'h10;
-    localparam logic [31:0] SPM_PMU_CYCLE_HI_OFF   = 32'h14;
-    localparam logic [31:0] SPM_PMU_ARB_LO_OFF     = 32'h18;
-    localparam logic [31:0] SPM_PMU_ARB_HI_OFF     = 32'h1C;
-    localparam logic [31:0] SPM_PMU_CREDIT_LO_OFF  = 32'h20;
-    localparam logic [31:0] SPM_PMU_CREDIT_HI_OFF  = 32'h24;
-    localparam logic [31:0] SPM_PMU_PORT_TXN_BASE  = 32'h40;
-    localparam int unsigned SPM_PMU_PORT_TXN_STRIDE = 8;
+    localparam logic [31:0] K_NOC_CMD_DATA      = 32'h0000_0000;
+    localparam logic [31:0] K_NOC_STATUS        = 32'h0000_0004;
 
-    localparam logic [31:0] NOC_CMD_DATA_OFF = 32'h00;
-
-    // -------------------------------------------------------------------------
-    // Internal wires
-    // -------------------------------------------------------------------------
     logic local_reset_n;
 
-    logic [7:0]  spm_cfg_map;
-    logic        spm_cfg_update;
-    logic        spm_arb_policy;
-    logic        spm_pmu_rst;
-    logic [63:0] spm_pmu_cycle_cnt;
-    logic [63:0] spm_pmu_port_txn_cnt [SPM_NUM_NOC_CHANNEL];
-    logic [63:0] spm_pmu_arb_stall_cnt;
-    logic [63:0] spm_pmu_credit_stall_cnt;
+    logic [7:0]  spm_cfg_map_reg;
+    logic        spm_arb_policy_reg;
+    logic        spm_cfg_update_pulse;
+    logic        spm_pmu_rst_pulse;
+    logic        spm_drop_noc_resp_sig;
+    logic        spm_soft_reset_sig;
+    logic [63:0] spm_pmu_cycle_cnt_sig;
+    logic [63:0] spm_pmu_port_txn_cnt_sig[SPM_NUM_NOC_CHANNEL];
+    logic [63:0] spm_pmu_arb_stall_cnt_sig;
+    logic [63:0] spm_pmu_credit_stall_cnt_sig;
 
-    logic [3:0]                     hddu_spm_req_valid;
-    logic [3:0]                     hddu_spm_req_ready;
-    logic [3:0][SPM_ADDR_WIDTH-1:0] hddu_spm_req_addr;
-    logic [3:0][HDDU_DATA_BITS-1:0] hddu_spm_req_wdata;
-    logic [3:0]                     hddu_spm_req_wen;
-    logic [3:0]                     hddu_spm_resp_valid;
-    logic [3:0]                     hddu_spm_resp_ready;
-    logic [3:0][HDDU_DATA_BITS-1:0] hddu_spm_resp_rdata;
-    SPM_RESPONSE_CODE               hddu_spm_resp_code [4];
+    logic            hddu_spm_req_valid_sig [SPM_NUM_NOC_CHANNEL];
+    logic            hddu_spm_req_ready_sig [SPM_NUM_NOC_CHANNEL];
+    spm_req_32_192_t hddu_spm_req_payload_sig[SPM_NUM_NOC_CHANNEL];
+    logic            hddu_spm_resp_valid_sig[SPM_NUM_NOC_CHANNEL];
+    logic            hddu_spm_resp_ready_sig[SPM_NUM_NOC_CHANNEL];
+    spm_resp_192_t   hddu_spm_resp_payload_sig[SPM_NUM_NOC_CHANNEL];
 
-    logic [31:0] hddu_mmio_addr;
-    logic        hddu_mmio_write;
-    logic [31:0] hddu_mmio_wdata;
-    logic [31:0] hddu_mmio_rdata;
-    logic        hddu_interrupt;
+    logic [31:0] hddu_mmio_addr_sig;
+    logic        hddu_mmio_write_sig;
+    logic [31:0] hddu_mmio_wdata_sig;
+    logic [31:0] hddu_mmio_rdata_sig;
+    logic        hddu_interrupt_sig;
 
-    logic        noc_command_mode;
-    logic [31:0] noc_command_data;
+    logic                             s_axi_awready_sig;
+    logic                             s_axi_wready_sig;
+    logic                             s_axi_bvalid_sig;
+    logic [1:0]                       s_axi_bresp_sig;
+    logic                             s_axi_arready_sig;
+    logic                             s_axi_rvalid_sig;
+    logic [SPM_SRAM_BANK_WIDTH_BITS-1:0] s_axi_rdata_sig;
+    logic [1:0]                       s_axi_rresp_sig;
 
-    logic                      noc_ps_valid, noc_ps_ready;
-    logic [HDDU_DATA_BITS-1:0] noc_ps_data;
-    logic [15:0]               noc_ps_addr;
-    logic [HDDU_DATA_BITS-1:0] noc_ps_mask;
+    logic [HDDU_DATA_BITS-1:0] hddu_noc_ps_data;
+    logic [15:0]               hddu_noc_ps_addr;
+    logic [63:0]               hddu_noc_ps_mask;
+    logic                      hddu_noc_ps_valid;
+    logic                      hddu_noc_ps_ready;
+    logic [HDDU_DATA_BITS-1:0] hddu_noc_pd_data;
+    logic [15:0]               hddu_noc_pd_addr;
+    logic [63:0]               hddu_noc_pd_mask;
+    logic                      hddu_noc_pd_valid;
+    logic                      hddu_noc_pd_ready;
+    logic [HDDU_DATA_BITS-1:0] hddu_noc_pli_data;
+    logic [15:0]               hddu_noc_pli_addr;
+    logic [63:0]               hddu_noc_pli_mask;
+    logic                      hddu_noc_pli_valid;
+    logic                      hddu_noc_pli_ready;
+    logic [15:0]               hddu_noc_plo_addr;
+    logic                      hddu_noc_plo_valid;
+    logic                      hddu_noc_plo_ready;
+    logic [HDDU_DATA_BITS-1:0] hddu_noc_plo_resp_data;
+    NOC_RESPONSE_STATUS        hddu_noc_plo_resp_status;
+    logic                      hddu_noc_plo_resp_valid;
+    logic                      hddu_noc_plo_resp_ready;
 
-    logic                      noc_pd_valid, noc_pd_ready;
-    logic [HDDU_DATA_BITS-1:0] noc_pd_data;
-    logic [15:0]               noc_pd_addr;
-    logic [HDDU_DATA_BITS-1:0] noc_pd_mask;
-
-    logic                      noc_pli_valid, noc_pli_ready;
-    logic [HDDU_DATA_BITS-1:0] noc_pli_data;
-    logic [15:0]               noc_pli_addr;
-    logic [HDDU_DATA_BITS-1:0] noc_pli_mask;
-
-    logic        noc_plo_req_valid, noc_plo_req_ready;
-    logic [15:0] noc_plo_req_addr;
-
-    logic                      noc_plo_resp_valid, noc_plo_resp_ready;
-    logic [HDDU_DATA_BITS-1:0] noc_plo_resp_data;
-    NOC_RESPONSE_STATUS        noc_plo_resp_status;
-
-    logic                                   spm_axi_awvalid, spm_axi_awready;
-    logic [SPM_ADDR_WIDTH-1:0]              spm_axi_awaddr;
-    logic                                   spm_axi_wvalid, spm_axi_wready;
-    logic [SPM_SRAM_BANK_WIDTH_BITS-1:0]    spm_axi_wdata;
-    logic [SPM_SRAM_BANK_WIDTH_BITS/8-1:0]  spm_axi_wstrb;
-    logic                                   spm_axi_bvalid, spm_axi_bready;
-    logic [1:0]                             spm_axi_bresp;
-    logic                                   spm_axi_arvalid, spm_axi_arready;
-    logic [SPM_ADDR_WIDTH-1:0]              spm_axi_araddr;
-    logic                                   spm_axi_rvalid, spm_axi_rready;
-    logic [SPM_SRAM_BANK_WIDTH_BITS-1:0]    spm_axi_rdata;
-    logic [1:0]                             spm_axi_rresp;
-
-    logic        ahb_active_reg;
-    logic        ahb_write_reg;
-    logic [31:0] ahb_addr_reg;
-    logic [2:0]  ahb_hsize_reg;
-    logic        ahb_read_wait_reg;
-    logic [31:0] ahb_rdata_reg;
+    logic noc_command_mode_sig;
+    logic [31:0] noc_command_data_sig;
     logic [31:0] noc_last_cmd_reg;
-    logic        ahb_hddu_rd_pending_reg;
 
-    // =========================================================================
-    // Sub-module instantiations
-    // =========================================================================
+    logic ccu_write_mode_sig;
+    logic [31:0] ccu_mode_wdata_sig;
+    logic ccu_write_ctrl_sig;
+    logic [31:0] ccu_ctrl_wdata_sig;
+    logic ccu_write_error_sig;
+    logic [31:0] ccu_error_wdata_sig;
+    logic ccu_notify_direct_start_sig;
+    logic ccu_notify_direct_stop_sig;
+    logic ccu_notify_direct_reset_sig;
+    logic [1:0] ccu_noc_action_sig;
+    logic       ccu_spm_soft_reset_sig;
+    cluster_mode_e ccu_mode_sig;
+    cluster_substate_e ccu_substate_sig;
+    logic [31:0] ccu_error_code_sig;
+    logic       ccu_layer_active_sig;
+    logic       ccu_stop_pending_sig;
+    logic       ccu_soft_reset_pending_sig;
+    logic       ccu_done_sticky_sig;
+    logic [31:0] ccu_status_word_sig;
+
+    logic [63:0] cluster_run_cycles_reg;
+    logic [31:0] cmd_stub_reg0;
+    logic [31:0] cmd_stub_reg1;
+
+    wire noc_quiesced_w;
+    wire spm_quiesced_w;
+
+    function automatic logic in_range(input logic [31:0] addr, input logic [31:0] base, input logic [31:0] size);
+        return (addr >= base) && (addr < (base + size));
+    endfunction
+
+    function automatic logic [31:0] apply_wstrb(input logic [31:0] current, input logic [31:0] wdata, input logic [3:0] wstrb);
+        logic [31:0] merged;
+        merged = current;
+        for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
+            if (wstrb[byte_idx]) begin
+                merged[byte_idx*8 +: 8] = wdata[byte_idx*8 +: 8];
+            end
+        end
+        return merged;
+    endfunction
+
+    function automatic logic [31:0] compose_noc_cmd(input logic [1:0] action);
+        logic [31:0] cmd;
+        cmd = 32'h0;
+        unique case (action)
+            CLUSTER_ACTION_NOC_START: cmd[3:0] = CMD_START_PE;
+            CLUSTER_ACTION_NOC_STOP:  cmd[3:0] = CMD_STOP_PE;
+            CLUSTER_ACTION_NOC_RESET: cmd[3:0] = CMD_RESET;
+            default:                  cmd[3:0] = CMD_INIT;
+        endcase
+        return cmd;
+    endfunction
+
+    function automatic logic [31:0] spm_readback(input logic [31:0] off);
+        logic [31:0] r;
+        r = 32'h0;
+        unique case (off)
+            K_SPM_CFG_MAP:       r = {24'h0, spm_cfg_map_reg};
+            K_SPM_ARB_POLICY:    r = {31'h0, spm_arb_policy_reg};
+            K_SPM_PMU_CYCLE_LO:  r = spm_pmu_cycle_cnt_sig[31:0];
+            K_SPM_PMU_CYCLE_HI:  r = spm_pmu_cycle_cnt_sig[63:32];
+            K_SPM_PMU_ARB_LO:    r = spm_pmu_arb_stall_cnt_sig[31:0];
+            K_SPM_PMU_ARB_HI:    r = spm_pmu_arb_stall_cnt_sig[63:32];
+            K_SPM_PMU_CREDIT_LO: r = spm_pmu_credit_stall_cnt_sig[31:0];
+            K_SPM_PMU_CREDIT_HI: r = spm_pmu_credit_stall_cnt_sig[63:32];
+            default: begin
+                for (int p = 0; p < SPM_NUM_NOC_CHANNEL; p++) begin
+                    if (off == (K_SPM_PMU_PORT_BASE + p*8))       r = spm_pmu_port_txn_cnt_sig[p][31:0];
+                    if (off == (K_SPM_PMU_PORT_BASE + p*8 + 4))   r = spm_pmu_port_txn_cnt_sig[p][63:32];
+                end
+            end
+        endcase
+        return r;
+    endfunction
+
+    function automatic logic [31:0] cluster_readback(input logic [31:0] off);
+        logic [31:0] r;
+        r = 32'h0;
+        unique case (off)
+            CLUSTER_REG_MODE:       r = ccu_mode_sig;
+            CLUSTER_REG_CTRL:       r = 32'h0;
+            CLUSTER_REG_STATUS:     r = ccu_status_word_sig;
+            CLUSTER_REG_ERROR_CODE: r = ccu_error_code_sig;
+            CLUSTER_REG_SUBSTATE:   r = ccu_substate_sig;
+            default:                r = 32'h0;
+        endcase
+        return r;
+    endfunction
+
+    function automatic logic [31:0] noc_status_word(input logic quiesced);
+        logic [31:0] r;
+        r = 32'h0;
+        r[0] = !quiesced;
+        r[1] = quiesced;
+        return r;
+    endfunction
+
+    wire cmd_wr_fire = power_enable_i && cmd_req_valid_i && cmd_req_write_i;
+    wire cmd_rd_fire = power_enable_i && cmd_req_valid_i && !cmd_req_write_i;
+    wire ahb_wr_fire = power_enable_i && hsel_i && hready_i && htrans_i[1] && hwrite_i;
+    wire ahb_rd_fire = power_enable_i && hsel_i && hready_i && htrans_i[1] && !hwrite_i;
+
+    wire [31:0] wr_addr_w  = cmd_wr_fire ? cmd_req_addr_i  : haddr_i;
+    wire [31:0] wr_data_w  = cmd_wr_fire ? apply_wstrb(32'h0, cmd_req_wdata_i, cmd_req_wstrb_i) : hwdata_i;
+    wire        wr_valid_w = cmd_wr_fire || ahb_wr_fire;
+    wire [31:0] rd_addr_w  = cmd_rd_fire ? cmd_req_addr_i  : haddr_i;
+    wire        rd_valid_w = cmd_rd_fire || ahb_rd_fire;
+
+    assign local_reset_n = reset_n && power_enable_i;
+
+    assign cmd_req_ready_o = power_enable_i;
+    assign hready_o        = power_enable_i;
+    assign hresp_o         = 1'b0;
+
+    assign s_axi_awready_o = power_enable_i ? s_axi_awready_sig : 1'b0;
+    assign s_axi_wready_o  = power_enable_i ? s_axi_wready_sig  : 1'b0;
+    assign s_axi_bvalid_o  = power_enable_i ? s_axi_bvalid_sig  : 1'b0;
+    assign s_axi_bresp_o   = power_enable_i ? s_axi_bresp_sig   : 2'b00;
+    assign s_axi_arready_o = power_enable_i ? s_axi_arready_sig : 1'b0;
+    assign s_axi_rvalid_o  = power_enable_i ? s_axi_rvalid_sig  : 1'b0;
+    assign s_axi_rdata_o   = power_enable_i ? s_axi_rdata_sig   : '0;
+    assign s_axi_rresp_o   = power_enable_i ? s_axi_rresp_sig   : 2'b00;
+
+    assign interrupt_o     = power_enable_i && (hddu_interrupt_sig || ccu_done_sticky_sig);
+
+    assign spm_cfg_update_pulse = wr_valid_w && in_range(wr_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE) && ((wr_addr_w - K_CMD_SPM_BASE) == K_SPM_CFG_UPDATE) && wr_data_w[0];
+    assign spm_pmu_rst_pulse    = wr_valid_w && in_range(wr_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE) && ((wr_addr_w - K_CMD_SPM_BASE) == K_SPM_PMU_CTRL) && wr_data_w[0];
+
+    assign hddu_mmio_write_sig  = wr_valid_w && in_range(wr_addr_w, K_CMD_HDDU_BASE, K_CMD_HDDU_SIZE);
+    assign hddu_mmio_addr_sig   = (wr_valid_w && in_range(wr_addr_w, K_CMD_HDDU_BASE, K_CMD_HDDU_SIZE)) ? (wr_addr_w - K_CMD_HDDU_BASE)
+                              : (rd_valid_w && in_range(rd_addr_w, K_CMD_HDDU_BASE, K_CMD_HDDU_SIZE)) ? (rd_addr_w - K_CMD_HDDU_BASE)
+                              : 32'h0;
+    assign hddu_mmio_wdata_sig  = wr_data_w;
+
+    assign ccu_write_mode_sig   = wr_valid_w && in_range(wr_addr_w, K_CMD_CLUSTER_BASE, K_CMD_CLUSTER_SIZE) && ((wr_addr_w - K_CMD_CLUSTER_BASE) == CLUSTER_REG_MODE);
+    assign ccu_mode_wdata_sig   = wr_data_w;
+    assign ccu_write_ctrl_sig   = wr_valid_w && in_range(wr_addr_w, K_CMD_CLUSTER_BASE, K_CMD_CLUSTER_SIZE) && ((wr_addr_w - K_CMD_CLUSTER_BASE) == CLUSTER_REG_CTRL);
+    assign ccu_ctrl_wdata_sig   = wr_data_w;
+    assign ccu_write_error_sig  = wr_valid_w && in_range(wr_addr_w, K_CMD_CLUSTER_BASE, K_CMD_CLUSTER_SIZE) && ((wr_addr_w - K_CMD_CLUSTER_BASE) == CLUSTER_REG_ERROR_CODE);
+    assign ccu_error_wdata_sig  = wr_data_w;
+
+    assign ccu_notify_direct_start_sig = wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && ((wr_addr_w - K_CMD_NOC_BASE) == K_NOC_CMD_DATA) && (wr_data_w[3:0] == CMD_START_PE);
+    assign ccu_notify_direct_stop_sig  = wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && ((wr_addr_w - K_CMD_NOC_BASE) == K_NOC_CMD_DATA) && (wr_data_w[3:0] == CMD_STOP_PE);
+    assign ccu_notify_direct_reset_sig = wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && ((wr_addr_w - K_CMD_NOC_BASE) == K_NOC_CMD_DATA) && (wr_data_w[3:0] == CMD_RESET);
+
+    assign spm_soft_reset_sig = ccu_spm_soft_reset_sig;
+    assign spm_drop_noc_resp_sig = 1'b0;
+
+    assign noc_command_mode_sig = (ccu_noc_action_sig != CLUSTER_ACTION_NONE)
+                               || (wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && ((wr_addr_w - K_CMD_NOC_BASE) == K_NOC_CMD_DATA));
+    assign noc_command_data_sig = (ccu_noc_action_sig != CLUSTER_ACTION_NONE) ? compose_noc_cmd(ccu_noc_action_sig) : wr_data_w;
+
+    assign noc_quiesced_w = !(hddu_noc_ps_valid || hddu_noc_pd_valid || hddu_noc_pli_valid || hddu_noc_plo_valid || hddu_noc_plo_resp_valid || hddu_interrupt_sig);
+    assign spm_quiesced_w = !(hddu_spm_req_valid_sig[0] || hddu_spm_req_valid_sig[1] || hddu_spm_req_valid_sig[2] || hddu_spm_req_valid_sig[3]
+                           || hddu_spm_resp_valid_sig[0] || hddu_spm_resp_valid_sig[1] || hddu_spm_resp_valid_sig[2] || hddu_spm_resp_valid_sig[3]
+                           || s_axi_bvalid_sig || s_axi_rvalid_sig);
+
+    always_comb begin
+        cmd_resp_valid_o = cmd_rd_fire;
+        cmd_resp_rdata_o = 32'h0;
+        cmd_resp_err_o   = 1'b0;
+        hrdata_o         = 32'h0;
+
+        if (rd_valid_w) begin
+            logic [31:0] rdata;
+            logic        err;
+            rdata = 32'h0;
+            err   = 1'b0;
+            if (cmd_rd_fire && (rd_addr_w == 32'h0000_0000)) begin
+                rdata = cmd_stub_reg0;
+            end else if (cmd_rd_fire && (rd_addr_w == 32'h0000_0004)) begin
+                rdata = cmd_stub_reg1;
+            end else if (in_range(rd_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE)) begin
+                rdata = spm_readback(rd_addr_w - K_CMD_SPM_BASE);
+            end else if (in_range(rd_addr_w, K_CMD_HDDU_BASE, K_CMD_HDDU_SIZE)) begin
+                rdata = hddu_mmio_rdata_sig;
+            end else if (in_range(rd_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE)) begin
+                if ((rd_addr_w - K_CMD_NOC_BASE) == K_NOC_STATUS) begin
+                    rdata = noc_status_word(noc_quiesced_w);
+                end else begin
+                    rdata = noc_last_cmd_reg;
+                end
+            end else if (in_range(rd_addr_w, K_CMD_CLUSTER_BASE, K_CMD_CLUSTER_SIZE)) begin
+                rdata = cluster_readback(rd_addr_w - K_CMD_CLUSTER_BASE);
+            end else begin
+                err = 1'b1;
+            end
+
+            if (cmd_rd_fire) begin
+                cmd_resp_rdata_o = rdata;
+                cmd_resp_err_o   = err;
+            end
+            if (ahb_rd_fire) begin
+                hrdata_o         = rdata;
+            end
+        end
+    end
+
+    always_ff @(posedge clk or negedge local_reset_n) begin
+        if (!local_reset_n) begin
+            spm_cfg_map_reg      <= 8'hE4;
+            spm_arb_policy_reg   <= 1'b0;
+            noc_last_cmd_reg     <= 32'h0;
+            cluster_run_cycles_reg <= 64'h0;
+            cmd_stub_reg0        <= 32'hDEAD_BEEF;
+            cmd_stub_reg1        <= 32'h0;
+        end else begin
+            if (cmd_wr_fire && (wr_addr_w == 32'h0000_0000)) begin
+                cmd_stub_reg0 <= wr_data_w;
+            end
+            if (cmd_wr_fire && (wr_addr_w == 32'h0000_0004)) begin
+                cmd_stub_reg1 <= wr_data_w;
+            end
+            if (wr_valid_w && in_range(wr_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE)) begin
+                unique case (wr_addr_w - K_CMD_SPM_BASE)
+                    K_SPM_CFG_MAP:    spm_cfg_map_reg    <= wr_data_w[7:0];
+                    K_SPM_ARB_POLICY: spm_arb_policy_reg <= wr_data_w[0];
+                    default: ;
+                endcase
+            end
+            if (wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && ((wr_addr_w - K_CMD_NOC_BASE) == K_NOC_CMD_DATA)) begin
+                noc_last_cmd_reg <= wr_data_w;
+            end
+            if (ccu_layer_active_sig) begin
+                cluster_run_cycles_reg <= cluster_run_cycles_reg + 64'd1;
+            end
+        end
+    end
 
     ScratchpadMemory #(
-        .NUM_NOC_PORTS          (SPM_NUM_NOC_CHANNEL),
-        .BANKS_PER_GROUP        (SPM_NUM_BANKS_PER_GROUP),
-        .BANK_DATA_WIDTH        (SPM_SRAM_BANK_WIDTH_BITS),
-        .BANK_DEPTH             (SPM_SRAM_BANK_DEPTH_WORDS),
-        .SRAM_BANK_LATENCY      (SPM_SRAM_BANK_LATENCY),
+        .NUM_NOC_PORTS(SPM_NUM_NOC_CHANNEL),
+        .BANKS_PER_GROUP(SPM_NUM_BANKS_PER_GROUP),
+        .BANK_DATA_WIDTH(SPM_SRAM_BANK_WIDTH_BITS),
+        .BANK_DEPTH(SPM_SRAM_BANK_DEPTH_WORDS),
+        .SRAM_BANK_LATENCY(SPM_SRAM_BANK_LATENCY),
         .SRAM_BANK_PIPELINE_DEPTH(SPM_SRAM_BANK_PIPELINE_DEPTH),
-        .ADDR_WIDTH             (SPM_ADDR_WIDTH)
-    ) u_spm (
-        .clk(clk), .reset_n(local_reset_n), .pmu_rst_i(spm_pmu_rst),
-        .config_map_i(spm_cfg_map), .config_update_i(spm_cfg_update), .arb_policy_i(spm_arb_policy),
-        .spm_req_valid_i(hddu_spm_req_valid), .spm_req_ready_o(hddu_spm_req_ready),
-        .spm_req_addr_i(hddu_spm_req_addr), .spm_req_wdata_i(hddu_spm_req_wdata),
-        .spm_req_wen_i(hddu_spm_req_wen),
-        .spm_resp_valid_o(hddu_spm_resp_valid), .spm_resp_ready_i(hddu_spm_resp_ready),
-        .spm_resp_rdata_o(hddu_spm_resp_rdata), .spm_resp_code_o(hddu_spm_resp_code),
-        .s_axi_awvalid_i(spm_axi_awvalid), .s_axi_awready_o(spm_axi_awready), .s_axi_awaddr_i(spm_axi_awaddr),
-        .s_axi_wvalid_i(spm_axi_wvalid), .s_axi_wready_o(spm_axi_wready),
-        .s_axi_wdata_i(spm_axi_wdata), .s_axi_wstrb_i(spm_axi_wstrb),
-        .s_axi_bvalid_o(spm_axi_bvalid), .s_axi_bready_i(spm_axi_bready), .s_axi_bresp_o(spm_axi_bresp),
-        .s_axi_arvalid_i(spm_axi_arvalid), .s_axi_arready_o(spm_axi_arready), .s_axi_araddr_i(spm_axi_araddr),
-        .s_axi_rvalid_o(spm_axi_rvalid), .s_axi_rready_i(spm_axi_rready),
-        .s_axi_rdata_o(spm_axi_rdata), .s_axi_rresp_o(spm_axi_rresp),
-        .pmu_cycle_cnt_o(spm_pmu_cycle_cnt), .pmu_port_txn_cnt_o(spm_pmu_port_txn_cnt),
-        .pmu_arb_stall_cnt_o(spm_pmu_arb_stall_cnt), .pmu_credit_stall_cnt_o(spm_pmu_credit_stall_cnt)
+        .ADDR_WIDTH(SPM_ADDR_WIDTH)
+    ) spm (
+        .clk(clk),
+        .reset_n(local_reset_n),
+        .pmu_rst_i(spm_pmu_rst_pulse),
+        .drop_noc_resp_i(spm_drop_noc_resp_sig),
+        .soft_reset_i(spm_soft_reset_sig),
+        .config_map_i(spm_cfg_map_reg),
+        .config_update_i(spm_cfg_update_pulse),
+        .arb_policy_i(spm_arb_policy_reg),
+        .spm_req_valid_i(hddu_spm_req_valid_sig),
+        .spm_req_ready_o(hddu_spm_req_ready_sig),
+        .spm_req_i(hddu_spm_req_payload_sig),
+        .spm_resp_valid_o(hddu_spm_resp_valid_sig),
+        .spm_resp_ready_i(hddu_spm_resp_ready_sig),
+        .spm_resp_o(hddu_spm_resp_payload_sig),
+        .s_axi_awvalid_i(s_axi_awvalid_i),
+        .s_axi_awready_o(s_axi_awready_sig),
+        .s_axi_awaddr_i(s_axi_awaddr_i),
+        .s_axi_wvalid_i(s_axi_wvalid_i),
+        .s_axi_wready_o(s_axi_wready_sig),
+        .s_axi_wdata_i(s_axi_wdata_i),
+        .s_axi_wstrb_i(s_axi_wstrb_i),
+        .s_axi_bvalid_o(s_axi_bvalid_sig),
+        .s_axi_bready_i(s_axi_bready_i),
+        .s_axi_bresp_o(s_axi_bresp_sig),
+        .s_axi_arvalid_i(s_axi_arvalid_i),
+        .s_axi_arready_o(s_axi_arready_sig),
+        .s_axi_araddr_i(s_axi_araddr_i),
+        .s_axi_rvalid_o(s_axi_rvalid_sig),
+        .s_axi_rready_i(s_axi_rready_i),
+        .s_axi_rdata_o(s_axi_rdata_sig),
+        .s_axi_rresp_o(s_axi_rresp_sig),
+        .pmu_cycle_cnt_o(spm_pmu_cycle_cnt_sig),
+        .pmu_port_txn_cnt_o(spm_pmu_port_txn_cnt_sig),
+        .pmu_arb_stall_cnt_o(spm_pmu_arb_stall_cnt_sig),
+        .pmu_credit_stall_cnt_o(spm_pmu_credit_stall_cnt_sig)
     );
 
     HybridDataDeliverUnit #(
         .SPM_ADDR_BITS(SPM_ADDR_WIDTH),
-        .NOC_TAG_BITS (HDDU_NOC_TAG_BITS),
-        .DATA_BITS    (HDDU_DATA_BITS)
-    ) u_hddu (
-        .clk(clk), .reset_n(local_reset_n),
-        .spm_req_valid(hddu_spm_req_valid), .spm_req_ready(hddu_spm_req_ready),
-        .spm_req_addr(hddu_spm_req_addr), .spm_req_wdata(hddu_spm_req_wdata), .spm_req_wen(hddu_spm_req_wen),
-        .spm_resp_valid(hddu_spm_resp_valid), .spm_resp_ready(hddu_spm_resp_ready),
-        .spm_resp_rdata(hddu_spm_resp_rdata), .spm_resp_code(hddu_spm_resp_code),
-        .noc_ps_valid(noc_ps_valid), .noc_ps_ready(noc_ps_ready),
-        .noc_ps_data(noc_ps_data), .noc_ps_addr(noc_ps_addr), .noc_ps_mask(noc_ps_mask),
-        .noc_pd_valid(noc_pd_valid), .noc_pd_ready(noc_pd_ready),
-        .noc_pd_data(noc_pd_data), .noc_pd_addr(noc_pd_addr), .noc_pd_mask(noc_pd_mask),
-        .noc_pli_valid(noc_pli_valid), .noc_pli_ready(noc_pli_ready),
-        .noc_pli_data(noc_pli_data), .noc_pli_addr(noc_pli_addr), .noc_pli_mask(noc_pli_mask),
-        .noc_plo_req_valid(noc_plo_req_valid), .noc_plo_req_ready(noc_plo_req_ready),
-        .noc_plo_req_addr(noc_plo_req_addr),
-        .noc_plo_resp_valid(noc_plo_resp_valid), .noc_plo_resp_ready(noc_plo_resp_ready),
-        .noc_plo_resp_data(noc_plo_resp_data),
-        .mmio_addr(hddu_mmio_addr), .mmio_write(hddu_mmio_write),
-        .mmio_wdata(hddu_mmio_wdata), .mmio_rdata(hddu_mmio_rdata),
-        .interrupt(hddu_interrupt)
+        .NOC_TAG_BITS(6),
+        .DATA_BITS(HDDU_DATA_BITS)
+    ) hddu (
+        .clk(clk),
+        .reset_n(local_reset_n),
+        .spm_req_valid(hddu_spm_req_valid_sig),
+        .spm_req_ready(hddu_spm_req_ready_sig),
+        .spm_req_payload(hddu_spm_req_payload_sig),
+        .spm_resp_valid(hddu_spm_resp_valid_sig),
+        .spm_resp_ready(hddu_spm_resp_ready_sig),
+        .spm_resp_payload(hddu_spm_resp_payload_sig),
+        .noc_ps_out_data(hddu_noc_ps_data),
+        .noc_ps_out_addr(hddu_noc_ps_addr),
+        .noc_ps_out_mask(hddu_noc_ps_mask),
+        .noc_ps_out_valid(hddu_noc_ps_valid),
+        .noc_ps_out_ready(hddu_noc_ps_ready),
+        .noc_pd_out_data(hddu_noc_pd_data),
+        .noc_pd_out_addr(hddu_noc_pd_addr),
+        .noc_pd_out_mask(hddu_noc_pd_mask),
+        .noc_pd_out_valid(hddu_noc_pd_valid),
+        .noc_pd_out_ready(hddu_noc_pd_ready),
+        .noc_pli_out_data(hddu_noc_pli_data),
+        .noc_pli_out_addr(hddu_noc_pli_addr),
+        .noc_pli_out_mask(hddu_noc_pli_mask),
+        .noc_pli_out_valid(hddu_noc_pli_valid),
+        .noc_pli_out_ready(hddu_noc_pli_ready),
+        .noc_plo_out_addr(hddu_noc_plo_addr),
+        .noc_plo_out_valid(hddu_noc_plo_valid),
+        .noc_plo_out_ready(hddu_noc_plo_ready),
+        .noc_plo_in_data(hddu_noc_plo_resp_data),
+        .noc_plo_in_status(hddu_noc_plo_resp_status),
+        .noc_plo_in_valid(hddu_noc_plo_resp_valid),
+        .noc_plo_in_ready(hddu_noc_plo_resp_ready),
+        .mmio_addr(hddu_mmio_addr_sig),
+        .mmio_write(hddu_mmio_write_sig),
+        .mmio_wdata(hddu_mmio_wdata_sig),
+        .mmio_rdata(hddu_mmio_rdata_sig),
+        .interrupt(hddu_interrupt_sig)
     );
 
     NetworkOnChip #(
-        .NUM_PORTS       (NOC_NUM_PORTS),
-        .PORT_WIDTH_BITS (NOC_PORT_WIDTH_BITS),
-        .NUM_PES_PER_PORT(NOC_NUM_PES_PER_PORT)
-    ) u_noc (
-        .clk(clk), .reset_n(local_reset_n),
-        .command_mode(noc_command_mode), .command_data(noc_command_data),
-        .noc_ps_in_data(noc_ps_data), .noc_ps_in_valid(noc_ps_valid), .noc_ps_in_ready(noc_ps_ready),
-        .noc_pd_in_data(noc_pd_data), .noc_pd_in_valid(noc_pd_valid), .noc_pd_in_ready(noc_pd_ready),
-        .noc_pli_in_data(noc_pli_data), .noc_pli_in_valid(noc_pli_valid), .noc_pli_in_ready(noc_pli_ready),
-        .noc_plo_in_data(noc_addr_req_t'{addr: noc_plo_req_addr}),
-        .noc_plo_in_valid(noc_plo_req_valid), .noc_plo_in_ready(noc_plo_req_ready),
-        .noc_plo_out_data(noc_plo_resp_data), .noc_plo_out_status(noc_plo_resp_status),
-        .noc_plo_out_valid(noc_plo_resp_valid), .noc_plo_out_ready(noc_plo_resp_ready)
+        .NUM_PORTS(NOC_NUM_PORTS),
+        .PORT_WIDTH_BITS(NOC_PORT_WIDTH_BITS),
+        .NUM_PES_PER_PORT(NOC_NUM_PES_PER_PORT),
+        .PE_FIFO_DEPTH(PE_FIFO_DEPTH),
+        .NOC_FIFO_DEPTH(NOC_FIFO_DEPTH)
+    ) noc (
+        .clk(clk),
+        .reset_n(local_reset_n),
+        .command_mode(noc_command_mode_sig),
+        .command_data(noc_command_data_sig),
+        .noc_ps_in_data(hddu_noc_ps_data),
+        .noc_ps_in_addr(hddu_noc_ps_addr),
+        .noc_ps_in_mask(hddu_noc_ps_mask),
+        .noc_ps_in_valid(hddu_noc_ps_valid),
+        .noc_ps_in_ready(hddu_noc_ps_ready),
+        .noc_pd_in_data(hddu_noc_pd_data),
+        .noc_pd_in_addr(hddu_noc_pd_addr),
+        .noc_pd_in_mask(hddu_noc_pd_mask),
+        .noc_pd_in_valid(hddu_noc_pd_valid),
+        .noc_pd_in_ready(hddu_noc_pd_ready),
+        .noc_pli_in_data(hddu_noc_pli_data),
+        .noc_pli_in_addr(hddu_noc_pli_addr),
+        .noc_pli_in_mask(hddu_noc_pli_mask),
+        .noc_pli_in_valid(hddu_noc_pli_valid),
+        .noc_pli_in_ready(hddu_noc_pli_ready),
+        .noc_plo_in_data('{addr: hddu_noc_plo_addr}),
+        .noc_plo_in_valid(hddu_noc_plo_valid),
+        .noc_plo_in_ready(hddu_noc_plo_ready),
+        .noc_plo_out_data(hddu_noc_plo_resp_data),
+        .noc_plo_out_status(hddu_noc_plo_resp_status),
+        .noc_plo_out_valid(hddu_noc_plo_resp_valid),
+        .noc_plo_out_ready(hddu_noc_plo_resp_ready)
     );
 
-    // =========================================================================
-    // comb_power_and_wiring
-    // =========================================================================
-    always_comb begin
-        local_reset_n = reset_n && power_enable_i;
-
-        spm_axi_awvalid = power_enable_i && s_axi_awvalid_i;
-        spm_axi_awaddr  = s_axi_awaddr_i;
-        s_axi_awready_o = power_enable_i && spm_axi_awready;
-
-        spm_axi_wvalid  = power_enable_i && s_axi_wvalid_i;
-        spm_axi_wdata   = s_axi_wdata_i;
-        spm_axi_wstrb   = s_axi_wstrb_i;
-        s_axi_wready_o  = power_enable_i && spm_axi_wready;
-
-        spm_axi_bready  = power_enable_i && s_axi_bready_i;
-        s_axi_bvalid_o  = power_enable_i && spm_axi_bvalid;
-        s_axi_bresp_o   = power_enable_i ? spm_axi_bresp : 2'b11;
-
-        spm_axi_arvalid = power_enable_i && s_axi_arvalid_i;
-        spm_axi_araddr  = s_axi_araddr_i;
-        s_axi_arready_o = power_enable_i && spm_axi_arready;
-
-        spm_axi_rready  = power_enable_i && s_axi_rready_i;
-        s_axi_rvalid_o  = power_enable_i && spm_axi_rvalid;
-        s_axi_rdata_o   = power_enable_i ? spm_axi_rdata : '0;
-        s_axi_rresp_o   = power_enable_i ? spm_axi_rresp : 2'b11;
-
-        hready_o    = power_enable_i && !ahb_read_wait_reg;
-        hresp_o     = 1'b0;
-        interrupt_o = power_enable_i && hddu_interrupt;
-        hrdata_o    = power_enable_i ? ahb_rdata_reg : 32'd0;
-    end
-
-    // =========================================================================
-    // seq_ahb_ctrl
-    // =========================================================================
-    always_ff @(posedge clk or negedge local_reset_n) begin
-        if (!local_reset_n) begin
-            spm_cfg_map       <= 8'd0;
-            spm_cfg_update    <= 1'b0;
-            spm_arb_policy    <= 1'b0;
-            spm_pmu_rst       <= 1'b0;
-            noc_command_mode  <= 1'b0;
-            noc_command_data  <= 32'd0;
-            noc_last_cmd_reg  <= 32'd0;
-            ahb_active_reg    <= 1'b0;
-            ahb_write_reg     <= 1'b0;
-            ahb_addr_reg      <= 32'd0;
-            ahb_read_wait_reg <= 1'b0;
-            ahb_rdata_reg     <= 32'd0;
-            hddu_mmio_addr    <= 32'd0;
-            hddu_mmio_wdata   <= 32'd0;
-            hddu_mmio_write   <= 1'b0;
-            ahb_hddu_rd_pending_reg <= 1'b0;
-        end else begin : seq_ahb_main
-            reg        is_trans;
-            reg [31:0] addr;
-            reg        is_write;
-            reg [31:0] wdata;
-            reg [31:0] off;
-            reg [31:0] read_value;
-            reg [31:0] rel;
-            integer    idx;
-            reg        is_high;
-
-            // Default one-shot deassertions
-            spm_cfg_update   <= 1'b0;
-            noc_command_mode <= 1'b0;
-            hddu_mmio_write  <= 1'b0;
-            spm_pmu_rst      <= 1'b0;
-
-            ahb_read_wait_reg <= ahb_active_reg && !ahb_write_reg;
-
-            if (!power_enable_i) begin
-                ahb_active_reg    <= 1'b0;
-                ahb_read_wait_reg <= 1'b0;
-            end else begin
-                // Address phase capture
-                is_trans = hsel_i && hready_i && !ahb_read_wait_reg && htrans_i[1];
-                if (is_trans) begin
-                    ahb_addr_reg   <= haddr_i;
-                    ahb_write_reg  <= hwrite_i;
-                    ahb_hsize_reg  <= hsize_i;
-                    ahb_active_reg <= 1'b1;
-                end else begin
-                    ahb_active_reg <= 1'b0;
-                end
-
-                // Data phase execution
-                if (ahb_active_reg) begin
-                    addr  = ahb_addr_reg;
-                    is_write = ahb_write_reg;
-                    wdata = hwdata_i;
-                    read_value = 32'd0;
-
-                    if (is_write) begin
-                        if (addr >= CMD_SPM_BASE && addr < (CMD_SPM_BASE + CMD_SPM_SIZE)) begin
-                            off = addr - CMD_SPM_BASE;
-                            case (off)
-                                SPM_CFG_MAP_OFF:    spm_cfg_map    <= wdata[7:0];
-                                SPM_CFG_UPDATE_OFF: begin
-                                    if (wdata[0]) spm_cfg_update <= 1'b1;
-                                end
-                                SPM_ARB_POLICY_OFF: spm_arb_policy <= wdata[0];
-                                SPM_PMU_CTRL_OFF: begin
-                                    if (wdata[0]) spm_pmu_rst <= 1'b1;
-                                end
-                                default: ;
-                            endcase
-                        end
-                        else if (addr >= CMD_NOC_BASE && addr < (CMD_NOC_BASE + CMD_NOC_SIZE)) begin
-                            off = addr - CMD_NOC_BASE;
-                            if (off == NOC_CMD_DATA_OFF) begin
-                                noc_last_cmd_reg <= wdata;
-                                noc_command_data <= wdata;
-                                noc_command_mode <= 1'b1;
-                            end
-                        end
-                        else if (addr >= CMD_HDDU_BASE && addr < (CMD_HDDU_BASE + CMD_HDDU_SIZE)) begin
-                            hddu_mmio_addr  <= addr - CMD_HDDU_BASE;
-                            hddu_mmio_wdata <= wdata;
-                            hddu_mmio_write <= 1'b1;
-                        end
-                    end else begin
-                        if (addr >= CMD_SPM_BASE && addr < (CMD_SPM_BASE + CMD_SPM_SIZE)) begin
-                            off = addr - CMD_SPM_BASE;
-                            case (off)
-                                SPM_CFG_MAP_OFF:       read_value = {24'd0, spm_cfg_map};
-                                SPM_CFG_UPDATE_OFF:    read_value = 32'd0;
-                                SPM_ARB_POLICY_OFF:    read_value = {31'd0, spm_arb_policy};
-                                SPM_PMU_CTRL_OFF:      read_value = 32'd0;
-                                SPM_PMU_CYCLE_LO_OFF:  read_value = spm_pmu_cycle_cnt[31:0];
-                                SPM_PMU_CYCLE_HI_OFF:  read_value = spm_pmu_cycle_cnt[63:32];
-                                SPM_PMU_ARB_LO_OFF:    read_value = spm_pmu_arb_stall_cnt[31:0];
-                                SPM_PMU_ARB_HI_OFF:    read_value = spm_pmu_arb_stall_cnt[63:32];
-                                SPM_PMU_CREDIT_LO_OFF: read_value = spm_pmu_credit_stall_cnt[31:0];
-                                SPM_PMU_CREDIT_HI_OFF: read_value = spm_pmu_credit_stall_cnt[63:32];
-                                default: begin
-                                    if (off >= SPM_PMU_PORT_TXN_BASE) begin
-                                        rel = off - SPM_PMU_PORT_TXN_BASE;
-                                        idx = rel / SPM_PMU_PORT_TXN_STRIDE;
-                                        is_high = (rel % SPM_PMU_PORT_TXN_STRIDE) == 4;
-                                        if (idx < SPM_NUM_NOC_CHANNEL) begin
-                                            read_value = is_high ? spm_pmu_port_txn_cnt[idx][63:32]
-                                                                 : spm_pmu_port_txn_cnt[idx][31:0];
-                                        end
-                                    end
-                                end
-                            endcase
-                        end
-                        else if (addr >= CMD_HDDU_BASE && addr < (CMD_HDDU_BASE + CMD_HDDU_SIZE)) begin
-                            hddu_mmio_addr <= addr - CMD_HDDU_BASE;
-                            ahb_hddu_rd_pending_reg <= 1'b1;
-                        end
-                        else if (addr >= CMD_NOC_BASE && addr < (CMD_NOC_BASE + CMD_NOC_SIZE)) begin
-                            off = addr - CMD_NOC_BASE;
-                            if (off == NOC_CMD_DATA_OFF) read_value = noc_last_cmd_reg;
-                        end
-
-                        ahb_rdata_reg <= read_value;
-                    end
-                end
-
-                // Late-capture HDDU read data (hddu_mmio_addr set prev cycle)
-                if (ahb_hddu_rd_pending_reg) begin
-                    ahb_rdata_reg <= hddu_mmio_rdata;
-                    ahb_hddu_rd_pending_reg <= 1'b0;
-                end
-            end
-        end
-    end
+    ClusterControlUnit ccu (
+        .clk(clk),
+        .reset_n(local_reset_n),
+        .write_mode_i(ccu_write_mode_sig),
+        .mode_wdata_i(ccu_mode_wdata_sig),
+        .write_ctrl_i(ccu_write_ctrl_sig),
+        .ctrl_wdata_i(ccu_ctrl_wdata_sig),
+        .write_error_i(ccu_write_error_sig),
+        .error_wdata_i(ccu_error_wdata_sig),
+        .notify_direct_start_i(ccu_notify_direct_start_sig),
+        .notify_direct_stop_i(ccu_notify_direct_stop_sig),
+        .notify_direct_reset_i(ccu_notify_direct_reset_sig),
+        .noc_quiesced_i(noc_quiesced_w),
+        .spm_quiesced_i(spm_quiesced_w),
+        .noc_action_o(ccu_noc_action_sig),
+        .spm_soft_reset_o(ccu_spm_soft_reset_sig),
+        .mode_o(ccu_mode_sig),
+        .substate_o(ccu_substate_sig),
+        .error_code_o(ccu_error_code_sig),
+        .layer_active_o(ccu_layer_active_sig),
+        .stop_pending_o(ccu_stop_pending_sig),
+        .soft_reset_pending_o(ccu_soft_reset_pending_sig),
+        .done_sticky_o(ccu_done_sticky_sig),
+        .status_word_o(ccu_status_word_sig)
+    );
 
 endmodule

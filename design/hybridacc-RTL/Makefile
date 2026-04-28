@@ -21,6 +21,7 @@ GATE_VCS_FLAGS := -full64 -sverilog -debug_access+all -timescale=1ns/1ps \
 	+define+GATE_SIM +neg_tchk +sdfverbose +no_notifier +notimingcheck \
 	-v $(STDCELL_V) -v $(SRAM_V) \
 	-y $(DW_SIM_VER) +libext+.v
+RTL_INCDIRS := +incdir+tb +incdir+src +incdir+src/Cluster +incdir+src/Core +incdir+src/PE +incdir+src/NoC
 SIM_PLUSARGS := $(if $(TEST_DATA_DIR),+DATA_DIR=$(TEST_DATA_DIR),) \
 	$(if $(VERIFY_TOL),+VERIFY_TOL=$(VERIFY_TOL),) \
 	$(if $(CLOCK_PERIOD_NS),+CLOCK_PERIOD_NS=$(CLOCK_PERIOD_NS),)
@@ -103,9 +104,15 @@ define run_tb
 	tb_base=$$(basename $$tb_file .sv); \
 	tb_dir=$$(dirname $$tb_file); \
 	echo "[SIM] Compiling $$tb_file ..."; \
-	$(VCS) $(VCS_FLAGS) +incdir+$$tb_dir +incdir+tb $(SRAM_SIM_MODEL) $$tb_file -o $(sim_bld_dir)/$$tb_base.simv > $(sim_log_dir)/$$tb_base.compile.log 2>&1; \
+	$(VCS) $(VCS_FLAGS) +incdir+$$tb_dir $(RTL_INCDIRS) $(SRAM_SIM_MODEL) $$tb_file -o $(sim_bld_dir)/$$tb_base.simv > $(sim_log_dir)/$$tb_base.compile.log 2>&1 || \
+		{ echo "[SIM] ERROR: VCS compile failed. See $(sim_log_dir)/$$tb_base.compile.log"; exit 1; }; \
+	if [ ! -x $(sim_bld_dir)/$$tb_base.simv ]; then \
+		echo "[SIM] ERROR: simv was not generated. See $(sim_log_dir)/$$tb_base.compile.log"; \
+		exit 1; \
+	fi; \
 	echo "[SIM] Running $$tb_base ..."; \
-	$(sim_bld_dir)/$$tb_base.simv $(SIM_PLUSARGS) > $(sim_log_dir)/$$tb_base.run.log 2>&1; \
+	$(sim_bld_dir)/$$tb_base.simv $(SIM_PLUSARGS) > $(sim_log_dir)/$$tb_base.run.log 2>&1 || \
+		{ echo "[SIM] ERROR: Simulation failed. See $(sim_log_dir)/$$tb_base.run.log"; exit 1; }; \
 	echo "[SIM] Logs: $(sim_log_dir)/$$tb_base.compile.log $(sim_log_dir)/$$tb_base.run.log"
 endef
 
@@ -214,14 +221,19 @@ define run_gate_tb
 		exit 1; \
 	fi; \
 	echo "[GATE_SIM] Compiling $$tb_file (gate: $$mod_name) ..."; \
-	$(VCS) $(GATE_VCS_FLAGS) +incdir+$$tb_dir +incdir+tb \
+	$(VCS) $(GATE_VCS_FLAGS) +incdir+$$tb_dir $(RTL_INCDIRS) \
 		$(SRAM_SIM_MODEL) $$netlist $$tb_file \
 		-o $(gate_sim_bld_dir)/$$tb_base.gate.simv \
 		> $(gate_sim_log_dir)/$$tb_base.compile.log 2>&1 || \
 		{ echo "[GATE_SIM] ERROR: VCS compile failed. See $(gate_sim_log_dir)/$$tb_base.compile.log"; exit 1; }; \
+	if [ ! -x $(gate_sim_bld_dir)/$$tb_base.gate.simv ]; then \
+		echo "[GATE_SIM] ERROR: gate simv was not generated. See $(gate_sim_log_dir)/$$tb_base.compile.log"; \
+		exit 1; \
+	fi; \
 	echo "[GATE_SIM] Running $$tb_base ..."; \
 	$(gate_sim_bld_dir)/$$tb_base.gate.simv $(SIM_PLUSARGS) \
-		> $(gate_sim_log_dir)/$$tb_base.run.log 2>&1; \
+		> $(gate_sim_log_dir)/$$tb_base.run.log 2>&1 || \
+		{ echo "[GATE_SIM] ERROR: Simulation failed. See $(gate_sim_log_dir)/$$tb_base.run.log"; exit 1; }; \
 	echo "[GATE_SIM] Logs: $(gate_sim_log_dir)/$$tb_base.compile.log $(gate_sim_log_dir)/$$tb_base.run.log"
 endef
 

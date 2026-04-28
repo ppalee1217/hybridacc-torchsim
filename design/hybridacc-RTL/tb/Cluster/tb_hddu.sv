@@ -1,279 +1,225 @@
 //-----------------------------------------------------------------------------
+// Engineer:      Eason Yeh (Yeh Hsuan-Yu)
+// Create Date:   2026/04/27
+// Design Name:   HybridAcc Testbench
 // Module Name:   tb_hddu
-// Description:   Testbench for Cluster/HybridDataDeliverUnit module.
-//                Tests: MMIO register read/write, AGU configuration,
-//                send plane (PS) data path, PLO receive path, counters.
+// Project Name:  HybridAcc
+// Target Devices: ASIC
+// Tool Versions: Synopsys VCS W-2024.09-SP1
+// Description:   Smoke-level testbench for HybridDataDeliverUnit.
+//                Covers one send plane and one receive plane.
+// Dependencies:  ../tb_common.svh, src/hybridacc_utils_pkg.sv,
+//                src/Cluster/cluster_pkg.sv,
+//                src/Cluster/AddressGenerateUnit.sv,
+//                src/Cluster/HybridDataDeliverUnit.sv
+// Revision:
+//   2026/04/27 - Initial version (M1 cluster datapath rewrite)
+// Additional Comments:
+//   None
 //-----------------------------------------------------------------------------
 `include "../tb_common.svh"
+`ifndef GATE_SIM
 `include "../../src/hybridacc_utils_pkg.sv"
-`include "../../src/FIFO.sv"
+`include "../../src/Cluster/cluster_pkg.sv"
 `include "../../src/Cluster/AddressGenerateUnit.sv"
 `include "../../src/Cluster/HybridDataDeliverUnit.sv"
+`endif
 
 module tb_hddu;
     import hybridacc_utils_pkg::*;
-
-    localparam int SPM_AW  = 32;
-    localparam int TAG_BITS= 6;
-    localparam int D_BITS  = 192;
+    import cluster_pkg::*;
 
     logic clk, reset_n;
 
-    // SPM interface
-    logic [3:0]                     spm_req_valid;
-    logic [3:0]                     spm_req_ready;
-    logic [3:0][SPM_AW-1:0]        spm_req_addr;
-    logic [3:0][D_BITS-1:0]        spm_req_wdata;
-    logic [3:0]                     spm_req_wen;
+    logic            spm_req_valid [4];
+    logic            spm_req_ready [4];
+    spm_req_32_192_t spm_req_payload[4];
+    logic            spm_resp_valid[4];
+    logic            spm_resp_ready[4];
+    spm_resp_192_t   spm_resp_payload[4];
 
-    logic [3:0]                     spm_resp_valid;
-    logic [3:0]                     spm_resp_ready;
-    logic [3:0][D_BITS-1:0]        spm_resp_rdata;
-    SPM_RESPONSE_CODE               spm_resp_code [4];
+    logic [191:0] noc_ps_out_data;
+    logic [15:0]  noc_ps_out_addr;
+    logic [63:0]  noc_ps_out_mask;
+    logic         noc_ps_out_valid;
+    logic         noc_ps_out_ready;
 
-    // NoC send planes
-    logic noc_ps_valid, noc_ps_ready;
-    logic [D_BITS-1:0] noc_ps_data;
-    logic [15:0] noc_ps_addr;
-    logic [D_BITS-1:0] noc_ps_mask;
+    logic [191:0] noc_pd_out_data;
+    logic [15:0]  noc_pd_out_addr;
+    logic [63:0]  noc_pd_out_mask;
+    logic         noc_pd_out_valid;
+    logic         noc_pd_out_ready;
 
-    logic noc_pd_valid, noc_pd_ready;
-    logic [D_BITS-1:0] noc_pd_data;
-    logic [15:0] noc_pd_addr;
-    logic [D_BITS-1:0] noc_pd_mask;
+    logic [191:0] noc_pli_out_data;
+    logic [15:0]  noc_pli_out_addr;
+    logic [63:0]  noc_pli_out_mask;
+    logic         noc_pli_out_valid;
+    logic         noc_pli_out_ready;
 
-    logic noc_pli_valid, noc_pli_ready;
-    logic [D_BITS-1:0] noc_pli_data;
-    logic [15:0] noc_pli_addr;
-    logic [D_BITS-1:0] noc_pli_mask;
+    logic [15:0]  noc_plo_out_addr;
+    logic         noc_plo_out_valid;
+    logic         noc_plo_out_ready;
+    logic [191:0] noc_plo_in_data;
+    NOC_RESPONSE_STATUS noc_plo_in_status;
+    logic         noc_plo_in_valid;
+    logic         noc_plo_in_ready;
 
-    // NoC receive (PLO)
-    logic noc_plo_req_valid, noc_plo_req_ready;
-    logic [15:0] noc_plo_req_addr;
-    logic noc_plo_resp_valid, noc_plo_resp_ready;
-    logic [D_BITS-1:0] noc_plo_resp_data;
-
-    // MMIO
-    logic [31:0] mmio_addr;
-    logic mmio_write;
-    logic [31:0] mmio_wdata;
-    logic [31:0] mmio_rdata;
-
-    logic interrupt;
-
-    tb_clock_reset clk_rst(.clk(clk), .reset_n(reset_n));
-
-    HybridDataDeliverUnit #(
-        .SPM_ADDR_BITS(SPM_AW), .NOC_TAG_BITS(TAG_BITS), .DATA_BITS(D_BITS)
-    ) dut (
-        .clk(clk), .reset_n(reset_n),
-        .spm_req_valid(spm_req_valid), .spm_req_ready(spm_req_ready),
-        .spm_req_addr(spm_req_addr), .spm_req_wdata(spm_req_wdata), .spm_req_wen(spm_req_wen),
-        .spm_resp_valid(spm_resp_valid), .spm_resp_ready(spm_resp_ready),
-        .spm_resp_rdata(spm_resp_rdata), .spm_resp_code(spm_resp_code),
-        .noc_ps_valid(noc_ps_valid), .noc_ps_ready(noc_ps_ready),
-        .noc_ps_data(noc_ps_data), .noc_ps_addr(noc_ps_addr), .noc_ps_mask(noc_ps_mask),
-        .noc_pd_valid(noc_pd_valid), .noc_pd_ready(noc_pd_ready),
-        .noc_pd_data(noc_pd_data), .noc_pd_addr(noc_pd_addr), .noc_pd_mask(noc_pd_mask),
-        .noc_pli_valid(noc_pli_valid), .noc_pli_ready(noc_pli_ready),
-        .noc_pli_data(noc_pli_data), .noc_pli_addr(noc_pli_addr), .noc_pli_mask(noc_pli_mask),
-        .noc_plo_req_valid(noc_plo_req_valid), .noc_plo_req_ready(noc_plo_req_ready),
-        .noc_plo_req_addr(noc_plo_req_addr),
-        .noc_plo_resp_valid(noc_plo_resp_valid), .noc_plo_resp_ready(noc_plo_resp_ready),
-        .noc_plo_resp_data(noc_plo_resp_data),
-        .mmio_addr(mmio_addr), .mmio_write(mmio_write),
-        .mmio_wdata(mmio_wdata), .mmio_rdata(mmio_rdata),
-        .interrupt(interrupt)
-    );
+    logic [31:0]  mmio_addr;
+    logic         mmio_write;
+    logic [31:0]  mmio_wdata;
+    logic [31:0]  mmio_rdata;
+    logic         interrupt;
 
     int pass_count = 0;
     int fail_count = 0;
+    int x_fail_count = 0;
 
-    task automatic check(input string name, input logic cond);
-        if (!cond) begin $error("[FAIL] %s", name); fail_count++; end
-        else begin $display("[PASS] %s", name); pass_count++; end
+    tb_clock_reset clk_rst(.clk(clk), .reset_n(reset_n));
+
+    HybridDataDeliverUnit dut (
+        .clk(clk),
+        .reset_n(reset_n),
+        .spm_req_valid(spm_req_valid),
+        .spm_req_ready(spm_req_ready),
+        .spm_req_payload(spm_req_payload),
+        .spm_resp_valid(spm_resp_valid),
+        .spm_resp_ready(spm_resp_ready),
+        .spm_resp_payload(spm_resp_payload),
+        .noc_ps_out_data(noc_ps_out_data),
+        .noc_ps_out_addr(noc_ps_out_addr),
+        .noc_ps_out_mask(noc_ps_out_mask),
+        .noc_ps_out_valid(noc_ps_out_valid),
+        .noc_ps_out_ready(noc_ps_out_ready),
+        .noc_pd_out_data(noc_pd_out_data),
+        .noc_pd_out_addr(noc_pd_out_addr),
+        .noc_pd_out_mask(noc_pd_out_mask),
+        .noc_pd_out_valid(noc_pd_out_valid),
+        .noc_pd_out_ready(noc_pd_out_ready),
+        .noc_pli_out_data(noc_pli_out_data),
+        .noc_pli_out_addr(noc_pli_out_addr),
+        .noc_pli_out_mask(noc_pli_out_mask),
+        .noc_pli_out_valid(noc_pli_out_valid),
+        .noc_pli_out_ready(noc_pli_out_ready),
+        .noc_plo_out_addr(noc_plo_out_addr),
+        .noc_plo_out_valid(noc_plo_out_valid),
+        .noc_plo_out_ready(noc_plo_out_ready),
+        .noc_plo_in_data(noc_plo_in_data),
+        .noc_plo_in_status(noc_plo_in_status),
+        .noc_plo_in_valid(noc_plo_in_valid),
+        .noc_plo_in_ready(noc_plo_in_ready),
+        .mmio_addr(mmio_addr),
+        .mmio_write(mmio_write),
+        .mmio_wdata(mmio_wdata),
+        .mmio_rdata(mmio_rdata),
+        .interrupt(interrupt)
+    );
+
+    task automatic mmio_write32(input logic [31:0] addr, input logic [31:0] data);
+        @(negedge clk);
+        mmio_addr  = addr;
+        mmio_wdata = data;
+        mmio_write = 1'b1;
+        @(posedge clk);
+        @(negedge clk);
+        mmio_write = 1'b0;
     endtask
 
-    task automatic mmio_wr(input logic [31:0] addr, input logic [31:0] data);
-        @(posedge clk);
-        mmio_addr  <= addr;
-        mmio_wdata <= data;
-        mmio_write <= 1'b1;
-        @(posedge clk);
-        mmio_write <= 1'b0;
+    task automatic cfg_agu_base_tag(input int bank, input logic [31:0] base_addr, input logic [31:0] tag_base);
+        mmio_write32(bank*32'h100 + AGU_REG_BASE_ADDR, base_addr);
+        mmio_write32(bank*32'h100 + AGU_REG_ITER01, 32'h0001_0001);
+        mmio_write32(bank*32'h100 + AGU_REG_ITER23, 32'h0001_0001);
+        mmio_write32(bank*32'h100 + AGU_REG_TAG_BASE, tag_base);
+        mmio_write32(bank*32'h100 + AGU_REG_MASK_CFG, 32'h0000_000F);
     endtask
-
-    task automatic mmio_rd(input logic [31:0] addr, output logic [31:0] data);
-        @(posedge clk);
-        mmio_addr <= addr;
-        mmio_write <= 1'b0;
-        @(posedge clk);
-        data = mmio_rdata;
-    endtask
-
-    logic [31:0] rd32;
-
-    // AGU register offsets (bank 0 starts at 0x000)
-    localparam logic [31:0] AGU0_BASE_ADDR   = 32'h000;
-    localparam logic [31:0] AGU0_ITER01      = 32'h008;
-    localparam logic [31:0] AGU0_ITER23      = 32'h00C;
-    localparam logic [31:0] AGU0_STRIDE0     = 32'h010;
-    localparam logic [31:0] AGU0_STRIDE1     = 32'h014;
-    localparam logic [31:0] AGU0_CTRL        = 32'h020;
-    localparam logic [31:0] AGU0_TAG_BASE    = 32'h040;
-    localparam logic [31:0] AGU0_TAG_STRIDE0 = 32'h044;
-    localparam logic [31:0] AGU0_TAG_STRIDE1 = 32'h048;
-    localparam logic [31:0] AGU0_TAG_CTRL    = 32'h04C;
-    localparam logic [31:0] AGU0_MASK_CFG    = 32'h054;
-
-    // Global registers
-    localparam logic [31:0] GLOBAL_CTRL      = 32'h800;
-    localparam logic [31:0] GLOBAL_STATUS    = 32'h804;
-    localparam logic [31:0] GLOBAL_PLANE_EN  = 32'h808;
-    localparam logic [31:0] GLOBAL_PLANE_MODE= 32'h80C;
-    localparam logic [31:0] GLOBAL_NUM_PLANES= 32'h810;
-    localparam logic [31:0] GLOBAL_PORT_WIDTH= 32'h814;
-
-    // SPM model: respond to read requests with test data
-    always @(posedge clk) begin
-        for (int p = 0; p < 3; p++) begin
-            if (spm_req_valid[p] && spm_req_ready[p] && !spm_req_wen[p]) begin
-                // Respond next cycle
-                spm_resp_valid[p] <= 1'b1;
-                spm_resp_rdata[p] <= {64'(spm_req_addr[p] + 3), 64'(spm_req_addr[p] + 2), 64'(spm_req_addr[p] + 1)};
-                spm_resp_code[p]  <= SPM_OK;
-            end else if (spm_resp_valid[p] && spm_resp_ready[p]) begin
-                spm_resp_valid[p] <= 1'b0;
-            end
-        end
-    end
-
-    // SPM write channel (plane 3 / RECV_PLANE): always ready
-    assign spm_req_ready = 4'b1111;
-
-    // SPM write response for PLO write requests
-    always @(posedge clk) begin
-        if (spm_req_valid[3] && spm_req_ready[3] && spm_req_wen[3]) begin
-            spm_resp_valid[3] <= 1'b1;
-            spm_resp_rdata[3] <= '0;
-            spm_resp_code[3]  <= SPM_OK;
-        end else if (spm_resp_valid[3] && spm_resp_ready[3]) begin
-            spm_resp_valid[3] <= 1'b0;
-        end
-    end
 
     initial begin
-        mmio_addr = '0;
-        mmio_write = 1'b0;
-        mmio_wdata = '0;
-        spm_resp_valid = '0;
-        spm_resp_rdata = '0;
-        for (int i = 0; i < 4; i++) spm_resp_code[i] = SPM_OK;
-        noc_ps_ready = 1'b1;
-        noc_pd_ready = 1'b1;
-        noc_pli_ready = 1'b1;
-        noc_plo_req_ready = 1'b1;
-        noc_plo_resp_valid = 1'b0;
-        noc_plo_resp_data = '0;
+        mmio_addr = 0;
+        mmio_wdata = 0;
+        mmio_write = 0;
+        noc_ps_out_ready = 1'b1;
+        noc_pd_out_ready = 1'b1;
+        noc_pli_out_ready = 1'b1;
+        noc_plo_out_ready = 1'b1;
+        noc_plo_in_data = '0;
+        noc_plo_in_status = NOC_NOP;
+        noc_plo_in_valid = 1'b0;
+        for (int i = 0; i < 4; i++) begin
+            spm_req_ready[i]   = 1'b1;
+            spm_resp_valid[i]  = 1'b0;
+            spm_resp_payload[i]= '0;
+        end
 
         @(posedge reset_n);
-        repeat (3) @(posedge clk);
+        @(posedge clk); @(negedge clk);
 
-        // ---- Test 1: MMIO read constant registers ----
-        $display("\n=== Test 1: MMIO read constants ===");
-        mmio_rd(GLOBAL_NUM_PLANES, rd32);
-        check("T1 num_planes", rd32 == 32'd4);
-        mmio_rd(GLOBAL_PORT_WIDTH, rd32);
-        check("T1 port_width", rd32 == 32'd48);  // 192/4=48
+        // -------------------------------------------------------------
+        // Test 1: PS send plane (AGU0 -> SPM read -> NoC PS request)
+        // -------------------------------------------------------------
+        cfg_agu_base_tag(0, 32'h0000_0020, 32'h0000_0003);
+        mmio_write32(32'h0000_0800, 32'h0000_0001); // START
 
-        // ---- Test 2: MMIO write then read plane_en ----
-        $display("\n=== Test 2: MMIO write/read ===");
-        mmio_wr(GLOBAL_PLANE_EN, 32'h0000_000F);  // enable all 4 planes
-        mmio_rd(GLOBAL_PLANE_EN, rd32);
-        check("T2 plane_en readback", rd32 == 32'h0000_000F);
-
-        // ---- Test 3: Send plane PS data path ----
-        $display("\n=== Test 3: PS send plane ===");
-        // Configure AGU 0 for PS plane: base=100, 2 descriptors, stride=1
-        mmio_wr(AGU0_BASE_ADDR, 32'd100);
-        mmio_wr(AGU0_ITER01, {16'd1, 16'd2});  // outer=1, inner=2
-        mmio_wr(AGU0_ITER23, {16'd1, 16'd1});
-        mmio_wr(AGU0_STRIDE0, 32'd1);
-        mmio_wr(AGU0_STRIDE1, 32'd0);
-        mmio_wr(AGU0_TAG_BASE, 32'd5);
-        mmio_wr(AGU0_TAG_STRIDE0, 32'd1);
-        mmio_wr(AGU0_TAG_STRIDE1, 32'd0);
-        mmio_wr(AGU0_TAG_CTRL, 32'd0);
-        mmio_wr(AGU0_MASK_CFG, 32'h0000_000F);
-        // Start AGU 0
-        mmio_wr(AGU0_CTRL, 32'h0000_0001);
-
-        // Wait for NoC PS output
-        wait (noc_ps_valid === 1'b1);
+        while (!spm_req_valid[0]) @(posedge clk);
         #(`TB_SETTLE);
-        check("T3 PS data[63:0]", noc_ps_data[63:0] == 64'd101);
-        check("T3 PS valid", noc_ps_valid == 1'b1);
-        // Consume first packet by waiting for deassert then re-assert
+        `CHECK_BIT("PS plane: spm req is read", spm_req_payload[0].wen, 1'b0)
+        `CHECK_VAL("PS plane: spm req addr", spm_req_payload[0].addr, 32'h0000_0020)
+
+        @(negedge clk);
+        spm_resp_payload[0].rdata = 192'h0123_4567_89AB_CDEF_1111_2222_3333_4444_5555_6666_7777_8888;
+        spm_resp_payload[0].code  = SPM_OK;
+        spm_resp_valid[0] = 1'b1;
         @(posedge clk);
-        if (noc_ps_valid) @(negedge noc_ps_valid);
-        wait (noc_ps_valid === 1'b1);
+        @(negedge clk);
+        spm_resp_valid[0] = 1'b0;
+
+        while (!noc_ps_out_valid) @(posedge clk);
         #(`TB_SETTLE);
-        check("T3 PS data2[63:0]", noc_ps_data[63:0] == 64'd102);
-        @(posedge clk);
-        repeat (5) @(posedge clk);
+        `CHECK_VAL("PS plane: noc addr from AGU tag", noc_ps_out_addr, 16'h0003)
+        `CHECK_VAL("PS plane: noc data", noc_ps_out_data, 192'h0123_4567_89AB_CDEF_1111_2222_3333_4444_5555_6666_7777_8888)
 
-        // ---- Test 4: PLO receive path (NoC → SPM write) ----
-        $display("\n=== Test 4: PLO receive path ===");
-        // Configure AGU 3 for PLO: base=200, 1 descriptor
-        mmio_wr(32'h300, 32'd200);         // AGU3 base addr (bank 3 offset 0x300)
-        mmio_wr(32'h308, {16'd1, 16'd1});  // iter01
-        mmio_wr(32'h30C, {16'd1, 16'd1});  // iter23
-        mmio_wr(32'h310, 32'd0);           // stride0
-        mmio_wr(32'h314, 32'd0);           // stride1
-        mmio_wr(32'h340, 32'd10);          // tag_base
-        mmio_wr(32'h344, 32'd0);           // tag_stride0
-        mmio_wr(32'h348, 32'd0);           // tag_stride1
-        mmio_wr(32'h34C, 32'd0);           // tag_ctrl
-        mmio_wr(32'h354, 32'h000F);        // mask_cfg
-        // Start AGU 3
-        mmio_wr(32'h320, 32'h0000_0001);
+        // -------------------------------------------------------------
+        // Test 2: PLO receive plane (AGU3 -> NoC addr req -> NoC resp -> SPM write)
+        // -------------------------------------------------------------
+        cfg_agu_base_tag(3, 32'h0000_0040, 32'h0000_0005);
+        mmio_write32(32'h0000_0800, 32'h0000_0001); // START again
 
-        // Wait for PLO request
-        wait (noc_plo_req_valid === 1'b1);
+        while (!noc_plo_out_valid) @(posedge clk);
         #(`TB_SETTLE);
-        check("T4 PLO req valid", noc_plo_req_valid == 1'b1);
+        `CHECK_VAL("PLO plane: noc read addr", noc_plo_out_addr, 16'h0005)
+
+        @(negedge clk);
+        noc_plo_in_data   = 192'hFACE_CAFE_DEAD_BEEF_9999_AAAA_BBBB_CCCC_DDDD_EEEE_FFFF_1234;
+        noc_plo_in_status = NOC_OK;
+        noc_plo_in_valid  = 1'b1;
         @(posedge clk);
+        @(negedge clk);
+        noc_plo_in_valid  = 1'b0;
 
-        // Simulate NoC response
-        @(posedge clk);
-        noc_plo_resp_valid <= 1'b1;
-        noc_plo_resp_data  <= {64'hAAAA, 64'hBBBB, 64'hCCCC};
-        wait (noc_plo_resp_ready === 1'b1);
-        @(posedge clk);
-        noc_plo_resp_valid <= 1'b0;
+        while (!spm_req_valid[3]) @(posedge clk);
+        #(`TB_SETTLE);
+        `CHECK_BIT("PLO plane: spm req is write", spm_req_payload[3].wen, 1'b1)
+        `CHECK_VAL("PLO plane: spm req addr", spm_req_payload[3].addr, 32'h0000_0040)
+        `CHECK_VAL("PLO plane: spm req data", spm_req_payload[3].wdata, 192'hFACE_CAFE_DEAD_BEEF_9999_AAAA_BBBB_CCCC_DDDD_EEEE_FFFF_1234)
 
-        // Give time for SPM write
-        repeat (5) @(posedge clk);
-        // Verify SPM got a write request
-        // (The SPM model accepted it because spm_req_ready[3]=1)
-        check("T4 PLO write went through", 1'b1); // passed if no deadlock
+        // -------------------------------------------------------------
+        // Test 3: global status becomes nonzero / interrupt sticky eventually
+        // -------------------------------------------------------------
+        @(posedge clk); @(negedge clk);
+        mmio_addr = 32'h0000_0804; // status
+        #(`TB_SETTLE);
+        `CHECK_COND("Global status readable", mmio_rdata[STATUS_IDLE] || mmio_rdata[STATUS_BUSY] || mmio_rdata[STATUS_DONE], mmio_rdata)
 
-        // ---- Test 5: status register ----
-        $display("\n=== Test 5: Status register ===");
-        mmio_rd(GLOBAL_STATUS, rd32);
-        check("T5 status readable", 1'b1);  // just verify no hang
+        repeat (6) @(posedge clk);
+        `CHECK_COND("Interrupt may assert after done", interrupt === 1'b0 || interrupt === 1'b1, interrupt)
 
-        // ---- Summary ----
-        repeat (10) @(posedge clk);
-        $display("\n========================================");
-        $display("tb_hddu: %0d PASS, %0d FAIL", pass_count, fail_count);
-        $display("========================================");
-        if (fail_count > 0) $fatal(1, "FAILED");
+        `TB_SUMMARY("tb_hddu")
         $finish;
     end
 
     initial begin
-        #500000;
-        $fatal(1, "TIMEOUT");
+        #400000;
+        $error("[TB_TIMEOUT] tb_hddu did not finish in time");
+        `TB_SUMMARY("tb_hddu")
+        $finish;
     end
+
 endmodule

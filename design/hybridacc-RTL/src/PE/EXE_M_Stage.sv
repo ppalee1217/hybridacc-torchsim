@@ -121,53 +121,61 @@ module EXE_M_Stage (
     logic swap_stall;
 
     always_comb begin
+        logic internal_stall;
+        logic advancing;
+        logic out_valid;
+
         swap_stall = valid_reg && decode_reg.is_swap && sdma_busy;
         stall_DL = ldma_stall | sdma_stall | swap_stall;
         stall_PS = valid_reg && decode_reg.sys_sdma_act && !ps_valid;
         stall_PD = valid_reg && ((decode_reg.pd_load && !pd_valid) || (decode_reg.pd_load_v && !pd_set_valid));
 
-        ready_out = pe_running && !halted_reg && !stall_DL && !stall_PS && !stall_PD && ready_in;
-        valid_out = valid_reg;
+        internal_stall = stall_DL | stall_PS | stall_PD;
+        advancing = valid_reg && ready_in && !internal_stall;
+        out_valid = valid_reg && !internal_stall;
+
+        ready_out = pe_running && !halted_reg && !internal_stall && (ready_in || !valid_reg);
+        valid_out = out_valid;
         halted_out = halted_reg;
 
-        EXE_A_decode_signals_out = decode_reg;
-        vmul_out_out = vmul_result;
+        EXE_A_decode_signals_out = out_valid ? decode_reg : pe_decode_signals_zero();
+        vmul_out_out = out_valid ? vmul_result : '0;
 
-        tr_enable = {31'b0, pe_running};
-        tr_shift_en = decode_reg.tr_shift && valid_reg && ready_in;
+        tr_enable = {31'b0, (decode_reg.tr_en && advancing)};
+        tr_shift_en = decode_reg.tr_shift && advancing;
         tr_shift_mode = {29'h0, decode_reg.imm[2:0]};
         tr_tid = decode_reg.rid3;
         tr_tid_in = pd_data;
-        tr_tid_write_en = decode_reg.tr_write && decode_reg.pd_load && pd_valid && valid_reg && ready_in;
+        tr_tid_write_en = decode_reg.tr_write && decode_reg.pd_load && pd_valid && advancing;
         tr_vtid_in = decode_reg.pd_load_v ? u64_to_v_fp16(pd_data_set) : ldma_dmrv_out;
-        tr_vtid_write_en = decode_reg.tr_write_v && valid_reg && ready_in;
-        tr_clear_regs = decode_reg.tr_clear_regs && valid_reg && ready_in;
-        tr_use_vcounter = decode_reg.tr_use_vcounter;
-        tr_clear_vcounter = decode_reg.sys_rst_tid && valid_reg && ready_in;
-        tr_incr_vcounter = decode_reg.tr_incr_vcounter && valid_reg && ready_in;
+        tr_vtid_write_en = decode_reg.tr_write_v && advancing;
+        tr_clear_regs = decode_reg.tr_clear_regs && advancing;
+        tr_use_vcounter = decode_reg.tr_use_vcounter && advancing;
+        tr_clear_vcounter = decode_reg.sys_rst_tid && advancing;
+        tr_incr_vcounter = decode_reg.tr_incr_vcounter && advancing;
 
         ldma_imm = decode_reg.imm;
-        ldma_set_addr = decode_reg.DMA_setaddr && !decode_reg.DMA_is_sdma && valid_reg && ready_in;
-        ldma_set_len = decode_reg.DMA_setlen && !decode_reg.DMA_is_sdma && valid_reg && ready_in;
-        ldma_set_loop = decode_reg.DMA_setloop && !decode_reg.DMA_is_sdma && valid_reg && ready_in;
-        ldma_set_mode = decode_reg.DMA_setmode && !decode_reg.DMA_is_sdma && valid_reg && ready_in;
+        ldma_set_addr = decode_reg.DMA_setaddr && !decode_reg.DMA_is_sdma && advancing;
+        ldma_set_len = decode_reg.DMA_setlen && !decode_reg.DMA_is_sdma && advancing;
+        ldma_set_loop = decode_reg.DMA_setloop && !decode_reg.DMA_is_sdma && advancing;
+        ldma_set_mode = decode_reg.DMA_setmode && !decode_reg.DMA_is_sdma && advancing;
         ldma_mode = decode_reg.func3[15:0];
-        ldma_active = decode_reg.sys_ldma_act && valid_reg && ready_in;
-        ldma_next = decode_reg.LDMA_next && valid_reg && ready_in;
-        ldma_reset_active = decode_reg.sys_ldma_rst && valid_reg && ready_in;
+        ldma_active = decode_reg.sys_ldma_act && advancing;
+        ldma_next = decode_reg.LDMA_next && advancing;
+        ldma_reset_active = decode_reg.sys_ldma_rst && advancing;
 
         sdma_imm = decode_reg.imm;
-        sdma_set_addr = decode_reg.DMA_setaddr && decode_reg.DMA_is_sdma && valid_reg && ready_in;
-        sdma_set_len = decode_reg.DMA_setlen && decode_reg.DMA_is_sdma && valid_reg && ready_in;
-        sdma_set_loop = decode_reg.DMA_setloop && decode_reg.DMA_is_sdma && valid_reg && ready_in;
-        sdma_set_mode = decode_reg.DMA_setmode && decode_reg.DMA_is_sdma && valid_reg && ready_in;
-        sdma_swap = decode_reg.is_swap && valid_reg && ready_out;
-        sdma_active = decode_reg.sys_sdma_act && valid_reg && ready_in;
-        sdma_reset_active = decode_reg.sys_sdma_rst && valid_reg && ready_in;
+        sdma_set_addr = decode_reg.DMA_setaddr && decode_reg.DMA_is_sdma && advancing;
+        sdma_set_len = decode_reg.DMA_setlen && decode_reg.DMA_is_sdma && advancing;
+        sdma_set_loop = decode_reg.DMA_setloop && decode_reg.DMA_is_sdma && advancing;
+        sdma_set_mode = decode_reg.DMA_setmode && decode_reg.DMA_is_sdma && advancing;
+        sdma_swap = decode_reg.is_swap && advancing;
+        sdma_active = decode_reg.sys_sdma_act && advancing;
+        sdma_reset_active = decode_reg.sys_sdma_rst && advancing;
 
         ps_ready = sdma_ps_ready;
-        pd_ready = pe_running && valid_reg && decode_reg.pd_load && ready_in;
-        pd_set_ready = pe_running && valid_reg && decode_reg.pd_load_v && ready_in;
+        pd_ready = pe_running && decode_reg.pd_load && advancing;
+        pd_set_ready = pe_running && decode_reg.pd_load_v && advancing;
     end
 
     always_ff @(posedge clk or negedge reset_n) begin

@@ -87,6 +87,11 @@ module PErouter #(
     logic ps_push, ps_pop, pd_push, pd_pop, pd_pop_set, pli_push, pli_pop, plo_push, plo_pop;
 
     logic [63:0] pd_mask;
+    logic route_pli_from_bus;
+    logic route_plo_to_bus;
+    logic noc_plo_req_fire;
+    logic pending_noc_resp_reg;
+    noc_response_t noc_plo_resp_reg;
 
     FIFO #(.T(logic [63:0]), .DEPTH(PE_FIFO_DEPTH)) ps_fifo (
         .clk(clk), .reset_n(reset_n), .data_in(noc_ps_req_data.data), .push(ps_push), .data_out(ps_fifo_dout), .pop(ps_pop), .empty(ps_empty), .full(ps_full), .clear(1'b0)
@@ -113,10 +118,16 @@ module PErouter #(
         im_write_addr = 16'h0;
         im_write_data = 16'h0;
 
+        route_pli_from_bus = (route_mode == PLI_FROM_BUS_PLO_TO_LN)
+                          || (route_mode == PLI_FROM_BUS_PLO_TO_BUS);
+        route_plo_to_bus = (route_mode == PLI_FROM_LN_PLO_TO_BUS)
+                        || (route_mode == PLI_FROM_BUS_PLO_TO_BUS);
+
         noc_ps_req_ready = enable && !ps_full;
         noc_pd_req_ready = enable && !pd_full;
-        noc_pli_req_ready = enable && !pli_full;
-        noc_plo_req_ready = enable && !plo_empty;
+        noc_pli_req_ready = enable && route_pli_from_bus && !pli_full;
+        noc_plo_req_ready = enable && route_plo_to_bus && !plo_empty && !pending_noc_resp_reg;
+        noc_plo_req_fire = noc_plo_req_valid && noc_plo_req_ready;
 
         ln_pli_ready = (route_mode == PLI_FROM_LN_PLO_TO_LN || route_mode == PLI_FROM_LN_PLO_TO_BUS) && !pli_full;
 
@@ -157,14 +168,30 @@ module PErouter #(
 
         pe_plo_ready = !plo_full;
         ln_plo_data = plo_fifo_dout;
-        ln_plo_valid = (route_mode == PLI_FROM_LN_PLO_TO_LN || route_mode == PLI_FROM_BUS_PLO_TO_LN) && !plo_empty;
+        ln_plo_valid = (route_mode == PLI_FROM_LN_PLO_TO_LN || route_mode == PLI_FROM_BUS_PLO_TO_LN)
+                    && !plo_empty
+                    && !noc_plo_req_fire;
 
-        noc_plo_resp_data.data = plo_fifo_dout;
-        noc_plo_resp_data.status = NOC_OK;
-        noc_plo_resp_valid = (route_mode == PLI_FROM_LN_PLO_TO_BUS || route_mode == PLI_FROM_BUS_PLO_TO_BUS) && !plo_empty;
+        noc_plo_resp_data = noc_plo_resp_reg;
+        noc_plo_resp_valid = pending_noc_resp_reg;
 
         if (ln_plo_valid && ln_plo_ready) plo_pop = 1'b1;
-        else if (noc_plo_resp_valid && noc_plo_resp_ready) plo_pop = 1'b1;
+        else if (noc_plo_req_fire) plo_pop = 1'b1;
         else plo_pop = 1'b0;
+    end
+
+    always_ff @(posedge clk or negedge reset_n) begin
+        if (!reset_n) begin
+            pending_noc_resp_reg <= 1'b0;
+            noc_plo_resp_reg <= '0;
+        end else begin
+            if (noc_plo_req_fire) begin
+                pending_noc_resp_reg <= 1'b1;
+                noc_plo_resp_reg.data <= plo_fifo_dout;
+                noc_plo_resp_reg.status <= NOC_OK;
+            end else if (pending_noc_resp_reg && noc_plo_resp_ready) begin
+                pending_noc_resp_reg <= 1'b0;
+            end
+        end
     end
 endmodule

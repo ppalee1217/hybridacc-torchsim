@@ -247,6 +247,10 @@ module tb_noc_sim;
     longint unsigned pli_pkt_count = 0;
     longint unsigned plo_req_count = 0;
     longint unsigned plo_resp_count = 0;
+    longint unsigned ln_handoff_01_count = 0;
+    longint unsigned ln_handoff_12_count = 0;
+    int unsigned     ln_handoff_01_samples = 0;
+    int unsigned     ln_handoff_12_samples = 0;
     int unsigned     progress_interval = 1000;
     int unsigned     idle_timeout_cycles = 0;
 
@@ -821,6 +825,38 @@ module tb_noc_sim;
                     $warning("[TB] Received response but no metadata logged!");
                 end
             end
+        end
+    end
+
+    always @(posedge clk) begin : ln_handoff_monitor
+        if (!reset_n) begin
+            ln_handoff_01_count = 0;
+            ln_handoff_12_count = 0;
+            ln_handoff_01_samples = 0;
+            ln_handoff_12_samples = 0;
+        end else begin
+            automatic int ln_fire_01 = 0;
+            automatic int ln_fire_12 = 0;
+            for (int pe_idx = 0; pe_idx < NUM_PES_PER_PORT; pe_idx++) begin
+                if (noc.ln_valid[1][pe_idx] && noc.ln_ready[1][pe_idx]) begin
+                    ln_fire_01++;
+                    if (ln_handoff_01_samples < 8) begin
+                        $display("[DBG-LN 0->1] sample=%0d pe=%0d data=0x%016h t=%0t",
+                                 ln_handoff_01_samples, pe_idx, noc.ln_data[1][pe_idx], $time);
+                        ln_handoff_01_samples = ln_handoff_01_samples + 1;
+                    end
+                end
+                if (noc.ln_valid[2][pe_idx] && noc.ln_ready[2][pe_idx]) begin
+                    ln_fire_12++;
+                    if (ln_handoff_12_samples < 8) begin
+                        $display("[DBG-LN 1->2] sample=%0d pe=%0d data=0x%016h t=%0t",
+                                 ln_handoff_12_samples, pe_idx, noc.ln_data[2][pe_idx], $time);
+                        ln_handoff_12_samples = ln_handoff_12_samples + 1;
+                    end
+                end
+            end
+            ln_handoff_01_count = ln_handoff_01_count + ln_fire_01;
+            ln_handoff_12_count = ln_handoff_12_count + ln_fire_12;
         end
     end
 
@@ -1588,6 +1624,9 @@ module tb_noc_sim;
             $display("Performance: %s/s (%s FLOPS)", format_si(macs_per_sec, "MACs"), format_si(macs_per_sec * 2, ""));
             $display("Arithmetic Intensity: %.2f MACs/Byte", arith_intensity);
         end
+        $display("LN handoff 0->1: %0d", ln_handoff_01_count);
+        $display("LN handoff 1->2: %0d", ln_handoff_12_count);
+        $display("PLO requests/responses: %0d / %0d", plo_req_count, plo_resp_count);
         $display("========================================");
     endtask
 
@@ -1610,6 +1649,10 @@ module tb_noc_sim;
         total_sent_bytes = 0;
         total_received_bytes = 0;
         total_macs = 0;
+        ln_handoff_01_count = 0;
+        ln_handoff_12_count = 0;
+        ln_handoff_01_samples = 0;
+        ln_handoff_12_samples = 0;
 
         // Parse plusargs
         if (!$value$plusargs("DATA_DIR=%s", data_dir))
@@ -1661,6 +1704,69 @@ module tb_noc_sim;
         // 4. Wait for scan chain / program / PE start (driven by ps_sender)
         @(scan_chain_done_ev);
         $display("[TB] Scan Chain configured.");
+        $display("[DBG-SC] p0 pe0  en=%0d mode=%0d ps=%0d pd=%0d pli=%0d plo=%0d",
+             noc.gen_ports[0].mbus.pe_cfg_reg[0].enable,
+             noc.gen_ports[0].mbus.pe_cfg_reg[0].route_mode,
+             noc.gen_ports[0].mbus.pe_cfg_reg[0].ps_id,
+             noc.gen_ports[0].mbus.pe_cfg_reg[0].pd_id,
+             noc.gen_ports[0].mbus.pe_cfg_reg[0].pli_id,
+             noc.gen_ports[0].mbus.pe_cfg_reg[0].plo_id);
+        $display("[DBG-SC] p0 pe13 en=%0d mode=%0d ps=%0d pd=%0d pli=%0d plo=%0d",
+             noc.gen_ports[0].mbus.pe_cfg_reg[13].enable,
+             noc.gen_ports[0].mbus.pe_cfg_reg[13].route_mode,
+             noc.gen_ports[0].mbus.pe_cfg_reg[13].ps_id,
+             noc.gen_ports[0].mbus.pe_cfg_reg[13].pd_id,
+             noc.gen_ports[0].mbus.pe_cfg_reg[13].pli_id,
+             noc.gen_ports[0].mbus.pe_cfg_reg[13].plo_id);
+        $display("[DBG-SC] p0 pe14 en=%0d mode=%0d ps=%0d pd=%0d pli=%0d plo=%0d",
+             noc.gen_ports[0].mbus.pe_cfg_reg[14].enable,
+             noc.gen_ports[0].mbus.pe_cfg_reg[14].route_mode,
+             noc.gen_ports[0].mbus.pe_cfg_reg[14].ps_id,
+             noc.gen_ports[0].mbus.pe_cfg_reg[14].pd_id,
+             noc.gen_ports[0].mbus.pe_cfg_reg[14].pli_id,
+             noc.gen_ports[0].mbus.pe_cfg_reg[14].plo_id);
+        $display("[DBG-SC] p1 pe0  en=%0d mode=%0d ps=%0d pd=%0d pli=%0d plo=%0d",
+             noc.gen_ports[1].mbus.pe_cfg_reg[0].enable,
+             noc.gen_ports[1].mbus.pe_cfg_reg[0].route_mode,
+             noc.gen_ports[1].mbus.pe_cfg_reg[0].ps_id,
+             noc.gen_ports[1].mbus.pe_cfg_reg[0].pd_id,
+             noc.gen_ports[1].mbus.pe_cfg_reg[0].pli_id,
+             noc.gen_ports[1].mbus.pe_cfg_reg[0].plo_id);
+        $display("[DBG-SC] p1 pe14 en=%0d mode=%0d ps=%0d pd=%0d pli=%0d plo=%0d",
+             noc.gen_ports[1].mbus.pe_cfg_reg[14].enable,
+             noc.gen_ports[1].mbus.pe_cfg_reg[14].route_mode,
+             noc.gen_ports[1].mbus.pe_cfg_reg[14].ps_id,
+             noc.gen_ports[1].mbus.pe_cfg_reg[14].pd_id,
+             noc.gen_ports[1].mbus.pe_cfg_reg[14].pli_id,
+             noc.gen_ports[1].mbus.pe_cfg_reg[14].plo_id);
+        $display("[DBG-SC] p1 pe15 en=%0d mode=%0d ps=%0d pd=%0d pli=%0d plo=%0d",
+             noc.gen_ports[1].mbus.pe_cfg_reg[15].enable,
+             noc.gen_ports[1].mbus.pe_cfg_reg[15].route_mode,
+             noc.gen_ports[1].mbus.pe_cfg_reg[15].ps_id,
+             noc.gen_ports[1].mbus.pe_cfg_reg[15].pd_id,
+             noc.gen_ports[1].mbus.pe_cfg_reg[15].pli_id,
+             noc.gen_ports[1].mbus.pe_cfg_reg[15].plo_id);
+        $display("[DBG-SC] p2 pe0  en=%0d mode=%0d ps=%0d pd=%0d pli=%0d plo=%0d",
+             noc.gen_ports[2].mbus.pe_cfg_reg[0].enable,
+             noc.gen_ports[2].mbus.pe_cfg_reg[0].route_mode,
+             noc.gen_ports[2].mbus.pe_cfg_reg[0].ps_id,
+             noc.gen_ports[2].mbus.pe_cfg_reg[0].pd_id,
+             noc.gen_ports[2].mbus.pe_cfg_reg[0].pli_id,
+             noc.gen_ports[2].mbus.pe_cfg_reg[0].plo_id);
+        $display("[DBG-SC] p2 pe13 en=%0d mode=%0d ps=%0d pd=%0d pli=%0d plo=%0d",
+             noc.gen_ports[2].mbus.pe_cfg_reg[13].enable,
+             noc.gen_ports[2].mbus.pe_cfg_reg[13].route_mode,
+             noc.gen_ports[2].mbus.pe_cfg_reg[13].ps_id,
+             noc.gen_ports[2].mbus.pe_cfg_reg[13].pd_id,
+             noc.gen_ports[2].mbus.pe_cfg_reg[13].pli_id,
+             noc.gen_ports[2].mbus.pe_cfg_reg[13].plo_id);
+        $display("[DBG-SC] p2 pe14 en=%0d mode=%0d ps=%0d pd=%0d pli=%0d plo=%0d",
+             noc.gen_ports[2].mbus.pe_cfg_reg[14].enable,
+             noc.gen_ports[2].mbus.pe_cfg_reg[14].route_mode,
+             noc.gen_ports[2].mbus.pe_cfg_reg[14].ps_id,
+             noc.gen_ports[2].mbus.pe_cfg_reg[14].pd_id,
+             noc.gen_ports[2].mbus.pe_cfg_reg[14].pli_id,
+             noc.gen_ports[2].mbus.pe_cfg_reg[14].plo_id);
 
         @(program_done_ev);
         $display("[TB] PE Program loaded.");
