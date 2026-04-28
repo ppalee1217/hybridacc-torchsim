@@ -451,6 +451,10 @@ SC_MODULE(HybridAcc) {
         return cluster_dma_overlap_cycles_[c];
     }
 
+    WaveGapInstructionStats wave_gap_instruction_stats() const {
+        return core_ctrl.wave_gap_instruction_stats();
+    }
+
     bool fast_load_section(SectionKind kind,
                            uint32_t local_addr,
                            const uint8_t* data,

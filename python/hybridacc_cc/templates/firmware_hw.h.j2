@@ -220,6 +220,8 @@ typedef struct {
 #define CSR_MSTATUS         0x300u
 #define CSR_MIE             0x304u
 #define CSR_MCAUSE          0x342u
+#define CSR_MCYCLE          0xB00u
+#define CSR_MINSTRET        0xB02u
 
 #define MSTATUS_MIE         (1u << 3)
 #define MIE_MTIE            (1u << 7)

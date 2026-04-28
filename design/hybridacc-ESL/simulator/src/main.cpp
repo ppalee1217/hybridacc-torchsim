@@ -739,23 +739,132 @@ int sc_main(int argc, char* argv[]) {
     const uint64_t cluster_run_cycles = dut.cluster_run_cycles(0);
     const uint64_t dma_active_cycles = dut.dma_active_cycles();
     const uint64_t overlap_cycles = dut.cluster_dma_overlap_cycles(0);
+    const auto wave_gap_stats = dut.wave_gap_instruction_stats();
+    const uint64_t wave_gap_cycles_total = wave_gap_stats.total_cycles;
+    const uint64_t boot_up_cycles = wave_gap_stats.boot_up_time.cycles;
+    const uint64_t boot_up_instructions = wave_gap_stats.boot_up_time.instructions;
+    const uint64_t drain_out_cycles = wave_gap_stats.drain_out_time.cycles;
+    const uint64_t drain_out_instructions = wave_gap_stats.drain_out_time.instructions;
     const double overlap_vs_compute_pct = cluster_run_cycles == 0
         ? 0.0
         : (100.0 * static_cast<double>(overlap_cycles) / static_cast<double>(cluster_run_cycles));
     const double overlap_vs_dma_pct = dma_active_cycles == 0
         ? 0.0
         : (100.0 * static_cast<double>(overlap_cycles) / static_cast<double>(dma_active_cycles));
+    const double wave_gap_cycles_avg = wave_gap_stats.completed_windows == 0
+        ? 0.0
+        : (static_cast<double>(wave_gap_stats.total_cycles)
+           / static_cast<double>(wave_gap_stats.completed_windows));
+    const double wave_gap_instr_avg = wave_gap_stats.completed_windows == 0
+        ? 0.0
+        : (static_cast<double>(wave_gap_stats.total_instructions)
+           / static_cast<double>(wave_gap_stats.completed_windows));
+    const double wave_gap_mmio_avg = wave_gap_stats.completed_windows == 0
+        ? 0.0
+        : (static_cast<double>(wave_gap_stats.total_mmio_config_instructions)
+           / static_cast<double>(wave_gap_stats.completed_windows));
+    const double wave_gap_data_avg = wave_gap_stats.completed_windows == 0
+        ? 0.0
+        : (static_cast<double>(wave_gap_stats.total_data_compute_instructions)
+           / static_cast<double>(wave_gap_stats.completed_windows));
+    const double wave_gap_ctrl_avg = wave_gap_stats.completed_windows == 0
+        ? 0.0
+        : (static_cast<double>(wave_gap_stats.total_control_instructions)
+           / static_cast<double>(wave_gap_stats.completed_windows));
 
     std::cout << "[SIM] Cluster RUN cycles source: HDDU/AGU busy" << std::endl;
     std::cout << "[SIM] Cluster RUN cycles: " << cluster_run_cycles << std::endl;
     std::cout << "[SIM] DMA active cycles: " << dma_active_cycles << std::endl;
     std::cout << "[SIM] Compute/DMA overlap cycles: " << overlap_cycles << std::endl;
+    std::cout << "[SIM] Cluster wave gap windows: "
+              << wave_gap_stats.completed_windows << std::endl;
+    std::cout << "[SIM] Cluster wave gap partial windows dropped: "
+              << wave_gap_stats.dropped_partial_windows << std::endl;
+    std::cout << "[SIM] Cluster wave gap cycles total: "
+              << wave_gap_cycles_total << std::endl;
+    std::cout << "[SIM] Cluster wave gap instructions total: "
+              << wave_gap_stats.total_instructions << std::endl;
+    std::cout << "[SIM] Cluster wave gap MMIO configure instructions total: "
+              << wave_gap_stats.total_mmio_config_instructions << std::endl;
+    std::cout << "[SIM] Cluster wave gap data compute instructions total: "
+              << wave_gap_stats.total_data_compute_instructions << std::endl;
+    std::cout << "[SIM] Cluster wave gap start/stop control instructions total: "
+              << wave_gap_stats.total_control_instructions << std::endl;
     std::cout << std::fixed << std::setprecision(2)
               << "[SIM] Compute/DMA overlap ratio (vs compute): "
               << overlap_vs_compute_pct << "%" << std::endl
               << "[SIM] Compute/DMA overlap ratio (vs DMA): "
               << overlap_vs_dma_pct << "%" << std::endl
+              << "[SIM] Cluster wave gap cycles avg: "
+              << wave_gap_cycles_avg << std::endl
+              << "[SIM] Cluster wave gap instructions avg: "
+              << wave_gap_instr_avg << std::endl
+              << "[SIM] Cluster wave gap MMIO configure instructions avg: "
+              << wave_gap_mmio_avg << std::endl
+              << "[SIM] Cluster wave gap data compute instructions avg: "
+              << wave_gap_data_avg << std::endl
+              << "[SIM] Cluster wave gap start/stop control instructions avg: "
+              << wave_gap_ctrl_avg << std::endl
+              << "[SIM] Cluster wave gap cycles min: "
+              << static_cast<double>(wave_gap_stats.min_cycles) << std::endl
+              << "[SIM] Cluster wave gap cycles max: "
+              << static_cast<double>(wave_gap_stats.max_cycles) << std::endl
+              << "[SIM] Cluster wave gap last window cycles: "
+              << static_cast<double>(wave_gap_stats.last_cycles) << std::endl
+              << "[SIM] Cluster wave gap instructions min: "
+              << static_cast<double>(wave_gap_stats.min_instructions) << std::endl
+              << "[SIM] Cluster wave gap instructions max: "
+              << static_cast<double>(wave_gap_stats.max_instructions) << std::endl
+              << "[SIM] Cluster wave gap last window instructions: "
+              << static_cast<double>(wave_gap_stats.last_instructions) << std::endl
+              << "[SIM] Cluster wave gap last MMIO configure instructions: "
+              << static_cast<double>(wave_gap_stats.last_mmio_config_instructions) << std::endl
+              << "[SIM] Cluster wave gap last data compute instructions: "
+              << static_cast<double>(wave_gap_stats.last_data_compute_instructions) << std::endl
+              << "[SIM] Cluster wave gap last start/stop control instructions: "
+              << static_cast<double>(wave_gap_stats.last_control_instructions) << std::endl
               << std::defaultfloat;
+    std::cout << "[SIM] Cluster boot-up cycles: "
+              << boot_up_cycles << std::endl;
+    std::cout << "[SIM] Cluster boot-up instructions: "
+              << boot_up_instructions << std::endl;
+    std::cout << "[SIM] Cluster drain-out cycles: "
+              << drain_out_cycles << std::endl;
+    std::cout << "[SIM] Cluster drain-out instructions: "
+              << drain_out_instructions << std::endl;
+    if (wave_gap_stats.boot_up_time.valid) {
+        std::cout << "[SIM] Cluster boot-up detail: start_cycle="
+                  << wave_gap_stats.boot_up_time.start_cycle
+                  << " first_start_cycle=" << wave_gap_stats.boot_up_time.end_cycle
+                  << " cycles=" << wave_gap_stats.boot_up_time.cycles
+                  << " start_instruction=" << wave_gap_stats.boot_up_time.start_instruction
+                  << " first_start_instruction=" << wave_gap_stats.boot_up_time.end_instruction
+                  << " instructions=" << wave_gap_stats.boot_up_time.instructions
+                  << std::endl;
+    }
+    if (wave_gap_stats.drain_out_time.valid) {
+        std::cout << "[SIM] Cluster drain-out detail: last_stop_cycle="
+                  << wave_gap_stats.drain_out_time.start_cycle
+                  << " end_cycle=" << wave_gap_stats.drain_out_time.end_cycle
+                  << " cycles=" << wave_gap_stats.drain_out_time.cycles
+                  << " last_stop_instruction=" << wave_gap_stats.drain_out_time.start_instruction
+                  << " end_instruction=" << wave_gap_stats.drain_out_time.end_instruction
+                  << " instructions=" << wave_gap_stats.drain_out_time.instructions
+                  << std::endl;
+    }
+    for (const auto& window : wave_gap_stats.windows) {
+        std::cout << "[SIM] Cluster wave gap window[" << window.index
+                  << "]: stop_cycle=" << window.stop_cycle
+                  << " next_start_cycle=" << window.next_start_cycle
+                  << " cycles=" << window.cycles
+                  << " stop_instruction=" << window.stop_instruction
+                  << " next_start_instruction=" << window.next_start_instruction
+                  << " instructions=" << window.instructions
+                  << " mmio_config=" << window.mmio_config_instructions
+                  << " data_compute=" << window.data_compute_instructions
+                  << " start_stop_control=" << window.control_instructions
+                  << std::endl;
+    }
     std::cout << "[SIM] Simulation ended at " << sc_time_stamp() << std::endl;
     dram.print_oob_summary();
 

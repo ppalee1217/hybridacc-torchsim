@@ -19,12 +19,17 @@ LDFLAGS := -T link.ld -nostdlib -Wl,--gc-sections
 
 OBJS    := $(patsubst %.S,%.o,$(patsubst %.c,%.o,$(SRCS)))
 
-all: $(TARGET)
-	$(OBJDUMP) -d $< > $(TARGET:.elf=.dis)
-	$(SIZE) $<
+all: $(TARGET) $(TARGET:.elf=.dis) $(TARGET:.elf=.mem)
+	$(SIZE) $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+
+$(TARGET:.elf=.dis): $(TARGET)
+	$(OBJDUMP) -d $< > $@
+
+$(TARGET:.elf=.mem): $(TARGET)
+	$(OBJCOPY) -O verilog $< $@
 
 %.o: %.S
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -39,6 +44,6 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(TARGET) *.dis
+	rm -f $(OBJS) $(TARGET) *.dis *.mem
 
 .PHONY: all clean

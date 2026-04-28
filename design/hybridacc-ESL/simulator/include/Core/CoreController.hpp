@@ -25,6 +25,7 @@
 
 #include <systemc>
 #include <cstdint>
+#include <vector>
 #include "Utils/utils.hpp"
 #include "Core/Types.hpp"
 #include "Core/BootHostIf.hpp"
@@ -43,6 +44,51 @@ namespace core {
 
 using namespace sc_core;
 using namespace sc_dt;
+
+struct WaveGapPhaseDetail {
+    bool valid = false;
+    uint64_t start_cycle = 0;
+    uint64_t end_cycle = 0;
+    uint64_t cycles = 0;
+    uint64_t start_instruction = 0;
+    uint64_t end_instruction = 0;
+    uint64_t instructions = 0;
+};
+
+struct WaveGapWindowDetail {
+    uint64_t index = 0;
+    uint64_t stop_cycle = 0;
+    uint64_t next_start_cycle = 0;
+    uint64_t cycles = 0;
+    uint64_t stop_instruction = 0;
+    uint64_t next_start_instruction = 0;
+    uint64_t instructions = 0;
+    uint64_t mmio_config_instructions = 0;
+    uint64_t data_compute_instructions = 0;
+    uint64_t control_instructions = 0;
+};
+
+struct WaveGapInstructionStats {
+    uint64_t completed_windows = 0;
+    uint64_t dropped_partial_windows = 0;
+    uint64_t total_cycles = 0;
+    uint64_t min_cycles = 0;
+    uint64_t max_cycles = 0;
+    uint64_t last_cycles = 0;
+    uint64_t total_instructions = 0;
+    uint64_t total_mmio_config_instructions = 0;
+    uint64_t total_data_compute_instructions = 0;
+    uint64_t total_control_instructions = 0;
+    uint64_t min_instructions = 0;
+    uint64_t max_instructions = 0;
+    uint64_t last_instructions = 0;
+    uint64_t last_mmio_config_instructions = 0;
+    uint64_t last_data_compute_instructions = 0;
+    uint64_t last_control_instructions = 0;
+    WaveGapPhaseDetail boot_up_time{};
+    WaveGapPhaseDetail drain_out_time{};
+    std::vector<WaveGapWindowDetail> windows{};
+};
 
 template <unsigned NUM_CLUSTERS = 1, unsigned NUM_NLU = 0>
 SC_MODULE(CoreController) {
@@ -641,6 +687,9 @@ SC_MODULE(CoreController) {
                   << m_mem_axi_ar_ready_i
                   << m_mem_axi_r_valid_i << m_mem_axi_r_data_i
                   << m_mem_axi_r_resp_i << m_mem_axi_r_last_i;
+
+            SC_CTHREAD(wave_gap_probe_thread, clk.pos());
+            async_reset_signal_is(reset_n, false);
     }
 
     /// Propagate runtime config to sub-modules after elaboration.
@@ -694,6 +743,14 @@ SC_MODULE(CoreController) {
     bool dma_active() const { return u_dma_engine.is_active(); }
 
     uint32_t irq_summary() const { return u_boot_host_if.debug_irq_summary(); }
+
+    WaveGapInstructionStats wave_gap_instruction_stats() const {
+        WaveGapInstructionStats stats = wave_gap_stats_;
+        stats.dropped_partial_windows = wave_gap_stop_events_ >= stats.completed_windows
+            ? (wave_gap_stop_events_ - stats.completed_windows)
+            : 0;
+        return stats;
+    }
 
     bool fast_load_section(SectionKind kind,
                            uint32_t local_addr,
@@ -921,6 +978,347 @@ private:
     sc_signal<sc_uint<32>>  sig_core_cause{"sig_core_cause"};
     sc_signal<sc_uint<32>>  sig_fabric_last_target{"sig_fabric_last_target"};
     sc_signal<sc_uint<32>>  sig_fabric_last_addr{"sig_fabric_last_addr"};
+
+    // ========================================================================
+    // Wave-gap probe state
+    // ========================================================================
+
+    enum class WaveGapInstrClass : uint8_t {
+        MMIO_CONFIG,
+        DATA_COMPUTE,
+        CLUSTER_CONTROL,
+    };
+
+    static constexpr uint32_t kClusterUnicastBase = 0x40000000u;
+    static constexpr uint32_t kClusterUnicastSize = 0x00100000u;
+    static constexpr uint32_t kClusterUnicastStride = 0x00010000u;
+    static constexpr uint32_t kClusterBroadcastBase = 0x50000000u;
+    static constexpr uint32_t kClusterBroadcastSize = 0x00010000u;
+    static constexpr uint32_t kClusterHdduGlobalCtrlLocalOffset = 0x1800u;
+    static constexpr uint32_t kHdduCtrlStartMask = 1u << 0;
+    static constexpr uint32_t kHdduCtrlStopMask = 1u << 1;
+
+    WaveGapInstructionStats wave_gap_stats_{};
+    bool wave_gap_window_open_ = false;
+    bool pending_mmio_instr_valid_ = false;
+    bool pending_mmio_is_stop_ = false;
+    bool pending_mmio_is_start_ = false;
+    WaveGapInstrClass pending_mmio_instr_class_ = WaveGapInstrClass::DATA_COMPUTE;
+    bool prev_mmio_req_valid_ = false;
+    bool prev_mmio_req_write_ = false;
+    uint32_t prev_mmio_req_addr_ = 0;
+    uint32_t prev_mmio_req_wdata_ = 0;
+    bool prev_core_enable_ = false;
+    uint64_t core_cycle_counter_ = 0;
+    uint64_t retired_instruction_counter_ = 0;
+    bool boot_up_pending_ = false;
+    uint64_t boot_up_start_cycle_ = 0;
+    uint64_t boot_up_start_instruction_before_ = 0;
+    bool drain_out_pending_ = false;
+    uint64_t drain_out_start_cycle_ = 0;
+    uint64_t drain_out_start_instruction_before_ = 0;
+    uint64_t wave_gap_stop_events_ = 0;
+    uint64_t wave_gap_cur_stop_cycle_ = 0;
+    uint64_t wave_gap_cur_stop_instruction_ = 0;
+    uint64_t wave_gap_cur_total_ = 0;
+    uint64_t wave_gap_cur_mmio_config_ = 0;
+    uint64_t wave_gap_cur_data_compute_ = 0;
+    uint64_t wave_gap_cur_control_ = 0;
+
+    static bool decode_cluster_local_offset(uint32_t addr, uint32_t& local_offset) {
+        if (addr >= kClusterUnicastBase && addr < (kClusterUnicastBase + kClusterUnicastSize)) {
+            local_offset = (addr - kClusterUnicastBase) % kClusterUnicastStride;
+            return true;
+        }
+        if (addr >= kClusterBroadcastBase && addr < (kClusterBroadcastBase + kClusterBroadcastSize)) {
+            local_offset = addr - kClusterBroadcastBase;
+            return true;
+        }
+        return false;
+    }
+
+    static bool decode_cluster_control_event(uint32_t addr,
+                                             bool is_write,
+                                             uint32_t wdata,
+                                             bool& is_stop,
+                                             bool& is_start) {
+        is_stop = false;
+        is_start = false;
+        if (!is_write) {
+            return false;
+        }
+
+        uint32_t local_offset = 0;
+        if (!decode_cluster_local_offset(addr, local_offset)) {
+            return false;
+        }
+        if (local_offset != kClusterHdduGlobalCtrlLocalOffset) {
+            return false;
+        }
+
+        is_stop = (wdata & kHdduCtrlStopMask) != 0u;
+        is_start = (wdata & kHdduCtrlStartMask) != 0u;
+        return is_stop || is_start;
+    }
+
+    void reset_wave_gap_probe() {
+        wave_gap_stats_ = {};
+        wave_gap_window_open_ = false;
+        pending_mmio_instr_valid_ = false;
+        pending_mmio_is_stop_ = false;
+        pending_mmio_is_start_ = false;
+        pending_mmio_instr_class_ = WaveGapInstrClass::DATA_COMPUTE;
+        prev_mmio_req_valid_ = false;
+        prev_mmio_req_write_ = false;
+        prev_mmio_req_addr_ = 0;
+        prev_mmio_req_wdata_ = 0;
+        prev_core_enable_ = false;
+        core_cycle_counter_ = 0;
+        retired_instruction_counter_ = 0;
+        boot_up_pending_ = false;
+        boot_up_start_cycle_ = 0;
+        boot_up_start_instruction_before_ = 0;
+        drain_out_pending_ = false;
+        drain_out_start_cycle_ = 0;
+        drain_out_start_instruction_before_ = 0;
+        wave_gap_stop_events_ = 0;
+        wave_gap_cur_stop_cycle_ = 0;
+        wave_gap_cur_stop_instruction_ = 0;
+        wave_gap_cur_total_ = 0;
+        wave_gap_cur_mmio_config_ = 0;
+        wave_gap_cur_data_compute_ = 0;
+        wave_gap_cur_control_ = 0;
+    }
+
+    static WaveGapPhaseDetail build_phase_detail(uint64_t start_cycle,
+                                                 uint64_t start_instruction_before,
+                                                 uint64_t end_cycle,
+                                                 uint64_t end_instruction) {
+        WaveGapPhaseDetail detail;
+        detail.valid = end_cycle >= start_cycle && end_instruction >= start_instruction_before;
+        detail.start_cycle = start_cycle;
+        detail.end_cycle = end_cycle;
+        detail.cycles = detail.valid ? (end_cycle - start_cycle + 1) : 0;
+        detail.instructions = detail.valid ? (end_instruction - start_instruction_before) : 0;
+        if (detail.instructions > 0) {
+            detail.start_instruction = start_instruction_before + 1;
+            detail.end_instruction = end_instruction;
+        }
+        return detail;
+    }
+
+    void reset_wave_gap_window_state() {
+        wave_gap_window_open_ = false;
+        wave_gap_cur_stop_cycle_ = 0;
+        wave_gap_cur_stop_instruction_ = 0;
+        wave_gap_cur_total_ = 0;
+        wave_gap_cur_mmio_config_ = 0;
+        wave_gap_cur_data_compute_ = 0;
+        wave_gap_cur_control_ = 0;
+    }
+
+    void account_wave_gap_instruction(WaveGapInstrClass instr_class) {
+        ++wave_gap_cur_total_;
+        switch (instr_class) {
+            case WaveGapInstrClass::MMIO_CONFIG:
+                ++wave_gap_cur_mmio_config_;
+                break;
+            case WaveGapInstrClass::DATA_COMPUTE:
+                ++wave_gap_cur_data_compute_;
+                break;
+            case WaveGapInstrClass::CLUSTER_CONTROL:
+                ++wave_gap_cur_control_;
+                break;
+        }
+    }
+
+    void start_wave_gap_window(WaveGapInstrClass instr_class,
+                               uint64_t current_cycle,
+                               uint64_t current_instruction) {
+        ++wave_gap_stop_events_;
+        if (wave_gap_window_open_) {
+            ++wave_gap_stats_.dropped_partial_windows;
+        }
+
+        wave_gap_window_open_ = true;
+        wave_gap_cur_stop_cycle_ = current_cycle;
+        wave_gap_cur_stop_instruction_ = current_instruction;
+        wave_gap_cur_total_ = 0;
+        wave_gap_cur_mmio_config_ = 0;
+        wave_gap_cur_data_compute_ = 0;
+        wave_gap_cur_control_ = 0;
+        account_wave_gap_instruction(instr_class);
+
+        drain_out_pending_ = true;
+        drain_out_start_cycle_ = current_cycle;
+        drain_out_start_instruction_before_ = current_instruction - 1;
+        wave_gap_stats_.drain_out_time = {};
+    }
+
+    void finish_wave_gap_window(uint64_t current_cycle,
+                                uint64_t current_instruction) {
+        WaveGapWindowDetail detail;
+        detail.index = wave_gap_stats_.completed_windows;
+        detail.stop_cycle = wave_gap_cur_stop_cycle_;
+        detail.next_start_cycle = current_cycle;
+        detail.cycles = current_cycle >= wave_gap_cur_stop_cycle_
+            ? (current_cycle - wave_gap_cur_stop_cycle_ + 1)
+            : 0;
+        detail.stop_instruction = wave_gap_cur_stop_instruction_;
+        detail.next_start_instruction = current_instruction;
+        detail.instructions = wave_gap_cur_total_;
+        detail.mmio_config_instructions = wave_gap_cur_mmio_config_;
+        detail.data_compute_instructions = wave_gap_cur_data_compute_;
+        detail.control_instructions = wave_gap_cur_control_;
+
+        ++wave_gap_stats_.completed_windows;
+        wave_gap_stats_.windows.push_back(detail);
+        wave_gap_stats_.total_cycles += detail.cycles;
+        wave_gap_stats_.total_instructions += wave_gap_cur_total_;
+        wave_gap_stats_.total_mmio_config_instructions += wave_gap_cur_mmio_config_;
+        wave_gap_stats_.total_data_compute_instructions += wave_gap_cur_data_compute_;
+        wave_gap_stats_.total_control_instructions += wave_gap_cur_control_;
+        wave_gap_stats_.last_cycles = detail.cycles;
+        wave_gap_stats_.last_instructions = wave_gap_cur_total_;
+        wave_gap_stats_.last_mmio_config_instructions = wave_gap_cur_mmio_config_;
+        wave_gap_stats_.last_data_compute_instructions = wave_gap_cur_data_compute_;
+        wave_gap_stats_.last_control_instructions = wave_gap_cur_control_;
+
+        if (wave_gap_stats_.completed_windows == 1 || detail.cycles < wave_gap_stats_.min_cycles) {
+            wave_gap_stats_.min_cycles = detail.cycles;
+        }
+        if (detail.cycles > wave_gap_stats_.max_cycles) {
+            wave_gap_stats_.max_cycles = detail.cycles;
+        }
+        if (wave_gap_stats_.completed_windows == 1 || wave_gap_cur_total_ < wave_gap_stats_.min_instructions) {
+            wave_gap_stats_.min_instructions = wave_gap_cur_total_;
+        }
+        if (wave_gap_cur_total_ > wave_gap_stats_.max_instructions) {
+            wave_gap_stats_.max_instructions = wave_gap_cur_total_;
+        }
+
+        reset_wave_gap_window_state();
+        drain_out_pending_ = false;
+    }
+
+    void maybe_finalize_boot_up(uint64_t current_cycle,
+                                uint64_t current_instruction,
+                                bool is_start) {
+        if (!is_start || !boot_up_pending_ || wave_gap_stats_.boot_up_time.valid) {
+            return;
+        }
+        wave_gap_stats_.boot_up_time = build_phase_detail(
+            boot_up_start_cycle_,
+            boot_up_start_instruction_before_,
+            current_cycle,
+            current_instruction);
+        boot_up_pending_ = false;
+    }
+
+    void maybe_finalize_drain_out() {
+        if (!drain_out_pending_ || wave_gap_stats_.drain_out_time.valid || !sig_core_halted.read()) {
+            return;
+        }
+        wave_gap_stats_.drain_out_time = build_phase_detail(
+            drain_out_start_cycle_,
+            drain_out_start_instruction_before_,
+            core_cycle_counter_,
+            retired_instruction_counter_);
+        if (wave_gap_window_open_) {
+            ++wave_gap_stats_.dropped_partial_windows;
+            reset_wave_gap_window_state();
+        }
+        drain_out_pending_ = false;
+    }
+
+    void wave_gap_probe_thread() {
+        reset_wave_gap_probe();
+        wait();
+
+        while (true) {
+            const bool core_enable = sig_core_enable.read();
+            const bool mmio_req_valid = sig_mcu_mmio_req_valid.read();
+            const bool mmio_req_write = sig_mcu_mmio_req_write.read();
+            const uint32_t mmio_req_addr = sig_mcu_mmio_req_addr.read().to_uint();
+            const uint32_t mmio_req_wdata = sig_mcu_mmio_req_wdata.read().to_uint();
+            if (core_enable) {
+                ++core_cycle_counter_;
+            }
+            if (core_enable && !prev_core_enable_) {
+                boot_up_pending_ = true;
+                boot_up_start_cycle_ = core_cycle_counter_;
+                boot_up_start_instruction_before_ = retired_instruction_counter_;
+            }
+
+            const bool is_new_mmio_request = mmio_req_valid &&
+                (!prev_mmio_req_valid_ ||
+                 mmio_req_write != prev_mmio_req_write_ ||
+                 mmio_req_addr != prev_mmio_req_addr_ ||
+                 mmio_req_wdata != prev_mmio_req_wdata_);
+
+            if (is_new_mmio_request && !pending_mmio_instr_valid_) {
+                bool is_stop = false;
+                bool is_start = false;
+                const bool is_control = decode_cluster_control_event(
+                    mmio_req_addr,
+                    mmio_req_write,
+                    mmio_req_wdata,
+                    is_stop,
+                    is_start);
+
+                pending_mmio_instr_valid_ = true;
+                pending_mmio_is_stop_ = is_stop;
+                pending_mmio_is_start_ = is_start;
+                pending_mmio_instr_class_ = is_control
+                    ? WaveGapInstrClass::CLUSTER_CONTROL
+                    : WaveGapInstrClass::MMIO_CONFIG;
+            }
+
+            if (sig_retire_valid.read()) {
+                const uint64_t current_instruction = retired_instruction_counter_ + 1;
+                WaveGapInstrClass instr_class = WaveGapInstrClass::DATA_COMPUTE;
+                bool is_stop = false;
+                bool is_start = false;
+
+                if (pending_mmio_instr_valid_) {
+                    instr_class = pending_mmio_instr_class_;
+                    is_stop = pending_mmio_is_stop_;
+                    is_start = pending_mmio_is_start_;
+                    pending_mmio_instr_valid_ = false;
+                    pending_mmio_is_stop_ = false;
+                    pending_mmio_is_start_ = false;
+                    pending_mmio_instr_class_ = WaveGapInstrClass::DATA_COMPUTE;
+                }
+
+                if (is_stop) {
+                    start_wave_gap_window(instr_class, core_cycle_counter_, current_instruction);
+                    if (is_start) {
+                        maybe_finalize_boot_up(core_cycle_counter_, current_instruction, true);
+                        finish_wave_gap_window(core_cycle_counter_, current_instruction);
+                    }
+                } else if (wave_gap_window_open_) {
+                    account_wave_gap_instruction(instr_class);
+                    if (is_start) {
+                        maybe_finalize_boot_up(core_cycle_counter_, current_instruction, true);
+                        finish_wave_gap_window(core_cycle_counter_, current_instruction);
+                    }
+                } else {
+                    maybe_finalize_boot_up(core_cycle_counter_, current_instruction, is_start);
+                }
+
+                retired_instruction_counter_ = current_instruction;
+            }
+
+            maybe_finalize_drain_out();
+            prev_mmio_req_valid_ = mmio_req_valid;
+            prev_mmio_req_write_ = mmio_req_write;
+            prev_mmio_req_addr_ = mmio_req_addr;
+            prev_mmio_req_wdata_ = mmio_req_wdata;
+            prev_core_enable_ = core_enable;
+
+            wait();
+        }
+    }
 
     // ========================================================================
     // Combinational derived signals

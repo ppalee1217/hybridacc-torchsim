@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
-from io import BytesIO
 from itertools import product
 from pathlib import Path
 from typing import Any
@@ -32,6 +31,38 @@ _METRIC_LABELS = {
     "compute_dma_overlap_cycles": "Compute/DMA Overlap Cycles",
     "compute_dma_overlap_pct_of_compute": "Overlap / Compute Busy (%)",
     "compute_dma_overlap_pct_of_dma": "Overlap / DMA Active (%)",
+    "wave_gap_windows": "Completed Wave Gaps",
+    "wave_gap_partial_windows_dropped": "Dropped Partial Wave Gaps",
+    "wave_gap_cycles_total": "Wave Gap Cycles Total",
+    "wave_gap_cycles_avg": "Wave Gap Cycles Avg",
+    "wave_gap_cycles_min": "Wave Gap Cycles Min",
+    "wave_gap_cycles_max": "Wave Gap Cycles Max",
+    "wave_gap_last_cycles": "Wave Gap Last Cycles",
+    "wave_gap_instructions_total": "Wave Gap Instructions Total",
+    "wave_gap_instructions_avg": "Wave Gap Instructions Avg",
+    "wave_gap_instructions_min": "Wave Gap Instructions Min",
+    "wave_gap_instructions_max": "Wave Gap Instructions Max",
+    "wave_gap_last_instructions": "Wave Gap Last Instructions",
+    "wave_gap_mmio_config_instructions_total": "Wave Gap MMIO Configure Instructions Total",
+    "wave_gap_mmio_config_instructions_avg": "Wave Gap MMIO Configure Instructions Avg",
+    "wave_gap_last_mmio_config_instructions": "Wave Gap Last MMIO Configure Instructions",
+    "wave_gap_data_compute_instructions_total": "Wave Gap Data Compute Instructions Total",
+    "wave_gap_data_compute_instructions_avg": "Wave Gap Data Compute Instructions Avg",
+    "wave_gap_last_data_compute_instructions": "Wave Gap Last Data Compute Instructions",
+    "wave_gap_control_instructions_total": "Wave Gap Start/Stop Control Instructions Total",
+    "wave_gap_control_instructions_avg": "Wave Gap Start/Stop Control Instructions Avg",
+    "wave_gap_last_control_instructions": "Wave Gap Last Start/Stop Control Instructions",
+    "boot_up_cycles": "Boot-up Cycles",
+    "boot_up_instructions": "Boot-up Instructions",
+    "drain_out_cycles": "Drain-out Cycles",
+    "drain_out_instructions": "Drain-out Instructions",
+    "core_probe_cycles_total": "Core Probe Cycles (Lifecycle Probe)",
+    "steady_state_core_cycles": "Steady-state Core Cycles",
+    "steady_state_core_utilization_pct": "Steady-state MACs Utilization (%)",
+    "ideal_hw_sw_codesign_core_cycles": "Ideal HW/SW Co-design Core Cycles",
+    "ideal_hw_sw_codesign_core_utilization_pct": "Ideal HW/SW Co-design MACs Utilization (%)",
+    "wave_gap_cycles_pct_of_steady_state": "Wave Gap / Steady-state (%)",
+    "wave_gap_data_compute_pct_of_gap_instructions": "Gap Data Compute / Gap Instructions (%)",
     "gfops_per_sec": "GFLOPS/sec",
     "active_pes": "Active PEs",
     "active_pe_ratio": "Active PE Ratio",
@@ -40,6 +71,51 @@ _METRIC_LABELS = {
     "cluster_level_macs_utilization_pct": "Cluster-level MACs Utilization (%)",
     "macs_utilization_pct": "Core-level MACs Utilization (%)",
 }
+_SIM_LOG_VALUE_PATTERNS = {
+    "sim_time_ns": re.compile(r"\[SIM\] Simulation ended at\s+(\d+)\s+ns"),
+    "ebreak_cycle": re.compile(r"\[TB\] EBREAK at cycle\s+(\d+)"),
+    "cluster_run_cycles": re.compile(r"\[SIM\] Cluster RUN cycles:\s+(\d+)"),
+    "dma_active_cycles": re.compile(r"\[SIM\] DMA active cycles:\s+(\d+)"),
+    "compute_dma_overlap_cycles": re.compile(r"\[SIM\] Compute/DMA overlap cycles:\s+(\d+)"),
+    "wave_gap_windows": re.compile(r"\[SIM\] Cluster wave gap windows:\s+(\d+)"),
+    "wave_gap_partial_windows_dropped": re.compile(r"\[SIM\] Cluster wave gap partial windows dropped:\s+(\d+)"),
+    "wave_gap_cycles_total": re.compile(r"\[SIM\] Cluster wave gap cycles total:\s+([0-9.]+)"),
+    "wave_gap_instructions_total": re.compile(r"\[SIM\] Cluster wave gap instructions total:\s+([0-9.]+)"),
+    "wave_gap_mmio_config_instructions_total": re.compile(r"\[SIM\] Cluster wave gap MMIO configure instructions total:\s+([0-9.]+)"),
+    "wave_gap_data_compute_instructions_total": re.compile(r"\[SIM\] Cluster wave gap data compute instructions total:\s+([0-9.]+)"),
+    "wave_gap_control_instructions_total": re.compile(r"\[SIM\] Cluster wave gap start/stop control instructions total:\s+([0-9.]+)"),
+    "wave_gap_cycles_avg": re.compile(r"\[SIM\] Cluster wave gap cycles avg:\s+([0-9.]+)"),
+    "wave_gap_instructions_avg": re.compile(r"\[SIM\] Cluster wave gap instructions avg:\s+([0-9.]+)"),
+    "wave_gap_mmio_config_instructions_avg": re.compile(r"\[SIM\] Cluster wave gap MMIO configure instructions avg:\s+([0-9.]+)"),
+    "wave_gap_data_compute_instructions_avg": re.compile(r"\[SIM\] Cluster wave gap data compute instructions avg:\s+([0-9.]+)"),
+    "wave_gap_control_instructions_avg": re.compile(r"\[SIM\] Cluster wave gap start/stop control instructions avg:\s+([0-9.]+)"),
+    "wave_gap_cycles_min": re.compile(r"\[SIM\] Cluster wave gap cycles min:\s+([0-9.]+)"),
+    "wave_gap_cycles_max": re.compile(r"\[SIM\] Cluster wave gap cycles max:\s+([0-9.]+)"),
+    "wave_gap_last_cycles": re.compile(r"\[SIM\] Cluster wave gap last window cycles:\s+([0-9.]+)"),
+    "wave_gap_instructions_min": re.compile(r"\[SIM\] Cluster wave gap instructions min:\s+([0-9.]+)"),
+    "wave_gap_instructions_max": re.compile(r"\[SIM\] Cluster wave gap instructions max:\s+([0-9.]+)"),
+    "wave_gap_last_instructions": re.compile(r"\[SIM\] Cluster wave gap last window instructions:\s+([0-9.]+)"),
+    "wave_gap_last_mmio_config_instructions": re.compile(r"\[SIM\] Cluster wave gap last MMIO configure instructions:\s+([0-9.]+)"),
+    "wave_gap_last_data_compute_instructions": re.compile(r"\[SIM\] Cluster wave gap last data compute instructions:\s+([0-9.]+)"),
+    "wave_gap_last_control_instructions": re.compile(r"\[SIM\] Cluster wave gap last start/stop control instructions:\s+([0-9.]+)"),
+    "boot_up_cycles": re.compile(r"\[SIM\] Cluster boot-up cycles:\s+([0-9.]+)"),
+    "boot_up_instructions": re.compile(r"\[SIM\] Cluster boot-up instructions:\s+([0-9.]+)"),
+    "drain_out_cycles": re.compile(r"\[SIM\] Cluster drain-out cycles:\s+([0-9.]+)"),
+    "drain_out_instructions": re.compile(r"\[SIM\] Cluster drain-out instructions:\s+([0-9.]+)"),
+}
+_BOOT_UP_DETAIL_PATTERN = re.compile(
+    r"\[SIM\] Cluster boot-up detail: start_cycle=(\d+) first_start_cycle=(\d+) cycles=(\d+) "
+    r"start_instruction=(\d+) first_start_instruction=(\d+) instructions=(\d+)"
+)
+_DRAIN_OUT_DETAIL_PATTERN = re.compile(
+    r"\[SIM\] Cluster drain-out detail: last_stop_cycle=(\d+) end_cycle=(\d+) cycles=(\d+) "
+    r"last_stop_instruction=(\d+) end_instruction=(\d+) instructions=(\d+)"
+)
+_WAVE_GAP_WINDOW_PATTERN = re.compile(
+    r"\[SIM\] Cluster wave gap window\[(\d+)\]: stop_cycle=(\d+) next_start_cycle=(\d+) cycles=(\d+) "
+    r"stop_instruction=(\d+) next_start_instruction=(\d+) instructions=(\d+) mmio_config=(\d+) "
+    r"data_compute=(\d+) start_stop_control=(\d+)"
+)
 _DIMENSION_ALIASES = {
     "h": "oh",
     "height": "oh",
@@ -219,6 +295,13 @@ def _parse_metric_names(text: str | None) -> list[str]:
 
 def _metric_display_label(metric: str) -> str:
     return _METRIC_LABELS.get(metric, metric.replace("_", " ").title())
+
+
+def _extract_last_float(text: str, pattern: re.Pattern[str]) -> float:
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return math.nan
+    return float(matches[-1].group(1))
 
 
 def _scatter_dimension_display_label(dim: str) -> str:
@@ -623,6 +706,40 @@ def _parse_sim_log(path: Path) -> dict[str, Any]:
         "cluster_run_cycles": math.nan,
         "dma_active_cycles": math.nan,
         "compute_dma_overlap_cycles": math.nan,
+        "wave_gap_windows": math.nan,
+        "wave_gap_partial_windows_dropped": math.nan,
+        "wave_gap_cycles_total": math.nan,
+        "wave_gap_instructions_total": math.nan,
+        "wave_gap_mmio_config_instructions_total": math.nan,
+        "wave_gap_data_compute_instructions_total": math.nan,
+        "wave_gap_control_instructions_total": math.nan,
+        "wave_gap_cycles_avg": math.nan,
+        "wave_gap_instructions_avg": math.nan,
+        "wave_gap_mmio_config_instructions_avg": math.nan,
+        "wave_gap_data_compute_instructions_avg": math.nan,
+        "wave_gap_control_instructions_avg": math.nan,
+        "wave_gap_cycles_min": math.nan,
+        "wave_gap_cycles_max": math.nan,
+        "wave_gap_last_cycles": math.nan,
+        "wave_gap_instructions_min": math.nan,
+        "wave_gap_instructions_max": math.nan,
+        "wave_gap_last_instructions": math.nan,
+        "wave_gap_last_mmio_config_instructions": math.nan,
+        "wave_gap_last_data_compute_instructions": math.nan,
+        "wave_gap_last_control_instructions": math.nan,
+        "boot_up_cycles": math.nan,
+        "boot_up_instructions": math.nan,
+        "boot_up_start_cycle": math.nan,
+        "boot_up_first_start_cycle": math.nan,
+        "boot_up_start_instruction": math.nan,
+        "boot_up_first_start_instruction": math.nan,
+        "drain_out_cycles": math.nan,
+        "drain_out_instructions": math.nan,
+        "drain_out_last_stop_cycle": math.nan,
+        "drain_out_end_cycle": math.nan,
+        "drain_out_last_stop_instruction": math.nan,
+        "drain_out_end_instruction": math.nan,
+        "wave_gap_window_details": [],
         "timeout": 0.0,
         "passed": 0.0,
     }
@@ -632,31 +749,64 @@ def _parse_sim_log(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8", errors="ignore")
     metrics["result_state"] = "failed"
 
-    sim_match = pd.Series(text.splitlines(), dtype="string").str.extract(r"\[SIM\] Simulation ended at\s+(\d+)\s+ns").dropna()
-    if not sim_match.empty:
-        metrics["sim_time_ns"] = float(sim_match.iloc[-1, 0])
+    for key, pattern in _SIM_LOG_VALUE_PATTERNS.items():
+        metrics[key] = _extract_last_float(text, pattern)
 
-    ebreak_match = pd.Series(text.splitlines(), dtype="string").str.extract(r"\[TB\] EBREAK at cycle\s+(\d+)").dropna()
-    if not ebreak_match.empty:
-        metrics["ebreak_cycle"] = float(ebreak_match.iloc[-1, 0])
+    boot_up_match = _BOOT_UP_DETAIL_PATTERN.search(text)
+    if boot_up_match is not None:
+        metrics["boot_up_start_cycle"] = float(boot_up_match.group(1))
+        metrics["boot_up_first_start_cycle"] = float(boot_up_match.group(2))
+        metrics["boot_up_start_instruction"] = float(boot_up_match.group(4))
+        metrics["boot_up_first_start_instruction"] = float(boot_up_match.group(5))
 
-    cluster_match = pd.Series(text.splitlines(), dtype="string").str.extract(r"\[SIM\] Cluster RUN cycles:\s+(\d+)").dropna()
-    if not cluster_match.empty:
-        metrics["cluster_run_cycles"] = float(cluster_match.iloc[-1, 0])
+    drain_out_match = _DRAIN_OUT_DETAIL_PATTERN.search(text)
+    if drain_out_match is not None:
+        metrics["drain_out_last_stop_cycle"] = float(drain_out_match.group(1))
+        metrics["drain_out_end_cycle"] = float(drain_out_match.group(2))
+        metrics["drain_out_last_stop_instruction"] = float(drain_out_match.group(4))
+        metrics["drain_out_end_instruction"] = float(drain_out_match.group(5))
 
-    dma_match = pd.Series(text.splitlines(), dtype="string").str.extract(r"\[SIM\] DMA active cycles:\s+(\d+)").dropna()
-    if not dma_match.empty:
-        metrics["dma_active_cycles"] = float(dma_match.iloc[-1, 0])
-
-    overlap_match = pd.Series(text.splitlines(), dtype="string").str.extract(r"\[SIM\] Compute/DMA overlap cycles:\s+(\d+)").dropna()
-    if not overlap_match.empty:
-        metrics["compute_dma_overlap_cycles"] = float(overlap_match.iloc[-1, 0])
+    metrics["wave_gap_window_details"] = [
+        {
+            "window_index": int(match.group(1)),
+            "stop_cycle": int(match.group(2)),
+            "next_start_cycle": int(match.group(3)),
+            "cycles": int(match.group(4)),
+            "stop_instruction": int(match.group(5)),
+            "next_start_instruction": int(match.group(6)),
+            "instructions": int(match.group(7)),
+            "mmio_config_instructions": int(match.group(8)),
+            "data_compute_instructions": int(match.group(9)),
+            "control_instructions": int(match.group(10)),
+        }
+        for match in _WAVE_GAP_WINDOW_PATTERN.finditer(text)
+    ]
 
     timeout = "Timeout waiting for EBREAK halt" in text
     passed = "[SIM] ALL TESTS PASSED" in text and "[SIM] SOME TESTS FAILED" not in text and not timeout
     metrics["timeout"] = 1.0 if timeout else 0.0
     metrics["passed"] = 1.0 if passed else 0.0
     metrics["result_state"] = "passed" if passed else "failed"
+    return metrics
+
+
+def _parse_e2e_result(path: Path) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "e2e_status": "MISSING",
+        "e2e_reason": "",
+    }
+    if not path.exists():
+        return metrics
+
+    text = path.read_text(encoding="utf-8", errors="ignore").strip()
+    if not text:
+        metrics["e2e_status"] = "UNKNOWN"
+        return metrics
+
+    fields = text.split("\x1f")
+    metrics["e2e_status"] = fields[0].strip() or "UNKNOWN"
+    if len(fields) >= 3:
+        metrics["e2e_reason"] = fields[2].strip()
     return metrics
 
 
@@ -703,16 +853,39 @@ def _resolve_result_dir(case: dict[str, Any], manifest: dict[str, Any], results_
     return case_dir
 
 
-def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) -> pd.DataFrame:
+def _derive_utilization(macs: float, cycles: Any, active_pes: Any) -> float:
+    if (
+        isinstance(cycles, (int, float))
+        and isinstance(active_pes, (int, float))
+        and cycles
+        and active_pes
+        and not math.isnan(cycles)
+        and not math.isnan(active_pes)
+    ):
+        return 100.0 * macs / (cycles * active_pes * 4.0)
+    return math.nan
+
+
+def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) -> tuple[pd.DataFrame, pd.DataFrame]:
     rows: list[dict[str, Any]] = []
+    window_rows: list[dict[str, Any]] = []
     for case in manifest.get("cases", []):
         result_dir = _resolve_result_dir(case, manifest, results_root)
         sim_metrics = _parse_sim_log(result_dir / "sim.log")
+        window_details = list(sim_metrics.pop("wave_gap_window_details", []))
+        e2e_metrics = _parse_e2e_result(result_dir / ".e2e.result")
         pe_metrics = _parse_active_pe_metrics(result_dir / "hardware_ir.json")
         row = dict(case)
         row["result_dir"] = str(result_dir)
         row.update(sim_metrics)
+        row.update(e2e_metrics)
         row.update(pe_metrics)
+        if row["e2e_status"] == "PASS":
+            row["passed"] = 1.0
+            row["result_state"] = "passed"
+        elif row["e2e_status"] == "FAIL":
+            row["passed"] = 0.0
+            row["result_state"] = "failed"
         row["macs"] = _case_macs(case)
         sim_time_ns = row.get("sim_time_ns")
         # 1 MAC is counted as 2 floating-point operations, and dividing by ns
@@ -731,26 +904,8 @@ def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) ->
         cluster_cycles_valid = isinstance(cluster_cycles, (int, float)) and not math.isnan(cluster_cycles)
         dma_cycles_valid = isinstance(dma_cycles, (int, float)) and not math.isnan(dma_cycles)
         overlap_cycles_valid = isinstance(overlap_cycles, (int, float)) and not math.isnan(overlap_cycles)
-        row["core_level_macs_utilization_pct"] = (
-            100.0 * row["macs"] / (core_cycles * active_pes * 4.0)
-            if isinstance(core_cycles, (int, float))
-            and isinstance(active_pes, (int, float))
-            and core_cycles
-            and active_pes
-            and not math.isnan(core_cycles)
-            and not math.isnan(active_pes)
-            else math.nan
-        )
-        row["cluster_level_macs_utilization_pct"] = (
-            100.0 * row["macs"] / (cluster_cycles * active_pes * 4.0)
-            if isinstance(cluster_cycles, (int, float))
-            and isinstance(active_pes, (int, float))
-            and cluster_cycles
-            and active_pes
-            and not math.isnan(cluster_cycles)
-            and not math.isnan(active_pes)
-            else math.nan
-        )
+        row["core_level_macs_utilization_pct"] = _derive_utilization(row["macs"], core_cycles, active_pes)
+        row["cluster_level_macs_utilization_pct"] = _derive_utilization(row["macs"], cluster_cycles, active_pes)
         row["compute_dma_overlap_pct_of_compute"] = (
             100.0 * overlap_cycles / cluster_cycles
             if overlap_cycles_valid and cluster_cycles_valid and cluster_cycles > 0
@@ -761,25 +916,119 @@ def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) ->
             if overlap_cycles_valid and dma_cycles_valid and dma_cycles > 0
             else math.nan
         )
+
+        boot_up_cycles = row.get("boot_up_cycles")
+        drain_out_cycles = row.get("drain_out_cycles")
+        wave_gap_cycles_total = row.get("wave_gap_cycles_total")
+        wave_gap_instructions_total = row.get("wave_gap_instructions_total")
+        wave_gap_data_compute_total = row.get("wave_gap_data_compute_instructions_total")
+        profiled_core_cycles_total = row.get("drain_out_end_cycle")
+        if not isinstance(profiled_core_cycles_total, (int, float)) or math.isnan(profiled_core_cycles_total):
+            profiled_core_cycles_total = core_cycles
+        row["core_probe_cycles_total"] = profiled_core_cycles_total
+        steady_state_core_cycles = math.nan
+        if (
+            isinstance(profiled_core_cycles_total, (int, float))
+            and isinstance(boot_up_cycles, (int, float))
+            and isinstance(drain_out_cycles, (int, float))
+            and not math.isnan(profiled_core_cycles_total)
+            and not math.isnan(boot_up_cycles)
+            and not math.isnan(drain_out_cycles)
+        ):
+            steady_state_core_cycles = profiled_core_cycles_total - boot_up_cycles - drain_out_cycles
+            if steady_state_core_cycles <= 0:
+                steady_state_core_cycles = math.nan
+        row["steady_state_core_cycles"] = steady_state_core_cycles
+        row["steady_state_core_utilization_pct"] = _derive_utilization(row["macs"], steady_state_core_cycles, active_pes)
+        row["wave_gap_cycles_pct_of_steady_state"] = (
+            100.0 * wave_gap_cycles_total / steady_state_core_cycles
+            if isinstance(wave_gap_cycles_total, (int, float))
+            and isinstance(steady_state_core_cycles, (int, float))
+            and not math.isnan(wave_gap_cycles_total)
+            and not math.isnan(steady_state_core_cycles)
+            and steady_state_core_cycles > 0
+            else math.nan
+        )
+        row["wave_gap_data_compute_pct_of_gap_instructions"] = (
+            100.0 * wave_gap_data_compute_total / wave_gap_instructions_total
+            if isinstance(wave_gap_data_compute_total, (int, float))
+            and isinstance(wave_gap_instructions_total, (int, float))
+            and not math.isnan(wave_gap_data_compute_total)
+            and not math.isnan(wave_gap_instructions_total)
+            and wave_gap_instructions_total > 0
+            else math.nan
+        )
+        ideal_hw_sw_codesign_core_cycles = math.nan
+        if (
+            isinstance(steady_state_core_cycles, (int, float))
+            and isinstance(wave_gap_data_compute_total, (int, float))
+            and not math.isnan(steady_state_core_cycles)
+            and not math.isnan(wave_gap_data_compute_total)
+        ):
+            ideal_hw_sw_codesign_core_cycles = steady_state_core_cycles - wave_gap_data_compute_total
+            if ideal_hw_sw_codesign_core_cycles <= 0:
+                ideal_hw_sw_codesign_core_cycles = math.nan
+        row["ideal_hw_sw_codesign_core_cycles"] = ideal_hw_sw_codesign_core_cycles
+        row["ideal_hw_sw_codesign_core_utilization_pct"] = _derive_utilization(
+            row["macs"],
+            ideal_hw_sw_codesign_core_cycles,
+            active_pes,
+        )
         row["macs_utilization_pct"] = row["core_level_macs_utilization_pct"]
+
+        for detail in window_details:
+            window_row = dict(case)
+            window_row["case_name"] = row["case_name"]
+            window_row["sweep_dim"] = row["sweep_dim"]
+            window_row["result_dir"] = row["result_dir"]
+            window_row.update(detail)
+            window_row["mmio_config_pct"] = (
+                100.0 * detail["mmio_config_instructions"] / detail["instructions"]
+                if detail["instructions"] > 0
+                else math.nan
+            )
+            window_row["data_compute_pct"] = (
+                100.0 * detail["data_compute_instructions"] / detail["instructions"]
+                if detail["instructions"] > 0
+                else math.nan
+            )
+            window_row["control_pct"] = (
+                100.0 * detail["control_instructions"] / detail["instructions"]
+                if detail["instructions"] > 0
+                else math.nan
+            )
+            window_rows.append(window_row)
+
         rows.append(row)
     if not rows:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
     df = pd.DataFrame(rows)
     order = [str(dim) for dim in manifest.get("workload", {}).get("axis_order", ["oh", "ow", "ic", "oc"]) if str(dim) in df.columns]
     df["sweep_sort_key"] = df["sweep_dim"].map({name: idx for idx, name in enumerate(order)}).fillna(len(order))
-    return df.sort_values(["sweep_sort_key", "sweep_dim", *order, "case_name"]).drop(columns=["sweep_sort_key"])
+    window_df = pd.DataFrame(window_rows)
+    if not window_df.empty:
+        sort_columns = [column for column in ["sweep_dim", *order, "case_name", "window_index"] if column in window_df.columns]
+        window_df = window_df.sort_values(sort_columns)
+    return df.sort_values(["sweep_sort_key", "sweep_dim", *order, "case_name"]).drop(columns=["sweep_sort_key"]), window_df
 
 
-def _figure_data_uri(fig: plt.Figure) -> str:
-    buffer = BytesIO()
+def _sanitize_image_stem(stem: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", stem.strip())
+    sanitized = sanitized.strip("._")
+    return sanitized or "plot"
+
+
+def _write_figure_image(fig: plt.Figure, image_dir: Path, stem: str) -> str:
+    image_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{_sanitize_image_stem(stem)}.png"
+    image_path = image_dir / filename
     fig.tight_layout()
-    fig.savefig(buffer, format="png", dpi=180, facecolor=fig.get_facecolor())
+    fig.savefig(image_path, format="png", dpi=180, facecolor=fig.get_facecolor())
     plt.close(fig)
-    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    return (Path("image") / filename).as_posix()
 
 
-def _build_1d_sweep_plot(frame: pd.DataFrame, sweep_dim: str) -> str | None:
+def _build_1d_sweep_plot(frame: pd.DataFrame, sweep_dim: str, image_dir: Path) -> str | None:
     if sweep_dim not in frame.columns:
         return None
     passed = frame[frame["passed"] == 1.0].copy()
@@ -812,14 +1061,56 @@ def _build_1d_sweep_plot(frame: pd.DataFrame, sweep_dim: str) -> str | None:
     for axis in axes_list[len(metrics):]:
         axis.remove()
     fig.suptitle(f"{frame['workload_key'].iloc[0]} {sweep_dim.upper()} sweep", fontsize=14, color="#4f3b27")
-    return _figure_data_uri(fig)
+    return _write_figure_image(fig, image_dir, f"sweep_{frame['workload_key'].iloc[0]}_{sweep_dim}")
+
+
+def _build_1d_profiling_plot(frame: pd.DataFrame, sweep_dim: str, image_dir: Path) -> str | None:
+    if sweep_dim not in frame.columns:
+        return None
+    passed = frame[frame["passed"] == 1.0].copy()
+    if passed.empty:
+        return None
+    metrics = [
+        ("wave_gap_cycles_total", _metric_display_label("wave_gap_cycles_total")),
+        ("wave_gap_instructions_total", _metric_display_label("wave_gap_instructions_total")),
+        ("wave_gap_mmio_config_instructions_total", _metric_display_label("wave_gap_mmio_config_instructions_total")),
+        ("wave_gap_data_compute_instructions_total", _metric_display_label("wave_gap_data_compute_instructions_total")),
+        ("wave_gap_control_instructions_total", _metric_display_label("wave_gap_control_instructions_total")),
+        ("boot_up_cycles", _metric_display_label("boot_up_cycles")),
+        ("drain_out_cycles", _metric_display_label("drain_out_cycles")),
+        ("steady_state_core_cycles", _metric_display_label("steady_state_core_cycles")),
+        ("steady_state_core_utilization_pct", _metric_display_label("steady_state_core_utilization_pct")),
+        ("ideal_hw_sw_codesign_core_utilization_pct", _metric_display_label("ideal_hw_sw_codesign_core_utilization_pct")),
+    ]
+    available_metrics = [
+        (metric, label)
+        for metric, label in metrics
+        if metric in passed.columns and passed[metric].notna().any()
+    ]
+    if not available_metrics:
+        return None
+    passed = passed.sort_values(sweep_dim)
+    rows = math.ceil(len(available_metrics) / 2)
+    fig, axes = plt.subplots(rows, 2, figsize=(12, max(7, rows * 3.1)), facecolor="#f7f2e8")
+    axes_list = list(axes.flat) if hasattr(axes, "flat") else [axes]
+    x = passed[sweep_dim]
+    for axis, (metric, label) in zip(axes_list, available_metrics):
+        axis.plot(x, passed[metric], marker="o", color="#355c7d", linewidth=2.0)
+        axis.set_title(label, fontsize=11)
+        axis.set_xlabel(sweep_dim.upper())
+        axis.grid(alpha=0.25, color="#7a8aa0")
+        axis.set_facecolor("#fffdf8")
+    for axis in axes_list[len(available_metrics):]:
+        axis.remove()
+    fig.suptitle(f"{frame['workload_key'].iloc[0]} {sweep_dim.upper()} profiling", fontsize=14, color="#28415c")
+    return _write_figure_image(fig, image_dir, f"profiling_{frame['workload_key'].iloc[0]}_{sweep_dim}")
 
 
 def _format_dimension_value(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else f"{value:g}"
 
 
-def _build_3d_scatter(frame: pd.DataFrame, dims: list[str], color_metric: str, axis_scale: str) -> str | None:
+def _build_3d_scatter(frame: pd.DataFrame, dims: list[str], color_metric: str, axis_scale: str, image_dir: Path) -> str | None:
     if len(dims) != 3:
         raise ValueError("3D scatter expects exactly three dimensions")
     frame = _with_scatter_dimensions(frame, dims)
@@ -888,7 +1179,8 @@ def _build_3d_scatter(frame: pd.DataFrame, dims: list[str], color_metric: str, a
     metric_label = _metric_display_label(color_metric)
     ax.set_title(f"3D sweep distribution ({axis_scale} scale) colored by {metric_label}")
     fig.colorbar(scatter, ax=ax, fraction=0.03, pad=0.08, label=metric_label)
-    return _figure_data_uri(fig)
+    dim_suffix = "_".join(dims)
+    return _write_figure_image(fig, image_dir, f"scatter_{color_metric}_{axis_scale}_{dim_suffix}")
 
 
 def _summary_stats(frame: pd.DataFrame) -> dict[str, float | int]:
@@ -902,13 +1194,20 @@ def _summary_stats(frame: pd.DataFrame) -> dict[str, float | int]:
         "avg_overlap_cycles": frame.loc[frame["compute_dma_overlap_cycles"].notna(), "compute_dma_overlap_cycles"].mean(),
         "avg_overlap_compute_pct": frame.loc[frame["compute_dma_overlap_pct_of_compute"].notna(), "compute_dma_overlap_pct_of_compute"].mean(),
         "avg_overlap_dma_pct": frame.loc[frame["compute_dma_overlap_pct_of_dma"].notna(), "compute_dma_overlap_pct_of_dma"].mean(),
+        "avg_wave_gap_cycles": frame.loc[frame["wave_gap_cycles_total"].notna(), "wave_gap_cycles_total"].mean(),
+        "avg_boot_up_cycles": frame.loc[frame["boot_up_cycles"].notna(), "boot_up_cycles"].mean(),
+        "avg_drain_out_cycles": frame.loc[frame["drain_out_cycles"].notna(), "drain_out_cycles"].mean(),
         "avg_gfops": frame.loc[frame["gfops_per_sec"].notna(), "gfops_per_sec"].mean(),
         "avg_active": frame.loc[frame["active_pes"].notna(), "active_pes"].mean(),
         "avg_core_util": frame.loc[frame["core_level_macs_utilization_pct"].notna(), "core_level_macs_utilization_pct"].mean(),
         "avg_cluster_util": frame.loc[frame["cluster_level_macs_utilization_pct"].notna(), "cluster_level_macs_utilization_pct"].mean(),
+        "avg_steady_state_util": frame.loc[frame["steady_state_core_utilization_pct"].notna(), "steady_state_core_utilization_pct"].mean(),
+        "avg_ideal_util": frame.loc[frame["ideal_hw_sw_codesign_core_utilization_pct"].notna(), "ideal_hw_sw_codesign_core_utilization_pct"].mean(),
         "max_gfops": frame.loc[frame["gfops_per_sec"].notna(), "gfops_per_sec"].max(),
         "max_core_util": frame.loc[frame["core_level_macs_utilization_pct"].notna(), "core_level_macs_utilization_pct"].max(),
         "max_cluster_util": frame.loc[frame["cluster_level_macs_utilization_pct"].notna(), "cluster_level_macs_utilization_pct"].max(),
+        "max_steady_state_util": frame.loc[frame["steady_state_core_utilization_pct"].notna(), "steady_state_core_utilization_pct"].max(),
+        "max_ideal_util": frame.loc[frame["ideal_hw_sw_codesign_core_utilization_pct"].notna(), "ideal_hw_sw_codesign_core_utilization_pct"].max(),
         "max_overlap_compute_pct": frame.loc[frame["compute_dma_overlap_pct_of_compute"].notna(), "compute_dma_overlap_pct_of_compute"].max(),
         "max_overlap_dma_pct": frame.loc[frame["compute_dma_overlap_pct_of_dma"].notna(), "compute_dma_overlap_pct_of_dma"].max(),
     }
@@ -928,6 +1227,9 @@ def _summary_cards(frame: pd.DataFrame) -> str:
         ("Avg sim time", _format_summary_number(summary["avg_time"], ".0f", " ns"), "passed cases"),
         ("Avg DMA active", _format_summary_number(summary["avg_dma_active_cycles"], ".0f"), "live simulator counter"),
         ("Avg overlap cycles", _format_summary_number(summary["avg_overlap_cycles"], ".0f"), "compute and DMA overlap"),
+        ("Avg wave-gap cycles", _format_summary_number(summary["avg_wave_gap_cycles"], ".0f"), "sum of completed stop->start windows"),
+        ("Avg boot-up", _format_summary_number(summary["avg_boot_up_cycles"], ".0f"), "core enable to first cluster start"),
+        ("Avg drain-out", _format_summary_number(summary["avg_drain_out_cycles"], ".0f"), "last cluster stop to MCU end"),
         ("Avg overlap/compute", _format_summary_number(summary["avg_overlap_compute_pct"], ".2f", "%"), "live simulator counter"),
         ("Avg overlap/DMA", _format_summary_number(summary["avg_overlap_dma_pct"], ".2f", "%"), "live simulator counter"),
         ("Avg GFLOPS/sec", _format_summary_number(summary["avg_gfops"], ".3g"), "modeled sim time"),
@@ -937,6 +1239,10 @@ def _summary_cards(frame: pd.DataFrame) -> str:
         ("Max core MAC util", _format_summary_number(summary["max_core_util"], ".2f", "%"), "available runs"),
         ("Avg cluster MAC util", _format_summary_number(summary["avg_cluster_util"], ".2f", "%"), "passed cases"),
         ("Max cluster MAC util", _format_summary_number(summary["max_cluster_util"], ".2f", "%"), "available runs"),
+        ("Avg steady-state util", _format_summary_number(summary["avg_steady_state_util"], ".2f", "%"), "excluding boot-up and drain-out"),
+        ("Max steady-state util", _format_summary_number(summary["max_steady_state_util"], ".2f", "%"), "excluding boot-up and drain-out"),
+        ("Avg ideal co-design util", _format_summary_number(summary["avg_ideal_util"], ".2f", "%"), "hide gap data-compute instructions"),
+        ("Max ideal co-design util", _format_summary_number(summary["max_ideal_util"], ".2f", "%"), "hide gap data-compute instructions"),
         ("Max overlap/compute", _format_summary_number(summary["max_overlap_compute_pct"], ".2f", "%"), "available runs"),
         ("Max overlap/DMA", _format_summary_number(summary["max_overlap_dma_pct"], ".2f", "%"), "available runs"),
     ]
@@ -946,11 +1252,187 @@ def _summary_cards(frame: pd.DataFrame) -> str:
     )
 
 
+def _window_summary_section(window_frame: pd.DataFrame, window_csv_name: str) -> str:
+    if window_frame.empty:
+        return (
+            '<section class="section"><div class="section-head"><h2>Wave-gap Windows</h2><span>No detailed windows found</span></div>'
+            '<div class="empty">This report did not find any per-window stop-&gt;start details in sim.log.</div></section>'
+        )
+
+    cards = [
+        ("Window rows", str(len(window_frame)), "completed stop->start intervals exported"),
+        ("Avg cycles/window", _format_summary_number(window_frame["cycles"].mean(), ".2f"), "per-window timing"),
+        ("Avg instructions/window", _format_summary_number(window_frame["instructions"].mean(), ".2f"), "retired core instructions"),
+        ("Avg MMIO/window", _format_summary_number(window_frame["mmio_config_instructions"].mean(), ".2f"), "MMIO configure instructions"),
+        ("Avg data/window", _format_summary_number(window_frame["data_compute_instructions"].mean(), ".2f"), "data-compute instructions"),
+        ("Avg control/window", _format_summary_number(window_frame["control_instructions"].mean(), ".2f"), "HDDU stop/start instructions"),
+        ("Max cycles/window", _format_summary_number(window_frame["cycles"].max(), ".0f"), "worst observed gap"),
+        ("Max instructions/window", _format_summary_number(window_frame["instructions"].max(), ".0f"), "worst observed gap"),
+    ]
+    preview_columns = [
+        column
+        for column in [
+            "case_name",
+            "window_index",
+            "stop_cycle",
+            "next_start_cycle",
+            "cycles",
+            "instructions",
+            "mmio_config_instructions",
+            "data_compute_instructions",
+            "control_instructions",
+        ]
+        if column in window_frame.columns
+    ]
+    preview_html = _format_table(window_frame.head(40), preview_columns)
+    cards_html = "".join(
+        f'<div class="card"><div class="label">{escape(label)}</div><div class="value">{escape(value)}</div><div class="sub">{escape(sub)}</div></div>'
+        for label, value, sub in cards
+    )
+    return "".join(
+        [
+            '<section class="section"><div class="section-head"><h2>Wave-gap Windows</h2>',
+            f'<span>Full detail exported to <a class="report-link" href="{escape(window_csv_name)}">{escape(window_csv_name)}</a></span></div>',
+            f'<div class="card-grid">{cards_html}</div>',
+            '<p class="hero-note">Previewing the first 40 completed stop-&gt;start windows. Use the CSV for the full per-window dataset.</p>',
+            preview_html,
+            '</section>',
+        ]
+    )
+
+
+def _profiling_timeline_section() -> str:
+    explainer_cards = [
+        (
+            "Boot-up",
+            "boot_up_cycles / boot_up_instructions",
+            "From core enable to the first cluster START. This is setup cost before steady-state wave execution begins.",
+        ),
+        (
+            "Steady-state",
+            "core_probe_cycles_total / steady_state_core_cycles",
+            "The middle region where waves execute. steady_state_core_cycles removes boot-up and drain-out from the lifecycle probe.",
+        ),
+        (
+            "Wave gaps",
+            "wave_gap_windows / wave_gap_cycles_total / wave_gap_partial_windows_dropped",
+            "Only completed STOP->next START windows are accumulated. Dropped partial windows mean a STOP did not see a later START before program end.",
+        ),
+        (
+            "Gap instruction mix",
+            "wave_gap_instructions_total and breakdown columns",
+            "Each completed gap is split into MMIO configure, data compute, and START/STOP control instructions.",
+        ),
+        (
+            "Busy vs DMA",
+            "cluster_run_cycles / dma_active_cycles / compute_dma_overlap_cycles",
+            "These are overlays, not the same baseline. overlap only counts the intersection between cluster busy time and DMA active time.",
+        ),
+        (
+            "EBREAK vs lifecycle probe",
+            "ebreak_cycle vs core_probe_cycles_total",
+            "ebreak_cycle is the TB-visible firmware end point. core_probe_cycles_total is the lifecycle basis used for boot-up, steady-state, and drain-out accounting.",
+        ),
+    ]
+    formula_cards = [
+        (
+            "Steady-state cycles",
+            "steady_state_core_cycles = core_probe_cycles_total - boot_up_cycles - drain_out_cycles",
+            "Use this when you want the middle part only, without startup or shutdown overhead.",
+        ),
+        (
+            "Steady-state utilization",
+            "steady_state_core_utilization_pct = 100 * MACs / (steady_state_core_cycles * active_pes * 4)",
+            "This treats only the steady-state middle segment as the time budget.",
+        ),
+        (
+            "Ideal HW/SW co-design",
+            "ideal_hw_sw_codesign_core_utilization_pct = 100 * MACs / ((steady_state_core_cycles - wave_gap_data_compute_instructions_total) * active_pes * 4)",
+            "Assumption: if gap data-compute instructions can be fully hidden, one retired data-compute instruction saves about one core cycle.",
+        ),
+    ]
+    cards_html = "".join(
+        f'<div class="timeline-chip"><div class="chip-title">{escape(title)}</div><div class="chip-metric">{escape(metric)}</div><p>{escape(description)}</p></div>'
+        for title, metric, description in explainer_cards
+    )
+    formulas_html = "".join(
+        f'<div class="formula-card"><div class="formula-label">{escape(title)}</div><div class="formula-math">{escape(formula)}</div><div class="formula-note">{escape(note)}</div></div>'
+        for title, formula, note in formula_cards
+    )
+    return "".join(
+        [
+            '<section class="section">',
+            '<div class="section-head timeline-head"><h2>Profiling Timeline</h2><span>How the counters map onto time</span></div>',
+            '<p class="timeline-intro">Read the profiling numbers as a single left-to-right firmware timeline. The lifecycle probe covers boot-up, repeated wave execution, and drain-out. Inside the steady-state middle region, the report overlays cluster busy time, DMA activity, and completed STOP-&gt;START wave gaps.</p>',
+            '<div class="timeline-svg-wrap">',
+            '<svg class="timeline-svg" viewBox="0 0 1380 450" role="img" aria-label="Timeline explaining boot-up, steady-state, wave gaps, DMA overlap, and drain-out metrics">',
+            '<defs><marker id="timeline-arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#8b5e34"></path></marker></defs>',
+            '<text x="36" y="40" fill="#2f251b" font-size="24" font-weight="700">How to read the profiling counters</text>',
+            '<line x1="250" y1="70" x2="1280" y2="70" stroke="#8b5e34" stroke-width="3" marker-end="url(#timeline-arrow)"></line>',
+            '<text x="250" y="54" fill="#6d5c4b" font-size="12">earlier</text>',
+            '<text x="1170" y="54" fill="#6d5c4b" font-size="12">later / program end</text>',
+            '<text x="36" y="116" fill="#2f251b" font-size="16" font-weight="700">Core lifecycle</text>',
+            '<text x="36" y="136" fill="#6d5c4b" font-size="12">core_probe_cycles_total</text>',
+            '<rect x="250" y="92" width="180" height="38" rx="14" fill="#c97d60"></rect>',
+            '<rect x="438" y="92" width="626" height="38" rx="14" fill="#355c7d"></rect>',
+            '<rect x="1072" y="92" width="198" height="38" rx="14" fill="#7b8f6a"></rect>',
+            '<text x="306" y="116" fill="#fffaf3" font-size="13" font-weight="700">Boot-up</text>',
+            '<text x="668" y="116" fill="#f7fbff" font-size="13" font-weight="700">Steady-state wave execution</text>',
+            '<text x="1130" y="116" fill="#f7fbf2" font-size="13" font-weight="700">Drain-out</text>',
+            '<text x="438" y="152" fill="#6d5c4b" font-size="12">steady_state_core_cycles = middle section only</text>',
+            '<text x="36" y="202" fill="#2f251b" font-size="16" font-weight="700">Inside steady-state</text>',
+            '<text x="36" y="222" fill="#6d5c4b" font-size="12">cluster run slices and stop-&gt;start gaps</text>',
+            '<rect x="250" y="178" width="180" height="38" rx="14" fill="#e8decd"></rect>',
+            '<rect x="438" y="178" width="142" height="38" rx="14" fill="#3f6b8c"></rect>',
+            '<rect x="590" y="178" width="108" height="38" rx="14" fill="#d8b991"></rect>',
+            '<rect x="708" y="178" width="154" height="38" rx="14" fill="#3f6b8c"></rect>',
+            '<rect x="872" y="178" width="108" height="38" rx="14" fill="#d8b991"></rect>',
+            '<rect x="990" y="178" width="132" height="38" rx="14" fill="#3f6b8c"></rect>',
+            '<rect x="1132" y="178" width="138" height="38" rx="14" fill="#e8decd"></rect>',
+            '<text x="474" y="202" fill="#f7fbff" font-size="12" font-weight="700">Cluster run</text>',
+            '<text x="621" y="202" fill="#4f3b27" font-size="12" font-weight="700">Wave gap</text>',
+            '<text x="755" y="202" fill="#f7fbff" font-size="12" font-weight="700">Cluster run</text>',
+            '<text x="903" y="202" fill="#4f3b27" font-size="12" font-weight="700">Wave gap</text>',
+            '<text x="1027" y="202" fill="#f7fbff" font-size="12" font-weight="700">Cluster run</text>',
+            '<text x="438" y="238" fill="#6d5c4b" font-size="12">wave_gap_cycles_total = sum of every completed gap segment above</text>',
+            '<text x="36" y="290" fill="#2f251b" font-size="16" font-weight="700">DMA and overlap overlay</text>',
+            '<text x="36" y="310" fill="#6d5c4b" font-size="12">dma_active_cycles and compute_dma_overlap_cycles</text>',
+            '<rect x="360" y="264" width="910" height="58" rx="18" fill="#fffaf3" stroke="#d8c4a5"></rect>',
+            '<text x="382" y="287" fill="#6d5c4b" font-size="11" font-weight="700">DMA active</text>',
+            '<rect x="466" y="274" width="368" height="16" rx="8" fill="#61a5a8"></rect>',
+            '<rect x="940" y="274" width="270" height="16" rx="8" fill="#61a5a8"></rect>',
+            '<text x="382" y="312" fill="#6d5c4b" font-size="11" font-weight="700">Overlap only</text>',
+            '<rect x="580" y="299" width="70" height="16" rx="8" fill="#1f7a8c"></rect>',
+            '<rect x="720" y="299" width="90" height="16" rx="8" fill="#1f7a8c"></rect>',
+            '<rect x="1030" y="299" width="150" height="16" rx="8" fill="#1f7a8c"></rect>',
+            '<text x="548" y="344" fill="#6d5c4b" font-size="12">compute_dma_overlap_cycles = intersection(cluster_run_cycles, dma_active_cycles)</text>',
+            '<text x="36" y="390" fill="#2f251b" font-size="16" font-weight="700">Wave-gap instruction mix</text>',
+            '<text x="36" y="410" fill="#6d5c4b" font-size="12">wave_gap_instructions_total</text>',
+            '<rect x="340" y="374" width="170" height="34" rx="12" fill="#b66b4d"></rect>',
+            '<rect x="518" y="374" width="524" height="34" rx="12" fill="#4b8f8c"></rect>',
+            '<rect x="1050" y="374" width="160" height="34" rx="12" fill="#a86f3a"></rect>',
+            '<text x="376" y="395" fill="#fffaf3" font-size="12" font-weight="700">MMIO configure</text>',
+            '<text x="722" y="395" fill="#f4fffe" font-size="12" font-weight="700">Data compute</text>',
+            '<text x="1078" y="395" fill="#fff8f0" font-size="12" font-weight="700">START/STOP control</text>',
+            '<text x="1050" y="430" fill="#6d5c4b" font-size="12">ideal HW/SW co-design removes only the data-compute slice</text>',
+            '</svg>',
+            '</div>',
+            f'<div class="timeline-chip-grid">{cards_html}</div>',
+            f'<div class="formula-grid">{formulas_html}</div>',
+            '</section>',
+        ]
+    )
+
+
 def _format_table(frame: pd.DataFrame, columns: list[str]) -> str:
     table = frame[columns].copy()
     for column in table.columns:
         if pd.api.types.is_float_dtype(table[column]):
-            table[column] = table[column].map(lambda value: "-" if pd.isna(value) else f"{value:.4g}")
+            table[column] = table[column].map(
+                lambda value: "-"
+                if pd.isna(value)
+                else (str(int(value)) if float(value).is_integer() else f"{value:.4g}")
+            )
     table.columns = [
         _scatter_dimension_display_label(str(dim)) if str(dim) in _SCATTER_DIMENSION_LABELS else _metric_display_label(str(dim))
         for dim in table.columns
@@ -962,9 +1444,12 @@ def _render_report_html(
     manifest: dict[str, Any],
     frame: pd.DataFrame,
     plots_1d: dict[str, str | None],
+    profiling_plots: dict[str, str | None],
     scatter_plots: dict[str, dict[str, str | None]],
     scatter_dims: list[str],
     scatter_metrics: list[str],
+    window_frame: pd.DataFrame,
+    window_csv_name: str,
 ) -> str:
     summary = _summary_stats(frame)
     sweep_sections = []
@@ -972,7 +1457,7 @@ def _render_report_html(
         raw_dims = group.iloc[0].get("sweep_dims", [sweep_dim])
         sweep_dims = [str(dim) for dim in raw_dims if str(dim) in group.columns] if isinstance(raw_dims, list) else [sweep_dim] if sweep_dim in group.columns else []
         section_title = " x ".join(_scatter_dimension_display_label(dim) for dim in sweep_dims) if sweep_dims else sweep_dim.upper()
-        table_columns = [
+        performance_columns = [
             *sweep_dims,
             "ebreak_cycle",
             "cluster_run_cycles",
@@ -989,21 +1474,52 @@ def _render_report_html(
             "cluster_level_macs_utilization_pct",
             "result_state",
         ]
+        profiling_columns = [
+            *sweep_dims,
+            "wave_gap_windows",
+            "wave_gap_partial_windows_dropped",
+            "wave_gap_cycles_total",
+            "wave_gap_instructions_total",
+            "wave_gap_mmio_config_instructions_total",
+            "wave_gap_data_compute_instructions_total",
+            "wave_gap_control_instructions_total",
+            "boot_up_cycles",
+            "drain_out_cycles",
+            "core_probe_cycles_total",
+            "steady_state_core_cycles",
+            "steady_state_core_utilization_pct",
+            "ideal_hw_sw_codesign_core_utilization_pct",
+            "result_state",
+        ]
         sort_columns = [*sweep_dims, "case_name"] if sweep_dims else ["case_name"]
         plot_uri = plots_1d.get(sweep_dim)
+        profiling_plot_uri = profiling_plots.get(sweep_dim)
         image_html = (
             f'<img src="{plot_uri}" alt="{escape(sweep_dim)} sweep plot" class="plot">'
             if plot_uri is not None
             else '<div class="empty">1D plot is only available when exactly one sweep dimension varies.</div>'
         )
+        profiling_image_html = (
+            f'<img src="{profiling_plot_uri}" alt="{escape(sweep_dim)} profiling plot" class="plot">'
+            if profiling_plot_uri is not None
+            else '<div class="empty">Profiling plots require parsed wave-gap, boot-up, or drain-out metrics.</div>'
+        )
+        sorted_group = group.sort_values(sort_columns)
         sweep_sections.append(
             "".join(
                 [
                     f'<section class="section"><div class="section-head"><h2>{escape(section_title)} Sweep</h2><span>{escape(group.iloc[0]["workload_key"])} workload</span></div>',
                     image_html,
+                    '<h3>Performance table</h3>',
                     _format_table(
-                        group.sort_values(sort_columns),
-                        table_columns,
+                        sorted_group,
+                        performance_columns,
+                    ),
+                    '<div class="section-head subhead"><h2>Profiling</h2><span>Wave-gap, boot-up, drain-out, and idealized co-design efficiency</span></div>',
+                    profiling_image_html,
+                    _format_table(
+                        sorted_group,
+                        profiling_columns,
                     ),
                     "</section>",
                 ]
@@ -1035,6 +1551,8 @@ def _render_report_html(
             )
         )
     scatter_html = "".join(scatter_parts)
+    timeline_section = _profiling_timeline_section()
+    window_section = _window_summary_section(window_frame, window_csv_name)
 
     return f"""
 <!doctype html>
@@ -1064,6 +1582,8 @@ def _render_report_html(
     .meta {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }}
     .hero-note {{ margin-top: 16px; max-width: 960px; }}
     .pill {{ border-radius: 999px; padding: 8px 12px; background: rgba(255,255,255,0.7); border: 1px solid var(--line); color: var(--muted); font-size: 13px; }}
+    .report-link {{ color: var(--accent); font-weight: 600; text-decoration: none; }}
+    .report-link:hover {{ text-decoration: underline; }}
     .card-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-top: 22px; }}
     .card {{ background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 16px; box-shadow: var(--shadow); }}
     .card .label {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }}
@@ -1071,8 +1591,25 @@ def _render_report_html(
     .card .sub {{ margin-top: 6px; color: var(--muted); font-size: 13px; }}
     .section {{ margin-top: 24px; background: var(--panel); border: 1px solid var(--line); border-radius: 24px; padding: 22px; box-shadow: var(--shadow); }}
     .section-head {{ display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 16px; }}
+    .subhead {{ margin-top: 26px; }}
     .section-head h2 {{ margin: 0; font-size: 24px; }}
+    .section h3 {{ margin: 0 0 12px; font-size: 18px; }}
     .section-head span {{ color: var(--muted); }}
+    .timeline-intro {{ margin: 0; color: var(--muted); line-height: 1.6; max-width: 1080px; }}
+    .timeline-head {{ align-items: flex-start; flex-direction: column; gap: 4px; }}
+    .timeline-head span {{ font-size: 13px; }}
+    .timeline-svg-wrap {{ margin-top: 18px; padding: 18px; border: 1px solid var(--line); border-radius: 22px; background: linear-gradient(180deg, rgba(255,255,255,0.78), rgba(244,237,225,0.9)); overflow-x: auto; }}
+    .timeline-svg {{ width: 100%; min-width: 1120px; height: auto; display: block; }}
+    .timeline-chip-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }}
+    .timeline-chip {{ background: var(--panel-strong); border: 1px solid var(--line); border-radius: 18px; padding: 16px; height: 100%; }}
+    .chip-title {{ color: var(--text); font-size: 14px; font-weight: 700; }}
+    .chip-metric {{ margin-top: 6px; color: var(--accent); font-family: "IBM Plex Mono", "SFMono-Regular", monospace; font-size: 11px; font-weight: 600; line-height: 1.45; word-break: break-word; }}
+    .timeline-chip p {{ margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }}
+    .formula-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }}
+    .formula-card {{ background: rgba(255,255,255,0.8); border: 1px solid var(--line); border-radius: 18px; padding: 16px; height: 100%; }}
+    .formula-label {{ color: var(--text); font-size: 14px; font-weight: 700; }}
+    .formula-math {{ margin-top: 10px; color: #28415c; font-family: "IBM Plex Mono", "SFMono-Regular", monospace; font-size: 12px; line-height: 1.6; word-break: break-word; }}
+    .formula-note {{ margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }}
     .plot {{ width: 100%; border-radius: 18px; border: 1px solid rgba(0,0,0,0.05); background: #fffdf8; margin-bottom: 18px; }}
     .plot-wide {{ max-height: 760px; object-fit: contain; }}
     .scatter-block + .scatter-block {{ margin-top: 24px; }}
@@ -1082,9 +1619,13 @@ def _render_report_html(
     .report-table th {{ background: rgba(139, 94, 52, 0.08); color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-size: 12px; }}
     .report-table th {{ white-space: normal; overflow-wrap: anywhere; word-break: break-word; }}
     .empty {{ border: 1px dashed var(--line); border-radius: 18px; padding: 28px; text-align: center; color: var(--muted); background: rgba(255,255,255,0.56); }}
+        @media (max-width: 1180px) {{
+            .timeline-chip-grid, .formula-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+        }}
     @media (max-width: 860px) {{
       main {{ padding: 14px; }}
       .section-head {{ flex-direction: column; align-items: flex-start; }}
+            .timeline-chip-grid, .formula-grid {{ grid-template-columns: 1fr; }}
       .report-table th, .report-table td {{ padding: 8px; font-size: 12px; }}
     }}
   </style>
@@ -1093,7 +1634,7 @@ def _render_report_html(
   <main>
     <section class="hero">
       <h1>{escape(manifest['suite_name'])} sweep report</h1>
-                        <p>Generated from manifest plus e2e output directories. The report summarizes core-level cycles to EBREAK, cluster busy cycles gathered directly from simulator HDDU/AGU activity, DMA active cycles, compute/DMA overlap gathered live during simulation, active PE footprint, and both core-level and cluster-level MAC utilization.</p>
+                                                <p>Generated from manifest plus e2e output directories. The report summarizes core-level cycles to EBREAK, cluster busy cycles gathered directly from simulator HDDU/AGU activity, DMA active cycles, compute/DMA overlap gathered live during simulation, wave-gap stop-&gt;start profiling, boot-up/drain-out costs, and an idealized HW/SW co-design utilization estimate that hides gap data-compute instructions after removing boot-up and drain-out time.</p>
             <div class="meta">
                 <span class="pill">workload={escape(manifest['workload']['key'])}</span>
                 <span class="pill">op={escape(manifest['workload']['op_type'])}</span>
@@ -1103,13 +1644,16 @@ def _render_report_html(
                                 <span class="pill">scatter metrics={escape(', '.join(_metric_display_label(metric) for metric in scatter_metrics))}</span>
                                 <span class="pill">max core util={escape(_format_summary_number(summary["max_core_util"], ".2f", "%"))}</span>
                                 <span class="pill">max cluster util={escape(_format_summary_number(summary["max_cluster_util"], ".2f", "%"))}</span>
+                                                                <span class="pill">max ideal co-design util={escape(_format_summary_number(summary["max_ideal_util"], ".2f", "%"))}</span>
                                                                 <span class="pill">max overlap/compute={escape(_format_summary_number(summary["max_overlap_compute_pct"], ".2f", "%"))}</span>
                                                                 <span class="pill">max overlap/DMA={escape(_format_summary_number(summary["max_overlap_dma_pct"], ".2f", "%"))}</span>
                                 <span class="pill">max GFLOPS/sec={escape(_format_summary_number(summary["max_gfops"], ".3g"))}</span>
             </div>
-                                                                                                <p class="hero-note">Peak observed results: core MAC utilization {escape(_format_summary_number(summary["max_core_util"], ".2f", "%"))}, cluster MAC utilization {escape(_format_summary_number(summary["max_cluster_util"], ".2f", "%"))}, overlap/compute ratio {escape(_format_summary_number(summary["max_overlap_compute_pct"], ".2f", "%"))}, overlap/DMA ratio {escape(_format_summary_number(summary["max_overlap_dma_pct"], ".2f", "%"))}, and throughput {escape(_format_summary_number(summary["max_gfops"], ".3g"))} GFLOPS/sec.</p>
+                                                                                                                                                                                                <p class="hero-note">Peak observed results: core MAC utilization {escape(_format_summary_number(summary["max_core_util"], ".2f", "%"))}, cluster MAC utilization {escape(_format_summary_number(summary["max_cluster_util"], ".2f", "%"))}, ideal HW/SW co-design utilization {escape(_format_summary_number(summary["max_ideal_util"], ".2f", "%"))}, overlap/compute ratio {escape(_format_summary_number(summary["max_overlap_compute_pct"], ".2f", "%"))}, overlap/DMA ratio {escape(_format_summary_number(summary["max_overlap_dma_pct"], ".2f", "%"))}, and throughput {escape(_format_summary_number(summary["max_gfops"], ".3g"))} GFLOPS/sec.</p>
       <div class="card-grid">{_summary_cards(frame)}</div>
     </section>
+        {timeline_section}
+        {window_section}
         {scatter_html}
     {''.join(sweep_sections)}
   </main>
@@ -1124,10 +1668,14 @@ def _report_suite(args: argparse.Namespace) -> int:
     results_root = args.results_root.resolve() if args.results_root is not None else None
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    image_dir = output_dir / "image"
+    image_dir.mkdir(parents=True, exist_ok=True)
 
-    frame = _collect_report_rows(manifest, results_root)
+    frame, window_frame = _collect_report_rows(manifest, results_root)
     csv_path = output_dir / "sweep_metrics.csv"
     frame.to_csv(csv_path, index=False)
+    window_csv_path = output_dir / "wave_gap_windows.csv"
+    window_frame.to_csv(window_csv_path, index=False)
 
     workload_key = str(manifest.get("workload", {}).get("key", ""))
     profile = _PROFILES.get(workload_key)
@@ -1147,21 +1695,37 @@ def _report_suite(args: argparse.Namespace) -> int:
             raise ValueError(f"metric column '{metric}' is not available in the report data")
 
     plots_1d = {
-        sweep_dim: _build_1d_sweep_plot(group, sweep_dim)
+        sweep_dim: _build_1d_sweep_plot(group, sweep_dim, image_dir)
+        for sweep_dim, group in frame.groupby("sweep_dim", sort=False)
+    }
+    profiling_plots = {
+        sweep_dim: _build_1d_profiling_plot(group, sweep_dim, image_dir)
         for sweep_dim, group in frame.groupby("sweep_dim", sort=False)
     }
     scatter_plots = {
         metric: {
-            "linear": _build_3d_scatter(frame, scatter_dims, metric, "linear"),
-            "log": _build_3d_scatter(frame, scatter_dims, metric, "log"),
+            "linear": _build_3d_scatter(frame, scatter_dims, metric, "linear", image_dir),
+            "log": _build_3d_scatter(frame, scatter_dims, metric, "log", image_dir),
         }
         for metric in scatter_metrics
     }
-    html = _render_report_html(manifest, frame, plots_1d, scatter_plots, scatter_dims, scatter_metrics)
+    html = _render_report_html(
+        manifest,
+        frame,
+        plots_1d,
+        profiling_plots,
+        scatter_plots,
+        scatter_dims,
+        scatter_metrics,
+        window_frame,
+        window_csv_path.name,
+    )
     html_path = output_dir / "report.html"
     html_path.write_text(html, encoding="utf-8")
 
     print(f"CSV: {csv_path}")
+    print(f"Wave-gap CSV: {window_csv_path}")
+    print(f"Images: {image_dir}")
     print(f"HTML: {html_path}")
     return 0
 
@@ -1194,9 +1758,9 @@ def _build_parser() -> argparse.ArgumentParser:
     report = subparsers.add_parser("report", help="Parse sweep outputs and build an HTML report")
     report.add_argument("--manifest", type=Path, required=True, help="Manifest JSON emitted by hacc-sweep gen")
     report.add_argument("--results-root", type=Path, default=None, help="Root directory passed to run_e2e.sh --output-dir")
-    report.add_argument("--output-dir", type=Path, required=True, help="Directory for CSV and HTML report")
+    report.add_argument("--output-dir", type=Path, required=True, help="Directory for CSV, HTML report, and exported plot images")
     report.add_argument("--scatter-dims", type=str, default=None, help="Three comma-separated dimensions for the 3D scatter; defaults depend on the workload profile")
-    report.add_argument("--color-metric", type=str, default="core_level_macs_utilization_pct,cluster_level_macs_utilization_pct", help="Comma-separated metric columns used for 3D scatter colors")
+    report.add_argument("--color-metric", type=str, default="core_level_macs_utilization_pct,cluster_level_macs_utilization_pct,ideal_hw_sw_codesign_core_utilization_pct", help="Comma-separated metric columns used for 3D scatter colors")
     report.set_defaults(func=_report_suite)
     return parser
 
