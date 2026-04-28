@@ -26,19 +26,23 @@ SECTIONS
         *(.rodata .rodata.*)
     } > ISRAM
 
+    /* Reserve 0x200 bytes (512 B) at DSRAM base for test results + work area,
+     * then place BSS after that to avoid overlap.
+     */
+    .result_reserved (NOLOAD) : {
+        . = . + 0x200;
+    } > DSRAM
+
     .data : {
         __data_start = .;
+        *(.sdata .sdata.*)
         *(.data .data.*)
         __data_end = .;
     } > DSRAM AT> DSRAM
 
-    /* Reserve 0x200 bytes (512 B) at DSRAM base for test results + work area,
-     * then place BSS after that to avoid overlap.
-     */
-    . = ORIGIN(DSRAM) + 0x200;
-
     .bss (NOLOAD) : {
         __bss_start = .;
+        *(.sbss .sbss.*)
         *(.bss .bss.* COMMON)
         __bss_end = .;
     } > DSRAM

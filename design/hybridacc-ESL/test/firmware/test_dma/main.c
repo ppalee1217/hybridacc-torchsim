@@ -61,13 +61,12 @@ volatile uint32_t g_dma_done;
 /* ========================================================================
  * Trap handler — called by trap_entry.S
  *
- * trap_entry.S unconditionally adds 4 to mepc after this returns.
- * For interrupts we compensate by writing (mepc − 4) back to the CSR
- * so the net effect is returning to the interrupted PC.
+ * trap_entry.S returns with MRET, so interrupts resume from mepc directly.
  * ======================================================================== */
 
 void trap_handler(uint32_t mcause, uint32_t mepc, uint32_t mtval)
 {
+    (void)mepc;
     (void)mtval;
 
     if (mcause & MCAUSE_INT) {
@@ -81,10 +80,8 @@ void trap_handler(uint32_t mcause, uint32_t mepc, uint32_t mtval)
                 mmio_write(PLIC_CLAIM_COMPLETE, src);  /* complete */
             }
         }
-        /* Compensate for trap_entry.S mepc += 4 */
-        CSR_WRITE(0x341, mepc - 4);
     }
-    /* Synchronous exceptions: let trap_entry advance mepc by 4 */
+    /* Synchronous exceptions are not expected in this test. */
 }
 
 /* ========================================================================
