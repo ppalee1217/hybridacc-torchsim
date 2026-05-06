@@ -62,8 +62,17 @@ design/hybridacc-RTL/sim/**
 design/hybridacc-RTL/csrc/**
 design/hybridacc-RTL/report/**
 design/hybridacc-RTL/syn/**
+design/hybridacc-RTL/superlint/**
+design/hybridacc-RTL/spyglass/**
 design/hybridacc-RTL/output/**
+design/hybridacc-RTL/wave/**
+design/hybridacc-RTL/sdfAnnotateInfo
 design/hybridacc-RTL/ucli.key
+jgproject/
 
 ## firmware .mem files
 **/firmware/**/*.mem
+
+## waveform files
+**/*.fsdb
+**/*.vcd
