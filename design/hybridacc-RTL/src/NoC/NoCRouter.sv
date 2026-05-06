@@ -245,7 +245,7 @@ module NoCRouter #(
     // =====================================================================
     always_comb begin
         ps_fifo_pop = 1'b0;
-        for (int i = 0; i < NUM_PORTS; i++) begin
+        for (int unsigned i = 0; i < NUM_PORTS; i++) begin
             noc_ps_to_bus_req_valid[i] = 1'b0;
             noc_ps_to_bus_req_data[i]  = '0;
         end
@@ -253,7 +253,7 @@ module NoCRouter #(
         if (command_mode &&
             (message_command_t'(command_data[3:0]) != CMD_NOC_SCAN_CHAIN)) begin
             // Sideband PE command bypass
-            for (int i = 0; i < NUM_PORTS; i++) begin
+            for (int unsigned i = 0; i < NUM_PORTS; i++) begin
                 noc_ps_to_bus_req_valid[i]     = 1'b1;
                 noc_ps_to_bus_req_data[i].addr = 16'h0040;
                 noc_ps_to_bus_req_data[i].data = {32'b0, command_data};
@@ -267,16 +267,16 @@ module NoCRouter #(
             automatic logic [7:0]     baddr   = (f_addr[7] ? 8'h40 : 8'h00) | {2'b0, f_addr[5:0]};
             automatic logic           all_rdy = 1'b1;
 
-            for (int i = 0; i < NUM_PORTS; i++) begin
+            for (int unsigned i = 0; i < NUM_PORTS; i++) begin
                 noc_ps_to_bus_req_data[i].addr = {8'b0, baddr};
                 noc_ps_to_bus_req_data[i].mask = f_mask;
                 noc_ps_to_bus_req_data[i].data = is_ultra ? f_data[64*i +: 64]
                                                           : f_data[63:0];
             end
-            for (int i = 0; i < NUM_PORTS; i++)
+            for (int unsigned i = 0; i < NUM_PORTS; i++)
                 if (!noc_ps_to_bus_req_ready[i]) all_rdy = 1'b0;
             if (all_rdy) begin
-                for (int i = 0; i < NUM_PORTS; i++)
+                for (int unsigned i = 0; i < NUM_PORTS; i++)
                     noc_ps_to_bus_req_valid[i] = 1'b1;
                 ps_fifo_pop = 1'b1;
             end
@@ -288,7 +288,7 @@ module NoCRouter #(
     // =====================================================================
     always_comb begin
         pd_fifo_pop = 1'b0;
-        for (int i = 0; i < NUM_PORTS; i++) begin
+        for (int unsigned i = 0; i < NUM_PORTS; i++) begin
             noc_pd_to_bus_req_valid[i] = 1'b0;
             noc_pd_to_bus_req_data[i]  = '0;
         end
@@ -300,16 +300,16 @@ module NoCRouter #(
             automatic logic [7:0]     baddr   = (f_addr[7] ? 8'h40 : 8'h00) | {2'b0, f_addr[5:0]};
             automatic logic           all_rdy = 1'b1;
 
-            for (int i = 0; i < NUM_PORTS; i++) begin
+            for (int unsigned i = 0; i < NUM_PORTS; i++) begin
                 noc_pd_to_bus_req_data[i].addr = {8'b0, baddr};
                 noc_pd_to_bus_req_data[i].mask = f_mask;
                 noc_pd_to_bus_req_data[i].data = is_ultra ? f_data[64*i +: 64]
                                                           : f_data[63:0];
             end
-            for (int i = 0; i < NUM_PORTS; i++)
+            for (int unsigned i = 0; i < NUM_PORTS; i++)
                 if (!noc_pd_to_bus_req_ready[i]) all_rdy = 1'b0;
             if (all_rdy) begin
-                for (int i = 0; i < NUM_PORTS; i++)
+                for (int unsigned i = 0; i < NUM_PORTS; i++)
                     noc_pd_to_bus_req_valid[i] = 1'b1;
                 pd_fifo_pop = 1'b1;
             end
@@ -321,7 +321,7 @@ module NoCRouter #(
     // =====================================================================
     always_comb begin
         pli_fifo_pop = 1'b0;
-        for (int i = 0; i < NUM_PORTS; i++) begin
+        for (int unsigned i = 0; i < NUM_PORTS; i++) begin
             noc_pli_to_bus_req_valid[i] = 1'b0;
             noc_pli_to_bus_req_data[i]  = '0;
         end
@@ -333,16 +333,16 @@ module NoCRouter #(
             automatic logic [7:0]     baddr   = (f_addr[7] ? 8'h40 : 8'h00) | {2'b0, f_addr[5:0]};
             automatic logic           all_rdy = 1'b1;
 
-            for (int i = 0; i < NUM_PORTS; i++) begin
+            for (int unsigned i = 0; i < NUM_PORTS; i++) begin
                 noc_pli_to_bus_req_data[i].addr = {8'b0, baddr};
                 noc_pli_to_bus_req_data[i].mask = f_mask;
                 noc_pli_to_bus_req_data[i].data = is_ultra ? f_data[64*i +: 64]
                                                            : f_data[63:0];
             end
-            for (int i = 0; i < NUM_PORTS; i++)
+            for (int unsigned i = 0; i < NUM_PORTS; i++)
                 if (!noc_pli_to_bus_req_ready[i]) all_rdy = 1'b0;
             if (all_rdy) begin
-                for (int i = 0; i < NUM_PORTS; i++)
+                for (int unsigned i = 0; i < NUM_PORTS; i++)
                     noc_pli_to_bus_req_valid[i] = 1'b1;
                 pli_fifo_pop = 1'b1;
             end
@@ -356,7 +356,7 @@ module NoCRouter #(
         plo_fifo_pop            = 1'b0;
         pending_read_next       = 1'b0;
         pending_read_ultra_next = 1'b0;
-        for (int i = 0; i < NUM_PORTS; i++) begin
+        for (int unsigned i = 0; i < NUM_PORTS; i++) begin
             noc_plo_to_bus_req_valid[i] = 1'b0;
             noc_plo_to_bus_req_data[i]  = '0;
         end
@@ -370,14 +370,14 @@ module NoCRouter #(
             automatic logic [7:0]  baddr    = (f_addr[7] ? 8'h40 : 8'h00) | {2'b0, f_addr[5:0]};
             automatic logic        all_rdy  = 1'b1;
 
-            for (int i = 0; i < NUM_PORTS; i++)
+            for (int unsigned i = 0; i < NUM_PORTS; i++)
                 noc_plo_to_bus_req_data[i].addr = {8'b0, baddr};
 
-            for (int i = 0; i < NUM_PORTS; i++)
+            for (int unsigned i = 0; i < NUM_PORTS; i++)
                 if (!noc_plo_to_bus_req_ready[i]) all_rdy = 1'b0;
 
             if (all_rdy) begin
-                for (int i = 0; i < NUM_PORTS; i++)
+                for (int unsigned i = 0; i < NUM_PORTS; i++)
                     noc_plo_to_bus_req_valid[i] = 1'b1;
                 plo_fifo_pop            = 1'b1;
                 pending_read_next       = 1'b1;
@@ -393,7 +393,7 @@ module NoCRouter #(
         resp_fifo_push = 1'b0;
         resp_fifo_in   = '0;
         rx_stall       = 1'b0;
-        for (int i = 0; i < NUM_PORTS; i++)
+        for (int unsigned i = 0; i < NUM_PORTS; i++)
             bus_to_noc_plo_resp_ready[i] = 1'b0;
 
         if (pending_read_reg) begin
@@ -402,7 +402,7 @@ module NoCRouter #(
             automatic logic                 all_ok    = 1'b1;
             automatic logic                 err       = 1'b0;
 
-            for (int i = 0; i < NUM_PORTS; i++) begin
+            for (int unsigned i = 0; i < NUM_PORTS; i++) begin
                 if (bus_to_noc_plo_resp_valid[i]) begin
                     vrx[i] = 1'b1;
                     if (bus_to_noc_plo_resp_data[i].status == NOC_ERROR)
@@ -411,13 +411,13 @@ module NoCRouter #(
             end
 
             if (pending_read_ultra_reg) begin
-                for (int i = 0; i < NUM_PORTS; i++) begin
+                for (int unsigned i = 0; i < NUM_PORTS; i++) begin
                     if (!vrx[i]) all_ok = 1'b0;
                     else collected[64*i +: 64] = bus_to_noc_plo_resp_data[i].data;
                 end
             end else begin
                 automatic logic seen = 1'b0;
-                for (int i = 0; i < NUM_PORTS; i++) begin
+                for (int unsigned i = 0; i < NUM_PORTS; i++) begin
                     if (vrx[i]) begin
                         if (seen) err = 1'b1;
                         seen = 1'b1;
@@ -429,7 +429,7 @@ module NoCRouter #(
 
             if (all_ok) begin
                 if (!resp_fifo_full) begin
-                    for (int i = 0; i < NUM_PORTS; i++)
+                    for (int unsigned i = 0; i < NUM_PORTS; i++)
                         if (vrx[i]) bus_to_noc_plo_resp_ready[i] = 1'b1;
                     resp_fifo_push = 1'b1;
                     resp_fifo_in   = pack_resp(collected,
@@ -463,10 +463,10 @@ module NoCRouter #(
         scan_chain_enable = scan_chain_enable_reg;
         if (scan_chain_enable_reg) begin
             scan_chain_out[0] = scan_chain_data_reg;
-            for (int i = 1; i < NUM_PORTS; i++)
+            for (int unsigned i = 1; i < NUM_PORTS; i++)
                 scan_chain_out[i] = scan_chain_in[i-1];
         end else begin
-            for (int i = 0; i < NUM_PORTS; i++)
+            for (int unsigned i = 0; i < NUM_PORTS; i++)
                 scan_chain_out[i] = '0;
         end
     end

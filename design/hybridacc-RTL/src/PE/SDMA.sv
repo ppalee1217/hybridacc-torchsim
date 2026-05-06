@@ -27,14 +27,13 @@ module SDMA (
     input  logic       active,
     input  logic       reset_active,
     output logic       busy,
-    output logic       done,
     output logic       dl_stall_out,
     output logic       bank_sel,
     input  v_fp16_t    ps_data,
     input  logic       ps_valid,
     output logic       ps_ready,
     output logic       dm_write_en,
-    output logic [15:0] dm_write_addr,
+    output logic [8:0] dm_write_addr,
     output logic [63:0] dm_write_data,
     output logic [7:0]  dm_write_mask
 );
@@ -48,9 +47,8 @@ module SDMA (
     // Runtime registers
     logic [15:0] dma_offset_active_reg, dma_len_active_rem_reg, dma_loops_active_rem_reg;
     logic bank_sel_active_reg;
-    logic [1:0] bank_valid_active_reg;
     logic write_pending_reg;
-    logic [15:0] write_addr_reg;
+    logic [8:0] write_addr_reg;
     logic [63:0] write_data_reg;
 
     // Next-state signals (combinational)
@@ -58,19 +56,38 @@ module SDMA (
     logic [15:0] dma_base_static_next, dma_len_static_next, dma_stride_static_next, dma_loop_static_next;
     logic [15:0] dma_offset_active_next, dma_len_active_rem_next, dma_loops_active_rem_next;
     logic bank_sel_active_next;
-    logic [1:0] bank_valid_active_next;
     logic write_pending_next;
-    logic [15:0] write_addr_next;
+    logic [8:0] write_addr_next;
     logic [63:0] write_data_next;
+    logic       fire_w;
 
-    function automatic logic [15:0] normalize_loop_count(input logic [15:0] v);
-        return (v == 16'h0) ? 16'd1 : v;
+    function automatic logic [15:0] inc16(input logic [15:0] value);
+        logic [15:0] result;
+        logic        carry;
+
+        carry = 1'b1;
+        for (int i = 0; i < 16; i++) begin
+            result[i] = value[i] ^ carry;
+            carry = value[i] & carry;
+        end
+        return result;
+    endfunction
+
+    function automatic logic [15:0] dec16(input logic [15:0] value);
+        logic [15:0] result;
+        logic        borrow;
+
+        borrow = 1'b1;
+        for (int i = 0; i < 16; i++) begin
+            result[i] = value[i] ^ borrow;
+            borrow = ~value[i] & borrow;
+        end
+        return result;
     endfunction
 
     // Next-state combinational logic
     always_comb begin
-        logic [1:0] mask;
-        logic fire;
+        fire_w = 1'b0;
 
         // Default: hold current values
         state_next = state_reg;
@@ -82,13 +99,11 @@ module SDMA (
         dma_len_active_rem_next = dma_len_active_rem_reg;
         dma_loops_active_rem_next = dma_loops_active_rem_reg;
         bank_sel_active_next = bank_sel_active_reg;
-        bank_valid_active_next = bank_valid_active_reg;
         write_pending_next = 1'b0;
         write_addr_next = write_addr_reg;
         write_data_next = write_data_reg;
 
-        mask = bank_sel_active_reg ? 2'b10 : 2'b01;
-        fire = (state_reg == RUN) && ps_valid && (dma_len_active_rem_reg > 16'd0);
+        fire_w = (state_reg == RUN) && ps_valid && (dma_len_active_rem_reg > 16'd0);
 
         // Reset active runtime registers
         if (reset_active) begin
@@ -97,9 +112,8 @@ module SDMA (
             dma_len_active_rem_next = 16'h0;
             dma_loops_active_rem_next = 16'h0;
             bank_sel_active_next = 1'b0;
-            bank_valid_active_next = 2'b00;
             write_pending_next = 1'b0;
-            write_addr_next = 16'h0;
+            write_addr_next = 9'h0;
             write_data_next = 64'h0;
         end
 
@@ -108,8 +122,8 @@ module SDMA (
             IDLE: begin
                 // Configuration (only in IDLE)
                 if (set_addr) dma_base_static_next = imm;
-                else if (set_len) dma_len_static_next = imm + 16'd1;
-                else if (set_loop) dma_loop_static_next = imm + 16'd1;
+                else if (set_len) dma_len_static_next = inc16(imm);
+                else if (set_loop) dma_loop_static_next = inc16(imm) | {15'h0, (&imm)};
                 else if (set_mode) dma_stride_static_next = imm;
 
                 // Allow swap even when idle
@@ -118,15 +132,12 @@ module SDMA (
                 // Start background store task
                 if (active) begin
                     dma_offset_active_next = 16'h0;
-                    dma_loops_active_rem_next = normalize_loop_count(dma_loop_static_reg);
+                    dma_loops_active_rem_next = dma_loop_static_reg;
                     dma_len_active_rem_next = dma_len_static_reg;
-                    bank_valid_active_next = bank_valid_active_reg & (~mask);
 
                     if (dma_len_static_reg == 16'h0) begin
-                        if (normalize_loop_count(dma_loop_static_reg) > 16'd0)
-                            dma_loops_active_rem_next = normalize_loop_count(dma_loop_static_reg) - 16'd1;
+                        dma_loops_active_rem_next = dec16(dma_loop_static_reg);
                         state_next = WAIT_SWAP;
-                        bank_valid_active_next = (bank_valid_active_reg & (~mask)) | mask;
                     end else begin
                         state_next = RUN;
                     end
@@ -134,17 +145,16 @@ module SDMA (
             end
 
             RUN: begin
-                if (fire) begin
+                if (fire_w) begin
                     // Buffer the write payload so DM sees registered data/address.
                     write_pending_next = 1'b1;
-                    write_addr_next = dma_base_static_reg + dma_offset_active_reg;
+                    write_addr_next = dma_base_static_reg[8:0] + dma_offset_active_reg[8:0];
                     write_data_next = v_fp16_to_u64(ps_data);
                     dma_offset_active_next = dma_offset_active_reg + dma_stride_static_reg * 16'd2;
                     dma_len_active_rem_next = dma_len_active_rem_reg - 16'd1;
                     if (dma_len_active_rem_reg == 16'd1) begin
                         if (dma_loops_active_rem_reg > 16'd0)
-                            dma_loops_active_rem_next = dma_loops_active_rem_reg - 16'd1;
-                        bank_valid_active_next = bank_valid_active_reg | mask;
+                            dma_loops_active_rem_next = dec16(dma_loops_active_rem_reg);
                         state_next = WAIT_SWAP;
                     end
                 end
@@ -152,20 +162,14 @@ module SDMA (
 
             WAIT_SWAP: begin
                 if (swap_in) begin
-                    logic new_bank;
-                    logic [1:0] new_mask;
-                    new_bank = ~bank_sel_active_reg;
-                    bank_sel_active_next = new_bank;
-                    new_mask = new_bank ? 2'b10 : 2'b01;
+                    bank_sel_active_next = ~bank_sel_active_reg;
 
                     if (dma_loops_active_rem_reg > 16'd0) begin
                         dma_offset_active_next = 16'h0;
                         dma_len_active_rem_next = dma_len_static_reg;
-                        bank_valid_active_next = bank_valid_active_reg & (~new_mask);
 
                         if (dma_len_static_reg == 16'h0) begin
-                            dma_loops_active_rem_next = dma_loops_active_rem_reg - 16'd1;
-                            bank_valid_active_next = (bank_valid_active_reg & (~new_mask)) | new_mask;
+                            dma_loops_active_rem_next = dec16(dma_loops_active_rem_reg);
                             state_next = WAIT_SWAP;
                         end else begin
                             state_next = RUN;
@@ -177,7 +181,6 @@ module SDMA (
             end
 
             FINISH: state_next = IDLE;
-            default: state_next = IDLE;
         endcase
     end
 
@@ -188,14 +191,13 @@ module SDMA (
             dma_base_static_reg <= 16'h0;
             dma_len_static_reg <= 16'h0;
             dma_stride_static_reg <= 16'h0;
-            dma_loop_static_reg <= 16'h0;
+            dma_loop_static_reg <= 16'd1;
             dma_offset_active_reg <= 16'h0;
             dma_len_active_rem_reg <= 16'h0;
             dma_loops_active_rem_reg <= 16'h0;
             bank_sel_active_reg <= 1'b0;
-            bank_valid_active_reg <= 2'b00;
             write_pending_reg <= 1'b0;
-            write_addr_reg <= 16'h0;
+            write_addr_reg <= 9'h0;
             write_data_reg <= 64'h0;
         end else begin
             state_reg <= state_next;
@@ -207,7 +209,6 @@ module SDMA (
             dma_len_active_rem_reg <= dma_len_active_rem_next;
             dma_loops_active_rem_reg <= dma_loops_active_rem_next;
             bank_sel_active_reg <= bank_sel_active_next;
-            bank_valid_active_reg <= bank_valid_active_next;
             write_pending_reg <= write_pending_next;
             write_addr_reg <= write_addr_next;
             write_data_reg <= write_data_next;
@@ -217,7 +218,6 @@ module SDMA (
     // Output combinational logic
     always_comb begin
         busy = 1'b0;
-        done = 1'b0;
         dm_write_en = write_pending_reg;
         dm_write_addr = write_addr_reg;
         dm_write_data = write_data_reg;
@@ -226,7 +226,6 @@ module SDMA (
 
         case (state_reg)
             RUN: busy = 1'b1;
-            FINISH: done = 1'b1;
             default: ;
         endcase
 

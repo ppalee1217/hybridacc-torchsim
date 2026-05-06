@@ -14,9 +14,7 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-import cluster_pkg::*;
-
-module ClusterControlUnit (
+module ClusterControlUnit import cluster_pkg::*; (
     input  logic             clk,
     input  logic             reset_n,
 

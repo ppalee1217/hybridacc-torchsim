@@ -60,6 +60,9 @@ module NetworkOnChip #(
     input  logic noc_plo_out_ready,
     output logic quiesced_o
 );
+    localparam int NUM_PORTS_GEN        = int'(NUM_PORTS);
+    localparam int NUM_PES_PER_PORT_GEN = int'(NUM_PES_PER_PORT);
+
     noc_request_t noc_ps_to_bus_data [NUM_PORTS];
     logic         noc_ps_to_bus_valid[NUM_PORTS];
     logic         noc_ps_to_bus_ready[NUM_PORTS];
@@ -119,12 +122,12 @@ module NetworkOnChip #(
 
         noc_activity_w = noc_ps_in_valid || noc_pd_in_valid || noc_pli_in_valid || noc_plo_in_valid || noc_plo_out_valid;
 
-        for (int port_idx = 0; port_idx < NUM_PORTS; port_idx++) begin
+        for (int unsigned port_idx = 0; port_idx < NUM_PORTS; port_idx++) begin
             noc_activity_w |= noc_ps_to_bus_valid[port_idx] || noc_pd_to_bus_valid[port_idx]
                            || noc_pli_to_bus_valid[port_idx] || noc_plo_to_bus_valid[port_idx]
                            || bus_to_noc_resp_valid[port_idx];
 
-            for (int pe_idx = 0; pe_idx < NUM_PES_PER_PORT; pe_idx++) begin
+            for (int unsigned pe_idx = 0; pe_idx < NUM_PES_PER_PORT; pe_idx++) begin
                 noc_activity_w |= bus_to_pe_ps_valid[port_idx][pe_idx] || bus_to_pe_pd_valid[port_idx][pe_idx]
                                || bus_to_pe_pli_valid[port_idx][pe_idx] || bus_to_pe_plo_valid[port_idx][pe_idx]
                                || pe_to_bus_plo_valid[port_idx][pe_idx] || pe_busy_sig[port_idx][pe_idx]
@@ -139,7 +142,7 @@ module NetworkOnChip #(
     // ln_data/valid[0]  = entry of chain (no upstream PE drives these)
     // ln_ready[NUM_PORTS] = exit of chain (no downstream PE drives these)
     generate
-        for (genvar k = 0; k < NUM_PES_PER_PORT; k++) begin : gen_ln_tieoff
+        for (genvar k = 0; k < NUM_PES_PER_PORT_GEN; k++) begin : gen_ln_tieoff
             assign ln_data [0][k]         = 64'd0;
             assign ln_valid[0][k]         = 1'b0;
             assign ln_ready[NUM_PORTS][k] = 1'b1;
@@ -163,7 +166,7 @@ module NetworkOnChip #(
 
     genvar i, j;
     generate
-        for (i = 0; i < NUM_PORTS; i++) begin : gen_ports
+        for (i = 0; i < NUM_PORTS_GEN; i++) begin : gen_ports
             MBUS #(.NUM_PES(NUM_PES_PER_PORT)) mbus (
                 .clk(clk), .reset_n(reset_n),
                 .router_enable(router_enable_sig[i]), .router_mode(router_mode_sig[i]),
@@ -181,7 +184,7 @@ module NetworkOnChip #(
                 .scan_chain_enable(scan_chain_enable), .scan_chain_in(router_scan_chain_out[i]), .scan_chain_out(mbus_scan_chain_out[i])
             );
 
-            for (j = 0; j < NUM_PES_PER_PORT; j++) begin : gen_pe
+            for (j = 0; j < NUM_PES_PER_PORT_GEN; j++) begin : gen_pe
                 ProcessElement #(.PE_FIFO_DEPTH(PE_FIFO_DEPTH)) pe (
                     .clk(clk), .reset_n(reset_n),
                     .router_enable(router_enable_sig[i][j]), .router_mode(router_mode_sig[i][j]),

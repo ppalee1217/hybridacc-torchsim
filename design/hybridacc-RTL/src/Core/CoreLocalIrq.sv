@@ -13,9 +13,7 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-import core_pkg::*;
-
-module CoreLocalIrq (
+module CoreLocalIrq import core_pkg::*; (
     input  logic        clk,
     input  logic        reset_n,
     input  logic        mmio_req_valid_i,
@@ -56,7 +54,7 @@ module CoreLocalIrq (
             if (mmio_req_valid_i) begin
                 mmio_resp_valid_o <= 1'b1;
                 if (mmio_req_write_i) begin
-                    unique case (mmio_req_addr_i)
+                    unique0 case (mmio_req_addr_i)
                         TIMER_MSIP:        msip_reg        <= mmio_req_wdata_i[0];
                         TIMER_MTIMECMP_LO: mtimecmp_lo_reg <= mmio_req_wdata_i;
                         TIMER_MTIMECMP_HI: mtimecmp_hi_reg <= mmio_req_wdata_i;
@@ -67,7 +65,7 @@ module CoreLocalIrq (
                     endcase
                     mmio_resp_rdata_o <= 32'h0;
                 end else begin
-                    unique case (mmio_req_addr_i)
+                    unique0 case (mmio_req_addr_i)
                         TIMER_MSIP:        mmio_resp_rdata_o <= {31'h0, msip_reg};
                         TIMER_MTIMECMP_LO: mmio_resp_rdata_o <= mtimecmp_lo_reg;
                         TIMER_MTIMECMP_HI: mmio_resp_rdata_o <= mtimecmp_hi_reg;

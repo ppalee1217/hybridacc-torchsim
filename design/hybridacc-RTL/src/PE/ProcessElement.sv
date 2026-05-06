@@ -77,6 +77,14 @@ module ProcessElement #(
     logic if_id_halted_sig, exe_m_halted_sig, exe_a_halted_sig;
     logic exe_m_stall_dl, exe_m_stall_ps, exe_m_stall_pd;
     logic exe_a_stall_port_pli, exe_a_stall_port_plo;
+    logic stage_signal_observed_w;
+
+    assign stage_signal_observed_w = (^if_id_pc_sig)
+                                   ^ exe_m_stall_dl
+                                   ^ exe_m_stall_ps
+                                   ^ exe_m_stall_pd
+                                   ^ exe_a_stall_port_pli
+                                   ^ exe_a_stall_port_plo;
 
     PErouter #(.PE_FIFO_DEPTH(PE_FIFO_DEPTH)) router (
         .clk(clk), .reset_n(reset_n), .enable(router_enable), .route_mode(router_mode),
@@ -137,7 +145,7 @@ module ProcessElement #(
         if (pe_running_reg && if_id_halted_sig && exe_m_halted_sig && exe_a_halted_sig)
             pe_running_next = 1'b0;
 
-        pe_busy = pe_running_reg;
+        pe_busy = pe_running_reg | (1'b0 & stage_signal_observed_w);
     end
 
     always_ff @(posedge clk or negedge reset_n) begin

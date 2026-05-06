@@ -24,11 +24,11 @@ module tb_sdma;
     logic clk, reset_n;
     logic [15:0] imm;
     logic set_addr, set_len, set_loop, set_mode, swap_in, active, reset_active;
-    logic busy, done, dl_stall_out, bank_sel;
+    logic busy, dl_stall_out, bank_sel;
     v_fp16_t ps_data;
     logic ps_valid, ps_ready;
     logic dm_write_en;
-    logic [15:0] dm_write_addr;
+    logic [8:0] dm_write_addr;
     logic [63:0] dm_write_data;
     logic [7:0] dm_write_mask;
 
@@ -36,7 +36,7 @@ module tb_sdma;
 
     SDMA dut(
         .clk(clk), .reset_n(reset_n), .imm(imm), .set_addr(set_addr), .set_len(set_len), .set_loop(set_loop), .set_mode(set_mode),
-        .swap_in(swap_in), .active(active), .reset_active(reset_active), .busy(busy), .done(done), .dl_stall_out(dl_stall_out), .bank_sel(bank_sel),
+        .swap_in(swap_in), .active(active), .reset_active(reset_active), .busy(busy), .dl_stall_out(dl_stall_out), .bank_sel(bank_sel),
         .ps_data(ps_data), .ps_valid(ps_valid), .ps_ready(ps_ready), .dm_write_en(dm_write_en), .dm_write_addr(dm_write_addr), .dm_write_data(dm_write_data), .dm_write_mask(dm_write_mask)
     );
 
@@ -60,7 +60,6 @@ end
 
         // Test 1: Reset state
         `CHECK_BIT("Reset: busy=0", busy, 1'b0)
-        `CHECK_BIT("Reset: done=0", done, 1'b0)
         `CHECK_BIT("Reset: bank_sel=0", bank_sel, 1'b0)
 
         // Test 2: Configure SDMA (addr=0x10, len=1 element (set_len imm=0 => len_static=1), loop=1)
@@ -84,7 +83,7 @@ end
         ps_valid = 0;
         @(negedge clk);
         `CHECK_BIT("Write: dm_write_en=1", dm_write_en, 1'b1)
-        `CHECK_VAL("Write: dm_write_addr=0x10", dm_write_addr, 16'h0010)
+        `CHECK_VAL("Write: dm_write_addr=0x10", dm_write_addr, 9'h010)
         `CHECK_VAL("Write: dm_write_data packed", dm_write_data, 64'h4444_3333_2222_1111)
         `CHECK_VAL("Write: dm_write_mask=FF", dm_write_mask, 8'hFF)
 
@@ -97,7 +96,7 @@ end
 
         // Wait for FINISH -> IDLE
         repeat(2) @(posedge clk); @(negedge clk);
-        `CHECK_COND("PostSwap: done=1 or idle", done === 1'b1 || busy === 1'b0, {done, busy})
+        `CHECK_BIT("PostSwap: idle", busy, 1'b0)
 
         // Test 3: Bank swap tracking
         // swap_in toggles bank_sel in IDLE
@@ -181,7 +180,7 @@ end
         @(posedge clk); @(negedge clk);
         swap_in = 1; @(posedge clk); swap_in = 0;
         repeat(2) @(posedge clk); @(negedge clk);
-        `CHECK_COND("MultiLoop: completes after swap", done === 1'b1 || busy === 1'b0, {done, busy})
+        `CHECK_BIT("MultiLoop: completes after swap", busy, 1'b0)
 
         // Test 8: Stride pattern (len=2, stride=2 => addresses skip by 2*8=16)
         reset_active = 1; @(posedge clk); reset_active = 0;
@@ -193,10 +192,10 @@ end
         ps_data.lanes[0] = 16'hBB00;
         ps_valid = 1;
         @(posedge clk); @(negedge clk);
-        `CHECK_VAL("Stride: first addr=0x0060", dm_write_addr, 16'h0060)
+        `CHECK_VAL("Stride: first addr=0x0060", dm_write_addr, 9'h060)
         @(posedge clk); @(negedge clk);
         // Second element: addr should be 0x0060 + stride*2 = 0x0060 + 4 = 0x0064
-        `CHECK_VAL("Stride: second addr=0x0064", dm_write_addr, 16'h0064)
+        `CHECK_VAL("Stride: second addr=0x0064", dm_write_addr, 9'h064)
         @(posedge clk);
         ps_valid = 0;
 

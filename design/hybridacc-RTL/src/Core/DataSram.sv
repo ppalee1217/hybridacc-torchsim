@@ -40,6 +40,7 @@ module DataSram #(
     localparam int unsigned MACRO_BYTES      = (MACRO_DATA_WIDTH / 8) * MACRO_DEPTH;
     localparam int unsigned NUM_MACROS       = SRAM_BYTES / MACRO_BYTES;
     localparam int unsigned MACRO_SEL_W      = (NUM_MACROS <= 1) ? 1 : $clog2(NUM_MACROS);
+    localparam int          NUM_MACROS_GEN   = int'(NUM_MACROS);
 
     typedef logic [MACRO_DATA_WIDTH-1:0] macro_word_t;
     typedef logic [MACRO_ADDR_W-1:0]     macro_addr_t;
@@ -51,6 +52,7 @@ module DataSram #(
     macro_addr_t sram_addr [NUM_MACROS];
     macro_word_t sram_d    [NUM_MACROS];
     macro_word_t sram_q    [NUM_MACROS];
+    logic        sram_pudelay_unused [NUM_MACROS];
 
     logic        dm_resp_valid_reg;
     logic        dm_resp_upper32_reg;
@@ -65,7 +67,7 @@ module DataSram #(
         begin
             value = 32'h0;
             base = wrap_byte_addr(byte_addr & ~32'h3);
-            for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
+            for (int unsigned byte_idx = 0; byte_idx < 4; byte_idx++) begin
                 if ((base + byte_idx) < SRAM_BYTES) begin
                     value[byte_idx*8 +: 8] = debug_mem[base + byte_idx];
                 end
@@ -116,11 +118,11 @@ module DataSram #(
         input logic [3:0]  strb
     );
         macro_word_t bweb_word;
-        int lane_lsb;
+        int unsigned lane_lsb;
         begin
             bweb_word = {MACRO_DATA_WIDTH{1'b1}};
-            lane_lsb = byte_addr_upper32(byte_addr) ? 32 : 0;
-            for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
+            lane_lsb = byte_addr_upper32(byte_addr) ? 32'd32 : 32'd0;
+            for (int unsigned byte_idx = 0; byte_idx < 4; byte_idx++) begin
                 if (strb[byte_idx]) begin
                     bweb_word[lane_lsb + byte_idx*8 +: 8] = 8'h00;
                 end
@@ -133,13 +135,22 @@ module DataSram #(
     assign mcu_dm_resp_valid_o = dm_resp_valid_reg;
 
     always_comb begin
+        logic pudelay_sink;
+
+        pudelay_sink = 1'b0;
+        for (int unsigned macro_idx = 0; macro_idx < NUM_MACROS; macro_idx++) begin
+            pudelay_sink ^= sram_pudelay_unused[macro_idx];
+        end
+    end
+
+    always_comb begin
         macro_sel_t  macro_sel;
         logic        wr_en;
         logic [31:0] wr_addr;
         logic [31:0] wr_data;
         logic [3:0]  wr_strb;
 
-        for (int macro_idx = 0; macro_idx < NUM_MACROS; macro_idx++) begin
+        for (int unsigned macro_idx = 0; macro_idx < NUM_MACROS; macro_idx++) begin
             sram_ceb[macro_idx]  = 1'b1;
             sram_web[macro_idx]  = 1'b1;
             sram_bweb[macro_idx] = {MACRO_DATA_WIDTH{1'b1}};
@@ -184,7 +195,7 @@ module DataSram #(
             dm_resp_upper32_reg   <= 1'b0;
             dm_resp_macro_sel_reg <= '0;
 `ifdef HACC_SIM_DEBUG_READBACK
-            for (int idx = 0; idx < SRAM_BYTES; idx++) begin
+            for (int unsigned idx = 0; idx < SRAM_BYTES; idx++) begin
                 debug_mem[idx] <= 8'h00;
             end
 `endif
@@ -225,7 +236,7 @@ module DataSram #(
             if (wr_en) begin
 `ifdef HACC_SIM_DEBUG_READBACK
                 debug_base = wrap_byte_addr(wr_addr & ~32'h3);
-                for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
+                for (int unsigned byte_idx = 0; byte_idx < 4; byte_idx++) begin
                     if (wr_strb[byte_idx] && ((debug_base + byte_idx) < SRAM_BYTES)) begin
                         debug_mem[debug_base + byte_idx] <= wr_data[byte_idx*8 +: 8];
                     end
@@ -245,12 +256,12 @@ module DataSram #(
     end
 
     generate
-        for (genvar macro = 0; macro < NUM_MACROS; macro++) begin : gen_dsram_macro
+        for (genvar macro = 0; macro < NUM_MACROS_GEN; macro++) begin : gen_dsram_macro
             TS1N16ADFPCLLLVTA128X64M4SWSHOD u_sram (
                 .SLP    (1'b0),
                 .DSLP   (1'b0),
                 .SD     (1'b0),
-                .PUDELAY(),
+                .PUDELAY(sram_pudelay_unused[macro]),
                 .CLK    (clk),
                 .CEB    (sram_ceb[macro]),
                 .WEB    (sram_web[macro]),
@@ -264,10 +275,12 @@ module DataSram #(
         end
     endgenerate
 
+    // synopsys translate_off
     initial begin
         if ((SRAM_BYTES % MACRO_BYTES) != 0) begin
             $error("DataSram requires SRAM_BYTES to be a multiple of %0d", MACRO_BYTES);
         end
     end
+    // synopsys translate_on
 
 endmodule

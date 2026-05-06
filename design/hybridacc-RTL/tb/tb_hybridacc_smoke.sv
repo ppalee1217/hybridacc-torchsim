@@ -110,6 +110,22 @@ module tb_hybridacc_smoke;
     int fail_count = 0;
     int x_fail_count = 0;
 
+`ifdef TB_ENABLE_FSDB_DUMP
+    string wave_dump_file = "tb_hybridacc_smoke.fsdb";
+    int wave_dump_depth = 0;
+
+    initial begin : tb_wave_dump_control
+        if ($test$plusargs("WAVE_DUMP")) begin
+            if (!$value$plusargs("WAVE_DEPTH=%d", wave_dump_depth) || (wave_dump_depth < 0)) begin
+                wave_dump_depth = 0;
+            end
+            $display("[TB] FSDB dump enabled: file=%0s depth=%0d", wave_dump_file, wave_dump_depth);
+            $fsdbDumpfile(wave_dump_file);
+            $fsdbDumpvars(wave_dump_depth, tb_hybridacc_smoke);
+        end
+    end
+`endif
+
     tb_clock_reset clk_rst(.clk(clk), .reset_n(reset_n));
 
     HybridAcc #(
@@ -195,7 +211,7 @@ module tb_hybridacc_smoke;
             for (int i = 0; i < 256; i++) begin
                 dram_mem[i] <= 64'h0;
             end
-            dram_mem[32'h100 >> 3] <= 64'h0000_0000_0010_0073;
+            dram_mem[32'h100 >> 3] <= 64'h0000_0000_0010_0073; // EBREAK instruction at address 0x100
             dram_r_pending_reg <= 1'b0;
             dram_r_addr_reg <= 32'h0;
             m_mem_axi_aw_ready_i <= 1'b1;

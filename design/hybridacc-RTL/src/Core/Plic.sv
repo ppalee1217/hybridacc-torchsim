@@ -13,9 +13,7 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-import core_pkg::*;
-
-module Plic #(
+module Plic import core_pkg::*; #(
     parameter int unsigned NUM_CLUSTERS = 1,
     parameter int unsigned NUM_NLU = 0
 ) (
@@ -48,6 +46,17 @@ module Plic #(
     logic [31:0] claimed_lo_reg;
     logic [31:0] claimed_hi_reg;
 
+    function automatic logic sample_nlu_source(input int unsigned id);
+        logic level;
+        level = 1'b0;
+        for (int unsigned nlu = 0; nlu < NUM_NLU; nlu++) begin
+            if (id == (NUM_CLUSTERS + 2 + nlu)) begin
+                level = nlu_irq_i[nlu];
+            end
+        end
+        return level;
+    endfunction
+
     function automatic logic sample_source(input int unsigned id);
         logic level;
         level = 1'b0;
@@ -55,12 +64,12 @@ module Plic #(
             level = cluster_irq_i[id - 1];
         end else if (id == (NUM_CLUSTERS + 1)) begin
             level = dma_irq_i;
-        end else if ((NUM_NLU > 0) && (id >= (NUM_CLUSTERS + 2)) && (id <= (NUM_CLUSTERS + NUM_NLU + 1))) begin
-            level = nlu_irq_i[id - NUM_CLUSTERS - 2];
         end else if (id == (NUM_CLUSTERS + NUM_NLU + 2)) begin
             level = loader_fault_i;
         end else if (id == (NUM_CLUSTERS + NUM_NLU + 3)) begin
             level = fabric_fault_i;
+        end else begin
+            level = sample_nlu_source(id);
         end
         return level;
     endfunction
@@ -116,7 +125,7 @@ module Plic #(
             claimed_hi_reg     <= 32'h0;
             mmio_resp_valid_o  <= 1'b0;
             mmio_resp_rdata_o  <= 32'h0;
-            for (int idx = 0; idx <= MAX_SOURCES; idx++) begin
+            for (int unsigned idx = 0; idx <= MAX_SOURCES; idx++) begin
                 priority_reg[idx] <= 32'd1;
             end
         end else begin

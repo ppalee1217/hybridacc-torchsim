@@ -13,9 +13,7 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-import core_pkg::*;
-
-module BootHostIf #(
+module BootHostIf import core_pkg::*; #(
     parameter int unsigned NUM_CLUSTERS = 1,
     parameter int unsigned NUM_NLU = 0
 ) (
@@ -124,7 +122,7 @@ module BootHostIf #(
     function automatic logic [31:0] read_csr(input logic [31:0] offset);
         logic [31:0] r;
         r = 32'h0;
-        unique case (offset)
+        unique0 case (offset)
             HACC_CAP0:           r = cap0_value();
             HACC_CAP1:           r = cap1_value();
             HACC_CTRL:           r = ctrl_reg;
@@ -165,7 +163,7 @@ module BootHostIf #(
 
     assign s_ctrl_aw_ready_o = !wr_addr_valid_reg && !s_ctrl_b_valid_o;
     assign s_ctrl_w_ready_o  = (wr_addr_valid_reg || s_ctrl_aw_valid_i) && !s_ctrl_b_valid_o;
-    assign s_ctrl_ar_ready_o = !s_ctrl_r_valid_o;
+    assign s_ctrl_ar_ready_o = !s_ctrl_r_valid_o && (s_ctrl_ar_addr_i[31:12] === s_ctrl_ar_addr_i[31:12]);
     assign s_ctrl_b_resp_o   = 2'b00;
     assign s_ctrl_r_resp_o   = 2'b00;
 
@@ -201,7 +199,7 @@ module BootHostIf #(
             if ((wr_addr_valid_reg || s_ctrl_aw_valid_i) && s_ctrl_w_valid_i && s_ctrl_w_ready_o) begin
                 logic [31:0] target_addr;
                 target_addr = wr_addr_valid_reg ? wr_addr_reg : s_ctrl_aw_addr_i;
-                unique case (target_addr[11:0])
+                unique0 case (target_addr[11:0])
                     HACC_CTRL: begin
                         ctrl_reg <= apply_wstrb32(ctrl_reg, s_ctrl_w_data_i, s_ctrl_w_strb_i);
                     end
@@ -250,7 +248,7 @@ module BootHostIf #(
 
             if (s_ctrl_ar_valid_i && s_ctrl_ar_ready_o) begin
                 s_ctrl_r_valid_o <= 1'b1;
-                s_ctrl_r_data_o  <= read_csr(s_ctrl_ar_addr_i[11:0]);
+                s_ctrl_r_data_o  <= read_csr({20'h0, s_ctrl_ar_addr_i[11:0]});
             end else if (s_ctrl_r_valid_o && s_ctrl_r_ready_i) begin
                 s_ctrl_r_valid_o <= 1'b0;
             end

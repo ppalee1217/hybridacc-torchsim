@@ -33,90 +33,169 @@ module asyncFIFO #(
     output logic full
 );
     localparam int unsigned MAX_ELEMENTS = DEPTH * CHUNKS_PER_PUSH;
+    localparam int unsigned OUT_T_BITS   = $bits(OUT_T);
     localparam int PTR_W = (MAX_ELEMENTS <= 1) ? 1 : $clog2(MAX_ELEMENTS);
+    localparam logic [PTR_W-1:0] PTR_LAST = MAX_ELEMENTS - 1;
+    localparam logic [PTR_W-1:0] PTR_ONE  = {{(PTR_W-1){1'b0}}, 1'b1};
+    localparam logic [PTR_W:0]   MAX_COUNT = MAX_ELEMENTS;
+    localparam logic [PTR_W:0]   SET_COUNT = CHUNKS_PER_PUSH;
+    localparam logic [PTR_W:0]   FULL_COUNT = MAX_ELEMENTS - CHUNKS_PER_PUSH;
+    localparam logic [PTR_W:0]   CNT_ONE = {{PTR_W{1'b0}}, 1'b1};
 
     OUT_T mem [0:MAX_ELEMENTS-1];
     logic [PTR_W-1:0] wr_ptr_reg, rd_ptr_reg;
     logic [PTR_W:0] cnt_reg;
 
+    logic             fifo_empty_w;
+    logic             fifo_full_w;
+    logic             set_valid_w;
+    logic             do_pop_w;
+    logic             do_pop_set_w;
+    logic             do_push_w;
+    logic [PTR_W:0]   mask_popcount_w;
+    logic [PTR_W:0]   remaining_after_pop_w;
+    logic [PTR_W-1:0] wr_ptr_next_w;
+    logic [PTR_W-1:0] rd_ptr_next_w;
+    logic [PTR_W:0]   cnt_next_w;
+
+    function automatic logic [PTR_W:0] count_add(
+        input logic [PTR_W:0] lhs,
+        input logic [PTR_W:0] rhs
+    );
+        logic [PTR_W:0] result;
+        logic           carry;
+
+        carry = 1'b0;
+        for (int i = 0; i <= PTR_W; i++) begin
+            result[i] = lhs[i] ^ rhs[i] ^ carry;
+            carry = (lhs[i] & rhs[i]) | (lhs[i] & carry) | (rhs[i] & carry);
+        end
+        return result;
+    endfunction
+
+    function automatic logic [PTR_W:0] count_sub(
+        input logic [PTR_W:0] lhs,
+        input logic [PTR_W:0] rhs
+    );
+        logic [PTR_W:0] result;
+        logic           borrow;
+
+        borrow = 1'b0;
+        for (int i = 0; i <= PTR_W; i++) begin
+            result[i] = lhs[i] ^ rhs[i] ^ borrow;
+            borrow = (~lhs[i] & rhs[i]) | (~(lhs[i] ^ rhs[i]) & borrow);
+        end
+        return result;
+    endfunction
+
+    function automatic logic [PTR_W-1:0] ptr_add_count(
+        input logic [PTR_W-1:0] ptr,
+        input logic [PTR_W:0]   amount
+    );
+        logic [PTR_W-1:0] result;
+        logic             carry;
+
+        carry = 1'b0;
+        for (int i = 0; i < PTR_W; i++) begin
+            result[i] = ptr[i] ^ amount[i] ^ carry;
+            carry = (ptr[i] & amount[i]) | (ptr[i] & carry) | (amount[i] & carry);
+        end
+        return result;
+    endfunction
+
+    function automatic logic [PTR_W-1:0] ptr_inc_if(
+        input logic [PTR_W-1:0] ptr,
+        input logic             enable
+    );
+        logic [PTR_W:0] amount;
+
+        amount = '0;
+        amount[0] = enable;
+        return ptr_add_count(ptr, amount);
+    endfunction
+
+    function automatic logic [PTR_W-1:0] ptr_add(
+        input logic [PTR_W-1:0] ptr,
+        input int unsigned      amount
+    );
+        logic [PTR_W:0] amount_bits;
+
+        amount_bits = amount[PTR_W:0];
+        return ptr_add_count(ptr, amount_bits);
+    endfunction
+
     always_comb begin
-        IN_T set_value;
-        set_value = '0;
+        fifo_empty_w = (cnt_reg == '0);
+        fifo_full_w = (cnt_reg > FULL_COUNT);
+        set_valid_w = (cnt_reg >= SET_COUNT);
+        empty = fifo_empty_w;
+        full = fifo_full_w;
+        set_valid = set_valid_w;
 
-        data_out = (cnt_reg > 0) ? mem[rd_ptr_reg] : '0;
-        set_valid = (cnt_reg >= CHUNKS_PER_PUSH);
-
-        if (set_valid) begin
-            for (int i = 0; i < CHUNKS_PER_PUSH; i++) begin
-                int idx;
-                idx = rd_ptr_reg + i;
-                if (idx >= MAX_ELEMENTS) idx -= MAX_ELEMENTS;
-                set_value[(i*$bits(OUT_T)) +: $bits(OUT_T)] = mem[idx];
-            end
+        mask_popcount_w = '0;
+        for (int unsigned i = 0; i < CHUNKS_PER_PUSH; i++) begin
+            mask_popcount_w = count_add(mask_popcount_w, {{PTR_W{1'b0}}, mask_in[i]});
         end
 
-        data_out_set = set_value;
+        do_pop_set_w = pop_set && set_valid_w;
+        do_pop_w = pop && !fifo_empty_w && !do_pop_set_w;
+
+        remaining_after_pop_w = cnt_reg;
+        remaining_after_pop_w = count_sub(
+            remaining_after_pop_w,
+            ({(PTR_W+1){do_pop_w}} & CNT_ONE) | ({(PTR_W+1){do_pop_set_w}} & SET_COUNT)
+        );
+
+        do_push_w = push && (count_add(remaining_after_pop_w, mask_popcount_w) <= MAX_COUNT);
+
+        wr_ptr_next_w = wr_ptr_reg;
+        for (int unsigned i = 0; i < CHUNKS_PER_PUSH; i++) begin
+            wr_ptr_next_w = ptr_inc_if(wr_ptr_next_w, do_push_w && mask_in[i]);
+        end
+
+        rd_ptr_next_w = ptr_add_count(
+            rd_ptr_reg,
+            ({(PTR_W+1){do_pop_w}} & CNT_ONE) | ({(PTR_W+1){do_pop_set_w}} & SET_COUNT)
+        );
+        cnt_next_w = count_add(
+            remaining_after_pop_w,
+            mask_popcount_w & {(PTR_W+1){do_push_w}}
+        );
+    end
+
+    always_comb begin
+        data_out = fifo_empty_w ? '0 : mem[rd_ptr_reg];
+        data_out_set = '0;
+
+        if (set_valid_w) begin
+            for (int unsigned i = 0; i < CHUNKS_PER_PUSH; i++) begin
+                data_out_set[(i*OUT_T_BITS) +: OUT_T_BITS] = mem[ptr_add(rd_ptr_reg, i)];
+            end
+        end
     end
 
     always_ff @(posedge clk or negedge reset_n) begin
-        logic do_pop, do_pop_set, do_push;
-        logic [PTR_W-1:0] wr_n, rd_n;
-        logic [PTR_W:0] cnt_n;
-        logic [31:0] mask_popcount;
-        logic [31:0] remaining_after_pop;
-
         if (!reset_n) begin
             wr_ptr_reg <= '0;
             rd_ptr_reg <= '0;
             cnt_reg <= '0;
-            for (int i = 0; i < MAX_ELEMENTS; i++) mem[i] <= '0;
+            for (int unsigned i = 0; i < MAX_ELEMENTS; i++) mem[i] <= '0;
         end else begin
-            mask_popcount = 0;
-            for (int i = 0; i < CHUNKS_PER_PUSH; i++) begin
-                if (mask_in[i]) mask_popcount++;
-            end
+            logic [PTR_W-1:0] wr_write_ptr;
 
-            do_pop = 1'b0;
-            do_pop_set = 1'b0;
-            do_push = 1'b0;
-
-            if (pop_set && (cnt_reg >= CHUNKS_PER_PUSH)) do_pop_set = 1'b1;
-            else if (pop && (cnt_reg > 0)) do_pop = 1'b1;
-
-            remaining_after_pop = cnt_reg - (do_pop ? 1 : 0) - (do_pop_set ? CHUNKS_PER_PUSH : 0);
-            if (push && ((remaining_after_pop + mask_popcount) <= MAX_ELEMENTS)) do_push = 1'b1;
-
-            wr_n = wr_ptr_reg;
-            rd_n = rd_ptr_reg;
-            cnt_n = cnt_reg;
-
-            if (do_push) begin
-                for (int i = 0; i < CHUNKS_PER_PUSH; i++) begin
+            wr_write_ptr = wr_ptr_reg;
+            if (do_push_w) begin
+                for (int unsigned i = 0; i < CHUNKS_PER_PUSH; i++) begin
                     if (mask_in[i]) begin
-                        mem[wr_n] <= data_in[(i*$bits(OUT_T)) +: $bits(OUT_T)];
-                        wr_n = (wr_n == MAX_ELEMENTS-1) ? '0 : (wr_n + 1'b1);
+                        mem[wr_write_ptr] <= data_in[(i*OUT_T_BITS) +: OUT_T_BITS];
+                        wr_write_ptr = ptr_inc_if(wr_write_ptr, 1'b1);
                     end
                 end
-                cnt_n = cnt_n + mask_popcount;
             end
 
-            if (do_pop_set) begin
-                if ((rd_n + CHUNKS_PER_PUSH) >= MAX_ELEMENTS) rd_n = rd_n + CHUNKS_PER_PUSH - MAX_ELEMENTS;
-                else rd_n = rd_n + CHUNKS_PER_PUSH;
-                cnt_n = cnt_n - CHUNKS_PER_PUSH;
-            end else if (do_pop) begin
-                rd_n = (rd_n == MAX_ELEMENTS-1) ? '0 : (rd_n + 1'b1);
-                cnt_n = cnt_n - 1'b1;
-            end
-
-            wr_ptr_reg <= wr_n;
-            rd_ptr_reg <= rd_n;
-            cnt_reg <= cnt_n;
+            wr_ptr_reg <= wr_ptr_next_w;
+            rd_ptr_reg <= rd_ptr_next_w;
+            cnt_reg <= cnt_next_w;
         end
-    end
-
-    always_comb begin
-        empty = (cnt_reg == 0);
-        full  = (cnt_reg > (MAX_ELEMENTS - CHUNKS_PER_PUSH));
     end
 endmodule

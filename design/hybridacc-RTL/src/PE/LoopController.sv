@@ -25,10 +25,18 @@ module LoopController #(
     output logic [15:0] pc_out,
     output logic        jump
 );
+    localparam int unsigned LOOP_SIZE_W = $clog2(LOOP_STACK_DEPTH + 1);
+    localparam int unsigned LOOP_INDEX_W = (LOOP_STACK_DEPTH <= 1) ? 1 : $clog2(LOOP_STACK_DEPTH);
+    localparam logic [LOOP_SIZE_W-1:0] LOOP_DEPTH_COUNT = LOOP_STACK_DEPTH;
+    localparam logic [LOOP_INDEX_W-1:0] LOOP_INDEX_ONE = 1;
+    localparam logic [LOOP_INDEX_W-1:0] LOOP_INDEX_TWO = 2;
+
     // Stack storage — holds levels below the current top
     logic [15:0] loop_start_pc [0:LOOP_STACK_DEPTH-1];
     logic [15:0] loop_remaining[0:LOOP_STACK_DEPTH-1];
-    logic [$clog2(LOOP_STACK_DEPTH+1)-1:0] loop_size_reg;
+    logic [LOOP_SIZE_W-1:0] loop_size_reg;
+    logic [LOOP_INDEX_W-1:0] loop_top_index_w;
+    logic [LOOP_INDEX_W-1:0] loop_restore_index_w;
 
     // Authoritative top-of-stack (directly maintained, not a stale copy)
     logic [15:0] top_pc_reg;
@@ -39,6 +47,8 @@ module LoopController #(
     logic [15:0] top_rem_dec;        // remaining - 1 (for decrement)
     logic        top_at_last;        // will pop on next loop_end?
 
+    assign loop_top_index_w = loop_size_reg[LOOP_INDEX_W-1:0] - LOOP_INDEX_ONE;
+    assign loop_restore_index_w = loop_size_reg[LOOP_INDEX_W-1:0] - LOOP_INDEX_TWO;
     assign top_rem_dec = top_remaining_reg - 16'd1;
     assign top_at_last = (top_remaining_reg <= 16'd1);
 
@@ -51,7 +61,7 @@ module LoopController #(
     // ---- Stack update ----
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
-            for (int idx = 0; idx < LOOP_STACK_DEPTH; idx++) begin
+            for (int unsigned idx = 0; idx < LOOP_STACK_DEPTH; idx++) begin
                 loop_start_pc[idx]  <= 16'h0000;
                 loop_remaining[idx] <= 16'h0000;
             end
@@ -60,11 +70,11 @@ module LoopController #(
             top_remaining_reg <= 16'h0000;
 
         end else if (loop_in_en && (count_in != 16'h0000) &&
-                     (loop_size_reg < LOOP_STACK_DEPTH[$clog2(LOOP_STACK_DEPTH+1)-1:0])) begin
+                     (loop_size_reg < LOOP_DEPTH_COUNT)) begin
             // === Push: save current top to array, new entry becomes top ===
             if (loop_size_reg > 0) begin
-                loop_remaining[loop_size_reg - 1] <= top_remaining_reg;
-                loop_start_pc[loop_size_reg - 1]  <= top_pc_reg;
+                loop_remaining[loop_top_index_w] <= top_remaining_reg;
+                loop_start_pc[loop_top_index_w]  <= top_pc_reg;
             end
             top_remaining_reg <= count_in + 16'd1;
             top_pc_reg        <= pc_in;
@@ -75,8 +85,8 @@ module LoopController #(
                 // === Pop: restore sub-top from array ===
                 loop_size_reg <= loop_size_reg - 1'b1;
                 if (loop_size_reg >= 2) begin
-                    top_remaining_reg <= loop_remaining[loop_size_reg - 2];
-                    top_pc_reg        <= loop_start_pc[loop_size_reg - 2];
+                    top_remaining_reg <= loop_remaining[loop_restore_index_w];
+                    top_pc_reg        <= loop_start_pc[loop_restore_index_w];
                 end else begin
                     top_remaining_reg <= 16'h0000;
                     top_pc_reg        <= 16'h0000;
@@ -84,7 +94,7 @@ module LoopController #(
             end else begin
                 // === Decrement: use pre-computed top_rem_dec ===
                 top_remaining_reg                 <= top_rem_dec;
-                loop_remaining[loop_size_reg - 1] <= top_rem_dec;
+                loop_remaining[loop_top_index_w] <= top_rem_dec;
             end
         end
     end

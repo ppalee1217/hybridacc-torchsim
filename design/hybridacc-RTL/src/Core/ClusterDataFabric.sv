@@ -13,9 +13,7 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-import core_pkg::*;
-
-module ClusterDataFabric #(
+module ClusterDataFabric import core_pkg::*; #(
     parameter int unsigned NUM_CLUSTERS = 1
 ) (
     input  logic clk,
@@ -73,11 +71,12 @@ module ClusterDataFabric #(
     input  logic [1:0]  m_cl_data_r_resp_i[NUM_CLUSTERS]
 );
     typedef enum logic {OWNER_DMA, OWNER_NLU} fabric_owner_e;
+    localparam int unsigned CLUSTER_ID_WIDTH = $clog2(NUM_CLUSTERS > 1 ? NUM_CLUSTERS : 2);
 
     logic        wr_active_reg;
     logic        wr_issue_reg;
     fabric_owner_e wr_owner_reg;
-    logic [$clog2(NUM_CLUSTERS > 1 ? NUM_CLUSTERS : 2)-1:0] wr_cluster_reg;
+    logic [CLUSTER_ID_WIDTH-1:0] wr_cluster_reg;
     logic [31:0] wr_local_addr_reg;
     logic [CL_AXI_DATA_WIDTH-1:0] wr_data_reg;
     logic [CL_AXI_DATA_WIDTH/8-1:0] wr_strb_reg;
@@ -87,14 +86,14 @@ module ClusterDataFabric #(
     logic        rd_active_reg;
     logic        rd_issue_reg;
     fabric_owner_e rd_owner_reg;
-    logic [$clog2(NUM_CLUSTERS > 1 ? NUM_CLUSTERS : 2)-1:0] rd_cluster_reg;
+    logic [CLUSTER_ID_WIDTH-1:0] rd_cluster_reg;
     logic [31:0] rd_local_addr_reg;
     logic        rd_r_valid_reg;
     logic [CL_AXI_DATA_WIDTH-1:0] rd_r_data_reg;
     logic [1:0]  rd_r_resp_reg;
 
-    function automatic logic [$clog2(NUM_CLUSTERS > 1 ? NUM_CLUSTERS : 2)-1:0] decode_cluster_id(input logic [31:0] addr);
-        return addr[31:24];
+    function automatic logic [CLUSTER_ID_WIDTH-1:0] decode_cluster_id(input logic [31:0] addr);
+        return addr[24 +: CLUSTER_ID_WIDTH];
     endfunction
 
     function automatic logic [31:0] decode_local_addr(input logic [31:0] addr);
@@ -121,7 +120,7 @@ module ClusterDataFabric #(
         s_dma_axi_r_resp_o  = rd_r_resp_reg;
         s_nlu_axi_r_resp_o  = rd_r_resp_reg;
 
-        for (int idx = 0; idx < NUM_CLUSTERS; idx++) begin
+        for (int unsigned idx = 0; idx < NUM_CLUSTERS; idx++) begin
             m_cl_data_aw_valid_o[idx] = 1'b0;
             m_cl_data_aw_addr_o[idx]  = wr_local_addr_reg;
             m_cl_data_w_valid_o[idx]  = 1'b0;

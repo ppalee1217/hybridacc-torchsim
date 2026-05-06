@@ -19,9 +19,7 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-import core_pkg::*;
-
-module CoreMcu (
+module CoreMcu import core_pkg::*; (
     input  logic        clk,
     input  logic        reset_n,
     input  logic [31:0] boot_addr_i,
@@ -113,8 +111,8 @@ module CoreMcu (
     logic        mmio_word_access_w;
     logic [31:0] ls_wdata_w;
     logic [3:0]  ls_wstrb_w;
-    logic signed [63:0] mul_ss_w;
-    logic signed [63:0] mul_su_w;
+    logic        [63:0] mul_ss_w;
+    logic        [63:0] mul_su_w;
     logic        [63:0] mul_uu_w;
 
     function automatic logic [31:0] imm_i_decode(input logic [31:0] instr);
@@ -174,7 +172,7 @@ module CoreMcu (
         input logic [1:0]  byte_offset,
         input logic [31:0] raw_data
     );
-        unique case (funct3)
+        unique0 case (funct3)
             3'b000: return {{24{raw_data[byte_offset*8 + 7]}}, raw_data[byte_offset*8 +: 8]};
             3'b001: return {{16{raw_data[byte_offset[1]*16 + 15]}}, raw_data[byte_offset[1]*16 +: 16]};
             3'b010: return raw_data;
@@ -216,12 +214,12 @@ module CoreMcu (
                     || addr_in_range(ls_addr_w, BASE_CLUSTER_BCAST, END_CLUSTER_BCAST)
                     || addr_in_range(ls_addr_w, BASE_NLU, END_NLU);
     assign mmio_word_access_w = (funct3_w == 3'b010) && (ls_addr_w[1:0] == 2'b00);
-    assign mul_ss_w = $signed({{32{rs1_data_w[31]}}, rs1_data_w}) * $signed({{32{rs2_data_w[31]}}, rs2_data_w});
-    assign mul_su_w = $signed({{32{rs1_data_w[31]}}, rs1_data_w}) * $signed({32'h0, rs2_data_w});
+    assign mul_ss_w = $unsigned($signed({{32{rs1_data_w[31]}}, rs1_data_w}) * $signed({{32{rs2_data_w[31]}}, rs2_data_w}));
+    assign mul_su_w = $unsigned($signed({{32{rs1_data_w[31]}}, rs1_data_w}) * $signed({32'h0, rs2_data_w}));
     assign mul_uu_w = {32'h0, rs1_data_w} * {32'h0, rs2_data_w};
 
     always_comb begin
-        unique case (csr_addr_w)
+        unique0 case (csr_addr_w)
             CSR_MSTATUS:  csr_read_data_w = mstatus_reg;
             CSR_MISA:     csr_read_data_w = 32'h4000_1100;
             CSR_MIE:      csr_read_data_w = mie_reg;
@@ -243,7 +241,7 @@ module CoreMcu (
         ls_wdata_w = rs2_data_w;
         ls_wstrb_w = 4'h0;
 
-        unique case (funct3_w)
+        unique0 case (funct3_w)
             3'b000: begin
                 load_supported_w = is_load_w;
                 store_supported_w = is_store_w;
@@ -309,7 +307,7 @@ module CoreMcu (
         input logic [11:0] csr_addr,
         input logic [31:0] csr_value
     );
-        unique case (csr_addr)
+        unique0 case (csr_addr)
             CSR_MSTATUS:  mstatus_reg  <= csr_value;
             CSR_MIE:      mie_reg      <= csr_value;
             CSR_MTVEC:    mtvec_reg    <= csr_value;
@@ -382,7 +380,7 @@ module CoreMcu (
 
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
-            for (int idx = 0; idx < CORE_GPR_NUM; idx++) begin
+            for (int unsigned idx = 0; idx < CORE_GPR_NUM; idx++) begin
                 gpr_reg[idx] <= 32'h0;
             end
             booted_reg     <= 1'b0;
@@ -514,7 +512,7 @@ module CoreMcu (
                 end else if (!instr_valid_reg && !fetch_pending_reg) begin
                     fetch_pending_reg <= 1'b1;
                 end else if (instr_valid_reg) begin
-                    unique case (opcode_w)
+                    unique0 case (opcode_w)
                         7'b0110111: begin
                             rd_write_en = 1'b1;
                             rd_value    = imm_u_w;
@@ -543,7 +541,7 @@ module CoreMcu (
                             end
                         end
                         7'b1100011: begin
-                            unique case (funct3_w)
+                            unique0 case (funct3_w)
                                 3'b000: branch_taken = (rs1_data_w == rs2_data_w);
                                 3'b001: branch_taken = (rs1_data_w != rs2_data_w);
                                 3'b100: branch_taken = ($signed(rs1_data_w) <  $signed(rs2_data_w));
@@ -563,7 +561,7 @@ module CoreMcu (
                             end
                         end
                         7'b0010011: begin
-                            unique case (funct3_w)
+                            unique0 case (funct3_w)
                                 3'b000: rd_value = rs1_data_w + imm_i_w;
                                 3'b010: rd_value = ($signed(rs1_data_w) < $signed(imm_i_w)) ? 32'd1 : 32'd0;
                                 3'b011: rd_value = (rs1_data_w < imm_i_w) ? 32'd1 : 32'd0;
@@ -582,15 +580,11 @@ module CoreMcu (
                                     if (funct7_w == 7'b0000000) begin
                                         rd_value = rs1_data_w >> instr_w[24:20];
                                     end else if (funct7_w == 7'b0100000) begin
-                                        rd_value = $signed(rs1_data_w) >>> instr_w[24:20];
+                                        rd_value = $unsigned($signed(rs1_data_w) >>> instr_w[24:20]);
                                     end else begin
                                         halt_fire  = 1'b1;
                                         halt_cause = 32'd2;
                                     end
-                                end
-                                default: begin
-                                    halt_fire  = 1'b1;
-                                    halt_cause = 32'd2;
                                 end
                             endcase
                             if (!halt_fire) begin
@@ -599,7 +593,7 @@ module CoreMcu (
                             end
                         end
                         7'b0110011: begin
-                            unique case ({funct7_w, funct3_w})
+                            unique0 case ({funct7_w, funct3_w})
                                 {7'b0000000, 3'b000}: rd_value = rs1_data_w + rs2_data_w;
                                 {7'b0100000, 3'b000}: rd_value = rs1_data_w - rs2_data_w;
                                 {7'b0000001, 3'b000}: rd_value = mul_uu_w[31:0];
@@ -611,7 +605,7 @@ module CoreMcu (
                                 {7'b0000000, 3'b011}: rd_value = (rs1_data_w < rs2_data_w) ? 32'd1 : 32'd0;
                                 {7'b0000000, 3'b100}: rd_value = rs1_data_w ^ rs2_data_w;
                                 {7'b0000000, 3'b101}: rd_value = rs1_data_w >> rs2_data_w[4:0];
-                                {7'b0100000, 3'b101}: rd_value = $signed(rs1_data_w) >>> rs2_data_w[4:0];
+                                {7'b0100000, 3'b101}: rd_value = $unsigned($signed(rs1_data_w) >>> rs2_data_w[4:0]);
                                 {7'b0000000, 3'b110}: rd_value = rs1_data_w | rs2_data_w;
                                 {7'b0000000, 3'b111}: rd_value = rs1_data_w & rs2_data_w;
                                 default: begin
@@ -688,7 +682,7 @@ module CoreMcu (
                                     rd_write_en = 1'b1;
                                     rd_value    = csr_read_data_w;
                                     csr_write_addr = csr_addr_w;
-                                    unique case (funct3_w)
+                                    unique0 case (funct3_w)
                                         3'b001: begin
                                             csr_write_en = 1'b1;
                                             csr_write_value = rs1_data_w;

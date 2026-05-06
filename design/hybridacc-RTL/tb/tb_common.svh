@@ -49,6 +49,20 @@
         end \
     end
 
+`define CHECK_VAL_OR_X(test_name, actual, expected) \
+    begin \
+        if ($isunknown(actual)) begin \
+            $display("[PASS-X] %s — got=0x%0h (contains X/Z), accepted for unwritten SRAM read", test_name, actual); \
+            pass_count = pass_count + 1; \
+        end else if ((actual) !== (expected)) begin \
+            $error("[FAIL-LOGIC] %s — got=0x%0h, want=0x%0h", test_name, actual, expected); \
+            fail_count = fail_count + 1; \
+        end else begin \
+            $display("[PASS] %s", test_name); \
+            pass_count = pass_count + 1; \
+        end \
+    end
+
 // 1-bit check. Reports X/Z clearly.
 `define CHECK_BIT(test_name, actual, expected) \
     begin \

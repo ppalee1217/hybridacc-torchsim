@@ -162,7 +162,7 @@ module AddressGenerateUnit
     // ---------------------------------------------------------------------
     always_comb begin
         cfg_rdata = 32'h0;
-        unique case (cfg_addr)
+        case (cfg_addr)
             AGU_REG_BASE_ADDR:    cfg_rdata = base_addr_reg;
             AGU_REG_BASE_ADDR_H:  cfg_rdata = base_addr_h_reg;
             AGU_REG_ITER01:       cfg_rdata = {iter_reg[1], iter_reg[0]};
@@ -204,7 +204,7 @@ module AddressGenerateUnit
     assign busy      = busy_reg;
     assign done      = done_reg;
     always_comb begin
-        unique case (state_reg)
+        case (state_reg)
             AGU_FSM_IDLE: fsm_state = 2'd0;
             AGU_FSM_RUN:  fsm_state = 2'd1;
             AGU_FSM_DONE: fsm_state = 2'd2;
@@ -226,42 +226,53 @@ module AddressGenerateUnit
         calc_tag = {10'd0, sum[5:0]};
     endfunction
 
-    // Compute next loop indices.
-    task automatic compute_next_loop(
-        input  logic [15:0] cur0, cur1, cur2, cur3,
-        output logic [15:0] nxt0, nxt1, nxt2, nxt3,
-        output logic        all_done
-    );
-        logic [16:0] tmp;
-        nxt0 = cur0; nxt1 = cur1; nxt2 = cur2; nxt3 = cur3;
-        all_done = 1'b0;
+    typedef struct packed {
+        logic [15:0] nxt0;
+        logic [15:0] nxt1;
+        logic [15:0] nxt2;
+        logic [15:0] nxt3;
+        logic        all_done;
+    } loop_next_t;
 
-        tmp = {1'b0, nxt0} + 17'd1;
+    // Compute next loop indices without side effects so it can be used in always_comb.
+    function automatic loop_next_t compute_next_loop(
+        input logic [15:0] cur0, cur1, cur2, cur3
+    );
+        loop_next_t result;
+        logic [16:0] tmp;
+        result.nxt0 = cur0;
+        result.nxt1 = cur1;
+        result.nxt2 = cur2;
+        result.nxt3 = cur3;
+        result.all_done = 1'b0;
+
+        tmp = {1'b0, result.nxt0} + 17'd1;
         if (tmp[15:0] < iter_reg[0]) begin
-            nxt0 = tmp[15:0];
+            result.nxt0 = tmp[15:0];
         end else begin
-            nxt0 = 16'd0;
-            tmp = {1'b0, nxt1} + 17'd1;
+            result.nxt0 = 16'd0;
+            tmp = {1'b0, result.nxt1} + 17'd1;
             if (tmp[15:0] < iter_reg[1]) begin
-                nxt1 = tmp[15:0];
+                result.nxt1 = tmp[15:0];
             end else begin
-                nxt1 = 16'd0;
-                tmp = {1'b0, nxt2} + 17'd1;
+                result.nxt1 = 16'd0;
+                tmp = {1'b0, result.nxt2} + 17'd1;
                 if (tmp[15:0] < iter_reg[2]) begin
-                    nxt2 = tmp[15:0];
+                    result.nxt2 = tmp[15:0];
                 end else begin
-                    nxt2 = 16'd0;
-                    tmp = {1'b0, nxt3} + 17'd1;
+                    result.nxt2 = 16'd0;
+                    tmp = {1'b0, result.nxt3} + 17'd1;
                     if (tmp[15:0] < iter_reg[3]) begin
-                        nxt3 = tmp[15:0];
+                        result.nxt3 = tmp[15:0];
                     end else begin
-                        nxt3 = 16'd0;
-                        all_done = 1'b1;
+                        result.nxt3 = 16'd0;
+                        result.all_done = 1'b1;
                     end
                 end
             end
         end
-    endtask
+        return result;
+    endfunction
 
     // ---------------------------------------------------------------------
     // Main sequential process
@@ -299,11 +310,9 @@ module AddressGenerateUnit
         issue_payload_w               = '0;
         issue_payload_valid_w         = 1'b0;
         if ((state_reg == AGU_FSM_RUN) && ~run_last_issued_reg && s0_ready) begin
-            logic [15:0] nxt0_w, nxt1_w, nxt2_w, nxt3_w;
-            logic        all_done_w;
+            loop_next_t loop_next_w;
 
-            compute_next_loop(idx_reg[0], idx_reg[1], idx_reg[2], idx_reg[3],
-                              nxt0_w, nxt1_w, nxt2_w, nxt3_w, all_done_w);
+            loop_next_w = compute_next_loop(idx_reg[0], idx_reg[1], idx_reg[2], idx_reg[3]);
 
             issue_payload_valid_w = 1'b1;
             issue_payload_w.valid       = 1'b1;
@@ -322,7 +331,7 @@ module AddressGenerateUnit
             issue_payload_w.tag_stride1 = tag_stride1_reg[7:0];
             issue_payload_w.mask        = mask_cfg_reg[15:0];
             issue_payload_w.ultra       = ctrl_reg[AGU_CTRL_ULTRA_BIT];
-            issue_payload_w.last        = all_done_w;
+            issue_payload_w.last        = loop_next_w.all_done;
         end
     end
 
@@ -377,7 +386,7 @@ module AddressGenerateUnit
                              cfg_wdata);
                 end
                 // synopsys translate_on
-                unique case (cfg_addr)
+                case (cfg_addr)
                     AGU_REG_BASE_ADDR:    base_addr_reg   <= cfg_wdata;
                     AGU_REG_BASE_ADDR_H:  base_addr_h_reg <= cfg_wdata;
                     AGU_REG_ITER01: begin
@@ -609,7 +618,7 @@ module AddressGenerateUnit
                     end
 
                     if (src_valid) begin
-                        unique case (src_w.tag_level)
+                        case (src_w.tag_level)
                             2'd0: begin
                                 tag_index_w  = {16'd0, src_w.idx0};
                                 tag_stride_w = {24'd0, src_w.tag_stride0};
@@ -661,15 +670,13 @@ module AddressGenerateUnit
                 // ----- loop counter advance + last-issued tracking -----
                 if (issue_payload_valid_w &&
                     (issue_consumed_by_s1 || (s0_ready && !issue_consumed_by_s1))) begin
-                    logic [15:0] nxt0_w, nxt1_w, nxt2_w, nxt3_w;
-                    logic        all_done_w;
-                    compute_next_loop(idx_reg[0], idx_reg[1], idx_reg[2], idx_reg[3],
-                                      nxt0_w, nxt1_w, nxt2_w, nxt3_w, all_done_w);
-                    idx_reg[0] <= nxt0_w;
-                    idx_reg[1] <= nxt1_w;
-                    idx_reg[2] <= nxt2_w;
-                    idx_reg[3] <= nxt3_w;
-                    if (all_done_w) run_last_issued_reg <= 1'b1;
+                    loop_next_t loop_next_w;
+                    loop_next_w = compute_next_loop(idx_reg[0], idx_reg[1], idx_reg[2], idx_reg[3]);
+                    idx_reg[0] <= loop_next_w.nxt0;
+                    idx_reg[1] <= loop_next_w.nxt1;
+                    idx_reg[2] <= loop_next_w.nxt2;
+                    idx_reg[3] <= loop_next_w.nxt3;
+                    if (loop_next_w.all_done) run_last_issued_reg <= 1'b1;
                 end
 
                 // ----- debug capture -----

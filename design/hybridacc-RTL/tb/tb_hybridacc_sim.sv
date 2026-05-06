@@ -144,6 +144,19 @@ module tb_hybridacc_sim;
     int fail_count = 0;
     int x_fail_count = 0;
 
+`ifdef GATE_SIM
+`ifdef TB_SDF_FILE
+    initial begin
+        $display("[TB] Loading SDF for gate-level simulation: %0s", `TB_SDF_FILE);
+        $sdf_annotate(`TB_SDF_FILE, dut);
+    end
+`else
+    initial begin
+        $display("[TB] GATE_SIM without TB_SDF_FILE define; skipping SDF annotation");
+    end
+`endif
+`endif
+
     tb_clock_reset clk_rst(.clk(clk), .reset_n(reset_n));
 
     HybridAcc #(
@@ -577,13 +590,16 @@ module tb_hybridacc_sim;
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
             last_retire_pc <= 32'h0;
+`ifndef GATE_SIM
         end else if (dut.core_ctrl.mcu_retire_valid_w) begin
             last_retire_pc <= dut.core_ctrl.mcu_retire_pc_w;
+`endif
         end
     end
 
     initial begin
         logic [31:0] rd;
+        logic [31:0] hacc_status;
         logic loader_done;
         logic core_halted;
         logic [31:0] total_tests;
@@ -639,8 +655,13 @@ module tb_hybridacc_sim;
 
         loader_done = 1'b0;
         for (int cycle = 0; cycle < max_loader_cycles; cycle++) begin
+`ifndef GATE_SIM
             @(posedge clk);
             if (dut.core_ctrl.loader_done_w) begin
+`else
+            host_read(HACC_STATUS, hacc_status);
+            if (hacc_status[1]) begin
+`endif
                 loader_done = 1'b1;
                 break;
             end
@@ -656,8 +677,13 @@ module tb_hybridacc_sim;
 
         core_halted = 1'b0;
         for (int cycle = 0; cycle < max_core_cycles; cycle++) begin
+`ifndef GATE_SIM
             @(posedge clk);
             if (dut.core_ctrl.mcu_halted_w) begin
+`else
+            host_read(HACC_STATUS, hacc_status);
+            if (hacc_status[2]) begin
+`endif
                 core_halted = 1'b1;
                 break;
             end
@@ -668,13 +694,29 @@ module tb_hybridacc_sim;
             $finish;
         end
 
+`ifdef GATE_SIM
+        host_read(CORE_PC_SNAPSHOT, rd);
+        last_retire_pc = rd;
+`endif
+
         host_read(CORE_CAUSE_SNAPSHOT, rd);
         `CHECK_VAL("HybridAcc firmware cause snapshot", rd, 32'd3)
 
+    `ifndef GATE_SIM
         total_tests = dsram_word(0);
         pass_tests  = dsram_word(4);
         fail_tests  = dsram_word(8);
         first_fail  = dsram_word(12);
+    `else
+        total_tests = 32'd0;
+        pass_tests  = 32'd0;
+        fail_tests  = 32'd0;
+        first_fail  = 32'd0;
+        if (!skip_fw_test_summary) begin
+            $display("[TB] Forcing SKIP_FW_TEST_SUMMARY behavior in GATE_SIM because dsram debug readback is unavailable");
+        end
+        skip_fw_test_summary = 1'b1;
+    `endif
 
         if (!skip_fw_test_summary) begin
             `CHECK_BIT("HybridAcc firmware total tests nonzero", total_tests != 32'd0, 1'b1)
@@ -698,6 +740,7 @@ module tb_hybridacc_sim;
             $display("[TB] Skipping exact golden compare; use external fp16 comparator for regression verdict");
         end
 
+    `ifndef GATE_SIM
         $display("[TB_RESULT] tb_hybridacc_sim instret=%0d mcycle=%0d last_retire_pc=0x%08x pass_tests=%0d total_tests=%0d fail_tests=%0d first_fail=%0d",
              dut.core_ctrl.core_mcu.instret_reg,
              dut.core_ctrl.core_mcu.cycle_reg,
@@ -706,6 +749,16 @@ module tb_hybridacc_sim;
              total_tests,
              fail_tests,
              first_fail);
+    `else
+        $display("[TB_RESULT] tb_hybridacc_sim instret=%0d mcycle=%0d last_retire_pc=0x%08x pass_tests=%0d total_tests=%0d fail_tests=%0d first_fail=%0d",
+             64'd0,
+             64'd0,
+             last_retire_pc,
+             pass_tests,
+             total_tests,
+             fail_tests,
+             first_fail);
+    `endif
 
         `TB_SUMMARY("tb_hybridacc_sim")
         $finish;

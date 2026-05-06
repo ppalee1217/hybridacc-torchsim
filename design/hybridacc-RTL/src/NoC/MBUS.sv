@@ -77,33 +77,30 @@ module MBUS #(
         logic [NUM_PES-1:0] mask;
         logic command;
         logic [5:0] tag;
+
         mask = '0;
         command = addr[6];
         tag = addr[5:0];
-        for (int i = 0; i < NUM_PES; i++) begin
-            if (!pe_cfg_reg[i].enable) continue;
-            if (command) mask[i] = 1'b1;
-            else begin
-                case (ch)
-                    NOC_CHANNEL_PS:  if (pe_cfg_reg[i].ps_id  == tag) mask[i] = 1'b1;
-                    NOC_CHANNEL_PD:  if (pe_cfg_reg[i].pd_id  == tag) mask[i] = 1'b1;
-                    NOC_CHANNEL_PLI: if (pe_cfg_reg[i].pli_id == tag) mask[i] = 1'b1;
-                    NOC_CHANNEL_PLO: if (pe_cfg_reg[i].plo_id == tag) mask[i] = 1'b1;
-                    default: ;
-                endcase
-            end
+        for (int unsigned i = 0; i < NUM_PES; i++) begin
+            mask[i] = pe_cfg_reg[i].enable && (
+                command ||
+                ((ch === NOC_CHANNEL_PS)  && (pe_cfg_reg[i].ps_id  == tag)) ||
+                ((ch === NOC_CHANNEL_PD)  && (pe_cfg_reg[i].pd_id  == tag)) ||
+                ((ch === NOC_CHANNEL_PLI) && (pe_cfg_reg[i].pli_id == tag)) ||
+                ((ch === NOC_CHANNEL_PLO) && (pe_cfg_reg[i].plo_id == tag))
+            );
         end
         return mask;
     endfunction
 
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
-            for (int i = 0; i < NUM_PES; i++) pe_cfg_reg[i] <= '0;
+            for (int unsigned i = 0; i < NUM_PES; i++) pe_cfg_reg[i] <= '0;
             rx_mask_reg <= '0;
         end else begin
             if (scan_chain_enable) begin
                 pe_cfg_reg[0] <= scan_chain_in;
-                for (int i = 1; i < NUM_PES; i++) pe_cfg_reg[i] <= pe_cfg_reg[i-1];
+                for (int unsigned i = 1; i < NUM_PES; i++) pe_cfg_reg[i] <= pe_cfg_reg[i-1];
             end
             rx_mask_reg <= rx_mask_next;
         end
@@ -131,7 +128,7 @@ module MBUS #(
 
         scan_chain_out = pe_cfg_reg[NUM_PES-1];
 
-        for (int i = 0; i < NUM_PES; i++) begin
+        for (int unsigned i = 0; i < NUM_PES; i++) begin
             router_enable[i] = pe_cfg_reg[i].enable;
             router_mode[i] = pe_cfg_reg[i].route_mode;
             bus_to_pe_ps_req_data[i] = noc_ps_to_bus_req_data;
@@ -151,24 +148,24 @@ module MBUS #(
         mask_plo = calc_mask(noc_plo_to_bus_req_data.addr, NOC_CHANNEL_PLO);
 
         all_ready = 1'b1;
-        for (int i = 0; i < NUM_PES; i++) if (mask_ps[i] && !bus_to_pe_ps_req_ready[i]) all_ready = 1'b0;
+        for (int unsigned i = 0; i < NUM_PES; i++) if (mask_ps[i] && !bus_to_pe_ps_req_ready[i]) all_ready = 1'b0;
         noc_ps_to_bus_req_ready = all_ready;
-        for (int i = 0; i < NUM_PES; i++) bus_to_pe_ps_req_valid[i] = noc_ps_to_bus_req_valid && all_ready && mask_ps[i];
+        for (int unsigned i = 0; i < NUM_PES; i++) bus_to_pe_ps_req_valid[i] = noc_ps_to_bus_req_valid && all_ready && mask_ps[i];
 
         all_ready = 1'b1;
-        for (int i = 0; i < NUM_PES; i++) if (mask_pd[i] && !bus_to_pe_pd_req_ready[i]) all_ready = 1'b0;
+        for (int unsigned i = 0; i < NUM_PES; i++) if (mask_pd[i] && !bus_to_pe_pd_req_ready[i]) all_ready = 1'b0;
         noc_pd_to_bus_req_ready = all_ready;
-        for (int i = 0; i < NUM_PES; i++) bus_to_pe_pd_req_valid[i] = noc_pd_to_bus_req_valid && all_ready && mask_pd[i];
+        for (int unsigned i = 0; i < NUM_PES; i++) bus_to_pe_pd_req_valid[i] = noc_pd_to_bus_req_valid && all_ready && mask_pd[i];
 
         all_ready = 1'b1;
-        for (int i = 0; i < NUM_PES; i++) if (mask_pli[i] && !bus_to_pe_pli_req_ready[i]) all_ready = 1'b0;
+        for (int unsigned i = 0; i < NUM_PES; i++) if (mask_pli[i] && !bus_to_pe_pli_req_ready[i]) all_ready = 1'b0;
         noc_pli_to_bus_req_ready = all_ready;
-        for (int i = 0; i < NUM_PES; i++) bus_to_pe_pli_req_valid[i] = noc_pli_to_bus_req_valid && all_ready && mask_pli[i];
+        for (int unsigned i = 0; i < NUM_PES; i++) bus_to_pe_pli_req_valid[i] = noc_pli_to_bus_req_valid && all_ready && mask_pli[i];
 
         all_ready = 1'b1;
-        for (int i = 0; i < NUM_PES; i++) if (mask_plo[i] && !bus_to_pe_plo_req_ready[i]) all_ready = 1'b0;
+        for (int unsigned i = 0; i < NUM_PES; i++) if (mask_plo[i] && !bus_to_pe_plo_req_ready[i]) all_ready = 1'b0;
         noc_plo_to_bus_req_ready = all_ready;
-        for (int i = 0; i < NUM_PES; i++) bus_to_pe_plo_req_valid[i] = noc_plo_to_bus_req_valid && all_ready && mask_plo[i];
+        for (int unsigned i = 0; i < NUM_PES; i++) bus_to_pe_plo_req_valid[i] = noc_plo_to_bus_req_valid && all_ready && mask_plo[i];
 
         rx_mask_next = rx_mask_reg;
         if (noc_plo_to_bus_req_valid && noc_plo_to_bus_req_ready) rx_mask_next = mask_plo;
@@ -177,7 +174,7 @@ module MBUS #(
         bus_to_noc_plo_resp_data.status = NOC_NOP;
         bus_to_noc_plo_resp_valid = 1'b0;
 
-        for (int i = 0; i < NUM_PES; i++) begin
+        for (int unsigned i = 0; i < NUM_PES; i++) begin
             if (rx_mask_reg[i] && pe_to_bus_plo_resp_valid[i] && !bus_to_noc_plo_resp_valid) begin
                 bus_to_noc_plo_resp_data = pe_to_bus_plo_resp_data[i];
                 bus_to_noc_plo_resp_valid = 1'b1;

@@ -13,9 +13,7 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-import core_pkg::*;
-
-module Isram #(
+module Isram import core_pkg::*; #(
     parameter int unsigned SRAM_BYTES = ISRAM_BYTES
 ) (
     input  logic        clk,
@@ -37,6 +35,7 @@ module Isram #(
     localparam int unsigned MACRO_BYTES      = (MACRO_DATA_WIDTH / 8) * MACRO_DEPTH;
     localparam int unsigned NUM_MACROS       = SRAM_BYTES / MACRO_BYTES;
     localparam int unsigned MACRO_SEL_W      = (NUM_MACROS <= 1) ? 1 : $clog2(NUM_MACROS);
+    localparam int          NUM_MACROS_GEN   = int'(NUM_MACROS);
 
     typedef logic [MACRO_DATA_WIDTH-1:0] macro_word_t;
     typedef logic [MACRO_ADDR_W-1:0]     macro_addr_t;
@@ -48,6 +47,7 @@ module Isram #(
     macro_addr_t sram_addr  [NUM_MACROS];
     macro_word_t sram_d     [NUM_MACROS];
     macro_word_t sram_q     [NUM_MACROS];
+    logic        sram_pudelay_unused [NUM_MACROS];
 
     logic        im_resp_valid_reg;
     logic        im_resp_upper32_reg;
@@ -94,11 +94,11 @@ module Isram #(
         input logic [3:0]  strb
     );
         macro_word_t bweb_word;
-        int lane_lsb;
+        int unsigned lane_lsb;
         begin
             bweb_word = {MACRO_DATA_WIDTH{1'b1}};
-            lane_lsb = byte_addr_upper32(byte_addr) ? 32 : 0;
-            for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
+            lane_lsb = byte_addr_upper32(byte_addr) ? 32'd32 : 32'd0;
+            for (int unsigned byte_idx = 0; byte_idx < 4; byte_idx++) begin
                 if (strb[byte_idx]) begin
                     bweb_word[lane_lsb + byte_idx*8 +: 8] = 8'h00;
                 end
@@ -111,12 +111,21 @@ module Isram #(
     assign mcu_im_resp_valid_o = im_resp_valid_reg;
 
     always_comb begin
+        logic pudelay_sink;
+
+        pudelay_sink = 1'b0;
+        for (int unsigned macro_idx = 0; macro_idx < NUM_MACROS; macro_idx++) begin
+            pudelay_sink ^= sram_pudelay_unused[macro_idx];
+        end
+    end
+
+    always_comb begin
         macro_sel_t  macro_sel;
         macro_addr_t macro_addr;
         macro_word_t macro_data;
         macro_word_t macro_bweb;
 
-        for (int macro_idx = 0; macro_idx < NUM_MACROS; macro_idx++) begin
+        for (int unsigned macro_idx = 0; macro_idx < NUM_MACROS; macro_idx++) begin
             sram_ceb[macro_idx]  = 1'b1;
             sram_web[macro_idx]  = 1'b1;
             sram_bweb[macro_idx] = {MACRO_DATA_WIDTH{1'b1}};
@@ -167,12 +176,12 @@ module Isram #(
     end
 
     generate
-        for (genvar macro = 0; macro < NUM_MACROS; macro++) begin : gen_isram_macro
+        for (genvar macro = 0; macro < NUM_MACROS_GEN; macro++) begin : gen_isram_macro
             TS1N16ADFPCLLLVTA128X64M4SWSHOD u_sram (
                 .SLP    (1'b0),
                 .DSLP   (1'b0),
                 .SD     (1'b0),
-                .PUDELAY(),
+                .PUDELAY(sram_pudelay_unused[macro]),
                 .CLK    (clk),
                 .CEB    (sram_ceb[macro]),
                 .WEB    (sram_web[macro]),
@@ -186,10 +195,12 @@ module Isram #(
         end
     endgenerate
 
+    // synopsys translate_off
     initial begin
         if ((SRAM_BYTES % MACRO_BYTES) != 0) begin
             $error("Isram requires SRAM_BYTES to be a multiple of %0d", MACRO_BYTES);
         end
     end
+    // synopsys translate_on
 
 endmodule

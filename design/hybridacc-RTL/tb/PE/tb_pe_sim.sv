@@ -896,7 +896,8 @@ end
                     dut.exe_m_stage.ps_valid);
                 $display("  LDMA: state=%0d next=%b busy=%b done=%b dl_stall=%b base=%0d off=%0d len=%0d req_type=%0d bcast=%b stride=%0d",
                     dut.exe_m_stage.ldma.state_reg, dut.exe_m_stage.ldma_next,
-                    dut.exe_m_stage.ldma_busy, dut.exe_m_stage.ldma_done,
+                    (dut.exe_m_stage.ldma.state_reg != 0) && (dut.exe_m_stage.ldma.state_reg != 4),
+                    (dut.exe_m_stage.ldma.state_reg == 4),
                     dut.exe_m_stage.ldma_stall,
                     dut.exe_m_stage.ldma.dma_base_reg, dut.exe_m_stage.ldma.dma_offset_reg,
                     dut.exe_m_stage.ldma.dma_len_reg,

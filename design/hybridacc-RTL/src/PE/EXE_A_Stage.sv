@@ -80,6 +80,10 @@ module EXE_A_Stage (
 
     logic             plo_buf_valid_next;
     logic [63:0]      plo_buf_data_next;
+    logic             plo_buf_do_pop_w;
+    logic             plo_buf_can_push_w;
+    logic             plo_buf_produce_w;
+    logic [63:0]      plo_buf_vpsum_data_w;
 
     fp16_t            s1_reg0_next, s1_reg1_next, s2_reg_next;
 
@@ -214,51 +218,52 @@ module EXE_A_Stage (
     // Combinational: PsumRegFile Control
     // =========================================================================
     always_comb begin
-        pe_decode_signals_t pr_decode;
-
-        // Select appropriate decode register based on state
-        if (state_reg == S_VMAC_S1 || state_reg == S_VMAC_S2 || state_reg == S_VMAC_S3)
-            pr_decode = decode_s2_reg;
-        else
-            pr_decode = decode_reg;
-
-        pr_enable         = pr_decode.pr_en;
-        pr_pid            = pr_decode.rid5;
-        pr_use_pcounter   = pr_decode.pr_use_vcounter;
-        pr_clear_regs     = pr_decode.pr_clear_regs;
-        pr_clear_pcounter = pr_decode.sys_rst_pid;
-
-        // PR mode: VMAC=0 (scalar), Normal=1 (vector), otherwise from decode
-        if (state_reg == S_VMAC_S1 || state_reg == S_VMAC_S2 || state_reg == S_VMAC_S3)
-            pr_mode = 32'd0;
-        else if (state_reg == S_NORMAL_MODE)
-            pr_mode = 32'd1;
-        else
-            pr_mode = {31'b0, pr_decode.pr_mode};
-
-        // PR p_in / vp_in
-        pr_p_in  = 16'h0000;
-        pr_vp_in = '0;
-        if (state_reg == S_VMAC_S1 || state_reg == S_VMAC_S2 || state_reg == S_VMAC_S3)
-            pr_p_in = vaddu_result_sig.lanes[3];
-        else if (state_reg == S_NORMAL_MODE)
-            pr_vp_in = vaddu_result_sig;
-
-        // PR write enable
+        pr_enable         = decode_reg.pr_en;
+        pr_pid            = decode_reg.rid5;
+        pr_use_pcounter   = decode_reg.pr_use_vcounter;
+        pr_clear_regs     = decode_reg.pr_clear_regs;
+        pr_clear_pcounter = decode_reg.sys_rst_pid;
+        pr_mode           = {31'b0, decode_reg.pr_mode};
+        pr_p_in           = 16'h0000;
+        pr_vp_in          = '0;
         pr_vpid_write_en = 1'b0;
-        if (state_reg == S_NORMAL_MODE) begin
-            if (decode_reg.pr_write) pr_vpid_write_en = 1'b1;
-        end else if (state_reg == S_VMAC_S1 || state_reg == S_VMAC_S2 || state_reg == S_VMAC_S3) begin
-            if (decode_s2_reg.pr_write) pr_vpid_write_en = 1'b1;
-        end
-
-        // PR incr counter
         pr_incr_pcounter = 1'b0;
-        if (state_reg == S_NORMAL_MODE || state_reg == S_EXEC_PLI_VADDU) begin
-            if (decode_reg.pr_incr_vcounter) pr_incr_pcounter = 1'b1;
-        end else if (state_reg == S_VMAC_S1 || state_reg == S_VMAC_S2 || state_reg == S_VMAC_S3) begin
-            if (decode_s2_reg.pr_incr_vcounter) pr_incr_pcounter = 1'b1;
-        end
+        case (state_reg)
+            S_VMAC_S1, S_VMAC_S2, S_VMAC_S3: begin
+                pr_enable         = decode_s2_reg.pr_en;
+                pr_pid            = decode_s2_reg.rid5;
+                pr_use_pcounter   = decode_s2_reg.pr_use_vcounter;
+                pr_clear_regs     = decode_s2_reg.pr_clear_regs;
+                pr_clear_pcounter = decode_s2_reg.sys_rst_pid;
+                pr_mode           = 32'd0;
+                pr_p_in           = vaddu_result_sig.lanes[3];
+                pr_vpid_write_en  = decode_s2_reg.pr_write;
+                pr_incr_pcounter  = decode_s2_reg.pr_incr_vcounter;
+            end
+            S_NORMAL_MODE: begin
+                pr_mode          = 32'd1;
+                pr_vp_in         = vaddu_result_sig;
+                pr_vpid_write_en = decode_reg.pr_write;
+                pr_incr_pcounter = decode_reg.pr_incr_vcounter;
+            end
+            S_EXEC_PLI_VADDU: begin
+                pr_incr_pcounter = decode_reg.pr_incr_vcounter;
+            end
+            default: begin
+            end
+        endcase
+    end
+
+    // =========================================================================
+    // Combinational: PLO Buffer Next-State
+    // =========================================================================
+    always_comb begin
+        plo_buf_do_pop_w = plo_buf_valid_reg && plo_ready;
+        plo_buf_can_push_w = !plo_buf_valid_reg || plo_ready;
+        plo_buf_produce_w = (state_reg == S_EXEC_PLI_VADDU || state_reg == S_WAIT_PLO) && plo_buf_can_push_w;
+        plo_buf_vpsum_data_w = (state_reg == S_WAIT_PLO)
+            ? v_fp16_to_u64(vaddu_result_reg)
+            : v_fp16_to_u64(vaddu_result_sig);
     end
 
     // =========================================================================
@@ -272,25 +277,14 @@ module EXE_A_Stage (
             plo_buf_valid_next = 1'b0;
             plo_buf_data_next  = 64'd0;
         end else begin
-            logic do_pop, can_push, produce;
-            logic [63:0] vpsum_data;
-
-            do_pop   = plo_buf_valid_reg && plo_ready;
-            can_push = !plo_buf_valid_reg || plo_ready;
-            produce  = (state_reg == S_EXEC_PLI_VADDU || state_reg == S_WAIT_PLO) && can_push;
-
-            vpsum_data = (state_reg == S_WAIT_PLO)
-                ? v_fp16_to_u64(vaddu_result_reg)
-                : v_fp16_to_u64(vaddu_result_sig);
-
-            if (do_pop && !produce) begin
+            if (plo_buf_do_pop_w && !plo_buf_produce_w) begin
                 plo_buf_valid_next = 1'b0;
-            end else if (!do_pop && produce) begin
+            end else if (!plo_buf_do_pop_w && plo_buf_produce_w) begin
                 plo_buf_valid_next = 1'b1;
-                plo_buf_data_next  = vpsum_data;
-            end else if (do_pop && produce) begin
+                plo_buf_data_next  = plo_buf_vpsum_data_w;
+            end else if (plo_buf_do_pop_w && plo_buf_produce_w) begin
                 plo_buf_valid_next = 1'b1;
-                plo_buf_data_next  = vpsum_data;
+                plo_buf_data_next  = plo_buf_vpsum_data_w;
             end
         end
     end
@@ -572,7 +566,6 @@ module EXE_A_Stage (
                     end
                 end
 
-                default: state_next = S_IDLE;
             endcase
         end
     end

@@ -20,9 +20,7 @@
 //   None
 //-----------------------------------------------------------------------------
 import hybridacc_utils_pkg::*;
-import cluster_pkg::*;
-
-module ComputeCluster #(
+module ComputeCluster import cluster_pkg::*; #(
     parameter int unsigned SPM_NUM_NOC_CHANNEL         = 4,
     parameter int unsigned SPM_NUM_BANKS_PER_GROUP     = 3,
     parameter int unsigned SPM_SRAM_BANK_WIDTH_BITS    = 64,
@@ -114,7 +112,6 @@ module ComputeCluster #(
     logic        spm_arb_policy_reg;
     logic        spm_cfg_update_pulse;
     logic        spm_pmu_rst_pulse;
-    logic        spm_drop_noc_resp_sig;
     logic        spm_soft_reset_sig;
     logic [63:0] spm_pmu_cycle_cnt_sig;
     logic [63:0] spm_pmu_port_txn_cnt_sig[SPM_NUM_NOC_CHANNEL];
@@ -195,9 +192,19 @@ module ComputeCluster #(
     logic [63:0] cluster_run_cycles_reg;
     logic [31:0] cmd_stub_reg0;
     logic [31:0] cmd_stub_reg1;
+    logic        noc_quiesced_reg;
 
     wire noc_quiesced_w;
     wire spm_quiesced_w;
+
+    logic [31:0] wr_spm_offset_w;
+    logic [31:0] rd_spm_offset_w;
+    logic [31:0] wr_hddu_offset_w;
+    logic [31:0] rd_hddu_offset_w;
+    logic [31:0] wr_noc_offset_w;
+    logic [31:0] rd_noc_offset_w;
+    logic [31:0] wr_cluster_offset_w;
+    logic [31:0] rd_cluster_offset_w;
 
     function automatic logic in_range(input logic [31:0] addr, input logic [31:0] base, input logic [31:0] size);
         return (addr >= base) && (addr < (base + size));
@@ -206,7 +213,7 @@ module ComputeCluster #(
     function automatic logic [31:0] apply_wstrb(input logic [31:0] current, input logic [31:0] wdata, input logic [3:0] wstrb);
         logic [31:0] merged;
         merged = current;
-        for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
+        for (int unsigned byte_idx = 0; byte_idx < 4; byte_idx++) begin
             if (wstrb[byte_idx]) begin
                 merged[byte_idx*8 +: 8] = wdata[byte_idx*8 +: 8];
             end
@@ -217,7 +224,7 @@ module ComputeCluster #(
     function automatic logic [31:0] compose_noc_cmd(input logic [1:0] action);
         logic [31:0] cmd;
         cmd = 32'h0;
-        unique case (action)
+        unique0 case (action)
             CLUSTER_ACTION_NOC_START: cmd[3:0] = CMD_START_PE;
             CLUSTER_ACTION_NOC_STOP:  cmd[3:0] = CMD_STOP_PE;
             CLUSTER_ACTION_NOC_RESET: cmd[3:0] = CMD_RESET;
@@ -229,7 +236,7 @@ module ComputeCluster #(
     function automatic logic [31:0] spm_readback(input logic [31:0] off);
         logic [31:0] r;
         r = 32'h0;
-        unique case (off)
+        unique0 case (off)
             K_SPM_CFG_MAP:       r = {24'h0, spm_cfg_map_reg};
             K_SPM_ARB_POLICY:    r = {31'h0, spm_arb_policy_reg};
             K_SPM_PMU_CYCLE_LO:  r = spm_pmu_cycle_cnt_sig[31:0];
@@ -239,7 +246,7 @@ module ComputeCluster #(
             K_SPM_PMU_CREDIT_LO: r = spm_pmu_credit_stall_cnt_sig[31:0];
             K_SPM_PMU_CREDIT_HI: r = spm_pmu_credit_stall_cnt_sig[63:32];
             default: begin
-                for (int p = 0; p < SPM_NUM_NOC_CHANNEL; p++) begin
+                for (int unsigned p = 0; p < SPM_NUM_NOC_CHANNEL; p++) begin
                     if (off == (K_SPM_PMU_PORT_BASE + p*8))       r = spm_pmu_port_txn_cnt_sig[p][31:0];
                     if (off == (K_SPM_PMU_PORT_BASE + p*8 + 4))   r = spm_pmu_port_txn_cnt_sig[p][63:32];
                 end
@@ -251,7 +258,7 @@ module ComputeCluster #(
     function automatic logic [31:0] cluster_readback(input logic [31:0] off);
         logic [31:0] r;
         r = 32'h0;
-        unique case (off)
+        unique0 case (off)
             CLUSTER_REG_MODE:       r = ccu_mode_sig;
             CLUSTER_REG_CTRL:       r = 32'h0;
             CLUSTER_REG_STATUS:     r = ccu_status_word_sig;
@@ -298,35 +305,43 @@ module ComputeCluster #(
 
     assign interrupt_o     = power_enable_i && (hddu_interrupt_sig || ccu_done_sticky_sig);
 
-    assign spm_cfg_update_pulse = wr_valid_w && in_range(wr_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE) && ((wr_addr_w - K_CMD_SPM_BASE) == K_SPM_CFG_UPDATE) && wr_data_w[0];
-    assign spm_pmu_rst_pulse    = wr_valid_w && in_range(wr_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE) && ((wr_addr_w - K_CMD_SPM_BASE) == K_SPM_PMU_CTRL) && wr_data_w[0];
+    assign wr_spm_offset_w     = {24'h0, wr_addr_w[7:0]};
+    assign rd_spm_offset_w     = {24'h0, rd_addr_w[7:0]};
+    assign wr_hddu_offset_w    = {20'h0, wr_addr_w[11:0]};
+    assign rd_hddu_offset_w    = {20'h0, rd_addr_w[11:0]};
+    assign wr_noc_offset_w     = {24'h0, wr_addr_w[7:0]};
+    assign rd_noc_offset_w     = {24'h0, rd_addr_w[7:0]};
+    assign wr_cluster_offset_w = {24'h0, wr_addr_w[7:0]};
+    assign rd_cluster_offset_w = {24'h0, rd_addr_w[7:0]};
+
+    assign spm_cfg_update_pulse = wr_valid_w && in_range(wr_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE) && (wr_spm_offset_w == K_SPM_CFG_UPDATE) && wr_data_w[0];
+    assign spm_pmu_rst_pulse    = wr_valid_w && in_range(wr_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE) && (wr_spm_offset_w == K_SPM_PMU_CTRL) && wr_data_w[0];
 
     assign hddu_mmio_write_sig  = wr_valid_w && in_range(wr_addr_w, K_CMD_HDDU_BASE, K_CMD_HDDU_SIZE);
-    assign hddu_mmio_addr_sig   = (wr_valid_w && in_range(wr_addr_w, K_CMD_HDDU_BASE, K_CMD_HDDU_SIZE)) ? (wr_addr_w - K_CMD_HDDU_BASE)
-                              : (rd_valid_w && in_range(rd_addr_w, K_CMD_HDDU_BASE, K_CMD_HDDU_SIZE)) ? (rd_addr_w - K_CMD_HDDU_BASE)
+    assign hddu_mmio_addr_sig   = (wr_valid_w && in_range(wr_addr_w, K_CMD_HDDU_BASE, K_CMD_HDDU_SIZE)) ? wr_hddu_offset_w
+                              : (rd_valid_w && in_range(rd_addr_w, K_CMD_HDDU_BASE, K_CMD_HDDU_SIZE)) ? rd_hddu_offset_w
                               : 32'h0;
     assign hddu_mmio_wdata_sig  = wr_data_w;
 
-    assign ccu_write_mode_sig   = wr_valid_w && in_range(wr_addr_w, K_CMD_CLUSTER_BASE, K_CMD_CLUSTER_SIZE) && ((wr_addr_w - K_CMD_CLUSTER_BASE) == CLUSTER_REG_MODE);
+    assign ccu_write_mode_sig   = wr_valid_w && in_range(wr_addr_w, K_CMD_CLUSTER_BASE, K_CMD_CLUSTER_SIZE) && (wr_cluster_offset_w == CLUSTER_REG_MODE);
     assign ccu_mode_wdata_sig   = wr_data_w;
-    assign ccu_write_ctrl_sig   = wr_valid_w && in_range(wr_addr_w, K_CMD_CLUSTER_BASE, K_CMD_CLUSTER_SIZE) && ((wr_addr_w - K_CMD_CLUSTER_BASE) == CLUSTER_REG_CTRL);
+    assign ccu_write_ctrl_sig   = wr_valid_w && in_range(wr_addr_w, K_CMD_CLUSTER_BASE, K_CMD_CLUSTER_SIZE) && (wr_cluster_offset_w == CLUSTER_REG_CTRL);
     assign ccu_ctrl_wdata_sig   = wr_data_w;
-    assign ccu_write_error_sig  = wr_valid_w && in_range(wr_addr_w, K_CMD_CLUSTER_BASE, K_CMD_CLUSTER_SIZE) && ((wr_addr_w - K_CMD_CLUSTER_BASE) == CLUSTER_REG_ERROR_CODE);
+    assign ccu_write_error_sig  = wr_valid_w && in_range(wr_addr_w, K_CMD_CLUSTER_BASE, K_CMD_CLUSTER_SIZE) && (wr_cluster_offset_w == CLUSTER_REG_ERROR_CODE);
     assign ccu_error_wdata_sig  = wr_data_w;
 
-    assign ccu_notify_direct_start_sig = wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && ((wr_addr_w - K_CMD_NOC_BASE) == K_NOC_CMD_DATA) && (wr_data_w[3:0] == CMD_START_PE);
-    assign ccu_notify_direct_stop_sig  = wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && ((wr_addr_w - K_CMD_NOC_BASE) == K_NOC_CMD_DATA) && (wr_data_w[3:0] == CMD_STOP_PE);
-    assign ccu_notify_direct_reset_sig = wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && ((wr_addr_w - K_CMD_NOC_BASE) == K_NOC_CMD_DATA) && (wr_data_w[3:0] == CMD_RESET);
+    assign ccu_notify_direct_start_sig = wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && (wr_noc_offset_w == K_NOC_CMD_DATA) && (wr_data_w[3:0] == CMD_START_PE);
+    assign ccu_notify_direct_stop_sig  = wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && (wr_noc_offset_w == K_NOC_CMD_DATA) && (wr_data_w[3:0] == CMD_STOP_PE);
+    assign ccu_notify_direct_reset_sig = wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && (wr_noc_offset_w == K_NOC_CMD_DATA) && (wr_data_w[3:0] == CMD_RESET);
 
     assign spm_soft_reset_sig = ccu_spm_soft_reset_sig;
-    assign spm_drop_noc_resp_sig = 1'b0;
 
     assign noc_command_mode_sig = (ccu_noc_action_sig != CLUSTER_ACTION_NONE)
-                               || (wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && ((wr_addr_w - K_CMD_NOC_BASE) == K_NOC_CMD_DATA));
+                               || (wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && (wr_noc_offset_w == K_NOC_CMD_DATA));
     assign noc_command_data_sig = (ccu_noc_action_sig != CLUSTER_ACTION_NONE) ? compose_noc_cmd(ccu_noc_action_sig) : wr_data_w;
     assign hddu_noc_plo_req_data.addr = hddu_noc_plo_addr;
 
-    assign noc_quiesced_w = noc_hw_quiesced_sig;
+    assign noc_quiesced_w = noc_quiesced_reg;
     assign spm_quiesced_w = !(hddu_spm_req_valid_sig[0] || hddu_spm_req_valid_sig[1] || hddu_spm_req_valid_sig[2] || hddu_spm_req_valid_sig[3]
                            || hddu_spm_resp_valid_sig[0] || hddu_spm_resp_valid_sig[1] || hddu_spm_resp_valid_sig[2] || hddu_spm_resp_valid_sig[3]
                            || s_axi_bvalid_sig || s_axi_rvalid_sig);
@@ -347,17 +362,17 @@ module ComputeCluster #(
             end else if (cmd_rd_fire && (rd_addr_w == 32'h0000_0004)) begin
                 rdata = cmd_stub_reg1;
             end else if (in_range(rd_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE)) begin
-                rdata = spm_readback(rd_addr_w - K_CMD_SPM_BASE);
+                rdata = spm_readback(rd_spm_offset_w);
             end else if (in_range(rd_addr_w, K_CMD_HDDU_BASE, K_CMD_HDDU_SIZE)) begin
                 rdata = hddu_mmio_rdata_sig;
             end else if (in_range(rd_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE)) begin
-                if ((rd_addr_w - K_CMD_NOC_BASE) == K_NOC_STATUS) begin
+                if (rd_noc_offset_w == K_NOC_STATUS) begin
                     rdata = noc_status_word(noc_quiesced_w);
                 end else begin
                     rdata = noc_last_cmd_reg;
                 end
             end else if (in_range(rd_addr_w, K_CMD_CLUSTER_BASE, K_CMD_CLUSTER_SIZE)) begin
-                rdata = cluster_readback(rd_addr_w - K_CMD_CLUSTER_BASE);
+                rdata = cluster_readback(rd_cluster_offset_w);
             end else begin
                 err = 1'b1;
             end
@@ -380,7 +395,9 @@ module ComputeCluster #(
             cluster_run_cycles_reg <= 64'h0;
             cmd_stub_reg0        <= 32'hDEAD_BEEF;
             cmd_stub_reg1        <= 32'h0;
+            noc_quiesced_reg     <= 1'b1;
         end else begin
+            noc_quiesced_reg <= noc_hw_quiesced_sig;
             if (cmd_wr_fire && (wr_addr_w == 32'h0000_0000)) begin
                 cmd_stub_reg0 <= wr_data_w;
             end
@@ -388,13 +405,13 @@ module ComputeCluster #(
                 cmd_stub_reg1 <= wr_data_w;
             end
             if (wr_valid_w && in_range(wr_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE)) begin
-                unique case (wr_addr_w - K_CMD_SPM_BASE)
+                unique0 case (wr_spm_offset_w)
                     K_SPM_CFG_MAP:    spm_cfg_map_reg    <= wr_data_w[7:0];
                     K_SPM_ARB_POLICY: spm_arb_policy_reg <= wr_data_w[0];
                     default: ;
                 endcase
             end
-            if (wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && ((wr_addr_w - K_CMD_NOC_BASE) == K_NOC_CMD_DATA)) begin
+            if (wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && (wr_noc_offset_w == K_NOC_CMD_DATA)) begin
                 noc_last_cmd_reg <= wr_data_w;
             end
             if (ccu_layer_active_sig) begin
@@ -449,7 +466,6 @@ module ComputeCluster #(
         .clk(clk),
         .reset_n(local_reset_n),
         .pmu_rst_i(spm_pmu_rst_pulse),
-        .drop_noc_resp_i(spm_drop_noc_resp_sig),
         .soft_reset_i(spm_soft_reset_sig),
         .config_map_i(spm_cfg_map_reg),
         .config_update_i(spm_cfg_update_pulse),
@@ -518,7 +534,7 @@ module ComputeCluster #(
         .noc_plo_in_status(hddu_noc_plo_resp_status),
         .noc_plo_in_valid(hddu_noc_plo_resp_valid),
         .noc_plo_in_ready(hddu_noc_plo_resp_ready),
-        .noc_quiesced_i(noc_hw_quiesced_sig),
+        .noc_quiesced_i(noc_quiesced_w),
         .mmio_addr(hddu_mmio_addr_sig),
         .mmio_write(hddu_mmio_write_sig),
         .mmio_wdata(hddu_mmio_wdata_sig),

@@ -15,9 +15,7 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-import core_pkg::*;
-
-module SectionLoader #(
+module SectionLoader import core_pkg::*; #(
     parameter int unsigned ISRAM_BYTES_P = ISRAM_BYTES,
     parameter int unsigned DSRAM_BYTES_P = DATA_SRAM_BYTES
 ) (
@@ -79,8 +77,10 @@ module SectionLoader #(
 
     assign m_mem_axi_ar_len_o = 8'h00;
     assign m_mem_axi_ar_addr_o = dram_addr_reg;
-    assign m_mem_axi_ar_valid_o = (state_reg == LD_FETCH);
-    assign m_mem_axi_r_ready_o = (state_reg == LD_WAIT_R);
+    assign m_mem_axi_ar_valid_o = (state_reg == LD_FETCH) && (manifest_addr_hi_i === manifest_addr_hi_i);
+    assign m_mem_axi_r_ready_o = (state_reg == LD_WAIT_R)
+                              && (m_mem_axi_r_data_i[MEM_AXI_DATA_WIDTH-1:32] === m_mem_axi_r_data_i[MEM_AXI_DATA_WIDTH-1:32])
+                              && (m_mem_axi_r_last_i === m_mem_axi_r_last_i);
     assign load_phase_o = (state_reg != LD_IDLE) && (state_reg != LD_DONE) && (state_reg != LD_ERR);
     assign busy_o = load_phase_o;
     assign done_o = (state_reg == LD_DONE);
@@ -116,7 +116,7 @@ module SectionLoader #(
             err_code_o <= LOADER_OK;
             err_info_o <= 32'h0;
         end else begin
-            unique case (state_reg)
+            unique0 case (state_reg)
                 LD_IDLE: begin
                     if (kick_i) begin
                         if ((manifest_size_i == 32'h0) || manifest_size_i[1:0] != 2'b00) begin

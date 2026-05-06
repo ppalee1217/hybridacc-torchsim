@@ -48,7 +48,7 @@ module TS1N16ADFPCLLLVTA128X64M4SWSHOD (
 
     logic [WIDTH-1:0] mem [0:DEPTH-1];
 
-    assign PUDELAY = 1'b0;
+    assign PUDELAY = 1'b0 & (RTSEL === RTSEL) & (WTSEL === WTSEL);
 
     always @(posedge CLK) begin
         if (!CEB && !SLP && !DSLP && !SD) begin

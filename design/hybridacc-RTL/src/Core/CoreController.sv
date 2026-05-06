@@ -13,9 +13,7 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-import core_pkg::*;
-
-module CoreController #(
+module CoreController import core_pkg::*; #(
     parameter int unsigned NUM_CLUSTERS = 1,
     parameter int unsigned NUM_NLU = 0
 ) (

@@ -23,14 +23,12 @@ module LDMA (
     input  logic       set_len,
     input  logic       set_loop,
     input  logic       set_mode,
-    input  logic [15:0] mode,
+    input  logic [2:0] mode,
     input  logic       active,
     input  logic       next,
     input  logic       reset_active,
-    output logic       busy,
-    output logic       done,
     output logic       dl_stall_out,
-    output logic [15:0] dm_read_addr,
+    output logic [8:0] dm_read_addr,
     input  logic [63:0] dm_read_data,
     output v_fp16_t    dmrv_out
 );
@@ -102,6 +100,14 @@ module LDMA (
 
     // Next-state combinational logic
     always_comb begin
+        logic [15:0] dma_stride_static_bytes;
+        logic [15:0] dma_stride_bytes;
+        logic [15:0] dma_offset_advance;
+
+        dma_stride_static_bytes = {dma_stride_static_reg[14:0], 1'b0};
+        dma_stride_bytes = {dma_stride_reg[14:0], 1'b0};
+        dma_offset_advance = dma_offset_reg + dma_stride_bytes;
+
         // Default: hold current values
         state_next = state_reg;
         dmrv_next = dmrv_reg;
@@ -125,7 +131,7 @@ module LDMA (
         if (set_loop) dma_loop_static_next = imm;
         if (set_mode) begin
             dma_stride_static_next = imm;
-            case (mode[2:0])
+            case (mode)
                 3'd0: begin request_type_static_next = LOAD_BYTE;  dma_broadcast_static_next = 1'b0; end
                 3'd1: begin request_type_static_next = LOAD_HALF;  dma_broadcast_static_next = 1'b0; end
                 3'd2: begin request_type_static_next = LOAD_WORD;  dma_broadcast_static_next = 1'b0; end
@@ -162,14 +168,14 @@ module LDMA (
                     dma_offset_next = 16'h0;
                     if (dma_len_static_reg == 16'h0) state_next = IDLE;
                     else begin
-                        dma_offset_next = dma_stride_static_reg * 16'd2;
+                        dma_offset_next = dma_stride_static_bytes;
                         state_next = LOAD_WAIT;
                     end
                 end
             end
             LOAD_PRE: begin
                 state_next = LOAD_WAIT;
-                dma_offset_next = dma_offset_reg + dma_stride_reg * 16'd2;
+                dma_offset_next = dma_offset_advance;
             end
             LOAD_WAIT: begin
                 state_next = LOAD_PIPELINE;
@@ -189,7 +195,7 @@ module LDMA (
                         end
                     end else begin
                         state_next = LOAD_PIPELINE;
-                        dma_offset_next = dma_offset_reg + dma_stride_reg * 16'd2;
+                        dma_offset_next = dma_offset_advance;
                         dma_len_next = dma_len_reg - 16'd1;
                     end
                     dmrv_next = u64_to_v_fp16(mask_and_broadcast(dm_read_data, request_type_reg, dma_broadcast_reg));
@@ -241,27 +247,21 @@ module LDMA (
 
     // Output combinational logic
     always_comb begin
-        busy = 1'b0;
-        done = 1'b0;
-        dm_read_addr = dma_base_reg + dma_offset_reg;
+        dm_read_addr = dma_base_reg[8:0] + dma_offset_reg[8:0];
         dmrv_out = dmrv_reg;
         dl_stall_out = 1'b0;
 
         case (state_reg)
             IDLE: begin
                 if (active && (dma_len_static_reg != 16'h0)) begin
-                    busy = 1'b1;
-                    dm_read_addr = dma_base_static_reg;
+                    dm_read_addr = dma_base_static_reg[8:0];
                 end
             end
-            LOAD_PRE, LOAD_WAIT: busy = 1'b1;
             LOAD_PIPELINE: begin
-                busy = 1'b1;
                 if (next) begin
-                    dm_read_addr = dma_base_reg + dma_offset_next;
+                    dm_read_addr = dma_base_reg[8:0] + dma_offset_next[8:0];
                 end
             end
-            DONE: done = 1'b1;
             default: ;
         endcase
     end

@@ -14,9 +14,7 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-import core_pkg::*;
-
-module HybridAcc #(
+module HybridAcc import core_pkg::*; #(
     parameter int unsigned NUM_CLUSTERS = 1
 ) (
     input  logic clk,
@@ -61,6 +59,8 @@ module HybridAcc #(
     input  logic        m_mem_axi_r_last_i,
     output logic        controller_irq_o
 );
+    localparam int NUM_CLUSTERS_GEN = int'(NUM_CLUSTERS);
+
     logic        cl_cmd_req_valid [NUM_CLUSTERS];
     logic        cl_cmd_req_write [NUM_CLUSTERS];
     logic [31:0] cl_cmd_req_addr  [NUM_CLUSTERS];
@@ -214,7 +214,7 @@ module HybridAcc #(
     );
 
     generate
-        for (genvar idx = 0; idx < NUM_CLUSTERS; idx++) begin : gen_clusters
+        for (genvar idx = 0; idx < NUM_CLUSTERS_GEN; idx++) begin : gen_clusters
             ComputeCluster cluster (
                 .clk(clk),
                 .reset_n(reset_n),

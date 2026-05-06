@@ -13,9 +13,7 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-import core_pkg::*;
-
-module DmaEngine (
+module DmaEngine import core_pkg::*; (
     input  logic clk,
     input  logic reset_n,
     input  logic        mmio_req_valid_i,
@@ -124,7 +122,7 @@ module DmaEngine (
     function automatic logic [31:0] read_mmio(input logic [31:0] off);
         logic [31:0] r;
         r = 32'h0;
-        unique case (off)
+        unique0 case (off)
             DMA_CAP0:           r = 32'h0000_0001;
             DMA_STATUS: begin
                 r[0] = (state_reg == DMA_ST_IDLE) || (state_reg == DMA_ST_DONE) || (state_reg == DMA_ST_ERROR);
@@ -194,7 +192,7 @@ module DmaEngine (
         m_cl_axi_ar_valid_o  = 1'b0;
         m_cl_axi_ar_addr_o   = encode_cluster_fabric_addr(src_cluster_id_reg, current_src_addr_reg);
 
-        unique case (state_reg)
+        unique0 case (state_reg)
             DMA_ST_READ_REQ: begin
                 if (src_kind_reg == DMA_EP_DRAM) begin
                     m_mem_axi_ar_valid_o = 1'b1;
@@ -289,7 +287,7 @@ module DmaEngine (
             // synopsys translate_on
 
             if (mmio_req_valid_i && mmio_req_write_i) begin
-                unique case (mmio_req_addr_i)
+                unique0 case (mmio_req_addr_i)
                     DMA_CTRL:           ctrl_reg <= mmio_req_wdata_i;
                     DMA_SRC_KIND:       src_kind_reg <= mmio_req_wdata_i;
                     DMA_DST_KIND:       dst_kind_reg <= mmio_req_wdata_i;
@@ -325,7 +323,7 @@ module DmaEngine (
                 err_info_reg <= 32'h0;
             end
 
-            unique case (state_reg)
+            unique0 case (state_reg)
                 DMA_ST_IDLE: begin
                     mem_aw_sent_reg <= 1'b0;
                     mem_w_sent_reg <= 1'b0;

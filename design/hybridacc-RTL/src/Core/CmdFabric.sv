@@ -13,9 +13,7 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-import core_pkg::*;
-
-module CmdFabric #(
+module CmdFabric import core_pkg::*; #(
     parameter int unsigned NUM_CLUSTERS = 1,
     parameter int unsigned NUM_NLU = 0
 ) (
@@ -106,9 +104,9 @@ module CmdFabric #(
             TARGET_DMA:        return addr - BASE_DMA_MMIO;
             TARGET_TIMER:      return addr - BASE_LOCAL_TIMER;
             TARGET_PLIC:       return addr - BASE_PLIC;
-            TARGET_CLUSTER:    return (addr - BASE_CLUSTER_UNICAST) % CLUSTER_STRIDE;
+            TARGET_CLUSTER:    return {16'h0, addr[15:0]};
             TARGET_CLUSTER_BC: return addr - BASE_CLUSTER_BCAST;
-            TARGET_NLU:        return (addr - BASE_NLU) % NLU_STRIDE;
+            TARGET_NLU:        return {20'h0, addr[11:0]};
             default:           return 32'h0;
         endcase
     endfunction
@@ -121,10 +119,20 @@ module CmdFabric #(
         endcase
     endfunction
 
+    function automatic logic cluster_mask_selected(input int unsigned idx);
+        if (idx < 32) begin
+            return cluster_mask_lo_i[idx];
+        end
+        if (idx < 64) begin
+            return cluster_mask_hi_i[idx - 32];
+        end
+        return 1'b0;
+    endfunction
+
     function automatic logic [31:0] read_local_ctrl(input logic [31:0] off);
         logic [31:0] r;
         r = 32'h0;
-        unique case (off)
+        unique0 case (off)
             LOCAL_CLUSTER_MASK_LO: r = cluster_mask_lo_i;
             LOCAL_CLUSTER_MASK_HI: r = cluster_mask_hi_i;
             LOCAL_MMIO_ERR_STATUS: r = mmio_err_status_reg;
@@ -170,7 +178,7 @@ module CmdFabric #(
         timer_mmio_req_addr_o  = req_offset_w;
         timer_mmio_req_wdata_o = req_wdata_w;
 
-        for (int idx = 0; idx < NUM_CLUSTERS; idx++) begin
+        for (int unsigned idx = 0; idx < NUM_CLUSTERS; idx++) begin
             cl_cmd_req_valid_o[idx] = 1'b0;
             cl_cmd_req_write_o[idx] = req_write_w;
             cl_cmd_req_addr_o[idx]  = req_offset_w;
@@ -178,7 +186,7 @@ module CmdFabric #(
             cl_cmd_req_wstrb_o[idx] = req_wstrb_w;
         end
 
-        for (int idx = 0; idx < (NUM_NLU > 0 ? NUM_NLU : 1); idx++) begin
+        for (int unsigned idx = 0; idx < (NUM_NLU > 0 ? NUM_NLU : 1); idx++) begin
             nlu_cmd_req_valid_o[idx] = 1'b0;
             nlu_cmd_req_write_o[idx] = req_write_w;
             nlu_cmd_req_addr_o[idx]  = req_offset_w;
@@ -186,7 +194,7 @@ module CmdFabric #(
         end
 
         if (request_fire_w) begin
-            unique case (req_target_w)
+            unique0 case (req_target_w)
                 TARGET_LOCAL_CTRL: begin
                     core_mmio_resp_valid_o = 1'b1;
                     core_mmio_resp_rdata_o = read_local_ctrl(req_offset_w);
@@ -217,14 +225,14 @@ module CmdFabric #(
                 end
                 TARGET_CLUSTER_BC: begin
                     core_mmio_resp_valid_o = req_write_w;
-                    for (int idx = 0; idx < NUM_CLUSTERS; idx++) begin
-                        if ((idx < 32 && cluster_mask_lo_i[idx]) || (idx >= 32 && cluster_mask_hi_i[idx - 32])) begin
+                    for (int unsigned idx = 0; idx < NUM_CLUSTERS; idx++) begin
+                        if (cluster_mask_selected(idx)) begin
                             cl_cmd_req_valid_o[idx] = 1'b1;
                         end
                     end
                     if (!req_write_w) begin
-                        for (int idx = 0; idx < NUM_CLUSTERS; idx++) begin
-                            if (((idx < 32 && cluster_mask_lo_i[idx]) || (idx >= 32 && cluster_mask_hi_i[idx - 32])) && cl_cmd_resp_valid_i[idx]) begin
+                        for (int unsigned idx = 0; idx < NUM_CLUSTERS; idx++) begin
+                            if (cluster_mask_selected(idx) && cl_cmd_resp_valid_i[idx]) begin
                                 core_mmio_resp_valid_o = 1'b1;
                                 core_mmio_resp_rdata_o = cl_cmd_resp_rdata_i[idx];
                             end
@@ -244,7 +252,7 @@ module CmdFabric #(
                 end
             endcase
         end else if (pending_valid_reg) begin
-            unique case (pending_target_reg)
+            unique0 case (pending_target_reg)
                 TARGET_DMA: begin
                     core_mmio_resp_valid_o = dma_mmio_resp_valid_i;
                     core_mmio_resp_rdata_o = dma_mmio_resp_rdata_i;
@@ -271,8 +279,8 @@ module CmdFabric #(
                     end
                 end
                 TARGET_CLUSTER_BC: begin
-                    for (int idx = 0; idx < NUM_CLUSTERS; idx++) begin
-                        if ((idx < 32 && cluster_mask_lo_i[idx]) || (idx >= 32 && cluster_mask_hi_i[idx - 32])) begin
+                    for (int unsigned idx = 0; idx < NUM_CLUSTERS; idx++) begin
+                        if (cluster_mask_selected(idx)) begin
                             cl_cmd_req_valid_o[idx] = 1'b1;
                             cl_cmd_req_write_o[idx] = pending_write_reg;
                             cl_cmd_req_addr_o[idx]  = pending_addr_reg;
@@ -280,8 +288,8 @@ module CmdFabric #(
                             cl_cmd_req_wstrb_o[idx] = 4'h0;
                         end
                     end
-                    for (int idx = 0; idx < NUM_CLUSTERS; idx++) begin
-                        if (((idx < 32 && cluster_mask_lo_i[idx]) || (idx >= 32 && cluster_mask_hi_i[idx - 32])) && cl_cmd_resp_valid_i[idx]) begin
+                    for (int unsigned idx = 0; idx < NUM_CLUSTERS; idx++) begin
+                        if (cluster_mask_selected(idx) && cl_cmd_resp_valid_i[idx]) begin
                             core_mmio_resp_valid_o = 1'b1;
                             core_mmio_resp_rdata_o = cl_cmd_resp_rdata_i[idx];
                         end

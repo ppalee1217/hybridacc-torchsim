@@ -19,9 +19,7 @@
 //   None
 //-----------------------------------------------------------------------------
 import hybridacc_utils_pkg::*;
-import cluster_pkg::*;
-
-module HybridDataDeliverUnit #(
+module HybridDataDeliverUnit import cluster_pkg::*; #(
     parameter int unsigned SPM_ADDR_BITS = 32,
     parameter int unsigned NOC_TAG_BITS  = 6,
     parameter int unsigned DATA_BITS     = 192
@@ -75,6 +73,7 @@ module HybridDataDeliverUnit #(
     localparam int unsigned NUM_SEND_PLANES = 3;
     localparam int unsigned RECV_PLANE      = 3;
     localparam int unsigned DATA_BYTES      = DATA_BITS / 8;
+    localparam int          NUM_AGU_GEN     = int'(NUM_AGU);
 
     localparam logic [31:0] MMIO_AGU_BASE        = 32'h0000_0000;
     localparam logic [31:0] MMIO_AGU_BANK_STRIDE = 32'h0000_0100;
@@ -146,10 +145,12 @@ module HybridDataDeliverUnit #(
 
     genvar g;
     generate
-        for (g = 0; g < NUM_AGU; g++) begin : gen_agu
-            AddressGenerateUnit #(
+        for (g = 0; g < NUM_AGU_GEN; g++) begin : gen_agu
+            AddressGenerateUnit
+            #(
                 .AGU_INDEX(g)
-            ) agu (
+            )
+            agu (
                 .clk(clk),
                 .reset_n(reset_n),
                 .cfg_write(agu_cfg_write_sig[g]),
@@ -184,7 +185,7 @@ module HybridDataDeliverUnit #(
         agu_bank    = mmio_addr[9:8];
         agu_subaddr = mmio_addr[7:0];
 
-        for (int i = 0; i < NUM_AGU; i++) begin
+        for (int unsigned i = 0; i < NUM_AGU; i++) begin
             agu_cfg_write_sig[i] = mmio_write && is_agu_bank && (agu_bank == i[1:0]);
             agu_cfg_addr_sig[i]  = (is_agu_bank && (agu_bank == i[1:0])) ? agu_subaddr : 8'h00;
             agu_cfg_wdata_sig[i] = mmio_wdata;
@@ -204,7 +205,7 @@ module HybridDataDeliverUnit #(
         if (is_agu_bank) begin
             mmio_rdata = agu_cfg_rdata_sig[agu_bank];
         end else begin
-            unique case (mmio_addr)
+            unique0 case (mmio_addr)
                 MMIO_GLOBAL_CTRL:           mmio_rdata = global_ctrl_reg;
                 MMIO_GLOBAL_STATUS:         mmio_rdata = status_word;
                 MMIO_GLOBAL_PLANE_EN:       mmio_rdata = plane_en_reg;
@@ -228,19 +229,20 @@ module HybridDataDeliverUnit #(
     // Combinational datapath wiring.
     // ---------------------------------------------------------------------
     always_comb begin
-        for (int i = 0; i < 4; i++) begin
+        for (int unsigned i = 0; i < 4; i++) begin
             spm_req_valid[i]   = 1'b0;
             spm_req_payload[i] = '0;
             spm_resp_ready[i]  = 1'b0;
         end
 
-        for (int i = 0; i < NUM_SEND_PLANES; i++) begin
+        for (int unsigned i = 0; i < NUM_SEND_PLANES; i++) begin
             agu_gen_ready_sig[i] = plane_en_reg[i]
                                  && !send_wait_valid_reg[i]
                                  && !send_hold_valid_reg[i]
                                  && spm_req_ready[i];
 
-            spm_req_valid[i]              = plane_en_reg[i] && agu_gen_valid_sig[i] && agu_gen_ready_sig[i];
+            spm_req_valid[i]              = plane_en_reg[i] && agu_gen_valid_sig[i]
+                                         && !send_wait_valid_reg[i] && !send_hold_valid_reg[i];
             spm_req_payload[i].addr       = agu_gen_addr_sig[i];
             spm_req_payload[i].wdata      = '0;
             spm_req_payload[i].wen        = 1'b0;
@@ -270,7 +272,7 @@ module HybridDataDeliverUnit #(
         noc_plo_in_ready  = plane_en_reg[RECV_PLANE] && recv_addr_pending_reg && spm_req_ready[RECV_PLANE];
         spm_resp_ready[RECV_PLANE] = plane_en_reg[RECV_PLANE];
 
-        spm_req_valid[RECV_PLANE]          = noc_plo_in_valid && noc_plo_in_ready && (noc_plo_in_status == NOC_OK);
+        spm_req_valid[RECV_PLANE]          = noc_plo_in_valid && (noc_plo_in_status == NOC_OK);
         spm_req_payload[RECV_PLANE].addr   = recv_write_addr_reg;
         spm_req_payload[RECV_PLANE].wdata  = noc_plo_in_data;
         spm_req_payload[RECV_PLANE].wen    = 1'b1;
@@ -298,7 +300,7 @@ module HybridDataDeliverUnit #(
             done_pending_reg   <= 1'b0;
             recv_addr_pending_reg <= 1'b0;
             recv_write_addr_reg   <= '0;
-            for (int i = 0; i < NUM_SEND_PLANES; i++) begin
+            for (int unsigned i = 0; i < NUM_SEND_PLANES; i++) begin
                 send_wait_valid_reg[i] <= 1'b0;
                 send_wait_addr_reg[i]  <= 16'h0;
                 send_wait_mask_reg[i]  <= 64'h0;
@@ -318,7 +320,7 @@ module HybridDataDeliverUnit #(
                         err_code_reg    <= 32'h0;
                     end
                     if (mmio_wdata[CTRL_SOFT_RESET]) begin
-                        for (int i = 0; i < NUM_SEND_PLANES; i++) begin
+                        for (int unsigned i = 0; i < NUM_SEND_PLANES; i++) begin
                             send_wait_valid_reg[i] <= 1'b0;
                             send_hold_valid_reg[i] <= 1'b0;
                         end
@@ -339,7 +341,7 @@ module HybridDataDeliverUnit #(
             end
 
             // Send plane: AGU -> SPM request handshake
-            for (int i = 0; i < NUM_SEND_PLANES; i++) begin
+            for (int unsigned i = 0; i < NUM_SEND_PLANES; i++) begin
                 if (plane_en_reg[i] && agu_gen_valid_sig[i] && agu_gen_ready_sig[i]) begin
                     send_wait_valid_reg[i] <= 1'b1;
                     send_wait_addr_reg[i]  <= {9'd0, agu_gen_ultra_sig[i], agu_gen_tag_sig[i][5:0]};
@@ -436,7 +438,7 @@ module HybridDataDeliverUnit #(
             end
 
             if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
-                for (int i = 0; i < NUM_SEND_PLANES; i++) begin
+                for (int unsigned i = 0; i < NUM_SEND_PLANES; i++) begin
                     logic noc_ready;
 
                     noc_ready = (i == 0) ? noc_ps_out_ready
@@ -513,10 +515,12 @@ module HybridDataDeliverUnit #(
     end
     // synopsys translate_on
 
+    // synopsys translate_off
     initial begin
         if ((SPM_ADDR_BITS != CLUSTER_ADDR_WIDTH) || (DATA_BITS != CLUSTER_DATA_WIDTH) || (NOC_TAG_BITS != 6)) begin
             $error("HybridDataDeliverUnit baseline currently supports SPM_ADDR_BITS=32, DATA_BITS=192, NOC_TAG_BITS=6 only");
         end
     end
+    // synopsys translate_on
 
 endmodule
