@@ -141,17 +141,17 @@ module CoreController #(
 
     logic        mcu_if_valid_w;
     logic [31:0] mcu_if_addr_w;
+    logic        mcu_if_resp_valid_w;
     logic [31:0] isram_rdata_w;
-    logic [31:0] isram_ls_rdata_w;
     logic        mcu_ls_valid_w;
     logic        mcu_ls_write_w;
     logic [31:0] mcu_ls_addr_w;
     logic [31:0] mcu_ls_wdata_w;
     logic [3:0]  mcu_ls_wstrb_w;
+    logic        mcu_ls_resp_valid_w;
     logic [31:0] dsram_rdata_w;
-    logic [31:0] mcu_ls_rdata_w;
-    logic        mcu_ls_is_isram_w;
     logic        mcu_ls_is_dsram_w;
+    logic        dsram_resp_valid_w;
     logic        mcu_mmio_valid_w;
     logic        mcu_mmio_write_w;
     logic [31:0] mcu_mmio_addr_w;
@@ -261,9 +261,8 @@ module CoreController #(
     assign m_mem_axi_ar_len_o   = loader_busy_w ? loader_mem_ar_len_w   : dma_mem_ar_len_w;
     assign m_mem_axi_r_ready_o  = loader_busy_w ? loader_mem_r_ready_w  : dma_mem_r_ready_w;
 
-    assign mcu_ls_is_isram_w = (mcu_ls_addr_w >= BASE_INST_RAM) && (mcu_ls_addr_w <= END_INST_RAM);
     assign mcu_ls_is_dsram_w = (mcu_ls_addr_w >= BASE_DATA_RAM) && (mcu_ls_addr_w <= END_DATA_RAM);
-    assign mcu_ls_rdata_w = mcu_ls_is_isram_w ? isram_ls_rdata_w : dsram_rdata_w;
+    assign mcu_ls_resp_valid_w = dsram_resp_valid_w;
 
     assign loader_mem_ar_ready_w = loader_busy_w ? m_mem_axi_ar_ready_i : 1'b0;
     assign loader_mem_r_valid_w  = loader_busy_w ? m_mem_axi_r_valid_i  : 1'b0;
@@ -366,10 +365,8 @@ module CoreController #(
         .reset_n(reset_n),
         .mcu_im_valid_i(mcu_if_valid_w),
         .mcu_im_addr_i(mcu_if_addr_w),
+        .mcu_im_resp_valid_o(mcu_if_resp_valid_w),
         .mcu_im_rdata_o(isram_rdata_w),
-        .mcu_dm_valid_i(mcu_ls_valid_w && !mcu_ls_write_w && mcu_ls_is_isram_w),
-        .mcu_dm_addr_i(mcu_ls_addr_w - BASE_INST_RAM),
-        .mcu_dm_rdata_o(isram_ls_rdata_w),
         .loader_wr_valid_i(loader_isram_wr_en_w),
         .loader_wr_addr_i(loader_isram_wr_addr_w),
         .loader_wr_data_i(loader_isram_wr_data_w),
@@ -386,6 +383,7 @@ module CoreController #(
         .mcu_dm_addr_i(mcu_ls_addr_w - BASE_DATA_RAM),
         .mcu_dm_wdata_i(mcu_ls_wdata_w),
         .mcu_dm_wstrb_i(mcu_ls_wstrb_w),
+        .mcu_dm_resp_valid_o(dsram_resp_valid_w),
         .mcu_dm_rdata_o(dsram_rdata_w),
         .loader_wr_valid_i(loader_dsram_wr_en_w),
         .loader_wr_addr_i(loader_dsram_wr_addr_w),
@@ -403,13 +401,15 @@ module CoreController #(
         .core_haltreq_i(boot_core_haltreq_w),
         .if_req_valid_o(mcu_if_valid_w),
         .if_addr_o(mcu_if_addr_w),
+        .if_resp_valid_i(mcu_if_resp_valid_w),
         .if_rdata_i(isram_rdata_w),
         .ls_req_valid_o(mcu_ls_valid_w),
         .ls_req_write_o(mcu_ls_write_w),
         .ls_req_addr_o(mcu_ls_addr_w),
         .ls_req_wdata_o(mcu_ls_wdata_w),
         .ls_req_wstrb_o(mcu_ls_wstrb_w),
-        .ls_resp_rdata_i(mcu_ls_rdata_w),
+        .ls_resp_valid_i(mcu_ls_resp_valid_w),
+        .ls_resp_rdata_i(dsram_rdata_w),
         .mmio_req_valid_o(mcu_mmio_valid_w),
         .mmio_req_write_o(mcu_mmio_write_w),
         .mmio_req_addr_o(mcu_mmio_addr_w),

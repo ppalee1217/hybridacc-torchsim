@@ -4,6 +4,10 @@
 #        or set MOD_NAME before sourcing this script
 # ============================================================================
 
+set script_dir [file dirname [file normalize [info script]]]
+source [file join $script_dir syn_common.tcl]
+hacc_init_run_config
+
 if {![info exists MOD_NAME]} {
     puts "ERROR: MOD_NAME not set. Use: dc_shell -x \"set MOD_NAME <name>\" -f synthesis_noc_units.tcl"
     exit 1
@@ -13,13 +17,17 @@ if {![info exists MOD_NAME]} {
 # Module source file mapping
 # ============================================================================
 set pkg_file "../src/hybridacc_utils_pkg.sv"
+set sram_wrapper "../src/utils/SRAM_Wrapper.sv"
+set networkonchip_srcs [list $sram_wrapper ../src/FIFO.sv ../src/asyncFIFO.sv ../src/PE/InstructionMemory.sv ../src/PE/Decoder.sv ../src/PE/LoopController.sv ../src/PE/DataMemory.sv ../src/PE/TransformRegFile.sv ../src/PE/PsumRegFile.sv ../src/PE/VMULU.sv ../src/PE/VADDU.sv ../src/PE/LDMA.sv ../src/PE/SDMA.sv ../src/PE/PErouter.sv ../src/PE/IF_ID_Stage.sv ../src/PE/EXE_M_Stage.sv ../src/PE/EXE_A_Stage.sv ../src/PE/ProcessElement.sv ../src/NoC/MBUS.sv ../src/NoC/NoCRouter.sv ../src/NetworkOnChip.sv]
 
 # Source files required for each module (in dependency order)
 array set MOD_SRCS {
     MBUS              {../src/NoC/MBUS.sv}
     NoCRouter         {../src/NoC/NoCRouter.sv}
-    NetworkOnChip     {../src/FIFO.sv ../src/asyncFIFO.sv ../src/PE/InstructionMemory.sv ../src/PE/Decoder.sv ../src/PE/LoopController.sv ../src/PE/DataMemory.sv ../src/PE/TransformRegFile.sv ../src/PE/PsumRegFile.sv ../src/PE/VMULU.sv ../src/PE/VADDU.sv ../src/PE/LDMA.sv ../src/PE/SDMA.sv ../src/PE/PErouter.sv ../src/PE/IF_ID_Stage.sv ../src/PE/EXE_M_Stage.sv ../src/PE/EXE_A_Stage.sv ../src/PE/ProcessElement.sv ../src/NoC/MBUS.sv ../src/NoC/NoCRouter.sv ../src/NetworkOnChip.sv}
+    NetworkOnChip     {}
 }
+
+set MOD_SRCS(NetworkOnChip) $networkonchip_srcs
 
 # All NoC modules need the utility package
 set MOD_NEEDS_PKG {MBUS NoCRouter NetworkOnChip}
@@ -44,15 +52,15 @@ if {![info exists MOD_SRCS($MOD_NAME)]} {
 
 puts "============================================================"
 puts " Synthesizing NoC unit: $MOD_NAME"
+hacc_print_run_context "NoC unit" $MOD_NAME
 puts "============================================================"
 
 # ============================================================================
 # Read source files
 # ============================================================================
-if {[lsearch -exact $MOD_NEEDS_PKG $MOD_NAME] >= 0} {
-    analyze -format sverilog $pkg_file
-}
-
+set output_dirs [hacc_prepare_output_dirs $MOD_NAME]
+set rpt_dir [lindex $output_dirs 0]
+set syn_dir [lindex $output_dirs 1]
 foreach src $MOD_SRCS($MOD_NAME) {
     analyze -format sverilog $src
 }

@@ -82,7 +82,6 @@ module CmdFabric #(
     logic [31:0] last_target_id_reg;
     logic [31:0] last_fault_addr_reg;
     logic [31:0] last_fault_info_reg;
-    logic [31:0] boot_reason_reg;
 
     logic pending_valid_reg;
     target_e pending_target_reg;
@@ -132,7 +131,7 @@ module CmdFabric #(
             LOCAL_LAST_TARGET_ID:  r = last_target_id_reg;
             LOCAL_LAST_FAULT_ADDR: r = last_fault_addr_reg;
             LOCAL_LAST_FAULT_INFO: r = last_fault_info_reg;
-            LOCAL_BOOT_REASON:     r = boot_reason_reg;
+            LOCAL_BOOT_REASON:     r = 32'h0;
             LOCAL_FABRIC_CAP0:     r = 32'h0000_0003;
             default:               r = 32'h0;
         endcase
@@ -310,7 +309,6 @@ module CmdFabric #(
             last_target_id_reg   <= 32'h0;
             last_fault_addr_reg  <= 32'h0;
             last_fault_info_reg  <= 32'h0;
-            boot_reason_reg      <= 32'h0;
             pending_valid_reg    <= 1'b0;
             pending_target_reg   <= TARGET_LOCAL_CTRL;
             pending_addr_reg     <= 32'h0;

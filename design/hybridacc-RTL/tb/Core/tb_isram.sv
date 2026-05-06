@@ -13,10 +13,8 @@ module tb_isram;
     logic clk, reset_n;
     logic        mcu_im_valid_i;
     logic [31:0] mcu_im_addr_i;
+    logic        mcu_im_resp_valid_o;
     logic [31:0] mcu_im_rdata_o;
-    logic        mcu_dm_valid_i;
-    logic [31:0] mcu_dm_addr_i;
-    logic [31:0] mcu_dm_rdata_o;
     logic        loader_wr_valid_i;
     logic [31:0] loader_wr_addr_i;
     logic [31:0] loader_wr_data_i;
@@ -35,10 +33,8 @@ module tb_isram;
         .reset_n(reset_n),
         .mcu_im_valid_i(mcu_im_valid_i),
         .mcu_im_addr_i(mcu_im_addr_i),
+        .mcu_im_resp_valid_o(mcu_im_resp_valid_o),
         .mcu_im_rdata_o(mcu_im_rdata_o),
-        .mcu_dm_valid_i(mcu_dm_valid_i),
-        .mcu_dm_addr_i(mcu_dm_addr_i),
-        .mcu_dm_rdata_o(mcu_dm_rdata_o),
         .loader_wr_valid_i(loader_wr_valid_i),
         .loader_wr_addr_i(loader_wr_addr_i),
         .loader_wr_data_i(loader_wr_data_i),
@@ -73,32 +69,18 @@ module tb_isram;
             @(negedge clk);
             mcu_im_addr_i  = addr;
             mcu_im_valid_i = 1'b1;
+            @(posedge clk);
             #(`TB_SETTLE);
+            `CHECK_BIT({test_name, " valid"}, mcu_im_resp_valid_o, 1'b1)
             `CHECK_VAL(test_name, mcu_im_rdata_o, expected)
-            mcu_im_valid_i = 1'b0;
-        end
-    endtask
-
-    task automatic check_dm(
-        input logic [31:0] addr,
-        input logic [31:0] expected,
-        input string       test_name
-    );
-        begin
             @(negedge clk);
-            mcu_dm_addr_i  = addr;
-            mcu_dm_valid_i = 1'b1;
-            #(`TB_SETTLE);
-            `CHECK_VAL(test_name, mcu_dm_rdata_o, expected)
-            mcu_dm_valid_i = 1'b0;
+            mcu_im_valid_i = 1'b0;
         end
     endtask
 
     initial begin
         mcu_im_valid_i = 1'b0;
         mcu_im_addr_i = '0;
-        mcu_dm_valid_i = 1'b0;
-        mcu_dm_addr_i = '0;
         loader_wr_valid_i = 1'b0;
         loader_wr_addr_i = '0;
         loader_wr_data_i = '0;
@@ -121,8 +103,8 @@ module tb_isram;
 
         check_im(32'h0000_0000, 32'h1122_3344, "Isram instruction read word0");
         check_im(32'h0000_0004, 32'hAABB_CCDD, "Isram instruction read word1");
-        check_dm(32'h0000_0008, 32'h0000_EEFF, "Isram data read partial word");
-        check_dm(32'h0000_0400, 32'h5566_7788, "Isram macro-boundary read");
+        check_im(32'h0000_0008, 32'h0000_EEFF, "Isram partial loader word");
+        check_im(32'h0000_0400, 32'h5566_7788, "Isram macro-boundary read");
 
         `TB_SUMMARY("tb_isram")
         $finish;

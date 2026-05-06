@@ -74,7 +74,6 @@ module AddressGenerateUnit
 
     logic        busy_reg;
     logic        done_reg;
-    logic        error_reg;
     logic        stalled_reg;
 
     agu_fsm_e    state_reg;
@@ -175,11 +174,11 @@ module AddressGenerateUnit
             AGU_REG_CTRL:         cfg_rdata = ctrl_reg;
             AGU_REG_STATUS: begin
                 cfg_rdata = 32'h0;
-                cfg_rdata[STATUS_IDLE]     = ~busy_reg & ~done_reg & ~error_reg;
+                cfg_rdata[STATUS_IDLE]     = ~busy_reg & ~done_reg;
                 cfg_rdata[STATUS_BUSY]     = busy_reg;
                 cfg_rdata[STATUS_DONE]     = done_reg;
                 cfg_rdata[STATUS_QUIESCED] = ~busy_reg & ~stalled_reg;
-                cfg_rdata[STATUS_ERROR]    = error_reg;
+                cfg_rdata[STATUS_ERROR]    = 1'b0;
             end
             AGU_REG_LANE_CFG:     cfg_rdata = lane_cfg_reg;
             AGU_REG_TAG_BASE:     cfg_rdata = tag_base_reg;
@@ -350,7 +349,6 @@ module AddressGenerateUnit
 
             busy_reg          <= 1'b0;
             done_reg          <= 1'b0;
-            error_reg         <= 1'b0;
             stalled_reg       <= 1'b0;
 
             state_reg         <= AGU_FSM_IDLE;

@@ -23,7 +23,6 @@
 `include "../../src/PE/PErouter.sv"
 `include "../../src/PE/PsumRegFile.sv"
 `include "../../src/PE/SDMA.sv"
-`include "../../src/PE/SRAM_SP_BWEB.sv"
 `include "../../src/PE/TransformRegFile.sv"
 `include "../../src/PE/VADDU.sv"
 `include "../../src/PE/VMULU.sv"

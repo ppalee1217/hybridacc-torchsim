@@ -6,16 +6,18 @@
 // Project Name:  HybridAcc
 // Target Devices: ASIC
 // Tool Versions: Synopsys VCS W-2024.09-SP1
-// Description:   Behavioral simulation model for TSMC TS1N16ADFPCLLLVTA128X64M4SWSHOD
-//                128-word × 64-bit single-port SRAM with per-bit write enable.
-//                For simulation: compile this file when foundry Verilog model
-//                  (N16ADFP_SRAM_100a.v) is not available.
-//                For synthesis: use the foundry .db timing library instead.
+// Description:   Shared behavioral simulation model for
+//                TSMC TS1N16ADFPCLLLVTA128X64M4SWSHOD.
+//                For pre-sim: compile or include this file when the foundry
+//                  Verilog model (N16ADFP_SRAM_100a.v) is not available.
+//                For synthesis / gate sim: use the foundry .db / .v model
+//                  instead; this file is skipped by TSMC_SRAM_MODEL_LOADED.
 // Dependencies:  None
 // Revision:
 //   2026/03/29 - Initial version
+//   2026/04/29 - Moved from src/PE to src/utils for shared SRAM use
 // Additional Comments:
-//   Port-compatible with TSMC foundry model. Power/test pins are accepted
+//   Port-compatible with the TSMC foundry model. Power/test pins are accepted
 //   but ignored in this behavioral model.
 //-----------------------------------------------------------------------------
 
@@ -44,28 +46,23 @@ module TS1N16ADFPCLLLVTA128X64M4SWSHOD (
     localparam int unsigned DEPTH = 128;
     localparam int unsigned WIDTH = 64;
 
-    // ---- Behavioral memory array ----
     logic [WIDTH-1:0] mem [0:DEPTH-1];
 
-    // PUDELAY is not modeled — tie low
     assign PUDELAY = 1'b0;
 
     always @(posedge CLK) begin
         if (!CEB && !SLP && !DSLP && !SD) begin
             if (!WEB) begin
-                // Write with per-bit mask (BWEB active-low)
                 for (int i = 0; i < WIDTH; i++) begin
                     if (!BWEB[i]) begin
                         mem[A][i] <= D[i];
                     end
                 end
             end
-            // Read — returns old data on write (read-before-write)
             Q <= mem[A];
         end
     end
 
-    // ---- Initialization for simulation ----
     initial begin
         for (int i = 0; i < DEPTH; i++) begin
             mem[i] = {WIDTH{1'b0}};

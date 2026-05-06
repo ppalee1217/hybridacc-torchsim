@@ -16,6 +16,7 @@ module tb_datasram;
     logic [31:0] mcu_dm_addr_i;
     logic [31:0] mcu_dm_wdata_i;
     logic [3:0]  mcu_dm_wstrb_i;
+    logic        mcu_dm_resp_valid_o;
     logic [31:0] mcu_dm_rdata_o;
     logic        loader_wr_valid_i;
     logic [31:0] loader_wr_addr_i;
@@ -38,6 +39,7 @@ module tb_datasram;
         .mcu_dm_addr_i(mcu_dm_addr_i),
         .mcu_dm_wdata_i(mcu_dm_wdata_i),
         .mcu_dm_wstrb_i(mcu_dm_wstrb_i),
+        .mcu_dm_resp_valid_o(mcu_dm_resp_valid_o),
         .mcu_dm_rdata_o(mcu_dm_rdata_o),
         .loader_wr_valid_i(loader_wr_valid_i),
         .loader_wr_addr_i(loader_wr_addr_i),
@@ -93,8 +95,11 @@ module tb_datasram;
             mcu_dm_addr_i  = addr;
             mcu_dm_write_i = 1'b0;
             mcu_dm_valid_i = 1'b1;
+            @(posedge clk);
             #(`TB_SETTLE);
+            `CHECK_BIT({test_name, " valid"}, mcu_dm_resp_valid_o, 1'b1)
             `CHECK_VAL(test_name, mcu_dm_rdata_o, expected)
+            @(negedge clk);
             mcu_dm_valid_i = 1'b0;
         end
     endtask

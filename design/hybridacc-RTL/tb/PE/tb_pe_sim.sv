@@ -27,7 +27,6 @@
 `include "../../src/PE/VMULU.sv"
 `include "../../src/PE/TransformRegFile.sv"
 `include "../../src/PE/PsumRegFile.sv"
-`include "../../src/PE/SRAM_SP_BWEB.sv"
 `include "../../src/PE/DataMemory.sv"
 `include "../../src/PE/LDMA.sv"
 `include "../../src/PE/SDMA.sv"

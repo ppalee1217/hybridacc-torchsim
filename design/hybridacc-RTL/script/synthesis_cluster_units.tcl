@@ -4,6 +4,10 @@
 #        or set MOD_NAME before sourcing this script
 # ============================================================================
 
+set script_dir [file dirname [file normalize [info script]]]
+source [file join $script_dir syn_common.tcl]
+hacc_init_run_config
+
 if {![info exists MOD_NAME]} {
     puts "ERROR: MOD_NAME not set. Use: dc_shell -x \"set MOD_NAME <name>\" -f synthesis_cluster_units.tcl"
     exit 1
@@ -13,21 +17,26 @@ if {![info exists MOD_NAME]} {
 # Module source file mapping
 # ============================================================================
 set pkg_file "../src/hybridacc_utils_pkg.sv"
+set sram_wrapper "../src/utils/SRAM_Wrapper.sv"
+set scratchpadmemory_srcs [list $sram_wrapper ../src/Cluster/AddressGenerateUnit.sv ../src/Cluster/ScratchpadMemory.sv]
+set computecluster_srcs [list $sram_wrapper ../src/FIFO.sv ../src/asyncFIFO.sv ../src/Cluster/AddressGenerateUnit.sv ../src/Cluster/ScratchpadMemory.sv ../src/Cluster/HybridDataDeliverUnit.sv ../src/PE/InstructionMemory.sv ../src/PE/Decoder.sv ../src/PE/LoopController.sv ../src/PE/DataMemory.sv ../src/PE/TransformRegFile.sv ../src/PE/PsumRegFile.sv ../src/PE/VMULU.sv ../src/PE/VADDU.sv ../src/PE/LDMA.sv ../src/PE/SDMA.sv ../src/PE/PErouter.sv ../src/PE/IF_ID_Stage.sv ../src/PE/EXE_M_Stage.sv ../src/PE/EXE_A_Stage.sv ../src/PE/ProcessElement.sv ../src/NoC/MBUS.sv ../src/NoC/NoCRouter.sv ../src/NetworkOnChip.sv ../src/Cluster/ComputeCluster.sv]
 
 # Source files required for each module (in dependency order)
 array set MOD_SRCS {
-    SRAM                    {../src/Cluster/SRAM.sv}
     AddressGenerateUnit     {../src/Cluster/AddressGenerateUnit.sv}
-    ScratchpadMemory        {../src/Cluster/SRAM.sv ../src/Cluster/AddressGenerateUnit.sv ../src/Cluster/ScratchpadMemory.sv}
+    ScratchpadMemory        {}
     HybridDataDeliverUnit   {../src/FIFO.sv ../src/Cluster/AddressGenerateUnit.sv ../src/Cluster/HybridDataDeliverUnit.sv}
-    ComputeCluster          {../src/FIFO.sv ../src/asyncFIFO.sv ../src/Cluster/SRAM.sv ../src/Cluster/AddressGenerateUnit.sv ../src/Cluster/ScratchpadMemory.sv ../src/Cluster/HybridDataDeliverUnit.sv ../src/PE/InstructionMemory.sv ../src/PE/Decoder.sv ../src/PE/LoopController.sv ../src/PE/DataMemory.sv ../src/PE/TransformRegFile.sv ../src/PE/PsumRegFile.sv ../src/PE/VMULU.sv ../src/PE/VADDU.sv ../src/PE/LDMA.sv ../src/PE/SDMA.sv ../src/PE/PErouter.sv ../src/PE/IF_ID_Stage.sv ../src/PE/EXE_M_Stage.sv ../src/PE/EXE_A_Stage.sv ../src/PE/ProcessElement.sv ../src/NoC/MBUS.sv ../src/NoC/NoCRouter.sv ../src/NetworkOnChip.sv ../src/Cluster/ComputeCluster.sv}
+    ComputeCluster          {}
 }
 
+set MOD_SRCS(ScratchpadMemory) $scratchpadmemory_srcs
+set MOD_SRCS(ComputeCluster) $computecluster_srcs
+
 # Modules that need the utility package
-set MOD_NEEDS_PKG {SRAM AddressGenerateUnit ScratchpadMemory HybridDataDeliverUnit ComputeCluster}
+set MOD_NEEDS_PKG {AddressGenerateUnit ScratchpadMemory HybridDataDeliverUnit ComputeCluster}
 
 # Modules that instantiate SRAM hard macros
-set MOD_HAS_SRAM {ComputeCluster}
+set MOD_HAS_SRAM {ScratchpadMemory ComputeCluster}
 
 # Purely combinational modules
 set MOD_COMBINATIONAL {AddressGenerateUnit}
@@ -46,15 +55,15 @@ if {![info exists MOD_SRCS($MOD_NAME)]} {
 
 puts "============================================================"
 puts " Synthesizing Cluster unit: $MOD_NAME"
+hacc_print_run_context "Cluster unit" $MOD_NAME
 puts "============================================================"
 
 # ============================================================================
 # Read source files
 # ============================================================================
-if {[lsearch -exact $MOD_NEEDS_PKG $MOD_NAME] >= 0} {
-    analyze -format sverilog $pkg_file
-}
-
+set output_dirs [hacc_prepare_output_dirs $MOD_NAME]
+set rpt_dir [lindex $output_dirs 0]
+set syn_dir [lindex $output_dirs 1]
 foreach src $MOD_SRCS($MOD_NAME) {
     analyze -format sverilog $src
 }

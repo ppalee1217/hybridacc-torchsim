@@ -33,7 +33,9 @@
 `include "../src/Cluster/ClusterControlUnit.sv"
 `include "../src/Core/core_pkg.sv"
 `include "../src/Core/Isram.sv"
+`define HACC_SIM_DEBUG_READBACK
 `include "../src/Core/DataSram.sv"
+`undef HACC_SIM_DEBUG_READBACK
 `include "../src/Core/CoreLocalIrq.sv"
 `include "../src/Core/Plic.sv"
 `include "../src/Core/BootHostIf.sv"
@@ -57,7 +59,6 @@
 `include "../src/PE/PErouter.sv"
 `include "../src/PE/PsumRegFile.sv"
 `include "../src/PE/SDMA.sv"
-`include "../src/PE/SRAM_SP_BWEB.sv"
 `include "../src/PE/TransformRegFile.sv"
 `include "../src/PE/VADDU.sv"
 `include "../src/PE/VMULU.sv"
@@ -301,13 +302,13 @@ module tb_hybridacc_sim;
     endtask
 
     function automatic logic [31:0] dsram_word(input int unsigned byte_offset);
-        logic [31:0] value;
         begin
-            value = 32'h0;
-            for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
-                value[byte_idx*8 +: 8] = dut.core_ctrl.dsram.mem[byte_offset + byte_idx];
-            end
-            return value;
+`ifndef GATE_SIM
+            return dut.core_ctrl.dsram.debug_read_word(byte_offset);
+`else
+            $fatal(1, "dsram_word debug readback is unavailable in GATE_SIM");
+            return 32'h0;
+`endif
         end
     endfunction
 

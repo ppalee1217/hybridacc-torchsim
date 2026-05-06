@@ -10,7 +10,13 @@
 # Setting Clock freq & some parameter
 #=====================================================================
 
-set clk_period 1.0
+if {[info exists ::clk_period]} {
+    set clk_period $::clk_period
+} elseif {[info exists ::CLOCK_PERIOD_NS] && [string is double -strict $::CLOCK_PERIOD_NS] && ($::CLOCK_PERIOD_NS > 0.0)} {
+    set clk_period $::CLOCK_PERIOD_NS
+} else {
+    set clk_period 1.0
+}
 set input_max   [expr {double(round(1000*$clk_period * 0.6))/1000}]
 set input_min   [expr {double(round(1000*$clk_period * 0.0))/1000}]
 set output_max  [expr {double(round(1000*$clk_period * 0.1))/1000}]

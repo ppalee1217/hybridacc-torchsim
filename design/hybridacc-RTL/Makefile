@@ -15,15 +15,25 @@ STDCELL_V := /cad/process/ADFP/Executable_Package/Collaterals/IP/stdcell/N16ADFP
 SRAM_V    := /cad/process/ADFP/Executable_Package/Collaterals/IP/sram/N16ADFP_SRAM/VERILOG/N16ADFP_SRAM_100a.v
 TSMC_SRAM_MODEL_DEFINE := +define+TSMC_SRAM_MODEL_LOADED
 RTL_MACRO_SIM_FLAGS := +no_notifier +notimingcheck
+SRAM_WRAPPER_SRC := src/utils/SRAM_Wrapper.sv
+USE_FOUNDRY_SRAM_MODEL ?= 0
+
+ifeq ($(USE_FOUNDRY_SRAM_MODEL),1)
+RTL_SRAM_FLAGS := $(TSMC_SRAM_MODEL_DEFINE) $(RTL_MACRO_SIM_FLAGS) -v $(SRAM_V)
+RTL_SRAM_SRCS :=
+else
+RTL_SRAM_FLAGS := $(RTL_MACRO_SIM_FLAGS)
+RTL_SRAM_SRCS := $(SRAM_WRAPPER_SRC)
+endif
 
 VCS_FLAGS ?= -full64 -sverilog -debug_access+all -timescale=1ns/1ps \
-	$(TSMC_SRAM_MODEL_DEFINE) $(RTL_MACRO_SIM_FLAGS) -v $(SRAM_V) \
+	$(RTL_SRAM_FLAGS) \
 	-y $(DW_SIM_VER) +libext+.v
 GATE_VCS_FLAGS := -full64 -sverilog -debug_access+all -timescale=1ns/1ps \
 	+define+GATE_SIM $(TSMC_SRAM_MODEL_DEFINE) +neg_tchk +sdfverbose +no_notifier +notimingcheck \
 	-v $(STDCELL_V) -v $(SRAM_V) \
 	-y $(DW_SIM_VER) +libext+.v
-RTL_INCDIRS := +incdir+tb +incdir+src +incdir+src/Cluster +incdir+src/Core +incdir+src/PE +incdir+src/NoC
+RTL_INCDIRS := +incdir+tb +incdir+src +incdir+src/utils +incdir+src/Cluster +incdir+src/Core +incdir+src/PE +incdir+src/NoC
 SIM_PLUSARGS := $(if $(TEST_DATA_DIR),+DATA_DIR=$(TEST_DATA_DIR),) \
 	$(if $(VERIFY_TOL),+VERIFY_TOL=$(VERIFY_TOL),) \
 	$(if $(CLOCK_PERIOD_NS),+CLOCK_PERIOD_NS=$(CLOCK_PERIOD_NS),)
@@ -59,13 +69,18 @@ RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim
 RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim_conv2d_3x3_single_wave
 RTL_REGRESS_GEMM_SINGLE_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim_gemm_single_wave
 
-TB_ALL := $(shell find tb -type f -name 'tb_*.sv')
+TB_ALL := $(shell find tb -type f -name 'tb_*.sv' ! -path 'tb/Cluster/tb_sram.sv')
 TB_PE := $(shell find tb/PE -type f -name 'tb_*.sv' 2>/dev/null)
 TB_NOC := $(shell find tb/NoC -type f -name 'tb_*.sv' 2>/dev/null)
-TB_CLUSTER := $(shell find tb/Cluster -type f -name 'tb_*.sv' 2>/dev/null)
+TB_CLUSTER := $(shell find tb/Cluster -type f -name 'tb_*.sv' ! -name 'tb_sram.sv' 2>/dev/null)
 SYN_TCL := $(shell find script -maxdepth 1 -type f -name 'synthesis_*.tcl')
 
 DC_SHELL ?= dc_shell
+SYN_BUILD_DIR ?= $(bld_dir)
+SYN_LOG_NAME ?= syn_compile_hybridacc.log
+SYN_DC_ENV := CLOCK_PERIOD_NS="$(CLOCK_PERIOD_NS)" RUN_TAG="$(RUN_TAG)" SYN_OUT_ROOT="$(SYN_OUT_ROOT)" REPORT_OUT_ROOT="$(REPORT_OUT_ROOT)"
+TOP_SYN_TCL := $(abspath script/syn_hybridacc.tcl)
+DC_SETUP_FILE := $(abspath script/synopsys_dc.setup)
 SNPSLMD_LICENSE_FILE ?= 26585@lstn
 export SNPSLMD_LICENSE_FILE
 
@@ -75,7 +90,7 @@ PE_UNITS := DataMemory Decoder InstructionMemory LoopController PsumRegFile \
 
 NOC_UNITS := MBUS NoCRouter NetworkOnChip
 
-CLUSTER_UNITS := SRAM AddressGenerateUnit ScratchpadMemory HybridDataDeliverUnit ComputeCluster
+CLUSTER_UNITS := AddressGenerateUnit ScratchpadMemory HybridDataDeliverUnit ComputeCluster
 
 # Mapping: PE module name -> gate-level netlist path (relative to project root)
 GATE_NETLIST_DIR := $(syn_dir)
@@ -97,6 +112,7 @@ help:
 	@echo "  gate_sim_pe          - Post-sim: run all PE testbenches (gate-level + SDF)"
 	@echo "  gate_sim_noc         - Post-sim: run all NoC testbenches (gate-level + SDF)"
 	@echo "  synthesize_<name>    - Run script/synthesis_<name>.tcl"
+	@echo "  syn_top              - Synthesize top-level HybridAcc via script/syn_hybridacc.tcl"
 	@echo "  synall               - Run all synthesis_*.tcl scripts under script/"
 	@echo "  syn_pe_<module>      - Synthesize a PE unit, e.g. syn_pe_VADDU"
 	@echo "  syn_pe_all           - Synthesize all PE units"
@@ -109,7 +125,7 @@ help:
 	@echo "  gate_sim_report      - Generate a post-sim report from sim/gate_log/"
 	@echo "  clean                - Remove simulation build artifacts"
 	@echo "  clean_syn            - Remove synthesized files and reports"
-	@echo "Variables: TEST_DATA_DIR=... VERIFY_TOL=... CLOCK_PERIOD_NS=... RTL_FW_REGRESS_ROOT=... RTL_FW_DEBUG_PLUSARGS='+TRACE_CLUSTER_DEBUG' RTL_FW_TEST_SEED=... UV=... RISCV_TOOL_PREFIX=..."
+	@echo "Variables: TEST_DATA_DIR=... VERIFY_TOL=... CLOCK_PERIOD_NS=... RUN_TAG=... SYN_OUT_ROOT=... REPORT_OUT_ROOT=... SYN_BUILD_DIR=... SYN_LOG_NAME=... RTL_FW_REGRESS_ROOT=... RTL_FW_DEBUG_PLUSARGS='+TRACE_CLUSTER_DEBUG' RTL_FW_TEST_SEED=... UV=... RISCV_TOOL_PREFIX=..."
 
 $(bld_dir):
 	mkdir -p $(bld_dir)
@@ -141,7 +157,7 @@ define run_tb
 	tb_base=$$(basename $$tb_file .sv); \
 	tb_dir=$$(dirname $$tb_file); \
 	echo "[SIM] Compiling $$tb_file ..."; \
-	$(VCS) $(VCS_FLAGS) +incdir+$$tb_dir $(RTL_INCDIRS) $$tb_file -o $(sim_bld_dir)/$$tb_base.simv > $(sim_log_dir)/$$tb_base.compile.log 2>&1 || \
+	$(VCS) $(VCS_FLAGS) +incdir+$$tb_dir $(RTL_INCDIRS) $(RTL_SRAM_SRCS) $$tb_file -o $(sim_bld_dir)/$$tb_base.simv > $(sim_log_dir)/$$tb_base.compile.log 2>&1 || \
 		{ echo "[SIM] ERROR: VCS compile failed. See $(sim_log_dir)/$$tb_base.compile.log"; exit 1; }; \
 	if [ ! -x $(sim_bld_dir)/$$tb_base.simv ]; then \
 		echo "[SIM] ERROR: simv was not generated. See $(sim_log_dir)/$$tb_base.compile.log"; \
@@ -410,7 +426,16 @@ synthesize_%: | $(bld_dir) $(syn_dir) $(report_dir)
 	mkdir -p $(report_dir)/$*
 	cp script/synopsys_dc.setup $(bld_dir)/.synopsys_dc.setup
 	cd $(bld_dir); \
-	dc_shell -no_home_init -f ../script/synthesis_$*.tcl | tee syn_compile.log
+	$(SYN_DC_ENV) $(DC_SHELL) -no_home_init -f ../script/synthesis_$*.tcl | tee syn_compile.log
+
+syn_top: | $(bld_dir) $(syn_dir) $(report_dir)
+	@echo "[SYN] Synthesizing top-level HybridAcc ..."
+	@build_dir="$(SYN_BUILD_DIR)"; \
+	mkdir -p "$$build_dir"; \
+	cp "$(DC_SETUP_FILE)" "$$build_dir/.synopsys_dc.setup"; \
+	cd "$$build_dir"; \
+	$(SYN_DC_ENV) $(DC_SHELL) -no_home_init -f "$(TOP_SYN_TCL)" | tee "$(SYN_LOG_NAME)"
+	@echo "[SYN] Done: HybridAcc  Build dir: $(SYN_BUILD_DIR)  Log: $(SYN_LOG_NAME)"
 
 synall:
 	@set -e; \
@@ -426,7 +451,7 @@ syn_pe_%: | $(bld_dir) $(syn_dir) $(report_dir)
 	mkdir -p $(report_dir)/$*
 	cp script/synopsys_dc.setup $(bld_dir)/.synopsys_dc.setup
 	cd $(bld_dir); \
-	$(DC_SHELL) -no_home_init -x "set MOD_NAME $*" -f ../script/synthesis_pe_units.tcl \
+	$(SYN_DC_ENV) $(DC_SHELL) -no_home_init -x "set MOD_NAME $*" -f ../script/synthesis_pe_units.tcl \
 		| tee ../$(report_dir)/$*/syn_compile_$*.log
 	@echo "[SYN] Done: $*  Reports: $(report_dir)/$*/"
 
@@ -443,7 +468,7 @@ syn_noc_%: | $(bld_dir) $(syn_dir) $(report_dir)
 	mkdir -p $(report_dir)/$*
 	cp script/synopsys_dc.setup $(bld_dir)/.synopsys_dc.setup
 	cd $(bld_dir); \
-	$(DC_SHELL) -no_home_init -x "set MOD_NAME $*" -f ../script/synthesis_noc_units.tcl \
+	$(SYN_DC_ENV) $(DC_SHELL) -no_home_init -x "set MOD_NAME $*" -f ../script/synthesis_noc_units.tcl \
 		| tee ../$(report_dir)/$*/syn_compile_$*.log
 	@echo "[SYN] Done: $*  Reports: $(report_dir)/$*/"
 
@@ -460,7 +485,7 @@ syn_cluster_%: | $(bld_dir) $(syn_dir) $(report_dir)
 	mkdir -p $(report_dir)/$*
 	cp script/synopsys_dc.setup $(bld_dir)/.synopsys_dc.setup
 	cd $(bld_dir); \
-	$(DC_SHELL) -no_home_init -x "set MOD_NAME $*" -f ../script/synthesis_cluster_units.tcl \
+	$(SYN_DC_ENV) $(DC_SHELL) -no_home_init -x "set MOD_NAME $*" -f ../script/synthesis_cluster_units.tcl \
 		| tee ../$(report_dir)/$*/syn_compile_$*.log
 	@echo "[SYN] Done: $*  Reports: $(report_dir)/$*/"
 
@@ -508,7 +533,7 @@ clean_syn:
 # ---------------------------------------------------------------------------
 sim_noc_sim: | $(sim_bld_dir) $(sim_log_dir)
 	@echo "[NOC_SIM] Compiling tb_noc_sim.sv ..."; \
-	$(VCS) $(VCS_FLAGS) +incdir+tb/NoC +incdir+tb \
+	$(VCS) $(VCS_FLAGS) +incdir+tb/NoC +incdir+tb $(RTL_SRAM_SRCS) \
 		tb/NoC/tb_noc_sim.sv \
 		-o $(sim_bld_dir)/tb_noc_sim.simv \
 		> $(sim_log_dir)/tb_noc_sim.compile.log 2>&1; \
@@ -555,4 +580,4 @@ sim_noc_sim_all: | $(sim_bld_dir) $(sim_log_dir)
 	done; \
 	echo "[NOC_SIM] Summary: $$pass PASSED, $$fail FAILED"
 
-.PHONY: help sim_all sim_pe sim_noc sim_cluster sim_noc_fast sim_noc_sim sim_noc_sim_all synall syn_pe_all syn_noc_all syn_cluster_all syn_report sim_report gate_sim_report gate_sim_pe gate_sim_noc postsim_all clean clean_syn rtl_regress_single_wave rtl_regress_conv2d_1x1_single_wave rtl_regress_conv2d_3x3_single_wave rtl_regress_gemm_single_wave
+.PHONY: help sim_all sim_pe sim_noc sim_cluster sim_noc_fast sim_noc_sim sim_noc_sim_all syn_top synall syn_pe_all syn_noc_all syn_cluster_all syn_report sim_report gate_sim_report gate_sim_pe gate_sim_noc postsim_all clean clean_syn rtl_regress_single_wave rtl_regress_conv2d_1x1_single_wave rtl_regress_conv2d_3x3_single_wave rtl_regress_gemm_single_wave

@@ -165,6 +165,7 @@ module ComputeCluster #(
     NOC_RESPONSE_STATUS        hddu_noc_plo_resp_status;
     logic                      hddu_noc_plo_resp_valid;
     logic                      hddu_noc_plo_resp_ready;
+    noc_addr_req_t             hddu_noc_plo_req_data;
     logic                      noc_hw_quiesced_sig;
 
     logic noc_command_mode_sig;
@@ -323,6 +324,7 @@ module ComputeCluster #(
     assign noc_command_mode_sig = (ccu_noc_action_sig != CLUSTER_ACTION_NONE)
                                || (wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && ((wr_addr_w - K_CMD_NOC_BASE) == K_NOC_CMD_DATA));
     assign noc_command_data_sig = (ccu_noc_action_sig != CLUSTER_ACTION_NONE) ? compose_noc_cmd(ccu_noc_action_sig) : wr_data_w;
+    assign hddu_noc_plo_req_data.addr = hddu_noc_plo_addr;
 
     assign noc_quiesced_w = noc_hw_quiesced_sig;
     assign spm_quiesced_w = !(hddu_spm_req_valid_sig[0] || hddu_spm_req_valid_sig[1] || hddu_spm_req_valid_sig[2] || hddu_spm_req_valid_sig[3]
@@ -550,7 +552,7 @@ module ComputeCluster #(
         .noc_pli_in_mask(hddu_noc_pli_mask),
         .noc_pli_in_valid(hddu_noc_pli_valid),
         .noc_pli_in_ready(hddu_noc_pli_ready),
-        .noc_plo_in_data('{addr: hddu_noc_plo_addr}),
+        .noc_plo_in_data(hddu_noc_plo_req_data),
         .noc_plo_in_valid(hddu_noc_plo_valid),
         .noc_plo_in_ready(hddu_noc_plo_ready),
         .noc_plo_out_data(hddu_noc_plo_resp_data),

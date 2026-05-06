@@ -4,6 +4,10 @@
 #        or set MOD_NAME before sourcing this script
 # ============================================================================
 
+set script_dir [file dirname [file normalize [info script]]]
+source [file join $script_dir syn_common.tcl]
+hacc_init_run_config
+
 if {![info exists MOD_NAME]} {
     puts "ERROR: MOD_NAME not set. Use: dc_shell -x \"set MOD_NAME <name>\" -f synthesis_pe_units.tcl"
     exit 1
@@ -13,10 +17,14 @@ if {![info exists MOD_NAME]} {
 # Module source file mapping
 # ============================================================================
 set pkg_file "../src/hybridacc_utils_pkg.sv"
+set sram_wrapper "../src/utils/SRAM_Wrapper.sv"
+set datamemory_srcs [list $sram_wrapper ../src/PE/DataMemory.sv]
+set exe_m_stage_srcs [list $sram_wrapper ../src/PE/TransformRegFile.sv ../src/PE/VMULU.sv ../src/PE/LDMA.sv ../src/PE/SDMA.sv ../src/PE/DataMemory.sv ../src/PE/EXE_M_Stage.sv]
+set processelement_srcs [list $sram_wrapper ../src/FIFO.sv ../src/asyncFIFO.sv ../src/PE/InstructionMemory.sv ../src/PE/Decoder.sv ../src/PE/LoopController.sv ../src/PE/DataMemory.sv ../src/PE/TransformRegFile.sv ../src/PE/PsumRegFile.sv ../src/PE/VMULU.sv ../src/PE/VADDU.sv ../src/PE/LDMA.sv ../src/PE/SDMA.sv ../src/PE/PErouter.sv ../src/PE/IF_ID_Stage.sv ../src/PE/EXE_M_Stage.sv ../src/PE/EXE_A_Stage.sv ../src/PE/ProcessElement.sv]
 
 # Source files required for each module (in dependency order)
 array set MOD_SRCS {
-    DataMemory          {../src/PE/DataMemory.sv}
+    DataMemory          {}
     Decoder             {../src/PE/Decoder.sv}
     InstructionMemory   {../src/PE/InstructionMemory.sv}
     LoopController      {../src/PE/LoopController.sv}
@@ -27,11 +35,15 @@ array set MOD_SRCS {
     LDMA                {../src/PE/LDMA.sv}
     SDMA                {../src/PE/SDMA.sv}
     IF_ID_Stage         {../src/PE/InstructionMemory.sv ../src/PE/Decoder.sv ../src/PE/LoopController.sv ../src/PE/IF_ID_Stage.sv}
-    EXE_M_Stage         {../src/PE/TransformRegFile.sv ../src/PE/VMULU.sv ../src/PE/LDMA.sv ../src/PE/SDMA.sv ../src/PE/DataMemory.sv ../src/PE/EXE_M_Stage.sv}
+    EXE_M_Stage         {}
     EXE_A_Stage         {../src/PE/VADDU.sv ../src/PE/PsumRegFile.sv ../src/PE/EXE_A_Stage.sv}
     PErouter            {../src/FIFO.sv ../src/asyncFIFO.sv ../src/PE/PErouter.sv}
-    ProcessElement      {../src/FIFO.sv ../src/asyncFIFO.sv ../src/PE/InstructionMemory.sv ../src/PE/Decoder.sv ../src/PE/LoopController.sv ../src/PE/DataMemory.sv ../src/PE/TransformRegFile.sv ../src/PE/PsumRegFile.sv ../src/PE/VMULU.sv ../src/PE/VADDU.sv ../src/PE/LDMA.sv ../src/PE/SDMA.sv ../src/PE/PErouter.sv ../src/PE/IF_ID_Stage.sv ../src/PE/EXE_M_Stage.sv ../src/PE/EXE_A_Stage.sv ../src/PE/ProcessElement.sv}
+    ProcessElement      {}
 }
+
+set MOD_SRCS(DataMemory) $datamemory_srcs
+set MOD_SRCS(EXE_M_Stage) $exe_m_stage_srcs
+set MOD_SRCS(ProcessElement) $processelement_srcs
 # Modules that need the utility package
 set MOD_NEEDS_PKG {Decoder EXE_A_Stage EXE_M_Stage IF_ID_Stage LDMA SDMA PErouter ProcessElement PsumRegFile TransformRegFile VADDU VMULU}
 
@@ -57,15 +69,15 @@ if {![info exists MOD_SRCS($MOD_NAME)]} {
 
 puts "============================================================"
 puts " Synthesizing PE unit: $MOD_NAME"
+hacc_print_run_context "PE unit" $MOD_NAME
 puts "============================================================"
 
 # ============================================================================
 # Read source files
 #   Use analyze (parse only) + elaborate (build with actual parameters).
-#   read_file would immediately elaborate with default parameters, causing
-#   unresolved references for parameterized sub-modules (FIFO, asyncFIFO).
-# ============================================================================
-if {[lsearch -exact $MOD_NEEDS_PKG $MOD_NAME] >= 0} {
+set output_dirs [hacc_prepare_output_dirs $MOD_NAME]
+set rpt_dir [lindex $output_dirs 0]
+set syn_dir [lindex $output_dirs 1]
     analyze -format sverilog $pkg_file
 }
 

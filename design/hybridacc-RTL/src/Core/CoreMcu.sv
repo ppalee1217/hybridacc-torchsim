@@ -29,12 +29,14 @@ module CoreMcu (
     input  logic        core_haltreq_i,
     output logic        if_req_valid_o,
     output logic [31:0] if_addr_o,
+    input  logic        if_resp_valid_i,
     input  logic [31:0] if_rdata_i,
     output logic        ls_req_valid_o,
     output logic        ls_req_write_o,
     output logic [31:0] ls_req_addr_o,
     output logic [31:0] ls_req_wdata_o,
     output logic [3:0]  ls_req_wstrb_o,
+    input  logic        ls_resp_valid_i,
     input  logic [31:0] ls_resp_rdata_i,
     output logic        mmio_req_valid_o,
     output logic        mmio_req_write_o,
@@ -59,8 +61,17 @@ module CoreMcu (
     logic        halted_reg;
     logic        in_trap_reg;
     logic        wfi_wait_reg;
+    logic        instr_valid_reg;
+    logic        fetch_pending_reg;
+    logic        ls_pending_reg;
+    logic        mmio_pending_reg;
+    logic        mmio_pending_write_reg;
     logic [31:0] pc_reg;
     logic [31:0] instr_reg;
+    logic [4:0]  pending_load_rd_index_reg;
+    logic [2:0]  pending_load_funct3_reg;
+    logic [1:0]  pending_load_addr_lsb_reg;
+    logic [4:0]  mmio_pending_rd_index_reg;
     logic [63:0] cycle_reg;
     logic [63:0] instret_reg;
     logic [31:0] cause_reg;
@@ -158,7 +169,22 @@ module CoreMcu (
         endcase
     endfunction
 
-    assign instr_w    = if_rdata_i;
+    function automatic logic [31:0] load_result_decode(
+        input logic [2:0]  funct3,
+        input logic [1:0]  byte_offset,
+        input logic [31:0] raw_data
+    );
+        unique case (funct3)
+            3'b000: return {{24{raw_data[byte_offset*8 + 7]}}, raw_data[byte_offset*8 +: 8]};
+            3'b001: return {{16{raw_data[byte_offset[1]*16 + 15]}}, raw_data[byte_offset[1]*16 +: 16]};
+            3'b010: return raw_data;
+            3'b100: return {24'h0, raw_data[byte_offset*8 +: 8]};
+            3'b101: return {16'h0, raw_data[byte_offset[1]*16 +: 16]};
+            default: return 32'h0;
+        endcase
+    endfunction
+
+    assign instr_w    = instr_reg;
     assign opcode_w   = instr_w[6:0];
     assign funct3_w   = instr_w[14:12];
     assign funct7_w   = instr_w[31:25];
@@ -247,26 +273,112 @@ module CoreMcu (
         endcase
     end
 
-    assign if_req_valid_o = running_reg;
+    assign if_req_valid_o = running_reg
+                         && !wfi_wait_reg
+                         && !instr_valid_reg
+                         && !fetch_pending_reg
+                         && !ls_pending_reg
+                         && !mmio_pending_reg;
     assign if_addr_o      = pc_reg;
 
-    assign ls_req_valid_o = running_reg && ((is_load_w && load_supported_w && (is_data_sram_w || is_inst_sram_w)) || (is_store_w && store_supported_w && is_data_sram_w));
-    assign ls_req_write_o = is_store_w;
+    assign ls_req_valid_o = running_reg
+                         && instr_valid_reg
+                         && ((is_load_w && load_supported_w && is_data_sram_w)
+                          || (is_store_w && store_supported_w && is_data_sram_w));
+    assign ls_req_write_o = instr_valid_reg && is_store_w && store_supported_w && is_data_sram_w;
     assign ls_req_addr_o  = ls_addr_w;
     assign ls_req_wdata_o = ls_wdata_w;
-    assign ls_req_wstrb_o = (running_reg && is_store_w && store_supported_w && is_data_sram_w) ? ls_wstrb_w : 4'h0;
+    assign ls_req_wstrb_o = (running_reg && instr_valid_reg && is_store_w && store_supported_w && is_data_sram_w) ? ls_wstrb_w : 4'h0;
 
-    assign mmio_req_valid_o = running_reg && ((is_load_w && load_supported_w && mmio_word_access_w && is_mmio_w) || (is_store_w && store_supported_w && mmio_word_access_w && is_mmio_w));
-    assign mmio_req_write_o = is_store_w;
+    assign mmio_req_valid_o = running_reg
+                           && instr_valid_reg
+                           && ((is_load_w && load_supported_w && mmio_word_access_w && is_mmio_w)
+                            || (is_store_w && store_supported_w && mmio_word_access_w && is_mmio_w));
+    assign mmio_req_write_o = instr_valid_reg && is_store_w;
     assign mmio_req_addr_o  = ls_addr_w;
     assign mmio_req_wdata_o = rs2_data_w;
-    assign mmio_req_wstrb_o = (running_reg && is_store_w && store_supported_w && mmio_word_access_w && is_mmio_w) ? 4'hF : 4'h0;
+    assign mmio_req_wstrb_o = (running_reg && instr_valid_reg && is_store_w && store_supported_w && mmio_word_access_w && is_mmio_w) ? 4'hF : 4'h0;
 
     assign retire_pc_o      = pc_reg;
     assign core_running_o   = running_reg;
     assign core_halted_o    = halted_reg;
     assign pc_snapshot_o    = pc_reg;
     assign cause_snapshot_o = cause_reg;
+
+    task automatic write_csr(
+        input logic [11:0] csr_addr,
+        input logic [31:0] csr_value
+    );
+        unique case (csr_addr)
+            CSR_MSTATUS:  mstatus_reg  <= csr_value;
+            CSR_MIE:      mie_reg      <= csr_value;
+            CSR_MTVEC:    mtvec_reg    <= csr_value;
+            CSR_MSCRATCH: mscratch_reg <= csr_value;
+            CSR_MEPC:     mepc_reg     <= csr_value;
+            CSR_MCAUSE:   cause_reg    <= csr_value;
+            CSR_MTVAL:    mtval_reg    <= csr_value;
+            CSR_MCYCLE:   cycle_reg    <= {32'h0, csr_value};
+            CSR_MINSTRET: instret_reg  <= {32'h0, csr_value};
+            default: ;
+        endcase
+    endtask
+
+    task automatic enter_irq_trap(input logic [31:0] epc_value);
+        begin
+            in_trap_reg <= 1'b1;
+            mepc_reg <= epc_value;
+            mtval_reg <= 32'h0;
+            mstatus_reg[7] <= mstatus_reg[3];
+            mstatus_reg[3] <= 1'b0;
+            if (irq_meip_take_w) begin
+                cause_reg <= 32'h8000_000B;
+            end else if (irq_mtip_take_w) begin
+                cause_reg <= 32'h8000_0007;
+            end else begin
+                cause_reg <= 32'h8000_0003;
+            end
+            pc_reg <= mtvec_reg;
+        end
+    endtask
+
+    task automatic retire_instruction(
+        input logic [31:0] next_pc_value,
+        input logic        rd_write_en_value,
+        input logic [4:0]  rd_index_value,
+        input logic [31:0] rd_data_value,
+        input logic        csr_write_en_value,
+        input logic [11:0] csr_write_addr_value,
+        input logic [31:0] csr_write_data_value
+    );
+        begin
+            if (rd_write_en_value && (rd_index_value != 5'd0)) begin
+                gpr_reg[rd_index_value] <= rd_data_value;
+            end
+            if (csr_write_en_value) begin
+                write_csr(csr_write_addr_value, csr_write_data_value);
+            end
+            if (irq_meip_take_w || irq_mtip_take_w || irq_msip_take_w) begin
+                enter_irq_trap(next_pc_value);
+            end else begin
+                pc_reg <= next_pc_value;
+            end
+            instret_reg <= instret_reg + 64'd1;
+            retire_valid_o <= 1'b1;
+        end
+    endtask
+
+    task automatic halt_core(input logic [31:0] halt_cause_value);
+        begin
+            running_reg <= 1'b0;
+            halted_reg <= 1'b1;
+            cause_reg <= halt_cause_value;
+            instr_valid_reg <= 1'b0;
+            fetch_pending_reg <= 1'b0;
+            ls_pending_reg <= 1'b0;
+            mmio_pending_reg <= 1'b0;
+            wfi_wait_reg <= 1'b0;
+        end
+    endtask
 
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
@@ -278,8 +390,17 @@ module CoreMcu (
             halted_reg     <= 1'b1;
             in_trap_reg    <= 1'b0;
             wfi_wait_reg   <= 1'b0;
+            instr_valid_reg <= 1'b0;
+            fetch_pending_reg <= 1'b0;
+            ls_pending_reg <= 1'b0;
+            mmio_pending_reg <= 1'b0;
+            mmio_pending_write_reg <= 1'b0;
             pc_reg         <= 32'h0;
             instr_reg      <= 32'h0;
+            pending_load_rd_index_reg <= 5'h0;
+            pending_load_funct3_reg <= 3'h0;
+            pending_load_addr_lsb_reg <= 2'h0;
+            mmio_pending_rd_index_reg <= 5'h0;
             cycle_reg      <= 64'h0;
             instret_reg    <= 64'h0;
             cause_reg      <= 32'h0;
@@ -303,6 +424,14 @@ module CoreMcu (
             logic [11:0] csr_write_addr;
             logic [31:0] csr_write_value;
             logic [31:0] csr_src_value;
+            logic        trap_fire;
+            logic [31:0] trap_cause;
+            logic [31:0] trap_tval;
+            logic        start_ls_pending;
+            logic        start_mmio_pending;
+            logic        set_wfi_wait;
+            logic        mmio_pending_write;
+            logic [4:0]  mmio_pending_rd_index;
 
             cycle_reg <= cycle_reg + 64'd1;
             retire_valid_o <= 1'b0;
@@ -313,47 +442,79 @@ module CoreMcu (
                 running_reg <= 1'b1;
                 halted_reg  <= 1'b0;
                 in_trap_reg <= 1'b0;
-                wfi_wait_reg<= 1'b0;
+                wfi_wait_reg <= 1'b0;
+                instr_valid_reg <= 1'b0;
+                fetch_pending_reg <= 1'b0;
+                ls_pending_reg <= 1'b0;
+                mmio_pending_reg <= 1'b0;
+                mmio_pending_write_reg <= 1'b0;
                 pc_reg      <= boot_addr_i;
                 cause_reg   <= 32'h0;
             end
 
             if (core_haltreq_i) begin
-                running_reg <= 1'b0;
-                halted_reg  <= 1'b1;
-            end
-
-            if (running_reg) begin
-                next_pc     = pc_reg + 32'd4;
-                rd_value    = 32'h0;
-                rd_index    = rd_idx_w;
-                rd_write_en = 1'b0;
-                retire_fire = 1'b0;
-                halt_fire   = 1'b0;
-                halt_cause  = cause_reg;
-                branch_taken= 1'b0;
-                csr_write_en = 1'b0;
+                halt_core(cause_reg);
+            end else if (running_reg) begin
+                next_pc           = pc_reg + 32'd4;
+                rd_value          = 32'h0;
+                rd_index          = rd_idx_w;
+                rd_write_en       = 1'b0;
+                retire_fire       = 1'b0;
+                halt_fire         = 1'b0;
+                halt_cause        = cause_reg;
+                branch_taken      = 1'b0;
+                csr_write_en      = 1'b0;
                 csr_write_addr = 12'h000;
-                csr_write_value = 32'h0;
-                csr_src_value = 32'h0;
-
-                instr_reg <= if_rdata_i;
+                csr_write_value   = 32'h0;
+                csr_src_value     = 32'h0;
+                trap_fire         = 1'b0;
+                trap_cause        = 32'h0;
+                trap_tval         = 32'h0;
+                start_ls_pending  = 1'b0;
+                start_mmio_pending = 1'b0;
+                set_wfi_wait      = 1'b0;
+                mmio_pending_write = 1'b0;
+                mmio_pending_rd_index = 5'h0;
 
                 if (wfi_wait_reg) begin
                     if (irq_meip_take_w || irq_mtip_take_w || irq_msip_take_w) begin
                         wfi_wait_reg <= 1'b0;
-                        in_trap_reg <= 1'b1;
-                        mepc_reg <= pc_reg + 32'd4;
-                        mtval_reg <= 32'h0;
-                        mstatus_reg[7] <= mstatus_reg[3];
-                        mstatus_reg[3] <= 1'b0;
-                        if (irq_meip_take_w)      cause_reg <= 32'h8000_000B;
-                        else if (irq_mtip_take_w) cause_reg <= 32'h8000_0007;
-                        else                      cause_reg <= 32'h8000_0003;
-                        pc_reg <= mtvec_reg;
+                        enter_irq_trap(pc_reg);
                     end
-                end else begin
-                unique case (opcode_w)
+                end else if (ls_pending_reg) begin
+                    if (ls_resp_valid_i) begin
+                        ls_pending_reg <= 1'b0;
+                        retire_instruction(
+                            pc_reg + 32'd4,
+                            1'b1,
+                            pending_load_rd_index_reg,
+                            load_result_decode(pending_load_funct3_reg, pending_load_addr_lsb_reg, ls_resp_rdata_i),
+                            1'b0,
+                            12'h000,
+                            32'h0
+                        );
+                    end
+                end else if (mmio_pending_reg) begin
+                    if (mmio_resp_valid_i) begin
+                        mmio_pending_reg <= 1'b0;
+                        retire_instruction(
+                            pc_reg + 32'd4,
+                            !mmio_pending_write_reg,
+                            mmio_pending_rd_index_reg,
+                            mmio_resp_rdata_i,
+                            1'b0,
+                            12'h000,
+                            32'h0
+                        );
+                    end
+                end else if (if_resp_valid_i && fetch_pending_reg && !instr_valid_reg) begin
+                    instr_reg <= if_rdata_i;
+                    instr_valid_reg <= 1'b1;
+                    fetch_pending_reg <= 1'b0;
+                end else if (!instr_valid_reg && !fetch_pending_reg) begin
+                    fetch_pending_reg <= 1'b1;
+                end else if (instr_valid_reg) begin
+                    unique case (opcode_w)
                         7'b0110111: begin
                             rd_write_en = 1'b1;
                             rd_value    = imm_u_w;
@@ -410,16 +571,19 @@ module CoreMcu (
                                 3'b110: rd_value = rs1_data_w | imm_i_w;
                                 3'b111: rd_value = rs1_data_w & imm_i_w;
                                 3'b001: begin
-                                    if (funct7_w == 7'b0000000) rd_value = rs1_data_w << instr_w[24:20];
-                                    else begin
+                                    if (funct7_w == 7'b0000000) begin
+                                        rd_value = rs1_data_w << instr_w[24:20];
+                                    end else begin
                                         halt_fire  = 1'b1;
                                         halt_cause = 32'd2;
                                     end
                                 end
                                 3'b101: begin
-                                    if (funct7_w == 7'b0000000) rd_value = rs1_data_w >> instr_w[24:20];
-                                    else if (funct7_w == 7'b0100000) rd_value = $signed(rs1_data_w) >>> instr_w[24:20];
-                                    else begin
+                                    if (funct7_w == 7'b0000000) begin
+                                        rd_value = rs1_data_w >> instr_w[24:20];
+                                    end else if (funct7_w == 7'b0100000) begin
+                                        rd_value = $signed(rs1_data_w) >>> instr_w[24:20];
+                                    end else begin
                                         halt_fire  = 1'b1;
                                         halt_cause = 32'd2;
                                     end
@@ -461,22 +625,20 @@ module CoreMcu (
                             end
                         end
                         7'b0000011: begin
-                            if (load_supported_w && (is_data_sram_w || is_inst_sram_w)) begin
-                                rd_write_en = 1'b1;
-                                unique case (funct3_w)
-                                    3'b000: rd_value = {{24{ls_resp_rdata_i[ls_addr_w[1:0]*8 + 7]}}, ls_resp_rdata_i[ls_addr_w[1:0]*8 +: 8]};
-                                    3'b001: rd_value = {{16{ls_resp_rdata_i[ls_addr_w[1]*16 + 15]}}, ls_resp_rdata_i[ls_addr_w[1]*16 +: 16]};
-                                    3'b010: rd_value = ls_resp_rdata_i;
-                                    3'b100: rd_value = {24'h0, ls_resp_rdata_i[ls_addr_w[1:0]*8 +: 8]};
-                                    3'b101: rd_value = {16'h0, ls_resp_rdata_i[ls_addr_w[1]*16 +: 16]};
-                                    default: rd_value = 32'h0;
-                                endcase
-                                retire_fire = 1'b1;
+                            if (load_supported_w && is_data_sram_w) begin
+                                start_ls_pending = 1'b1;
+                            end else if (load_supported_w && is_inst_sram_w) begin
+                                halt_fire  = 1'b1;
+                                halt_cause = 32'd2;
                             end else if (load_supported_w && mmio_word_access_w && is_mmio_w) begin
                                 if (mmio_resp_valid_i) begin
                                     rd_write_en = 1'b1;
-                                    rd_value    = mmio_resp_rdata_i;
+                                    rd_value = mmio_resp_rdata_i;
                                     retire_fire = 1'b1;
+                                end else begin
+                                    start_mmio_pending = 1'b1;
+                                    mmio_pending_write = 1'b0;
+                                    mmio_pending_rd_index = rd_idx_w;
                                 end
                             end else begin
                                 halt_fire  = 1'b1;
@@ -486,9 +648,15 @@ module CoreMcu (
                         7'b0100011: begin
                             if (store_supported_w && is_data_sram_w) begin
                                 retire_fire = 1'b1;
+                            end else if (store_supported_w && is_inst_sram_w) begin
+                                halt_fire  = 1'b1;
+                                halt_cause = 32'd2;
                             end else if (store_supported_w && mmio_word_access_w && is_mmio_w) begin
                                 if (mmio_resp_valid_i) begin
                                     retire_fire = 1'b1;
+                                end else begin
+                                    start_mmio_pending = 1'b1;
+                                    mmio_pending_write = 1'b1;
                                 end
                             end else begin
                                 halt_fire  = 1'b1;
@@ -497,18 +665,15 @@ module CoreMcu (
                         end
                         7'b1110011: begin
                             if (instr_w == 32'h0000_0073) begin
-                                in_trap_reg <= 1'b1;
-                                mepc_reg <= pc_reg;
-                                mtval_reg <= 32'h0;
-                                mstatus_reg[7] <= mstatus_reg[3];
-                                mstatus_reg[3] <= 1'b0;
-                                cause_reg <= 32'd11;
-                                pc_reg <= mtvec_reg;
+                                trap_fire = 1'b1;
+                                trap_cause = 32'd11;
+                                trap_tval = 32'h0;
                             end else if (instr_w == 32'h0010_0073) begin
                                 halt_fire  = 1'b1;
                                 halt_cause = 32'd3;
                             end else if (instr_w == 32'h1050_0073) begin
-                                wfi_wait_reg <= 1'b1;
+                                retire_fire = 1'b1;
+                                set_wfi_wait = 1'b1;
                             end else if (instr_w == 32'h3020_0073) begin
                                 in_trap_reg <= 1'b0;
                                 mstatus_reg[3] <= mstatus_reg[7];
@@ -584,63 +749,36 @@ module CoreMcu (
                         end
                     endcase
 
-                if (halt_fire) begin
-                    running_reg <= 1'b0;
-                    halted_reg  <= 1'b1;
-                    cause_reg   <= halt_cause;
-                end else if (retire_fire && (irq_meip_take_w || irq_mtip_take_w || irq_msip_take_w)) begin
-                    if (rd_write_en && (rd_index != 5'd0)) begin
-                        gpr_reg[rd_index] <= rd_value;
+                    if (halt_fire) begin
+                        halt_core(halt_cause);
+                    end else if (trap_fire) begin
+                        instr_valid_reg <= 1'b0;
+                        in_trap_reg <= 1'b1;
+                        mepc_reg <= pc_reg;
+                        mtval_reg <= trap_tval;
+                        mstatus_reg[7] <= mstatus_reg[3];
+                        mstatus_reg[3] <= 1'b0;
+                        cause_reg <= trap_cause;
+                        pc_reg <= mtvec_reg;
+                    end else if (start_ls_pending) begin
+                        instr_valid_reg <= 1'b0;
+                        ls_pending_reg <= 1'b1;
+                        pending_load_rd_index_reg <= rd_idx_w;
+                        pending_load_funct3_reg <= funct3_w;
+                        pending_load_addr_lsb_reg <= ls_addr_w[1:0];
+                    end else if (start_mmio_pending) begin
+                        instr_valid_reg <= 1'b0;
+                        mmio_pending_reg <= 1'b1;
+                        mmio_pending_write_reg <= mmio_pending_write;
+                        mmio_pending_rd_index_reg <= mmio_pending_rd_index;
+                    end else if (retire_fire) begin
+                        instr_valid_reg <= 1'b0;
+                        if (set_wfi_wait && !(irq_meip_take_w || irq_mtip_take_w || irq_msip_take_w)) begin
+                            wfi_wait_reg <= 1'b1;
+                        end
+                        retire_instruction(next_pc, rd_write_en, rd_index, rd_value, csr_write_en, csr_write_addr, csr_write_value);
                     end
-                    if (csr_write_en) begin
-                        unique case (csr_write_addr)
-                            CSR_MSTATUS:  mstatus_reg  <= csr_write_value;
-                            CSR_MIE:      mie_reg      <= csr_write_value;
-                            CSR_MTVEC:    mtvec_reg    <= csr_write_value;
-                            CSR_MSCRATCH: mscratch_reg <= csr_write_value;
-                            CSR_MEPC:     mepc_reg     <= csr_write_value;
-                            CSR_MCAUSE:   cause_reg    <= csr_write_value;
-                            CSR_MTVAL:    mtval_reg    <= csr_write_value;
-                            CSR_MCYCLE:   cycle_reg    <= {32'h0, csr_write_value};
-                            CSR_MINSTRET: instret_reg  <= {32'h0, csr_write_value};
-                            default: ;
-                        endcase
-                    end
-                    in_trap_reg <= 1'b1;
-                    mepc_reg <= next_pc;
-                    mtval_reg <= 32'h0;
-                    mstatus_reg[7] <= mstatus_reg[3];
-                    mstatus_reg[3] <= 1'b0;
-                    if (irq_meip_take_w)      cause_reg <= 32'h8000_000B;
-                    else if (irq_mtip_take_w) cause_reg <= 32'h8000_0007;
-                    else                      cause_reg <= 32'h8000_0003;
-                    pc_reg <= mtvec_reg;
-                    instret_reg <= instret_reg + 64'd1;
-                    retire_valid_o <= 1'b1;
                 end else begin
-                    if (rd_write_en && (rd_index != 5'd0)) begin
-                        gpr_reg[rd_index] <= rd_value;
-                    end
-                    if (csr_write_en) begin
-                        unique case (csr_write_addr)
-                            CSR_MSTATUS:  mstatus_reg  <= csr_write_value;
-                            CSR_MIE:      mie_reg      <= csr_write_value;
-                            CSR_MTVEC:    mtvec_reg    <= csr_write_value;
-                            CSR_MSCRATCH: mscratch_reg <= csr_write_value;
-                            CSR_MEPC:     mepc_reg     <= csr_write_value;
-                            CSR_MCAUSE:   cause_reg    <= csr_write_value;
-                            CSR_MTVAL:    mtval_reg    <= csr_write_value;
-                            CSR_MCYCLE:   cycle_reg    <= {32'h0, csr_write_value};
-                            CSR_MINSTRET: instret_reg  <= {32'h0, csr_write_value};
-                            default: ;
-                        endcase
-                    end
-                    if (retire_fire) begin
-                        pc_reg <= next_pc;
-                        instret_reg <= instret_reg + 64'd1;
-                        retire_valid_o <= 1'b1;
-                    end
-                end
                 end
             end
         end

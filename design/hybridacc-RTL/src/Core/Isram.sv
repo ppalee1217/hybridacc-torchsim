@@ -22,10 +22,8 @@ module Isram #(
     input  logic        reset_n,
     input  logic        mcu_im_valid_i,
     input  logic [31:0] mcu_im_addr_i,
+    output logic        mcu_im_resp_valid_o,
     output logic [31:0] mcu_im_rdata_o,
-    input  logic        mcu_dm_valid_i,
-    input  logic [31:0] mcu_dm_addr_i,
-    output logic [31:0] mcu_dm_rdata_o,
     input  logic        loader_wr_valid_i,
     input  logic [31:0] loader_wr_addr_i,
     input  logic [31:0] loader_wr_data_i,
@@ -44,23 +42,16 @@ module Isram #(
     typedef logic [MACRO_ADDR_W-1:0]     macro_addr_t;
     typedef logic [MACRO_SEL_W-1:0]      macro_sel_t;
 
-    // Simulation shadow keeps the current zero-wait-state CoreMcu contract
-    // while the real TSMC hard macros are instantiated and exercised.
-    logic [7:0] mem [0:SRAM_BYTES-1];
+    logic        sram_ceb   [NUM_MACROS];
+    logic        sram_web   [NUM_MACROS];
+    macro_word_t sram_bweb  [NUM_MACROS];
+    macro_addr_t sram_addr  [NUM_MACROS];
+    macro_word_t sram_d     [NUM_MACROS];
+    macro_word_t sram_q     [NUM_MACROS];
 
-    logic       if_sram_ceb  [NUM_MACROS];
-    logic       if_sram_web  [NUM_MACROS];
-    macro_word_t if_sram_bweb[NUM_MACROS];
-    macro_addr_t if_sram_addr[NUM_MACROS];
-    macro_word_t if_sram_d   [NUM_MACROS];
-    macro_word_t if_sram_q   [NUM_MACROS];
-
-    logic       dm_sram_ceb  [NUM_MACROS];
-    logic       dm_sram_web  [NUM_MACROS];
-    macro_word_t dm_sram_bweb[NUM_MACROS];
-    macro_addr_t dm_sram_addr[NUM_MACROS];
-    macro_word_t dm_sram_d   [NUM_MACROS];
-    macro_word_t dm_sram_q   [NUM_MACROS];
+    logic        im_resp_valid_reg;
+    logic        im_resp_upper32_reg;
+    macro_sel_t  im_resp_macro_sel_reg;
 
     function automatic logic [31:0] wrap_byte_addr(input logic [31:0] byte_addr);
         return byte_addr & (SRAM_BYTES - 1);
@@ -74,6 +65,14 @@ module Isram #(
         return macro_addr_t'((wrap_byte_addr(byte_addr) % MACRO_BYTES) >> 3);
     endfunction
 
+    function automatic logic byte_addr_upper32(input logic [31:0] byte_addr);
+        logic [31:0] wrapped_addr;
+        begin
+            wrapped_addr = wrap_byte_addr(byte_addr);
+            return wrapped_addr[2];
+        end
+    endfunction
+
     function automatic macro_word_t word32_to_macro_data(
         input logic [31:0] byte_addr,
         input logic [31:0] word_data
@@ -81,7 +80,7 @@ module Isram #(
         macro_word_t data_word;
         begin
             data_word = '0;
-            if (wrap_byte_addr(byte_addr)[2]) begin
+            if (byte_addr_upper32(byte_addr)) begin
                 data_word[63:32] = word_data;
             end else begin
                 data_word[31:0] = word_data;
@@ -98,7 +97,7 @@ module Isram #(
         int lane_lsb;
         begin
             bweb_word = {MACRO_DATA_WIDTH{1'b1}};
-            lane_lsb = wrap_byte_addr(byte_addr)[2] ? 32 : 0;
+            lane_lsb = byte_addr_upper32(byte_addr) ? 32 : 0;
             for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
                 if (strb[byte_idx]) begin
                     bweb_word[lane_lsb + byte_idx*8 +: 8] = 8'h00;
@@ -109,6 +108,7 @@ module Isram #(
     endfunction
 
     assign loader_wr_ready_o = load_phase_i;
+    assign mcu_im_resp_valid_o = im_resp_valid_reg;
 
     always_comb begin
         macro_sel_t  macro_sel;
@@ -117,17 +117,11 @@ module Isram #(
         macro_word_t macro_bweb;
 
         for (int macro_idx = 0; macro_idx < NUM_MACROS; macro_idx++) begin
-            if_sram_ceb[macro_idx]  = 1'b1;
-            if_sram_web[macro_idx]  = 1'b1;
-            if_sram_bweb[macro_idx] = {MACRO_DATA_WIDTH{1'b1}};
-            if_sram_addr[macro_idx] = '0;
-            if_sram_d[macro_idx]    = '0;
-
-            dm_sram_ceb[macro_idx]  = 1'b1;
-            dm_sram_web[macro_idx]  = 1'b1;
-            dm_sram_bweb[macro_idx] = {MACRO_DATA_WIDTH{1'b1}};
-            dm_sram_addr[macro_idx] = '0;
-            dm_sram_d[macro_idx]    = '0;
+            sram_ceb[macro_idx]  = 1'b1;
+            sram_web[macro_idx]  = 1'b1;
+            sram_bweb[macro_idx] = {MACRO_DATA_WIDTH{1'b1}};
+            sram_addr[macro_idx] = '0;
+            sram_d[macro_idx]    = '0;
         end
 
         if (load_phase_i && loader_wr_valid_i) begin
@@ -136,102 +130,58 @@ module Isram #(
             macro_data = word32_to_macro_data(loader_wr_addr_i, loader_wr_data_i);
             macro_bweb = strb32_to_macro_bweb(loader_wr_addr_i, loader_wr_strb_i);
 
-            if_sram_ceb[macro_sel]  = 1'b0;
-            if_sram_web[macro_sel]  = 1'b0;
-            if_sram_bweb[macro_sel] = macro_bweb;
-            if_sram_addr[macro_sel] = macro_addr;
-            if_sram_d[macro_sel]    = macro_data;
-
-            dm_sram_ceb[macro_sel]  = 1'b0;
-            dm_sram_web[macro_sel]  = 1'b0;
-            dm_sram_bweb[macro_sel] = macro_bweb;
-            dm_sram_addr[macro_sel] = macro_addr;
-            dm_sram_d[macro_sel]    = macro_data;
-        end else begin
-            if (mcu_im_valid_i) begin
-                macro_sel = byte_addr_to_macro_sel(mcu_im_addr_i);
-                if_sram_ceb[macro_sel]  = 1'b0;
-                if_sram_addr[macro_sel] = byte_addr_to_macro_addr(mcu_im_addr_i);
-            end
-            if (mcu_dm_valid_i) begin
-                macro_sel = byte_addr_to_macro_sel(mcu_dm_addr_i);
-                dm_sram_ceb[macro_sel]  = 1'b0;
-                dm_sram_addr[macro_sel] = byte_addr_to_macro_addr(mcu_dm_addr_i);
-            end
+            sram_ceb[macro_sel]  = 1'b0;
+            sram_web[macro_sel]  = 1'b0;
+            sram_bweb[macro_sel] = macro_bweb;
+            sram_addr[macro_sel] = macro_addr;
+            sram_d[macro_sel]    = macro_data;
+        end else if (mcu_im_valid_i) begin
+            macro_sel = byte_addr_to_macro_sel(mcu_im_addr_i);
+            sram_ceb[macro_sel]  = 1'b0;
+            sram_addr[macro_sel] = byte_addr_to_macro_addr(mcu_im_addr_i);
         end
     end
 
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
-            for (int idx = 0; idx < SRAM_BYTES; idx++) begin
-                mem[idx] <= 8'h00;
-            end
-        end else if (load_phase_i && loader_wr_valid_i) begin
-            logic [31:0] base;
-            base = wrap_byte_addr(loader_wr_addr_i);
-            for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
-                if (loader_wr_strb_i[byte_idx] && ((base + byte_idx) < SRAM_BYTES)) begin
-                    mem[base + byte_idx] <= loader_wr_data_i[byte_idx*8 +: 8];
-                end
+            im_resp_valid_reg     <= 1'b0;
+            im_resp_upper32_reg   <= 1'b0;
+            im_resp_macro_sel_reg <= '0;
+        end else begin
+            im_resp_valid_reg <= 1'b0;
+            if (!load_phase_i && mcu_im_valid_i) begin
+                im_resp_valid_reg     <= 1'b1;
+                im_resp_upper32_reg   <= byte_addr_upper32(mcu_im_addr_i);
+                im_resp_macro_sel_reg <= byte_addr_to_macro_sel(mcu_im_addr_i);
             end
         end
     end
 
     always_comb begin
         mcu_im_rdata_o = 32'h0;
-        mcu_dm_rdata_o = 32'h0;
-        if (!load_phase_i && mcu_im_valid_i) begin
-            logic [31:0] base;
-            base = wrap_byte_addr(mcu_im_addr_i);
-            for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
-                if ((base + byte_idx) < SRAM_BYTES) begin
-                    mcu_im_rdata_o[byte_idx*8 +: 8] = mem[base + byte_idx];
-                end
-            end
-        end
-        if (!load_phase_i && mcu_dm_valid_i) begin
-            logic [31:0] base;
-            base = wrap_byte_addr(mcu_dm_addr_i & ~32'h3);
-            for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
-                if ((base + byte_idx) < SRAM_BYTES) begin
-                    mcu_dm_rdata_o[byte_idx*8 +: 8] = mem[base + byte_idx];
-                end
-            end
+        if (im_resp_valid_reg) begin
+            mcu_im_rdata_o = im_resp_upper32_reg
+                           ? sram_q[im_resp_macro_sel_reg][63:32]
+                           : sram_q[im_resp_macro_sel_reg][31:0];
         end
     end
 
     generate
         for (genvar macro = 0; macro < NUM_MACROS; macro++) begin : gen_isram_macro
-            TS1N16ADFPCLLLVTA128X64M4SWSHOD u_if_sram (
+            TS1N16ADFPCLLLVTA128X64M4SWSHOD u_sram (
                 .SLP    (1'b0),
                 .DSLP   (1'b0),
                 .SD     (1'b0),
                 .PUDELAY(),
                 .CLK    (clk),
-                .CEB    (if_sram_ceb[macro]),
-                .WEB    (if_sram_web[macro]),
-                .A      (if_sram_addr[macro]),
-                .D      (if_sram_d[macro]),
-                .BWEB   (if_sram_bweb[macro]),
+                .CEB    (sram_ceb[macro]),
+                .WEB    (sram_web[macro]),
+                .A      (sram_addr[macro]),
+                .D      (sram_d[macro]),
+                .BWEB   (sram_bweb[macro]),
                 .RTSEL  (2'b01),
                 .WTSEL  (2'b01),
-                .Q      (if_sram_q[macro])
-            );
-
-            TS1N16ADFPCLLLVTA128X64M4SWSHOD u_dm_sram (
-                .SLP    (1'b0),
-                .DSLP   (1'b0),
-                .SD     (1'b0),
-                .PUDELAY(),
-                .CLK    (clk),
-                .CEB    (dm_sram_ceb[macro]),
-                .WEB    (dm_sram_web[macro]),
-                .A      (dm_sram_addr[macro]),
-                .D      (dm_sram_d[macro]),
-                .BWEB   (dm_sram_bweb[macro]),
-                .RTSEL  (2'b01),
-                .WTSEL  (2'b01),
-                .Q      (dm_sram_q[macro])
+                .Q      (sram_q[macro])
             );
         end
     endgenerate
