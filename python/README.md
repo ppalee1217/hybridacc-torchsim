@@ -205,3 +205,35 @@ else:
 # 生成所有 NoC 測試資料
 ./scripts/gen_noc_tb.sh -a
 ```
+
+## Synthesis Report Parser
+
+目前已新增 `syn-report` CLI，可直接解析 Synopsys synthesis 產出的 `area/power/timing/cell` reports，並輸出 RTL hierarchy 的 module/sub-module breakdown。
+
+範例：
+
+```bash
+uv run syn-report \
+  --report-dir design/hybridacc-RTL/report/clk_2p00ns \
+  --out-dir output/tmp-syn-report-parser-demo
+```
+
+若要看某個 sub-module 的下一層 breakdown，可指定 `--focus-module`：
+
+```bash
+uv run syn-report \
+  --report-dir design/hybridacc-RTL/report/clk_2p00ns \
+  --out-dir output/tmp-syn-report-parser-demo-hddu \
+  --focus-module gen_clusters_0__cluster/hddu
+```
+
+輸出內容包含：
+
+1. `summary.json`: area / power / timing summary 與 hierarchy metadata。
+2. `module_hierarchy.csv`: 所有 module / sub-module 的階層表，含 `total_area` 與 `total_estimated_power_mw`。
+3. `module_breakdown.csv`: 指定 `focus module` 的 immediate children breakdown。
+4. `module_area_breakdown.png` 與 `module_power_breakdown.png`: 立即子模組圓餅圖。
+5. `module_breakdown_index.csv`: 遞迴輸出的所有 breakdown scope 清單。
+6. `all_module_breakdowns/`: 每一層 module 的 breakdown CSV 與 pie chart。若同一層有多個 `gen_*` sibling，會 fuse 成同一塊，例如 `gen_agu_0__agu` ~ `gen_agu_3__agu` 會顯示成 `gen_agu_*__agu`；若只有單一實例則保留原名。只有還能再往下拆成 sub-module 的 scope 才會繼續輸出下一層，leaf-like implementation scope 不會再展開。
+
+注意：目前 power breakdown 是估算值，不是 `report_power -hierarchy` 的真實 per-module 功耗。作法是先用 `report_power` 的 power-group total 建出 cell-level power density，再往 RTL hierarchy 聚合；對於只有 summary row、沒有展開 inner cells 的 module，會用父層 residual power 依 area 做保守分攤。

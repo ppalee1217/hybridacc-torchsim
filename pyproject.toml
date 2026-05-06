@@ -28,7 +28,8 @@ trace-parser = "trace_parser.cli:main"
 hacc-compile = "hybridacc_cc.cli:main"
 hacc-setup = "hybridacc_cc.setup_cli:main"
 hacc-sweep = "hybridacc_cc.sweep_tools:main"
+syn-report = "syn_report_parser.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["./python"]
-include = ["hybridacc_verify*", "trace_parser*", "log_parser*", "hybridacc_cc*"]
+include = ["hybridacc_verify*", "trace_parser*", "log_parser*", "hybridacc_cc*", "syn_report_parser*"]
