@@ -57,19 +57,25 @@ _METRIC_LABELS = {
     "drain_out_cycles": "Drain-out Cycles",
     "drain_out_instructions": "Drain-out Instructions",
     "core_probe_cycles_total": "Core Probe Cycles (Lifecycle Probe)",
+    "ideal_core_level_cycles": "Ideal Core-level Cycles (Hide Gap Data Compute)",
+    "ideal_core_level_macs_utilization_pct": "Lifecycle-aligned Ideal Core-level MACs Utilization (%)",
+    "ideal_cluster_level_cycles": "Ideal Cluster-level Busy Cycles (Hide Gap Data Compute)",
+    "ideal_cluster_level_macs_utilization_pct": "Ideal Cluster-level MACs Utilization (%)",
     "steady_state_core_cycles": "Steady-state Core Cycles",
     "steady_state_core_utilization_pct": "Steady-state MACs Utilization (%)",
-    "ideal_hw_sw_codesign_core_cycles": "Ideal HW/SW Co-design Core Cycles",
-    "ideal_hw_sw_codesign_core_utilization_pct": "Ideal HW/SW Co-design MACs Utilization (%)",
+    "steady_state_marginal_macs_utilization_pct": "Steady-state Marginal MACs Utilization (%)",
+    "ideal_hw_sw_codesign_core_cycles": "Ideal HW/SW Co-design Steady-state Core Cycles",
+    "ideal_hw_sw_codesign_core_utilization_pct": "Ideal HW/SW Co-design Steady-state MACs Utilization (%)",
+    "ideal_hw_sw_codesign_marginal_macs_utilization_pct": "Ideal HW/SW Co-design Marginal Steady-state MACs Utilization (%)",
     "wave_gap_cycles_pct_of_steady_state": "Wave Gap / Steady-state (%)",
     "wave_gap_data_compute_pct_of_gap_instructions": "Gap Data Compute / Gap Instructions (%)",
     "gfops_per_sec": "GFLOPS/sec",
     "active_pes": "Active PEs",
     "active_pe_ratio": "Active PE Ratio",
     "macs": "MACs",
-    "core_level_macs_utilization_pct": "Core-level MACs Utilization (%)",
+    "core_level_macs_utilization_pct": "Lifecycle-aligned Core-level MACs Utilization (%)",
     "cluster_level_macs_utilization_pct": "Cluster-level MACs Utilization (%)",
-    "macs_utilization_pct": "Core-level MACs Utilization (%)",
+    "macs_utilization_pct": "Lifecycle-aligned Core-level MACs Utilization (%)",
 }
 _SIM_LOG_VALUE_PATTERNS = {
     "sim_time_ns": re.compile(r"\[SIM\] Simulation ended at\s+(\d+)\s+ns"),
@@ -866,6 +872,71 @@ def _derive_utilization(macs: float, cycles: Any, active_pes: Any) -> float:
     return math.nan
 
 
+def _subtract_hidden_gap_cycles(cycles: Any, hidden_cycles: Any) -> float:
+    if (
+        isinstance(cycles, (int, float))
+        and isinstance(hidden_cycles, (int, float))
+        and not math.isnan(cycles)
+        and not math.isnan(hidden_cycles)
+    ):
+        adjusted_cycles = float(cycles) - float(hidden_cycles)
+        if adjusted_cycles > 0:
+            return adjusted_cycles
+    return math.nan
+
+
+def _derive_marginal_utilization(
+    macs_delta: pd.Series,
+    cycle_delta: pd.Series,
+    active_pes: pd.Series,
+    same_active_mask: pd.Series,
+) -> pd.Series:
+    values = 100.0 * macs_delta / (cycle_delta * active_pes * 4.0)
+    valid = (
+        same_active_mask
+        & macs_delta.notna()
+        & cycle_delta.notna()
+        & active_pes.notna()
+        & (macs_delta > 0)
+        & (cycle_delta > 0)
+        & (active_pes > 0)
+    )
+    return values.where(valid, math.nan)
+
+
+def _append_marginal_utilization_metrics(frame: pd.DataFrame, order: list[str]) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+
+    frame = frame.copy()
+    frame["steady_state_marginal_macs_utilization_pct"] = math.nan
+    frame["ideal_hw_sw_codesign_marginal_macs_utilization_pct"] = math.nan
+
+    for sweep_dim, sweep_frame in frame.groupby("sweep_dim", sort=False):
+        if sweep_dim not in frame.columns:
+            continue
+        fixed_dims = [column for column in order if column in sweep_frame.columns and column != sweep_dim]
+        grouped = sweep_frame.groupby(fixed_dims, dropna=False, sort=False) if fixed_dims else [(None, sweep_frame)]
+        for _, slice_frame in grouped:
+            sorted_slice = slice_frame.sort_values(sweep_dim)
+            active_pes = sorted_slice["active_pes"]
+            same_active_mask = active_pes.eq(active_pes.shift(1))
+            macs_delta = sorted_slice["macs"].diff()
+            frame.loc[sorted_slice.index, "steady_state_marginal_macs_utilization_pct"] = _derive_marginal_utilization(
+                macs_delta,
+                sorted_slice["steady_state_core_cycles"].diff(),
+                active_pes,
+                same_active_mask,
+            )
+            frame.loc[sorted_slice.index, "ideal_hw_sw_codesign_marginal_macs_utilization_pct"] = _derive_marginal_utilization(
+                macs_delta,
+                sorted_slice["ideal_hw_sw_codesign_core_cycles"].diff(),
+                active_pes,
+                same_active_mask,
+            )
+    return frame
+
+
 def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) -> tuple[pd.DataFrame, pd.DataFrame]:
     rows: list[dict[str, Any]] = []
     window_rows: list[dict[str, Any]] = []
@@ -897,14 +968,18 @@ def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) ->
         )
         active_pes = row.get("active_pes")
         row["macs_per_active_pe"] = row["macs"] / active_pes if isinstance(active_pes, (int, float)) and active_pes and not math.isnan(active_pes) else math.nan
-        core_cycles = row.get("ebreak_cycle")
+        ebreak_cycles = row.get("ebreak_cycle")
         cluster_cycles = row.get("cluster_run_cycles")
         dma_cycles = row.get("dma_active_cycles")
         overlap_cycles = row.get("compute_dma_overlap_cycles")
         cluster_cycles_valid = isinstance(cluster_cycles, (int, float)) and not math.isnan(cluster_cycles)
         dma_cycles_valid = isinstance(dma_cycles, (int, float)) and not math.isnan(dma_cycles)
         overlap_cycles_valid = isinstance(overlap_cycles, (int, float)) and not math.isnan(overlap_cycles)
-        row["core_level_macs_utilization_pct"] = _derive_utilization(row["macs"], core_cycles, active_pes)
+        profiled_core_cycles_total = row.get("drain_out_end_cycle")
+        if not isinstance(profiled_core_cycles_total, (int, float)) or math.isnan(profiled_core_cycles_total):
+            profiled_core_cycles_total = ebreak_cycles
+        row["core_probe_cycles_total"] = profiled_core_cycles_total
+        row["core_level_macs_utilization_pct"] = _derive_utilization(row["macs"], profiled_core_cycles_total, active_pes)
         row["cluster_level_macs_utilization_pct"] = _derive_utilization(row["macs"], cluster_cycles, active_pes)
         row["compute_dma_overlap_pct_of_compute"] = (
             100.0 * overlap_cycles / cluster_cycles
@@ -922,10 +997,19 @@ def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) ->
         wave_gap_cycles_total = row.get("wave_gap_cycles_total")
         wave_gap_instructions_total = row.get("wave_gap_instructions_total")
         wave_gap_data_compute_total = row.get("wave_gap_data_compute_instructions_total")
-        profiled_core_cycles_total = row.get("drain_out_end_cycle")
-        if not isinstance(profiled_core_cycles_total, (int, float)) or math.isnan(profiled_core_cycles_total):
-            profiled_core_cycles_total = core_cycles
-        row["core_probe_cycles_total"] = profiled_core_cycles_total
+        ideal_core_level_cycles = _subtract_hidden_gap_cycles(profiled_core_cycles_total, wave_gap_data_compute_total)
+        row["ideal_core_level_cycles"] = ideal_core_level_cycles
+        row["ideal_core_level_macs_utilization_pct"] = _derive_utilization(
+            row["macs"],
+            ideal_core_level_cycles,
+            active_pes,
+        )
+        row["ideal_cluster_level_cycles"] = cluster_cycles if cluster_cycles_valid else math.nan
+        row["ideal_cluster_level_macs_utilization_pct"] = _derive_utilization(
+            row["macs"],
+            row["ideal_cluster_level_cycles"],
+            active_pes,
+        )
         steady_state_core_cycles = math.nan
         if (
             isinstance(profiled_core_cycles_total, (int, float))
@@ -958,16 +1042,10 @@ def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) ->
             and wave_gap_instructions_total > 0
             else math.nan
         )
-        ideal_hw_sw_codesign_core_cycles = math.nan
-        if (
-            isinstance(steady_state_core_cycles, (int, float))
-            and isinstance(wave_gap_data_compute_total, (int, float))
-            and not math.isnan(steady_state_core_cycles)
-            and not math.isnan(wave_gap_data_compute_total)
-        ):
-            ideal_hw_sw_codesign_core_cycles = steady_state_core_cycles - wave_gap_data_compute_total
-            if ideal_hw_sw_codesign_core_cycles <= 0:
-                ideal_hw_sw_codesign_core_cycles = math.nan
+        ideal_hw_sw_codesign_core_cycles = _subtract_hidden_gap_cycles(
+            steady_state_core_cycles,
+            wave_gap_data_compute_total,
+        )
         row["ideal_hw_sw_codesign_core_cycles"] = ideal_hw_sw_codesign_core_cycles
         row["ideal_hw_sw_codesign_core_utilization_pct"] = _derive_utilization(
             row["macs"],
@@ -1005,6 +1083,7 @@ def _collect_report_rows(manifest: dict[str, Any], results_root: Path | None) ->
     df = pd.DataFrame(rows)
     order = [str(dim) for dim in manifest.get("workload", {}).get("axis_order", ["oh", "ow", "ic", "oc"]) if str(dim) in df.columns]
     df["sweep_sort_key"] = df["sweep_dim"].map({name: idx for idx, name in enumerate(order)}).fillna(len(order))
+    df = _append_marginal_utilization_metrics(df, order)
     window_df = pd.DataFrame(window_rows)
     if not window_df.empty:
         sort_columns = [column for column in ["sweep_dim", *order, "case_name", "window_index"] if column in window_df.columns]
@@ -1048,9 +1127,11 @@ def _build_1d_sweep_plot(frame: pd.DataFrame, sweep_dim: str, image_dir: Path) -
         ("gfops_per_sec", _metric_display_label("gfops_per_sec")),
         ("core_level_macs_utilization_pct", _metric_display_label("core_level_macs_utilization_pct")),
         ("cluster_level_macs_utilization_pct", _metric_display_label("cluster_level_macs_utilization_pct")),
+        ("ideal_core_level_macs_utilization_pct", _metric_display_label("ideal_core_level_macs_utilization_pct")),
     ]
-    fig, axes = plt.subplots(6, 2, figsize=(12, 19), facecolor="#f7f2e8")
-    axes_list = list(axes.flat)
+    rows = math.ceil(len(metrics) / 2)
+    fig, axes = plt.subplots(rows, 2, figsize=(12, max(7, rows * 3.1)), facecolor="#f7f2e8")
+    axes_list = list(axes.flat) if hasattr(axes, "flat") else [axes]
     x = passed[sweep_dim]
     for axis, (metric, label) in zip(axes_list, metrics):
         axis.plot(x, passed[metric], marker="o", color="#8b5e34", linewidth=2.0)
@@ -1079,8 +1160,11 @@ def _build_1d_profiling_plot(frame: pd.DataFrame, sweep_dim: str, image_dir: Pat
         ("boot_up_cycles", _metric_display_label("boot_up_cycles")),
         ("drain_out_cycles", _metric_display_label("drain_out_cycles")),
         ("steady_state_core_cycles", _metric_display_label("steady_state_core_cycles")),
-        ("steady_state_core_utilization_pct", _metric_display_label("steady_state_core_utilization_pct")),
-        ("ideal_hw_sw_codesign_core_utilization_pct", _metric_display_label("ideal_hw_sw_codesign_core_utilization_pct")),
+        ("steady_state_marginal_macs_utilization_pct", _metric_display_label("steady_state_marginal_macs_utilization_pct")),
+        (
+            "ideal_hw_sw_codesign_marginal_macs_utilization_pct",
+            _metric_display_label("ideal_hw_sw_codesign_marginal_macs_utilization_pct"),
+        ),
     ]
     available_metrics = [
         (metric, label)
@@ -1201,11 +1285,13 @@ def _summary_stats(frame: pd.DataFrame) -> dict[str, float | int]:
         "avg_active": frame.loc[frame["active_pes"].notna(), "active_pes"].mean(),
         "avg_core_util": frame.loc[frame["core_level_macs_utilization_pct"].notna(), "core_level_macs_utilization_pct"].mean(),
         "avg_cluster_util": frame.loc[frame["cluster_level_macs_utilization_pct"].notna(), "cluster_level_macs_utilization_pct"].mean(),
+        "avg_ideal_core_util": frame.loc[frame["ideal_core_level_macs_utilization_pct"].notna(), "ideal_core_level_macs_utilization_pct"].mean(),
         "avg_steady_state_util": frame.loc[frame["steady_state_core_utilization_pct"].notna(), "steady_state_core_utilization_pct"].mean(),
         "avg_ideal_util": frame.loc[frame["ideal_hw_sw_codesign_core_utilization_pct"].notna(), "ideal_hw_sw_codesign_core_utilization_pct"].mean(),
         "max_gfops": frame.loc[frame["gfops_per_sec"].notna(), "gfops_per_sec"].max(),
         "max_core_util": frame.loc[frame["core_level_macs_utilization_pct"].notna(), "core_level_macs_utilization_pct"].max(),
         "max_cluster_util": frame.loc[frame["cluster_level_macs_utilization_pct"].notna(), "cluster_level_macs_utilization_pct"].max(),
+        "max_ideal_core_util": frame.loc[frame["ideal_core_level_macs_utilization_pct"].notna(), "ideal_core_level_macs_utilization_pct"].max(),
         "max_steady_state_util": frame.loc[frame["steady_state_core_utilization_pct"].notna(), "steady_state_core_utilization_pct"].max(),
         "max_ideal_util": frame.loc[frame["ideal_hw_sw_codesign_core_utilization_pct"].notna(), "ideal_hw_sw_codesign_core_utilization_pct"].max(),
         "max_overlap_compute_pct": frame.loc[frame["compute_dma_overlap_pct_of_compute"].notna(), "compute_dma_overlap_pct_of_compute"].max(),
@@ -1239,10 +1325,12 @@ def _summary_cards(frame: pd.DataFrame) -> str:
         ("Max core MAC util", _format_summary_number(summary["max_core_util"], ".2f", "%"), "available runs"),
         ("Avg cluster MAC util", _format_summary_number(summary["avg_cluster_util"], ".2f", "%"), "passed cases"),
         ("Max cluster MAC util", _format_summary_number(summary["max_cluster_util"], ".2f", "%"), "available runs"),
+        ("Avg ideal core util", _format_summary_number(summary["avg_ideal_core_util"], ".2f", "%"), "hide gap data-compute at core level"),
+        ("Max ideal core util", _format_summary_number(summary["max_ideal_core_util"], ".2f", "%"), "hide gap data-compute at core level"),
         ("Avg steady-state util", _format_summary_number(summary["avg_steady_state_util"], ".2f", "%"), "excluding boot-up and drain-out"),
         ("Max steady-state util", _format_summary_number(summary["max_steady_state_util"], ".2f", "%"), "excluding boot-up and drain-out"),
-        ("Avg ideal co-design util", _format_summary_number(summary["avg_ideal_util"], ".2f", "%"), "hide gap data-compute instructions"),
-        ("Max ideal co-design util", _format_summary_number(summary["max_ideal_util"], ".2f", "%"), "hide gap data-compute instructions"),
+        ("Avg ideal steady-state co-design util", _format_summary_number(summary["avg_ideal_util"], ".2f", "%"), "hide gap data-compute after removing boot-up and drain-out"),
+        ("Max ideal steady-state co-design util", _format_summary_number(summary["max_ideal_util"], ".2f", "%"), "hide gap data-compute after removing boot-up and drain-out"),
         ("Max overlap/compute", _format_summary_number(summary["max_overlap_compute_pct"], ".2f", "%"), "available runs"),
         ("Max overlap/DMA", _format_summary_number(summary["max_overlap_dma_pct"], ".2f", "%"), "available runs"),
     ]
@@ -1331,10 +1419,15 @@ def _profiling_timeline_section() -> str:
         (
             "EBREAK vs lifecycle probe",
             "ebreak_cycle vs core_probe_cycles_total",
-            "ebreak_cycle is the TB-visible firmware end point. core_probe_cycles_total is the lifecycle basis used for boot-up, steady-state, and drain-out accounting.",
+            "ebreak_cycle is the TB-visible halt observation. core_probe_cycles_total uses drain_out_end_cycle when available, and is the lifecycle basis used for core-level, boot-up, steady-state, and drain-out accounting.",
         ),
     ]
     formula_cards = [
+        (
+            "Core-level utilization",
+            "core_level_macs_utilization_pct = 100 * MACs / (core_probe_cycles_total * active_pes * 4)",
+            "This keeps the denominator aligned with the lifecycle probe boundary instead of the earlier TB-visible EBREAK observation.",
+        ),
         (
             "Steady-state cycles",
             "steady_state_core_cycles = core_probe_cycles_total - boot_up_cycles - drain_out_cycles",
@@ -1346,9 +1439,29 @@ def _profiling_timeline_section() -> str:
             "This treats only the steady-state middle segment as the time budget.",
         ),
         (
-            "Ideal HW/SW co-design",
+            "Steady-state marginal utilization",
+            "steady_state_marginal_macs_utilization_pct(i) = 100 * delta_macs(i) / (delta_steady_state_core_cycles(i) * active_pes * 4)",
+            "For 1D sweeps this uses adjacent points, so a fixed startup or drain offset no longer shows up as a downward-converging average.",
+        ),
+        (
+            "Lifecycle-aligned ideal core-level utilization",
+            "ideal_core_level_macs_utilization_pct = 100 * MACs / ((core_probe_cycles_total - wave_gap_data_compute_instructions_total) * active_pes * 4)",
+            "This answers: if the per-gap data-compute instructions were fully hidden, how much would the lifecycle-aligned end-to-end core-level MAC utilization improve?",
+        ),
+        (
+            "Ideal cluster-level utilization",
+            "ideal_cluster_level_macs_utilization_pct = 100 * MACs / (cluster_run_cycles * active_pes * 4)",
+            "cluster_run_cycles already counts only HDDU/AGU busy time, so hiding core-side gap data-compute does not change the cluster-level denominator.",
+        ),
+        (
+            "Ideal steady-state co-design",
             "ideal_hw_sw_codesign_core_utilization_pct = 100 * MACs / ((steady_state_core_cycles - wave_gap_data_compute_instructions_total) * active_pes * 4)",
             "Assumption: if gap data-compute instructions can be fully hidden, one retired data-compute instruction saves about one core cycle.",
+        ),
+        (
+            "Ideal steady-state marginal co-design",
+            "ideal_hw_sw_codesign_marginal_macs_utilization_pct(i) = 100 * delta_macs(i) / (delta_ideal_hw_sw_codesign_core_cycles(i) * active_pes * 4)",
+            "This keeps the same hidden-gap assumption, but measures the slope between adjacent sweep points instead of the cumulative average.",
         ),
     ]
     cards_html = "".join(
@@ -1472,6 +1585,8 @@ def _render_report_html(
             "macs",
             "core_level_macs_utilization_pct",
             "cluster_level_macs_utilization_pct",
+            "ideal_core_level_macs_utilization_pct",
+            "ideal_cluster_level_macs_utilization_pct",
             "result_state",
         ]
         profiling_columns = [
@@ -1486,9 +1601,15 @@ def _render_report_html(
             "boot_up_cycles",
             "drain_out_cycles",
             "core_probe_cycles_total",
+            "ideal_core_level_cycles",
+            "ideal_cluster_level_cycles",
             "steady_state_core_cycles",
+            "ideal_core_level_macs_utilization_pct",
+            "ideal_cluster_level_macs_utilization_pct",
             "steady_state_core_utilization_pct",
+            "steady_state_marginal_macs_utilization_pct",
             "ideal_hw_sw_codesign_core_utilization_pct",
+            "ideal_hw_sw_codesign_marginal_macs_utilization_pct",
             "result_state",
         ]
         sort_columns = [*sweep_dims, "case_name"] if sweep_dims else ["case_name"]
@@ -1634,7 +1755,7 @@ def _render_report_html(
   <main>
     <section class="hero">
       <h1>{escape(manifest['suite_name'])} sweep report</h1>
-                                                <p>Generated from manifest plus e2e output directories. The report summarizes core-level cycles to EBREAK, cluster busy cycles gathered directly from simulator HDDU/AGU activity, DMA active cycles, compute/DMA overlap gathered live during simulation, wave-gap stop-&gt;start profiling, boot-up/drain-out costs, and an idealized HW/SW co-design utilization estimate that hides gap data-compute instructions after removing boot-up and drain-out time.</p>
+                                                <p>Generated from manifest plus e2e output directories. The report summarizes the TB-visible EBREAK observation, lifecycle probe cycles aligned to drain-out end when available, cluster busy cycles gathered directly from simulator HDDU/AGU activity, DMA active cycles, compute/DMA overlap gathered live during simulation, wave-gap stop-&gt;start profiling, boot-up/drain-out costs, plus idealized core-level and steady-state utilization estimates for the case where gap data-compute instructions can be hidden.</p>
             <div class="meta">
                 <span class="pill">workload={escape(manifest['workload']['key'])}</span>
                 <span class="pill">op={escape(manifest['workload']['op_type'])}</span>
@@ -1644,12 +1765,13 @@ def _render_report_html(
                                 <span class="pill">scatter metrics={escape(', '.join(_metric_display_label(metric) for metric in scatter_metrics))}</span>
                                 <span class="pill">max core util={escape(_format_summary_number(summary["max_core_util"], ".2f", "%"))}</span>
                                 <span class="pill">max cluster util={escape(_format_summary_number(summary["max_cluster_util"], ".2f", "%"))}</span>
-                                                                <span class="pill">max ideal co-design util={escape(_format_summary_number(summary["max_ideal_util"], ".2f", "%"))}</span>
+                                                                <span class="pill">max ideal core util={escape(_format_summary_number(summary["max_ideal_core_util"], ".2f", "%"))}</span>
+                                                                <span class="pill">max ideal steady-state util={escape(_format_summary_number(summary["max_ideal_util"], ".2f", "%"))}</span>
                                                                 <span class="pill">max overlap/compute={escape(_format_summary_number(summary["max_overlap_compute_pct"], ".2f", "%"))}</span>
                                                                 <span class="pill">max overlap/DMA={escape(_format_summary_number(summary["max_overlap_dma_pct"], ".2f", "%"))}</span>
                                 <span class="pill">max GFLOPS/sec={escape(_format_summary_number(summary["max_gfops"], ".3g"))}</span>
             </div>
-                                                                                                                                                                                                <p class="hero-note">Peak observed results: core MAC utilization {escape(_format_summary_number(summary["max_core_util"], ".2f", "%"))}, cluster MAC utilization {escape(_format_summary_number(summary["max_cluster_util"], ".2f", "%"))}, ideal HW/SW co-design utilization {escape(_format_summary_number(summary["max_ideal_util"], ".2f", "%"))}, overlap/compute ratio {escape(_format_summary_number(summary["max_overlap_compute_pct"], ".2f", "%"))}, overlap/DMA ratio {escape(_format_summary_number(summary["max_overlap_dma_pct"], ".2f", "%"))}, and throughput {escape(_format_summary_number(summary["max_gfops"], ".3g"))} GFLOPS/sec.</p>
+                                                                                                                                                                                                <p class="hero-note">Peak observed results: core MAC utilization {escape(_format_summary_number(summary["max_core_util"], ".2f", "%"))}, cluster MAC utilization {escape(_format_summary_number(summary["max_cluster_util"], ".2f", "%"))}, ideal core MAC utilization {escape(_format_summary_number(summary["max_ideal_core_util"], ".2f", "%"))}, ideal steady-state co-design utilization {escape(_format_summary_number(summary["max_ideal_util"], ".2f", "%"))}, overlap/compute ratio {escape(_format_summary_number(summary["max_overlap_compute_pct"], ".2f", "%"))}, overlap/DMA ratio {escape(_format_summary_number(summary["max_overlap_dma_pct"], ".2f", "%"))}, and throughput {escape(_format_summary_number(summary["max_gfops"], ".3g"))} GFLOPS/sec.</p>
       <div class="card-grid">{_summary_cards(frame)}</div>
     </section>
         {timeline_section}
@@ -1760,7 +1882,7 @@ def _build_parser() -> argparse.ArgumentParser:
     report.add_argument("--results-root", type=Path, default=None, help="Root directory passed to run_e2e.sh --output-dir")
     report.add_argument("--output-dir", type=Path, required=True, help="Directory for CSV, HTML report, and exported plot images")
     report.add_argument("--scatter-dims", type=str, default=None, help="Three comma-separated dimensions for the 3D scatter; defaults depend on the workload profile")
-    report.add_argument("--color-metric", type=str, default="core_level_macs_utilization_pct,cluster_level_macs_utilization_pct,ideal_hw_sw_codesign_core_utilization_pct", help="Comma-separated metric columns used for 3D scatter colors")
+    report.add_argument("--color-metric", type=str, default="core_level_macs_utilization_pct,ideal_core_level_macs_utilization_pct,cluster_level_macs_utilization_pct,ideal_hw_sw_codesign_core_utilization_pct", help="Comma-separated metric columns used for 3D scatter colors")
     report.set_defaults(func=_report_suite)
     return parser
 

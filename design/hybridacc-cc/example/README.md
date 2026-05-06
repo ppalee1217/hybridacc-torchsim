@@ -52,7 +52,7 @@ When multiple workloads are passed, `run_e2e.sh` enters batch mode. It uses `npr
 
 `hacc-sweep report` now exports both core-level and cluster-level MAC utilization:
 
-- `core_level_macs_utilization_pct`: MAC utilization using the core-level cycle window from firmware start until EBREAK.
+- `core_level_macs_utilization_pct`: MAC utilization using `core_probe_cycles_total`; when available this aligns the denominator to `drain_out_end_cycle`, otherwise it falls back to the TB-visible EBREAK cycle.
 - `cluster_level_macs_utilization_pct`: MAC utilization using only the cycles where the cluster control state is `RUN`.
 - `macs_utilization_pct`: compatibility alias of `core_level_macs_utilization_pct` for older report consumers.
 

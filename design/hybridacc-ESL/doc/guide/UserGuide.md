@@ -438,7 +438,7 @@ scripts/fast_entry/run_e2e.sh design/hybridacc-cc/example/*.yaml --jobs 8
 
 若使用 `uv run hacc-sweep report` 彙整 batch 結果，目前報表會區分兩個 MAC utilization 指標：
 
-- `core_level_macs_utilization_pct`：以 core 從啟動到 EBREAK 的 cycle 視窗計算。
+- `core_level_macs_utilization_pct`：以 `core_probe_cycles_total` 的 lifecycle 視窗計算；若 simulator 有 `drain_out_end_cycle`，則對齊到 drain-out 結束，否則才 fallback 到 `EBREAK`。
 - `cluster_level_macs_utilization_pct`：只以 cluster control state 為 `RUN` 的 cycle 計算。
 
 模擬器會直接在 `sim.log` 輸出 `[SIM] Cluster RUN cycles: <n>`，報表會直接讀取這個數值，因此不需要另外開 trace 來回推 cluster 的執行區間。
