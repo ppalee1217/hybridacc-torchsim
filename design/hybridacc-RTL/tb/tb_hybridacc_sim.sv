@@ -28,6 +28,7 @@
 `include "../src/asyncFIFO.sv"
 `include "../src/Cluster/cluster_pkg.sv"
 `include "../src/Cluster/AddressGenerateUnit.sv"
+`include "../src/Cluster/ScratchpadMemoryBank.sv"
 `include "../src/Cluster/ScratchpadMemory.sv"
 `include "../src/Cluster/HybridDataDeliverUnit.sv"
 `include "../src/Cluster/ClusterControlUnit.sv"
@@ -143,6 +144,22 @@ module tb_hybridacc_sim;
     int pass_count = 0;
     int fail_count = 0;
     int x_fail_count = 0;
+
+`ifdef TB_ENABLE_FSDB_DUMP
+    string wave_dump_file = "tb_hybridacc_sim.fsdb";
+    int wave_dump_depth = 0;
+
+    initial begin : tb_wave_dump_control
+        if ($test$plusargs("WAVE_DUMP")) begin
+            if (!$value$plusargs("WAVE_DEPTH=%d", wave_dump_depth) || (wave_dump_depth < 0)) begin
+                wave_dump_depth = 0;
+            end
+            $display("[TB] FSDB dump enabled: file=%0s depth=%0d", wave_dump_file, wave_dump_depth);
+            $fsdbDumpfile(wave_dump_file);
+            $fsdbDumpvars(wave_dump_depth, tb_hybridacc_sim);
+        end
+    end
+`endif
 
 `ifdef GATE_SIM
 `ifdef TB_SDF_FILE

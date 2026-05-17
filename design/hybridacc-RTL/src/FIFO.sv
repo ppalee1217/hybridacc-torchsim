@@ -107,7 +107,12 @@ module FIFO #(
     end
 
     always_ff @(posedge clk or negedge reset_n) begin
-        if (!reset_n || clear) begin
+        if (!reset_n) begin
+            wr_ptr_reg <= '0;
+            rd_ptr_reg <= '0;
+            cnt_reg <= '0;
+            for (int unsigned i = 0; i < DEPTH; i++) mem[i] <= '0;
+        end else if (clear) begin
             wr_ptr_reg <= '0;
             rd_ptr_reg <= '0;
             cnt_reg <= '0;

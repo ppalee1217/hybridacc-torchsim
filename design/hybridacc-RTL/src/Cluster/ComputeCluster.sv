@@ -105,6 +105,8 @@ module ComputeCluster import cluster_pkg::*; #(
 
     localparam logic [31:0] K_NOC_CMD_DATA      = 32'h0000_0000;
     localparam logic [31:0] K_NOC_STATUS        = 32'h0000_0004;
+    localparam logic [7:0]  K_SPM_CFG_MAP_RESET = 8'hE4;
+    localparam logic [31:0] K_CMD_STUB0_RESET   = 32'hDEAD_BEEF;
 
     logic local_reset_n;
 
@@ -193,6 +195,10 @@ module ComputeCluster import cluster_pkg::*; #(
     logic [31:0] cmd_stub_reg0;
     logic [31:0] cmd_stub_reg1;
     logic        noc_quiesced_reg;
+    logic        reset_init_done_reg;
+
+    logic [7:0]  spm_cfg_map_w;
+    logic [31:0] cmd_stub_reg0_w;
 
     wire noc_quiesced_w;
     wire spm_quiesced_w;
@@ -237,7 +243,7 @@ module ComputeCluster import cluster_pkg::*; #(
         logic [31:0] r;
         r = 32'h0;
         unique0 case (off)
-            K_SPM_CFG_MAP:       r = {24'h0, spm_cfg_map_reg};
+            K_SPM_CFG_MAP:       r = {24'h0, spm_cfg_map_w};
             K_SPM_ARB_POLICY:    r = {31'h0, spm_arb_policy_reg};
             K_SPM_PMU_CYCLE_LO:  r = spm_pmu_cycle_cnt_sig[31:0];
             K_SPM_PMU_CYCLE_HI:  r = spm_pmu_cycle_cnt_sig[63:32];
@@ -341,7 +347,9 @@ module ComputeCluster import cluster_pkg::*; #(
     assign noc_command_data_sig = (ccu_noc_action_sig != CLUSTER_ACTION_NONE) ? compose_noc_cmd(ccu_noc_action_sig) : wr_data_w;
     assign hddu_noc_plo_req_data.addr = hddu_noc_plo_addr;
 
-    assign noc_quiesced_w = noc_quiesced_reg;
+    assign spm_cfg_map_w   = reset_init_done_reg ? spm_cfg_map_reg : K_SPM_CFG_MAP_RESET;
+    assign cmd_stub_reg0_w = reset_init_done_reg ? cmd_stub_reg0 : K_CMD_STUB0_RESET;
+    assign noc_quiesced_w  = reset_init_done_reg ? noc_quiesced_reg : 1'b1;
     assign spm_quiesced_w = !(hddu_spm_req_valid_sig[0] || hddu_spm_req_valid_sig[1] || hddu_spm_req_valid_sig[2] || hddu_spm_req_valid_sig[3]
                            || hddu_spm_resp_valid_sig[0] || hddu_spm_resp_valid_sig[1] || hddu_spm_resp_valid_sig[2] || hddu_spm_resp_valid_sig[3]
                            || s_axi_bvalid_sig || s_axi_rvalid_sig);
@@ -358,7 +366,7 @@ module ComputeCluster import cluster_pkg::*; #(
             rdata = 32'h0;
             err   = 1'b0;
             if (cmd_rd_fire && (rd_addr_w == 32'h0000_0000)) begin
-                rdata = cmd_stub_reg0;
+                rdata = cmd_stub_reg0_w;
             end else if (cmd_rd_fire && (rd_addr_w == 32'h0000_0004)) begin
                 rdata = cmd_stub_reg1;
             end else if (in_range(rd_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE)) begin
@@ -389,13 +397,23 @@ module ComputeCluster import cluster_pkg::*; #(
 
     always_ff @(posedge clk or negedge local_reset_n) begin
         if (!local_reset_n) begin
-            spm_cfg_map_reg      <= 8'hE4;
+            spm_cfg_map_reg      <= 8'h0;
             spm_arb_policy_reg   <= 1'b0;
             noc_last_cmd_reg     <= 32'h0;
             cluster_run_cycles_reg <= 64'h0;
-            cmd_stub_reg0        <= 32'hDEAD_BEEF;
+            cmd_stub_reg0        <= 32'h0;
+            cmd_stub_reg1        <= 32'h0;
+            noc_quiesced_reg     <= 1'b0;
+            reset_init_done_reg  <= 1'b0;
+        end else if (!reset_init_done_reg) begin
+            spm_cfg_map_reg      <= K_SPM_CFG_MAP_RESET;
+            spm_arb_policy_reg   <= 1'b0;
+            noc_last_cmd_reg     <= 32'h0;
+            cluster_run_cycles_reg <= 64'h0;
+            cmd_stub_reg0        <= K_CMD_STUB0_RESET;
             cmd_stub_reg1        <= 32'h0;
             noc_quiesced_reg     <= 1'b1;
+            reset_init_done_reg  <= 1'b1;
         end else begin
             noc_quiesced_reg <= noc_hw_quiesced_sig;
             if (cmd_wr_fire && (wr_addr_w == 32'h0000_0000)) begin
@@ -467,7 +485,7 @@ module ComputeCluster import cluster_pkg::*; #(
         .reset_n(local_reset_n),
         .pmu_rst_i(spm_pmu_rst_pulse),
         .soft_reset_i(spm_soft_reset_sig),
-        .config_map_i(spm_cfg_map_reg),
+        .config_map_i(spm_cfg_map_w),
         .config_update_i(spm_cfg_update_pulse),
         .arb_policy_i(spm_arb_policy_reg),
         .spm_req_valid_i(hddu_spm_req_valid_sig),

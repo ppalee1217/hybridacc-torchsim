@@ -45,6 +45,8 @@ set_fix_hold                 [all_clocks]
 #=====================================================================
 set_operating_conditions -min_library N16ADFP_StdCellff0p88v125c -min ff0p88v125c \
                          -max_library N16ADFP_StdCellss0p72vm40c -max ss0p72vm40c
+set_min_library N16ADFP_StdCellss0p72vm40c.db -min_version N16ADFP_StdCellff0p88v125c.db
+set_min_library N16ADFP_SRAM_ss0p72v0p72vm40c_100a.db -min_version N16ADFP_SRAM_ff0p88v0p88v125c_100a.db
 
 set_driving_cell -library N16ADFP_StdCellss0p72vm40c -lib_cell BUFFD4BWP16P90LVT -pin {Z} [get_ports clk]
 set_driving_cell -library N16ADFP_StdCellss0p72vm40c -lib_cell DFQD1BWP16P90LVT  -pin {Q} [remove_from_collection [all_inputs] [get_ports clk]]

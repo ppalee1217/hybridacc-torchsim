@@ -111,15 +111,6 @@ module Isram import core_pkg::*; #(
     assign mcu_im_resp_valid_o = im_resp_valid_reg;
 
     always_comb begin
-        logic pudelay_sink;
-
-        pudelay_sink = 1'b0;
-        for (int unsigned macro_idx = 0; macro_idx < NUM_MACROS; macro_idx++) begin
-            pudelay_sink ^= sram_pudelay_unused[macro_idx];
-        end
-    end
-
-    always_comb begin
         macro_sel_t  macro_sel;
         macro_addr_t macro_addr;
         macro_word_t macro_data;

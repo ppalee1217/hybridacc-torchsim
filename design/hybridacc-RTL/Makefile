@@ -44,7 +44,7 @@ GATE_VCS_FLAGS := -full64 -sverilog -debug_access+all -timescale=1ns/1ps \
 	-y $(DW_SIM_VER) +libext+.v
 GATE_SIM_COMPILE_FILTER_REGEX ?= ^(Parsing design file|Parsing included file|Back to file )
 GATE_SIM_RUN_FILTER_REGEX ?= CLK_OPERATION : input CEB unknown/high-Z|^Info : Set Memory Content to all x at
-GATE_TOP_NETLIST_DIR ?= $(syn_dir)/clk_2p00ns
+GATE_TOP_NETLIST_DIR ?= $(TOP_SYN_OUT_ROOT)
 GATE_TOP_SDF_FILE ?= $(GATE_TOP_NETLIST_DIR)/HybridAcc/HybridAcc.sdf
 GATE_TOP_LOG_PREFIX ?= $(gate_sim_log_dir)/tb_hybridacc_sim_gate
 GATE_TOP_COMPARE_RTOL ?= $(RTL_FW_COMPARE_RTOL)
@@ -103,9 +103,20 @@ TB_CLUSTER := $(shell find tb/Cluster -type f -name 'tb_*.sv' ! -name 'tb_sram.s
 SYN_TCL := $(shell find script -maxdepth 1 -type f -name 'synthesis_*.tcl')
 
 DC_SHELL ?= dc_shell
-SYN_BUILD_DIR ?= $(bld_dir)
-SYN_LOG_NAME ?= syn_compile_hybridacc.log
-SYN_DC_ENV := CLOCK_PERIOD_NS="$(CLOCK_PERIOD_NS)" RUN_TAG="$(RUN_TAG)" SYN_OUT_ROOT="$(SYN_OUT_ROOT)" REPORT_OUT_ROOT="$(REPORT_OUT_ROOT)"
+SYN_MAX_CORES ?= 8
+SYN_MAX_MEMORY_GB ?= 128
+SYN_RESOURCE_LIMIT_DESC := cores=$(SYN_MAX_CORES) mem=$(SYN_MAX_MEMORY_GB)GB
+SYN_BASH_RESOURCE_LIMIT := ulimit -Sv $$(( $(SYN_MAX_MEMORY_GB) * 1024 * 1024 ))
+# Top-level synthesis defaults derive from the effective clock so runs do not collide.
+TOP_SYN_CLOCK_PERIOD_NS := $(if $(strip $(CLOCK_PERIOD_NS)),$(strip $(CLOCK_PERIOD_NS)),1.0)
+TOP_SYN_CLK_TAG := clk_$(shell printf '%s' "$(TOP_SYN_CLOCK_PERIOD_NS)" | sed -E 's/^\./0./; /\./! s/$$/.00/; /\.[0-9]$$/ s/$$/0/; s/\./p/g')ns
+SYN_BUILD_DIR ?= $(bld_dir)/$(TOP_SYN_CLK_TAG)
+SYN_LOG_NAME ?= syn_compile_hybridacc_$(TOP_SYN_CLK_TAG).log
+TOP_SYN_RUN_TAG ?= $(TOP_SYN_CLK_TAG)
+TOP_SYN_OUT_ROOT ?= $(abspath $(syn_dir)/$(TOP_SYN_CLK_TAG))
+TOP_SYN_REPORT_OUT_ROOT ?= $(abspath $(report_dir)/$(TOP_SYN_CLK_TAG))
+SYN_DC_ENV := CLOCK_PERIOD_NS="$(CLOCK_PERIOD_NS)" RUN_TAG="$(RUN_TAG)" SYN_OUT_ROOT="$(SYN_OUT_ROOT)" REPORT_OUT_ROOT="$(REPORT_OUT_ROOT)" SYN_MAX_CORES="$(SYN_MAX_CORES)"
+TOP_SYN_DC_ENV := CLOCK_PERIOD_NS="$(TOP_SYN_CLOCK_PERIOD_NS)" RUN_TAG="$(TOP_SYN_RUN_TAG)" SYN_OUT_ROOT="$(TOP_SYN_OUT_ROOT)" REPORT_OUT_ROOT="$(TOP_SYN_REPORT_OUT_ROOT)" SYN_MAX_CORES="$(SYN_MAX_CORES)" TOP_SYN_MAX_CORES="$(SYN_MAX_CORES)"
 TOP_SYN_TCL := $(abspath script/syn_hybridacc.tcl)
 DC_SETUP_FILE := $(abspath script/synopsys_dc.setup)
 SNPSLMD_LICENSE_FILE ?= 26585@lstn
@@ -161,7 +172,7 @@ help:
 	@echo "  clean_superlint      - Remove output Jasper/Superlint logs, run dirs, and Tcl probes"
 	@echo "  clean                - Remove simulation build artifacts"
 	@echo "  clean_syn            - Remove synthesized files and reports"
-	@echo "Variables: TEST_DATA_DIR=... VERIFY_TOL=... CLOCK_PERIOD_NS=... WAVE_DUMP=0|1 WAVE_DEPTH=... VERDI_HOME=... NOVAS_HOME=... RUN_TAG=... SYN_OUT_ROOT=... REPORT_OUT_ROOT=... SYN_BUILD_DIR=... SYN_LOG_NAME=... GATE_TOP_NETLIST_DIR=... GATE_TOP_SDF_FILE=... GATE_SIM_RUN_FILTER=... RTL_FW_REGRESS_ROOT=... RTL_FW_DEBUG_PLUSARGS='+TRACE_CLUSTER_DEBUG' RTL_FW_TEST_SEED=... UV=... RISCV_TOOL_PREFIX=... JASPER=... JASPER_CSHRC=... SUPERLINT_REPORT_OUT=... SUPERLINT_HOTSPOT_OUT=..."
+	@echo "Variables: TEST_DATA_DIR=... VERIFY_TOL=... CLOCK_PERIOD_NS=... WAVE_DUMP=0|1 WAVE_DEPTH=... VERDI_HOME=... NOVAS_HOME=... RUN_TAG=... SYN_OUT_ROOT=... REPORT_OUT_ROOT=... SYN_BUILD_DIR=... SYN_LOG_NAME=... SYN_MAX_CORES=... SYN_MAX_MEMORY_GB=... GATE_TOP_NETLIST_DIR=... GATE_TOP_SDF_FILE=... GATE_SIM_RUN_FILTER=... RTL_FW_REGRESS_ROOT=... RTL_FW_DEBUG_PLUSARGS='+TRACE_CLUSTER_DEBUG' RTL_FW_TEST_SEED=... UV=... RISCV_TOOL_PREFIX=... JASPER=... JASPER_CSHRC=... SUPERLINT_REPORT_OUT=... SUPERLINT_HOTSPOT_OUT=..."
 
 $(bld_dir):
 	mkdir -p $(bld_dir)
@@ -568,7 +579,17 @@ synthesize_%: | $(bld_dir) $(syn_dir) $(report_dir)
 	mkdir -p $(report_dir)/$*
 	cp script/synopsys_dc.setup $(bld_dir)/.synopsys_dc.setup
 	cd $(bld_dir); \
-	$(SYN_DC_ENV) $(DC_SHELL) -no_home_init -f ../script/synthesis_$*.tcl | tee syn_compile.log
+	echo "[SYN] Resource cap: $(SYN_RESOURCE_LIMIT_DESC)"; \
+	status_file="$$(pwd)/.dc_status"; \
+	rm -f "$$status_file"; \
+	( bash -lc '$(SYN_BASH_RESOURCE_LIMIT); $(SYN_DC_ENV) $(DC_SHELL) -no_home_init -f ../script/synthesis_$*.tcl'; \
+	  echo $$? > "$$status_file" ) | tee syn_compile.log; \
+	dc_rc=$$(cat "$$status_file"); \
+	rm -f "$$status_file"; \
+	if [ $$dc_rc -ne 0 ]; then \
+		echo "[SYN] ERROR: synthesis_$*.tcl failed under resource cap $(SYN_RESOURCE_LIMIT_DESC)"; \
+		exit $$dc_rc; \
+	fi
 
 syn_top: | $(bld_dir) $(syn_dir) $(report_dir)
 	@echo "[SYN] Synthesizing top-level HybridAcc ..."
@@ -576,8 +597,18 @@ syn_top: | $(bld_dir) $(syn_dir) $(report_dir)
 	mkdir -p "$$build_dir"; \
 	cp "$(DC_SETUP_FILE)" "$$build_dir/.synopsys_dc.setup"; \
 	cd "$$build_dir"; \
-	$(SYN_DC_ENV) $(DC_SHELL) -no_home_init -f "$(TOP_SYN_TCL)" | tee "$(SYN_LOG_NAME)"
-	@echo "[SYN] Done: HybridAcc  Build dir: $(SYN_BUILD_DIR)  Log: $(SYN_LOG_NAME)"
+	echo "[SYN] Resource cap: $(SYN_RESOURCE_LIMIT_DESC)"; \
+	status_file="$$(pwd)/.dc_status"; \
+	rm -f "$$status_file"; \
+	( bash -lc '$(SYN_BASH_RESOURCE_LIMIT); $(TOP_SYN_DC_ENV) $(DC_SHELL) -no_home_init -f "$(TOP_SYN_TCL)"'; \
+	  echo $$? > "$$status_file" ) | tee "$(SYN_LOG_NAME)"; \
+	dc_rc=$$(cat "$$status_file"); \
+	rm -f "$$status_file"; \
+	if [ $$dc_rc -ne 0 ]; then \
+		echo "[SYN] ERROR: top-level synthesis failed under resource cap $(SYN_RESOURCE_LIMIT_DESC)"; \
+		exit $$dc_rc; \
+	fi
+	@echo "[SYN] Done: HybridAcc  Build dir: $(SYN_BUILD_DIR)  Syn root: $(TOP_SYN_OUT_ROOT)  Report root: $(TOP_SYN_REPORT_OUT_ROOT)  Log: $(SYN_LOG_NAME)"
 
 synall:
 	@set -e; \
@@ -593,8 +624,17 @@ syn_pe_%: | $(bld_dir) $(syn_dir) $(report_dir)
 	mkdir -p $(report_dir)/$*
 	cp script/synopsys_dc.setup $(bld_dir)/.synopsys_dc.setup
 	cd $(bld_dir); \
-	$(SYN_DC_ENV) $(DC_SHELL) -no_home_init -x "set MOD_NAME $*" -f ../script/synthesis_pe_units.tcl \
-		| tee ../$(report_dir)/$*/syn_compile_$*.log
+	echo "[SYN] Resource cap: $(SYN_RESOURCE_LIMIT_DESC)"; \
+	status_file="$$(pwd)/.dc_status"; \
+	rm -f "$$status_file"; \
+	( bash -lc '$(SYN_BASH_RESOURCE_LIMIT); $(SYN_DC_ENV) $(DC_SHELL) -no_home_init -x "set MOD_NAME $*" -f ../script/synthesis_pe_units.tcl'; \
+	  echo $$? > "$$status_file" ) | tee ../$(report_dir)/$*/syn_compile_$*.log; \
+	dc_rc=$$(cat "$$status_file"); \
+	rm -f "$$status_file"; \
+	if [ $$dc_rc -ne 0 ]; then \
+		echo "[SYN] ERROR: PE unit $* failed under resource cap $(SYN_RESOURCE_LIMIT_DESC)"; \
+		exit $$dc_rc; \
+	fi
 	@echo "[SYN] Done: $*  Reports: $(report_dir)/$*/"
 
 syn_pe_all: | $(bld_dir) $(syn_dir) $(report_dir)
@@ -610,8 +650,17 @@ syn_noc_%: | $(bld_dir) $(syn_dir) $(report_dir)
 	mkdir -p $(report_dir)/$*
 	cp script/synopsys_dc.setup $(bld_dir)/.synopsys_dc.setup
 	cd $(bld_dir); \
-	$(SYN_DC_ENV) $(DC_SHELL) -no_home_init -x "set MOD_NAME $*" -f ../script/synthesis_noc_units.tcl \
-		| tee ../$(report_dir)/$*/syn_compile_$*.log
+	echo "[SYN] Resource cap: $(SYN_RESOURCE_LIMIT_DESC)"; \
+	status_file="$$(pwd)/.dc_status"; \
+	rm -f "$$status_file"; \
+	( bash -lc '$(SYN_BASH_RESOURCE_LIMIT); $(SYN_DC_ENV) $(DC_SHELL) -no_home_init -x "set MOD_NAME $*" -f ../script/synthesis_noc_units.tcl'; \
+	  echo $$? > "$$status_file" ) | tee ../$(report_dir)/$*/syn_compile_$*.log; \
+	dc_rc=$$(cat "$$status_file"); \
+	rm -f "$$status_file"; \
+	if [ $$dc_rc -ne 0 ]; then \
+		echo "[SYN] ERROR: NoC unit $* failed under resource cap $(SYN_RESOURCE_LIMIT_DESC)"; \
+		exit $$dc_rc; \
+	fi
 	@echo "[SYN] Done: $*  Reports: $(report_dir)/$*/"
 
 syn_noc_all: | $(bld_dir) $(syn_dir) $(report_dir)
@@ -627,8 +676,17 @@ syn_cluster_%: | $(bld_dir) $(syn_dir) $(report_dir)
 	mkdir -p $(report_dir)/$*
 	cp script/synopsys_dc.setup $(bld_dir)/.synopsys_dc.setup
 	cd $(bld_dir); \
-	$(SYN_DC_ENV) $(DC_SHELL) -no_home_init -x "set MOD_NAME $*" -f ../script/synthesis_cluster_units.tcl \
-		| tee ../$(report_dir)/$*/syn_compile_$*.log
+	echo "[SYN] Resource cap: $(SYN_RESOURCE_LIMIT_DESC)"; \
+	status_file="$$(pwd)/.dc_status"; \
+	rm -f "$$status_file"; \
+	( bash -lc '$(SYN_BASH_RESOURCE_LIMIT); $(SYN_DC_ENV) $(DC_SHELL) -no_home_init -x "set MOD_NAME $*" -f ../script/synthesis_cluster_units.tcl'; \
+	  echo $$? > "$$status_file" ) | tee ../$(report_dir)/$*/syn_compile_$*.log; \
+	dc_rc=$$(cat "$$status_file"); \
+	rm -f "$$status_file"; \
+	if [ $$dc_rc -ne 0 ]; then \
+		echo "[SYN] ERROR: Cluster unit $* failed under resource cap $(SYN_RESOURCE_LIMIT_DESC)"; \
+		exit $$dc_rc; \
+	fi
 	@echo "[SYN] Done: $*  Reports: $(report_dir)/$*/"
 
 syn_cluster_all: | $(bld_dir) $(syn_dir) $(report_dir)

@@ -17,8 +17,7 @@ if {![info exists MOD_NAME]} {
 # Module source file mapping
 # ============================================================================
 set pkg_file "../src/hybridacc_utils_pkg.sv"
-set sram_wrapper "../src/utils/SRAM_Wrapper.sv"
-set networkonchip_srcs [list $sram_wrapper ../src/FIFO.sv ../src/asyncFIFO.sv ../src/PE/InstructionMemory.sv ../src/PE/Decoder.sv ../src/PE/LoopController.sv ../src/PE/DataMemory.sv ../src/PE/TransformRegFile.sv ../src/PE/PsumRegFile.sv ../src/PE/VMULU.sv ../src/PE/VADDU.sv ../src/PE/LDMA.sv ../src/PE/SDMA.sv ../src/PE/PErouter.sv ../src/PE/IF_ID_Stage.sv ../src/PE/EXE_M_Stage.sv ../src/PE/EXE_A_Stage.sv ../src/PE/ProcessElement.sv ../src/NoC/MBUS.sv ../src/NoC/NoCRouter.sv ../src/NetworkOnChip.sv]
+set networkonchip_srcs [list ../src/FIFO.sv ../src/asyncFIFO.sv ../src/PE/InstructionMemory.sv ../src/PE/Decoder.sv ../src/PE/LoopController.sv ../src/PE/DataMemory.sv ../src/PE/TransformRegFile.sv ../src/PE/PsumRegFile.sv ../src/PE/VMULU.sv ../src/PE/VADDU.sv ../src/PE/LDMA.sv ../src/PE/SDMA.sv ../src/PE/PErouter.sv ../src/PE/IF_ID_Stage.sv ../src/PE/EXE_M_Stage.sv ../src/PE/EXE_A_Stage.sv ../src/PE/ProcessElement.sv ../src/NoC/MBUS.sv ../src/NoC/NoCRouter.sv ../src/NetworkOnChip.sv]
 
 # Source files required for each module (in dependency order)
 array set MOD_SRCS {
@@ -53,6 +52,7 @@ if {![info exists MOD_SRCS($MOD_NAME)]} {
 puts "============================================================"
 puts " Synthesizing NoC unit: $MOD_NAME"
 hacc_print_run_context "NoC unit" $MOD_NAME
+puts " Compile cfg : cores=$::SYN_MAX_CORES"
 puts "============================================================"
 
 # ============================================================================
@@ -75,7 +75,7 @@ link
 # ============================================================================
 # Constraints
 # ============================================================================
-set_host_options -max_core 8
+set_host_options -max_cores $::SYN_MAX_CORES
 
 # SDC selection: combinational / unit / integration
 if {[lsearch -exact $MOD_COMBINATIONAL $MOD_NAME] >= 0} {

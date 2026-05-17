@@ -88,20 +88,25 @@ module SectionLoader import core_pkg::*; #(
 
     always_comb begin
         isram_wr_en_o = 1'b0;
-        isram_wr_addr_o = local_addr_reg;
-        isram_wr_data_o = data_word_reg;
-        isram_wr_strb_o = 4'hF;
+        isram_wr_addr_o = 32'h0;
+        isram_wr_data_o = 32'h0;
+        isram_wr_strb_o = 4'h0;
         dsram_wr_en_o = 1'b0;
-        dsram_wr_addr_o = local_addr_reg;
-        dsram_wr_data_o = data_word_reg;
-        dsram_wr_strb_o = 4'hF;
+        dsram_wr_addr_o = 32'h0;
+        dsram_wr_data_o = 32'h0;
+        dsram_wr_strb_o = 4'h0;
 
         if (state_reg == LD_WRITE_LOCAL) begin
             if (local_addr_reg < ISRAM_BYTES_P) begin
                 isram_wr_en_o = 1'b1;
+                isram_wr_addr_o = local_addr_reg;
+                isram_wr_data_o = data_word_reg;
+                isram_wr_strb_o = 4'hF;
             end else begin
                 dsram_wr_en_o = 1'b1;
                 dsram_wr_addr_o = local_addr_reg - ISRAM_BYTES_P;
+                dsram_wr_data_o = data_word_reg;
+                dsram_wr_strb_o = 4'hF;
             end
         end
     end

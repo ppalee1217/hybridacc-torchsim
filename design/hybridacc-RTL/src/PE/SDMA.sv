@@ -43,6 +43,7 @@ module SDMA (
 
     // Configuration registers
     logic [15:0] dma_base_static_reg, dma_len_static_reg, dma_stride_static_reg, dma_loop_static_reg;
+    logic        reset_init_done_reg;
 
     // Runtime registers
     logic [15:0] dma_offset_active_reg, dma_len_active_rem_reg, dma_loops_active_rem_reg;
@@ -191,6 +192,20 @@ module SDMA (
             dma_base_static_reg <= 16'h0;
             dma_len_static_reg <= 16'h0;
             dma_stride_static_reg <= 16'h0;
+            dma_loop_static_reg <= 16'h0;
+            dma_offset_active_reg <= 16'h0;
+            dma_len_active_rem_reg <= 16'h0;
+            dma_loops_active_rem_reg <= 16'h0;
+            bank_sel_active_reg <= 1'b0;
+            write_pending_reg <= 1'b0;
+            write_addr_reg <= 9'h0;
+            write_data_reg <= 64'h0;
+            reset_init_done_reg <= 1'b0;
+        end else if (!reset_init_done_reg) begin
+            state_reg <= IDLE;
+            dma_base_static_reg <= 16'h0;
+            dma_len_static_reg <= 16'h0;
+            dma_stride_static_reg <= 16'h0;
             dma_loop_static_reg <= 16'd1;
             dma_offset_active_reg <= 16'h0;
             dma_len_active_rem_reg <= 16'h0;
@@ -199,6 +214,7 @@ module SDMA (
             write_pending_reg <= 1'b0;
             write_addr_reg <= 9'h0;
             write_data_reg <= 64'h0;
+            reset_init_done_reg <= 1'b1;
         end else begin
             state_reg <= state_next;
             dma_base_static_reg <= dma_base_static_next;

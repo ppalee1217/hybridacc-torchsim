@@ -7,6 +7,7 @@
 `include "../../src/asyncFIFO.sv"
 `include "../../src/Cluster/cluster_pkg.sv"
 `include "../../src/Cluster/AddressGenerateUnit.sv"
+`include "../../src/Cluster/ScratchpadMemoryBank.sv"
 `include "../../src/Cluster/ScratchpadMemory.sv"
 `include "../../src/Cluster/HybridDataDeliverUnit.sv"
 `include "../../src/Cluster/ClusterControlUnit.sv"

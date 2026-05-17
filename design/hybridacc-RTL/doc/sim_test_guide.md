@@ -163,7 +163,7 @@ make sim_tb_hybridacc_smoke
 | `make gate_sim_pe` | 跑 PE 類 gate-level testbench |
 | `make gate_sim_noc` | 跑 NoC 類 gate-level testbench |
 
-注意：目前 Makefile 內建的 gate-level 映射主要覆蓋 PE / NoC。Cluster、Core、HybridAcc top-level 並沒有完整的 gate-level convenience target，需要另外補 netlist 與 target 對應。
+注意：目前 Makefile 內建的 `MOD_NAME` 映射主要覆蓋 PE / NoC。Cluster、Core、HybridAcc top-level 雖然沒有 convenience mapping，但仍可用通用 `gate_sim_<tb>` target，手動指定 `MOD_NAME` 與 `GATE_NETLIST_DIR`。後面第 11.2.1 節有 `tb_hybridacc_smoke` 的實際範例。
 
 ---
 
@@ -735,6 +735,48 @@ make gate_sim_pe
 make gate_sim_noc
 ```
 
+### 11.2.1 Top-level gate smoke 指令
+
+如果你要的是「先用 top-level netlist 快速確認 HybridAcc 沒有明顯壞掉」，目前最直接的 smoke bench 是 `tb_hybridacc_smoke.sv`。這條路徑不依賴 PE / NoC 的內建 module mapping，而是直接走通用 `gate_sim_<tb>` target。
+
+先 synthesize top-level。例如目前常用的 `2.0 ns` case：
+
+```bash
+make syn_top CLOCK_PERIOD_NS=2.0
+```
+
+上面這條指令會把 netlist 放在：
+
+```text
+syn/clk_2p00ns/HybridAcc/HybridAcc_syn.v
+```
+
+接著執行 gate smoke：
+
+```bash
+make gate_sim_tb_hybridacc_smoke \
+  MOD_NAME=HybridAcc \
+  GATE_NETLIST_DIR=./syn/clk_2p00ns
+```
+
+這裡最容易填錯的是 `GATE_NETLIST_DIR`。它要指向 netlist 的外層 root，也就是包含 `HybridAcc/` 子目錄的那層；Makefile 會再自動去找 `$(GATE_NETLIST_DIR)/HybridAcc/HybridAcc_syn.v`。
+
+如果你的 top-level synthesis 不是 `2.0 ns`，就把路徑中的 `clk_2p00ns` 換成對應的 clock tag。例如 `1.0 ns` 時應改成：
+
+```bash
+make syn_top CLOCK_PERIOD_NS=1.0
+make gate_sim_tb_hybridacc_smoke \
+  MOD_NAME=HybridAcc \
+  GATE_NETLIST_DIR=./syn/clk_1p00ns
+```
+
+log 位置和其他 gate-level testbench 相同：
+
+- `sim/gate_log/tb_hybridacc_smoke.compile.log`
+- `sim/gate_log/tb_hybridacc_smoke.run.log`
+
+要注意的是，`tb_hybridacc_smoke.sv` 目前是「純 gate netlist smoke」bench，重點是快速檢查 top-level 基本功能與 gate/X 問題；它沒有 `+SDF_FILE` hook，所以不是 SDF back-annotated timing run。若你要的是帶 firmware/workload 的 top-level gate regression，應改用 `gate_regress_*` 系列 target。
+
 ### 11.3 gate-level log 位置
 
 - `sim/gate_log/<tb>.compile.log`
@@ -747,7 +789,7 @@ make gate_sim_noc
 - PE testbench
 - NoC testbench
 
-Cluster / Core / HybridAcc top-level 並沒有完整自動化 gate-level 入口；若要補這些流程，需要：
+Cluster / Core / HybridAcc top-level 沒有內建 convenience mapping；但像 `tb_hybridacc_smoke` 這種 top-level smoke bench，仍可透過前面第 11.2.1 節的 generic `gate_sim_<tb>` 用法直接執行。若要再往前補完整自動化入口，通常還需要：
 
 1. 先有對應 netlist
 2. 在 Makefile 補 target 與 module name mapping

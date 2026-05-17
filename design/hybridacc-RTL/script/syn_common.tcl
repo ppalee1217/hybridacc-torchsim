@@ -5,6 +5,7 @@
 #   RUN_TAG          Logical label for the synthesis run
 #   SYN_OUT_ROOT     Root directory for netlists/SDF
 #   REPORT_OUT_ROOT  Root directory for logs/reports
+#   SYN_MAX_CORES    Max DC parallel cores
 # ============================================================================
 
 proc hacc_fail {message} {
@@ -43,6 +44,11 @@ proc hacc_init_run_config {} {
     hacc_init_var RUN_TAG default
     hacc_init_var SYN_OUT_ROOT "../syn"
     hacc_init_var REPORT_OUT_ROOT "../report"
+    hacc_init_var SYN_MAX_CORES 8
+
+    if {![string is integer -strict $::SYN_MAX_CORES] || $::SYN_MAX_CORES < 1} {
+        hacc_fail "SYN_MAX_CORES must be a positive integer, got '$::SYN_MAX_CORES'"
+    }
 
     set ::SYN_OUT_ROOT [file normalize $::SYN_OUT_ROOT]
     set ::REPORT_OUT_ROOT [file normalize $::REPORT_OUT_ROOT]
@@ -63,6 +69,7 @@ proc hacc_print_run_context {design_kind design_name} {
     puts " Design name : $design_name"
     puts " Run tag     : $::RUN_TAG"
     puts " Clock (ns)  : $::clk_period"
+    puts " Max cores   : $::SYN_MAX_CORES"
     puts " Syn root    : $::SYN_OUT_ROOT"
     puts " Report root : $::REPORT_OUT_ROOT"
 }

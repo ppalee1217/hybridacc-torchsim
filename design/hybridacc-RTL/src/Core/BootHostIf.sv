@@ -60,6 +60,9 @@ module BootHostIf import core_pkg::*; #(
     input  logic [31:0] fabric_last_addr_i,
     output logic        controller_irq_o
 );
+    localparam logic [31:0] DEFAULT_CLUSTER_MASK_LO = (NUM_CLUSTERS >= 32) ? 32'hFFFF_FFFF : ((32'h1 << NUM_CLUSTERS) - 1);
+    localparam logic [31:0] DEFAULT_CLUSTER_MASK_HI = (NUM_CLUSTERS > 32) ? ((32'h1 << (NUM_CLUSTERS - 32)) - 1) : 32'h0;
+
     logic [31:0] ctrl_reg;
     logic [31:0] boot_addr_reg;
     logic [31:0] manifest_lo_reg;
@@ -67,10 +70,13 @@ module BootHostIf import core_pkg::*; #(
     logic [31:0] manifest_size_reg;
     logic [31:0] cluster_mask_lo_reg;
     logic [31:0] cluster_mask_hi_reg;
+    logic [31:0] cluster_mask_lo_w;
+    logic [31:0] cluster_mask_hi_w;
     logic [31:0] trace_base_reg;
     logic [31:0] trace_size_reg;
     logic [31:0] trace_ctrl_reg;
     logic [31:0] irq_summary_sticky_reg;
+    logic        reset_init_done_reg;
 
     logic        wr_addr_valid_reg;
     logic [31:0] wr_addr_reg;
@@ -137,8 +143,8 @@ module BootHostIf import core_pkg::*; #(
             LOADER_ERR_CODE:     r = loader_err_code_i;
             LOADER_ERR_INFO:     r = loader_err_info_i;
             IRQ_SUMMARY:         r = irq_summary_word(irq_summary_sticky_reg, loader_done_i, loader_err_code_i, core_cause_snapshot_i, core_halted_i, plic_pending_any_i);
-            CLUSTER_MASK_LO:     r = cluster_mask_lo_reg;
-            CLUSTER_MASK_HI:     r = cluster_mask_hi_reg;
+            CLUSTER_MASK_LO:     r = cluster_mask_lo_w;
+            CLUSTER_MASK_HI:     r = cluster_mask_hi_w;
             LAST_MMIO_TARGET:    r = fabric_last_target_i;
             LAST_MMIO_ADDR:      r = fabric_last_addr_i;
             TRACE_BASE:          r = trace_base_reg;
@@ -150,6 +156,9 @@ module BootHostIf import core_pkg::*; #(
         return r;
     endfunction
 
+    assign cluster_mask_lo_w = reset_init_done_reg ? cluster_mask_lo_reg : DEFAULT_CLUSTER_MASK_LO;
+    assign cluster_mask_hi_w = reset_init_done_reg ? cluster_mask_hi_reg : DEFAULT_CLUSTER_MASK_HI;
+
     assign core_enable_o     = ctrl_reg[0];
     assign core_haltreq_o    = ctrl_reg[1];
     assign boot_addr_o       = boot_addr_reg;
@@ -157,8 +166,8 @@ module BootHostIf import core_pkg::*; #(
     assign manifest_addr_lo_o= manifest_lo_reg;
     assign manifest_addr_hi_o= manifest_hi_reg;
     assign manifest_size_o   = manifest_size_reg;
-    assign cluster_mask_lo_o = cluster_mask_lo_reg;
-    assign cluster_mask_hi_o = cluster_mask_hi_reg;
+    assign cluster_mask_lo_o = cluster_mask_lo_w;
+    assign cluster_mask_hi_o = cluster_mask_hi_w;
     assign controller_irq_o  = |irq_summary_word(irq_summary_sticky_reg, loader_done_i, loader_err_code_i, core_cause_snapshot_i, core_halted_i, plic_pending_any_i);
 
     assign s_ctrl_aw_ready_o = !wr_addr_valid_reg && !s_ctrl_b_valid_o;
@@ -174,8 +183,8 @@ module BootHostIf import core_pkg::*; #(
             manifest_lo_reg      <= 32'h0;
             manifest_hi_reg      <= 32'h0;
             manifest_size_reg    <= 32'h0;
-            cluster_mask_lo_reg  <= (NUM_CLUSTERS >= 32) ? 32'hFFFF_FFFF : ((32'h1 << NUM_CLUSTERS) - 1);
-            cluster_mask_hi_reg  <= (NUM_CLUSTERS > 32) ? ((32'h1 << (NUM_CLUSTERS - 32)) - 1) : 32'h0;
+            cluster_mask_lo_reg  <= 32'h0;
+            cluster_mask_hi_reg  <= 32'h0;
             trace_base_reg       <= 32'h0;
             trace_size_reg       <= 32'h0;
             trace_ctrl_reg       <= 32'h0;
@@ -186,6 +195,11 @@ module BootHostIf import core_pkg::*; #(
             s_ctrl_r_valid_o     <= 1'b0;
             s_ctrl_r_data_o      <= 32'h0;
             loader_kick_o        <= 1'b0;
+            reset_init_done_reg  <= 1'b0;
+        end else if (!reset_init_done_reg) begin
+            cluster_mask_lo_reg  <= DEFAULT_CLUSTER_MASK_LO;
+            cluster_mask_hi_reg  <= DEFAULT_CLUSTER_MASK_HI;
+            reset_init_done_reg  <= 1'b1;
         end else begin
             loader_kick_o <= 1'b0;
 

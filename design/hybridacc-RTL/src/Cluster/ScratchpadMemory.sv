@@ -16,7 +16,8 @@
 //                Internal bank/FIFO micro-architecture is simplified versus
 //                ESL, but address mapping and observable port behavior are
 //                aligned for Cluster bring-up.
-// Dependencies:  src/hybridacc_utils_pkg.sv, src/Cluster/cluster_pkg.sv
+// Dependencies:  src/hybridacc_utils_pkg.sv, src/Cluster/cluster_pkg.sv,
+//                src/Cluster/ScratchpadMemoryBank.sv
 // Revision:
 //   2026/04/27 - Initial version (M1 cluster datapath rewrite)
 // Additional Comments:
@@ -89,24 +90,19 @@ module ScratchpadMemory import cluster_pkg::*; #(
     localparam int unsigned BANK_IDX_W        = (TOTAL_BANKS <= 1) ? 1 : $clog2(TOTAL_BANKS);
     localparam int unsigned BANK_ROW_W        = (BANK_DEPTH <= 1) ? 1 : $clog2(BANK_DEPTH);
     localparam int unsigned MACRO_DEPTH       = 128;
-    localparam int unsigned MACRO_ADDR_W      = 7;
-    localparam int unsigned MACROS_PER_BANK   = BANK_DEPTH / MACRO_DEPTH;
-    localparam int unsigned MACRO_SEL_W       = (MACROS_PER_BANK <= 1) ? 1 : $clog2(MACROS_PER_BANK);
     localparam int          TOTAL_BANKS_GEN   = int'(TOTAL_BANKS);
-    localparam int          MACROS_PER_BANK_GEN = int'(MACROS_PER_BANK);
 
     typedef logic [BANK_DATA_WIDTH-1:0] bank_word_t;
     typedef logic [BANK_ROW_W-1:0]      bank_row_t;
-    typedef logic [MACRO_ADDR_W-1:0]    macro_addr_t;
-    typedef logic [MACRO_SEL_W-1:0]     macro_sel_t;
 
     logic [GROUP_IDX_W-1:0] active_map_reg [NUM_NOC_PORTS];
+    logic                   active_map_init_done_reg;
 
     logic                   resp_valid_reg [NUM_NOC_PORTS];
     spm_resp_192_t          resp_data_reg  [NUM_NOC_PORTS];
     logic                   noc_read_pending_reg  [NUM_NOC_PORTS];
     logic                   noc_read_parallel_reg [NUM_NOC_PORTS];
-    logic [GROUP_IDX_W-1:0] noc_read_group_reg    [NUM_NOC_PORTS];
+    logic [NUM_NOC_PORTS*GROUP_IDX_W-1:0] noc_read_group_reg;
     logic [BANK_IDX_W-1:0]  noc_read_bank_reg     [NUM_NOC_PORTS];
     bank_row_t              noc_read_row_reg      [NUM_NOC_PORTS];
 
@@ -143,13 +139,13 @@ module ScratchpadMemory import cluster_pkg::*; #(
     logic [BANK_IDX_W-1:0]  dma_read_bank_idx_w;
     bank_row_t              dma_read_row_w;
 
-    logic                   sram_ceb  [TOTAL_BANKS][MACROS_PER_BANK];
-    logic                   sram_web  [TOTAL_BANKS][MACROS_PER_BANK];
-    bank_word_t             sram_bweb [TOTAL_BANKS][MACROS_PER_BANK];
-    macro_addr_t            sram_addr [TOTAL_BANKS][MACROS_PER_BANK];
-    bank_word_t             sram_d    [TOTAL_BANKS][MACROS_PER_BANK];
-    bank_word_t             sram_q    [TOTAL_BANKS][MACROS_PER_BANK];
-    logic                   sram_pudelay_unused [TOTAL_BANKS][MACROS_PER_BANK];
+    logic                   bank_ceb_w            [TOTAL_BANKS];
+    logic                   bank_web_w            [TOTAL_BANKS];
+    bank_row_t              bank_addr_w           [TOTAL_BANKS];
+    bank_word_t             bank_d_w              [TOTAL_BANKS];
+    bank_word_t             bank_bweb_w           [TOTAL_BANKS];
+    bank_word_t             bank_q_w              [TOTAL_BANKS];
+    logic                   bank_pudelay_unused_w [TOTAL_BANKS];
 
     function automatic bank_word_t expand_strb_to_bweb(
         input logic [BANK_DATA_WIDTH/8-1:0] strb
@@ -161,12 +157,8 @@ module ScratchpadMemory import cluster_pkg::*; #(
         return mask;
     endfunction
 
-    function automatic macro_sel_t row_to_macro_sel(input bank_row_t row_idx);
-        return macro_sel_t'(row_idx / MACRO_DEPTH);
-    endfunction
-
-    function automatic macro_addr_t row_to_macro_addr(input bank_row_t row_idx);
-        return macro_addr_t'(row_idx % MACRO_DEPTH);
+    function automatic logic [GROUP_IDX_W-1:0] noc_read_group_get(input int unsigned port_idx);
+        return noc_read_group_reg[port_idx*GROUP_IDX_W +: GROUP_IDX_W];
     endfunction
 
     function automatic logic decode_linear_bank(
@@ -181,17 +173,6 @@ module ScratchpadMemory import cluster_pkg::*; #(
         decode_linear_bank = (bank_sel < BANKS_PER_GROUP);
     endfunction
 
-    always_comb begin
-        logic pudelay_sink;
-
-        pudelay_sink = 1'b0;
-        for (int unsigned bank_idx = 0; bank_idx < TOTAL_BANKS; bank_idx++) begin
-            for (int unsigned macro_idx = 0; macro_idx < MACROS_PER_BANK; macro_idx++) begin
-                pudelay_sink ^= sram_pudelay_unused[bank_idx][macro_idx];
-            end
-        end
-    end
-
     // ---------------------------------------------------------------------
     // Combinational readiness for NoC and DMA ingress.
     // Static priority: lower port index has higher priority.
@@ -201,13 +182,11 @@ module ScratchpadMemory import cluster_pkg::*; #(
 
         for (int unsigned b = 0; b < TOTAL_BANKS; b++) begin
             bank_claimed[b] = 1'b0;
-            for (int unsigned m = 0; m < MACROS_PER_BANK; m++) begin
-                sram_ceb[b][m]  = 1'b1;
-                sram_web[b][m]  = 1'b1;
-                sram_bweb[b][m] = {BANK_DATA_WIDTH{1'b1}};
-                sram_addr[b][m] = '0;
-                sram_d[b][m]    = '0;
-            end
+            bank_ceb_w[b]       = 1'b1;
+            bank_web_w[b]       = 1'b1;
+            bank_addr_w[b]      = '0;
+            bank_d_w[b]         = '0;
+            bank_bweb_w[b]      = {BANK_DATA_WIDTH{1'b1}};
         end
 
         dma_write_issue_w    = 1'b0;
@@ -235,7 +214,7 @@ module ScratchpadMemory import cluster_pkg::*; #(
                 continue;
             end
 
-            group_idx = active_map_reg[p];
+            group_idx = active_map_init_done_reg ? active_map_reg[p] : p[GROUP_IDX_W-1:0];
             bank_base = group_idx * BANKS_PER_GROUP;
             can_accept = 1'b1;
 
@@ -334,52 +313,40 @@ module ScratchpadMemory import cluster_pkg::*; #(
                 if (noc_parallel_w[p]) begin
                     for (int unsigned k = 0; k < BANKS_PER_GROUP; k++) begin
                         logic [BANK_IDX_W-1:0] bank_idx;
-                        macro_sel_t macro_sel;
 
                         bank_idx = $bits(bank_idx)'(noc_group_w[p] * BANKS_PER_GROUP + k);
-                        macro_sel = row_to_macro_sel(noc_row_w[p]);
-
-                        sram_ceb[bank_idx][macro_sel]  = 1'b0;
-                        sram_web[bank_idx][macro_sel]  = !spm_req_i[p].wen;
-                        sram_addr[bank_idx][macro_sel] = row_to_macro_addr(noc_row_w[p]);
+                        bank_ceb_w[bank_idx]  = 1'b0;
+                        bank_web_w[bank_idx]  = !spm_req_i[p].wen;
+                        bank_addr_w[bank_idx] = noc_row_w[p];
                         if (spm_req_i[p].wen) begin
-                            sram_bweb[bank_idx][macro_sel] = {BANK_DATA_WIDTH{1'b0}};
-                            sram_d[bank_idx][macro_sel]    = spm_req_i[p].wdata[k*BANK_DATA_WIDTH +: BANK_DATA_WIDTH];
+                            bank_bweb_w[bank_idx] = '0;
+                            bank_d_w[bank_idx]    = spm_req_i[p].wdata[k*BANK_DATA_WIDTH +: BANK_DATA_WIDTH];
                         end
                     end
                 end else begin
-                    macro_sel_t macro_sel;
-
-                    macro_sel = row_to_macro_sel(noc_row_w[p]);
-                    sram_ceb[noc_bank_idx_w[p]][macro_sel]  = 1'b0;
-                    sram_web[noc_bank_idx_w[p]][macro_sel]  = !spm_req_i[p].wen;
-                    sram_addr[noc_bank_idx_w[p]][macro_sel] = row_to_macro_addr(noc_row_w[p]);
+                    bank_ceb_w[noc_bank_idx_w[p]]  = 1'b0;
+                    bank_web_w[noc_bank_idx_w[p]]  = !spm_req_i[p].wen;
+                    bank_addr_w[noc_bank_idx_w[p]] = noc_row_w[p];
                     if (spm_req_i[p].wen) begin
-                        sram_bweb[noc_bank_idx_w[p]][macro_sel] = {BANK_DATA_WIDTH{1'b0}};
-                        sram_d[noc_bank_idx_w[p]][macro_sel]    = spm_req_i[p].wdata[BANK_DATA_WIDTH-1:0];
+                        bank_bweb_w[noc_bank_idx_w[p]] = '0;
+                        bank_d_w[noc_bank_idx_w[p]]    = spm_req_i[p].wdata[BANK_DATA_WIDTH-1:0];
                     end
                 end
             end
         end
 
         if (dma_write_issue_w) begin
-            macro_sel_t macro_sel;
-
-            macro_sel = row_to_macro_sel(dma_write_row_w);
-            sram_ceb[dma_write_bank_idx_w][macro_sel]  = 1'b0;
-            sram_web[dma_write_bank_idx_w][macro_sel]  = 1'b0;
-            sram_bweb[dma_write_bank_idx_w][macro_sel] = expand_strb_to_bweb(w_pending_strb_reg);
-            sram_addr[dma_write_bank_idx_w][macro_sel] = row_to_macro_addr(dma_write_row_w);
-            sram_d[dma_write_bank_idx_w][macro_sel]    = w_pending_data_reg;
+            bank_ceb_w[dma_write_bank_idx_w]   = 1'b0;
+            bank_web_w[dma_write_bank_idx_w]   = 1'b0;
+            bank_addr_w[dma_write_bank_idx_w]  = dma_write_row_w;
+            bank_bweb_w[dma_write_bank_idx_w]  = expand_strb_to_bweb(w_pending_strb_reg);
+            bank_d_w[dma_write_bank_idx_w]     = w_pending_data_reg;
         end
 
         if (dma_read_issue_w) begin
-            macro_sel_t macro_sel;
-
-            macro_sel = row_to_macro_sel(dma_read_row_w);
-            sram_ceb[dma_read_bank_idx_w][macro_sel]  = 1'b0;
-            sram_web[dma_read_bank_idx_w][macro_sel]  = 1'b1;
-            sram_addr[dma_read_bank_idx_w][macro_sel] = row_to_macro_addr(dma_read_row_w);
+            bank_ceb_w[dma_read_bank_idx_w]  = 1'b0;
+            bank_web_w[dma_read_bank_idx_w]  = 1'b1;
+            bank_addr_w[dma_read_bank_idx_w] = dma_read_row_w;
         end
 
         s_axi_awready_o = !aw_pending_valid_reg;
@@ -412,12 +379,12 @@ module ScratchpadMemory import cluster_pkg::*; #(
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
             for (int unsigned p = 0; p < NUM_NOC_PORTS; p++) begin
-                active_map_reg[p]      <= p[GROUP_IDX_W-1:0];
+                active_map_reg[p]      <= '0;
                 resp_valid_reg[p]      <= 1'b0;
                 resp_data_reg[p]       <= '0;
                 noc_read_pending_reg[p]  <= 1'b0;
                 noc_read_parallel_reg[p] <= 1'b0;
-                noc_read_group_reg[p]    <= '0;
+                noc_read_group_reg[p*GROUP_IDX_W +: GROUP_IDX_W] <= '0;
                 noc_read_bank_reg[p]     <= '0;
                 noc_read_row_reg[p]      <= '0;
                 pmu_port_txn_cnt_reg[p]<= 64'd0;
@@ -440,6 +407,7 @@ module ScratchpadMemory import cluster_pkg::*; #(
             pmu_cycle_cnt_reg         <= 64'd0;
             pmu_arb_stall_cnt_reg     <= 64'd0;
             pmu_credit_stall_cnt_reg  <= 64'd0;
+            active_map_init_done_reg  <= 1'b0;
         end else begin
             pmu_cycle_cnt_reg <= pmu_cycle_cnt_reg + 64'd1;
 
@@ -452,7 +420,12 @@ module ScratchpadMemory import cluster_pkg::*; #(
                 end
             end
 
-            if (config_update_i) begin
+            if (!active_map_init_done_reg) begin
+                for (int unsigned p = 0; p < NUM_NOC_PORTS; p++) begin
+                    active_map_reg[p] <= p[GROUP_IDX_W-1:0];
+                end
+                active_map_init_done_reg <= 1'b1;
+            end else if (config_update_i) begin
                 // synopsys translate_off
                 if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_MMIO")) begin
                     $display("[%0t] [TRACE][SPM] config_update map=0x%02x arb_policy=%0b",
@@ -477,7 +450,7 @@ module ScratchpadMemory import cluster_pkg::*; #(
                     resp_data_reg[p]  <= '0;
                     noc_read_pending_reg[p]  <= 1'b0;
                     noc_read_parallel_reg[p] <= 1'b0;
-                    noc_read_group_reg[p]    <= '0;
+                    noc_read_group_reg[p*GROUP_IDX_W +: GROUP_IDX_W] <= '0;
                     noc_read_bank_reg[p]     <= '0;
                     noc_read_row_reg[p]      <= '0;
                 end
@@ -545,22 +518,19 @@ module ScratchpadMemory import cluster_pkg::*; #(
                 // Complete outstanding SRAM reads.
                 for (int unsigned p = 0; p < NUM_NOC_PORTS; p++) begin
                     if (noc_read_pending_reg[p]) begin
-                        macro_sel_t macro_sel;
-
                         // synopsys translate_off
                         if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
                             $display("[%0t] [TRACE][SPM][P%0d] read_complete parallel=%0b group=%0d bank=%0d row=%0d data_lo=0x%016x",
                                      $time,
                                      p,
                                      noc_read_parallel_reg[p],
-                                     noc_read_group_reg[p],
+                                     noc_read_group_get(p),
                                      noc_read_bank_reg[p],
                                      noc_read_row_reg[p],
-                                     sram_q[noc_read_parallel_reg[p] ? (noc_read_group_reg[p] * BANKS_PER_GROUP) : noc_read_bank_reg[p]][row_to_macro_sel(noc_read_row_reg[p])]);
+                                     bank_q_w[noc_read_parallel_reg[p] ? (noc_read_group_get(p) * BANKS_PER_GROUP) : noc_read_bank_reg[p]]);
                         end
                         // synopsys translate_on
 
-                        macro_sel = row_to_macro_sel(noc_read_row_reg[p]);
                         resp_valid_reg[p]     <= 1'b1;
                         resp_data_reg[p].rdata<= '0;
                         resp_data_reg[p].code <= SPM_OK;
@@ -568,15 +538,15 @@ module ScratchpadMemory import cluster_pkg::*; #(
                             for (int unsigned k = 0; k < BANKS_PER_GROUP; k++) begin
                                 logic [BANK_IDX_W-1:0] bank_idx;
 
-                                bank_idx = $bits(bank_idx)'(noc_read_group_reg[p] * BANKS_PER_GROUP + k);
-                                resp_data_reg[p].rdata[k*BANK_DATA_WIDTH +: BANK_DATA_WIDTH] <= sram_q[bank_idx][macro_sel];
+                                bank_idx = $bits(bank_idx)'(noc_read_group_get(p) * BANKS_PER_GROUP + k);
+                                resp_data_reg[p].rdata[k*BANK_DATA_WIDTH +: BANK_DATA_WIDTH] <= bank_q_w[bank_idx];
                             end
                         end else begin
-                            resp_data_reg[p].rdata[BANK_DATA_WIDTH-1:0] <= sram_q[noc_read_bank_reg[p]][macro_sel];
+                            resp_data_reg[p].rdata[BANK_DATA_WIDTH-1:0] <= bank_q_w[noc_read_bank_reg[p]];
                         end
                         noc_read_pending_reg[p]  <= 1'b0;
                         noc_read_parallel_reg[p] <= 1'b0;
-                        noc_read_group_reg[p]    <= '0;
+                        noc_read_group_reg[p*GROUP_IDX_W +: GROUP_IDX_W] <= '0;
                         noc_read_bank_reg[p]     <= '0;
                         noc_read_row_reg[p]      <= '0;
                     end
@@ -585,7 +555,7 @@ module ScratchpadMemory import cluster_pkg::*; #(
                 if (dma_read_pending_reg) begin
                     rvalid_reg           <= 1'b1;
                     rresp_reg            <= 2'b00;
-                    rdata_reg            <= sram_q[dma_read_bank_reg][row_to_macro_sel(dma_read_row_reg)];
+                    rdata_reg            <= bank_q_w[dma_read_bank_reg];
                     dma_read_pending_reg <= 1'b0;
                 end
 
@@ -610,7 +580,7 @@ module ScratchpadMemory import cluster_pkg::*; #(
                         logic [GROUP_IDX_W-1:0] group_idx;
                         logic [31:0] laddr;
                         int unsigned bank_base;
-                        group_idx = active_map_reg[p];
+                        group_idx = noc_group_w[p];
                         laddr     = spm_req_i[p].addr;
                         bank_base = group_idx * BANKS_PER_GROUP;
 
@@ -637,7 +607,7 @@ module ScratchpadMemory import cluster_pkg::*; #(
                             end else begin
                                 noc_read_pending_reg[p]  <= 1'b1;
                                 noc_read_parallel_reg[p] <= 1'b1;
-                                noc_read_group_reg[p]    <= noc_group_w[p];
+                                noc_read_group_reg[p*GROUP_IDX_W +: GROUP_IDX_W] <= noc_group_w[p];
                                 noc_read_row_reg[p]      <= noc_row_w[p];
                             end
                         end else begin
@@ -721,23 +691,26 @@ module ScratchpadMemory import cluster_pkg::*; #(
 
     generate
         for (genvar bank = 0; bank < TOTAL_BANKS_GEN; bank++) begin : gen_spm_bank
-            for (genvar macro = 0; macro < MACROS_PER_BANK_GEN; macro++) begin : gen_spm_macro
-                TS1N16ADFPCLLLVTA128X64M4SWSHOD u_sram (
-                    .SLP    (1'b0),
-                    .DSLP   (1'b0),
-                    .SD     (1'b0),
-                    .PUDELAY(sram_pudelay_unused[bank][macro]),
-                    .CLK    (clk),
-                    .CEB    (sram_ceb[bank][macro]),
-                    .WEB    (sram_web[bank][macro]),
-                    .A      (sram_addr[bank][macro]),
-                    .D      (sram_d[bank][macro]),
-                    .BWEB   (sram_bweb[bank][macro]),
-                    .RTSEL  (2'b01),
-                    .WTSEL  (2'b01),
-                    .Q      (sram_q[bank][macro])
-                );
-            end
+            ScratchpadMemoryBank #(
+                .BANK_DATA_WIDTH(BANK_DATA_WIDTH),
+                .BANK_DEPTH(BANK_DEPTH),
+                .MACRO_DEPTH(MACRO_DEPTH),
+                .BANK_ROW_W(BANK_ROW_W)
+            ) u_bank (
+                .SLP    (1'b0),
+                .DSLP   (1'b0),
+                .SD     (1'b0),
+                .PUDELAY(bank_pudelay_unused_w[bank]),
+                .CLK    (clk),
+                .CEB    (bank_ceb_w[bank]),
+                .WEB    (bank_web_w[bank]),
+                .A      (bank_addr_w[bank]),
+                .D      (bank_d_w[bank]),
+                .BWEB   (bank_bweb_w[bank]),
+                .RTSEL  (2'b01),
+                .WTSEL  (2'b01),
+                .Q      (bank_q_w[bank])
+            );
         end
     endgenerate
 

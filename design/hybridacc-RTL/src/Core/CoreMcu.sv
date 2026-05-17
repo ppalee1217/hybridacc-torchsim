@@ -54,6 +54,7 @@ module CoreMcu import core_pkg::*; (
     output logic [31:0] cause_snapshot_o
 );
     logic [31:0] gpr_reg [0:CORE_GPR_NUM-1];
+    logic        reset_init_done_reg;
     logic        booted_reg;
     logic        running_reg;
     logic        halted_reg;
@@ -79,6 +80,8 @@ module CoreMcu import core_pkg::*; (
     logic [31:0] mscratch_reg;
     logic [31:0] mepc_reg;
     logic [31:0] mtval_reg;
+    logic        core_running_w;
+    logic        core_halted_w;
 
     logic [31:0] instr_w;
     logic [6:0]  opcode_w;
@@ -297,9 +300,11 @@ module CoreMcu import core_pkg::*; (
     assign mmio_req_wdata_o = rs2_data_w;
     assign mmio_req_wstrb_o = (running_reg && instr_valid_reg && is_store_w && store_supported_w && mmio_word_access_w && is_mmio_w) ? 4'hF : 4'h0;
 
+    assign core_running_w   = reset_init_done_reg ? running_reg : 1'b0;
+    assign core_halted_w    = reset_init_done_reg ? halted_reg : 1'b1;
     assign retire_pc_o      = pc_reg;
-    assign core_running_o   = running_reg;
-    assign core_halted_o    = halted_reg;
+    assign core_running_o   = core_running_w;
+    assign core_halted_o    = core_halted_w;
     assign pc_snapshot_o    = pc_reg;
     assign cause_snapshot_o = cause_reg;
 
@@ -383,9 +388,10 @@ module CoreMcu import core_pkg::*; (
             for (int unsigned idx = 0; idx < CORE_GPR_NUM; idx++) begin
                 gpr_reg[idx] <= 32'h0;
             end
+            reset_init_done_reg <= 1'b0;
             booted_reg     <= 1'b0;
             running_reg    <= 1'b0;
-            halted_reg     <= 1'b1;
+            halted_reg     <= 1'b0;
             in_trap_reg    <= 1'b0;
             wfi_wait_reg   <= 1'b0;
             instr_valid_reg <= 1'b0;
@@ -409,6 +415,9 @@ module CoreMcu import core_pkg::*; (
             mepc_reg       <= 32'h0;
             mtval_reg      <= 32'h0;
             retire_valid_o <= 1'b0;
+        end else if (!reset_init_done_reg) begin
+            reset_init_done_reg <= 1'b1;
+            halted_reg          <= 1'b1;
         end else begin
             logic [31:0] next_pc;
             logic [31:0] rd_value;

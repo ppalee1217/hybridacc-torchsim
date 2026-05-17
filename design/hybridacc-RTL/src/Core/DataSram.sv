@@ -46,12 +46,12 @@ module DataSram #(
     typedef logic [MACRO_ADDR_W-1:0]     macro_addr_t;
     typedef logic [MACRO_SEL_W-1:0]      macro_sel_t;
 
-    logic        sram_ceb  [NUM_MACROS];
-    logic        sram_web  [NUM_MACROS];
-    macro_word_t sram_bweb [NUM_MACROS];
-    macro_addr_t sram_addr [NUM_MACROS];
-    macro_word_t sram_d    [NUM_MACROS];
-    macro_word_t sram_q    [NUM_MACROS];
+    logic        sram_ceb [NUM_MACROS];
+    logic        sram_web [NUM_MACROS];
+    macro_word_t sram_bweb[NUM_MACROS];
+    macro_addr_t sram_addr[NUM_MACROS];
+    macro_word_t sram_d   [NUM_MACROS];
+    macro_word_t sram_q   [NUM_MACROS];
     logic        sram_pudelay_unused [NUM_MACROS];
 
     logic        dm_resp_valid_reg;
@@ -135,15 +135,6 @@ module DataSram #(
     assign mcu_dm_resp_valid_o = dm_resp_valid_reg;
 
     always_comb begin
-        logic pudelay_sink;
-
-        pudelay_sink = 1'b0;
-        for (int unsigned macro_idx = 0; macro_idx < NUM_MACROS; macro_idx++) begin
-            pudelay_sink ^= sram_pudelay_unused[macro_idx];
-        end
-    end
-
-    always_comb begin
         macro_sel_t  macro_sel;
         logic        wr_en;
         logic [31:0] wr_addr;
@@ -151,11 +142,11 @@ module DataSram #(
         logic [3:0]  wr_strb;
 
         for (int unsigned macro_idx = 0; macro_idx < NUM_MACROS; macro_idx++) begin
-            sram_ceb[macro_idx]  = 1'b1;
-            sram_web[macro_idx]  = 1'b1;
+            sram_ceb[macro_idx] = 1'b1;
+            sram_web[macro_idx] = 1'b1;
             sram_bweb[macro_idx] = {MACRO_DATA_WIDTH{1'b1}};
             sram_addr[macro_idx] = '0;
-            sram_d[macro_idx]    = '0;
+            sram_d[macro_idx] = '0;
         end
 
         wr_en   = 1'b0;
@@ -177,14 +168,14 @@ module DataSram #(
 
         if (wr_en) begin
             macro_sel = byte_addr_to_macro_sel(wr_addr);
-            sram_ceb[macro_sel]  = 1'b0;
-            sram_web[macro_sel]  = 1'b0;
+            sram_ceb[macro_sel] = 1'b0;
+            sram_web[macro_sel] = 1'b0;
             sram_bweb[macro_sel] = strb32_to_macro_bweb(wr_addr, wr_strb);
             sram_addr[macro_sel] = byte_addr_to_macro_addr(wr_addr);
-            sram_d[macro_sel]    = word32_to_macro_data(wr_addr, wr_data);
+            sram_d[macro_sel] = word32_to_macro_data(wr_addr, wr_data);
         end else if (!load_phase_i && mcu_dm_valid_i && !mcu_dm_write_i) begin
             macro_sel = byte_addr_to_macro_sel(mcu_dm_addr_i);
-            sram_ceb[macro_sel]  = 1'b0;
+            sram_ceb[macro_sel] = 1'b0;
             sram_addr[macro_sel] = byte_addr_to_macro_addr(mcu_dm_addr_i);
         end
     end
@@ -247,11 +238,15 @@ module DataSram #(
     end
 
     always_comb begin
+        macro_word_t resp_word;
+
         mcu_dm_rdata_o = 32'h0;
+        resp_word = '0;
         if (dm_resp_valid_reg) begin
+            resp_word = sram_q[dm_resp_macro_sel_reg];
             mcu_dm_rdata_o = dm_resp_upper32_reg
-                           ? sram_q[dm_resp_macro_sel_reg][63:32]
-                           : sram_q[dm_resp_macro_sel_reg][31:0];
+                           ? resp_word[63:32]
+                           : resp_word[31:0];
         end
     end
 

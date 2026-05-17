@@ -31,20 +31,30 @@ module CoreLocalIrq import core_pkg::*; (
     logic [31:0] mtime_lo_reg;
     logic [31:0] mtime_hi_reg;
     logic        timer_en_reg;
+    logic        reset_init_done_reg;
+    logic [31:0] mtimecmp_lo_w;
+    logic [31:0] mtimecmp_hi_w;
 
     assign irq_msip_o = msip_reg;
-    assign irq_mtip_o = timer_en_reg && ({mtime_hi_reg, mtime_lo_reg} >= {mtimecmp_hi_reg, mtimecmp_lo_reg});
+    assign mtimecmp_lo_w = reset_init_done_reg ? mtimecmp_lo_reg : 32'hFFFF_FFFF;
+    assign mtimecmp_hi_w = reset_init_done_reg ? mtimecmp_hi_reg : 32'hFFFF_FFFF;
+    assign irq_mtip_o = timer_en_reg && reset_init_done_reg && ({mtime_hi_reg, mtime_lo_reg} >= {mtimecmp_hi_w, mtimecmp_lo_w});
 
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
             msip_reg          <= 1'b0;
-            mtimecmp_lo_reg   <= 32'hFFFF_FFFF;
-            mtimecmp_hi_reg   <= 32'hFFFF_FFFF;
+            mtimecmp_lo_reg   <= 32'h0;
+            mtimecmp_hi_reg   <= 32'h0;
             mtime_lo_reg      <= 32'h0;
             mtime_hi_reg      <= 32'h0;
             timer_en_reg      <= 1'b0;
             mmio_resp_valid_o <= 1'b0;
             mmio_resp_rdata_o <= 32'h0;
+            reset_init_done_reg <= 1'b0;
+        end else if (!reset_init_done_reg) begin
+            mtimecmp_lo_reg   <= 32'hFFFF_FFFF;
+            mtimecmp_hi_reg   <= 32'hFFFF_FFFF;
+            reset_init_done_reg <= 1'b1;
         end else begin
             mmio_resp_valid_o <= 1'b0;
             if (timer_en_reg) begin
@@ -67,8 +77,8 @@ module CoreLocalIrq import core_pkg::*; (
                 end else begin
                     unique0 case (mmio_req_addr_i)
                         TIMER_MSIP:        mmio_resp_rdata_o <= {31'h0, msip_reg};
-                        TIMER_MTIMECMP_LO: mmio_resp_rdata_o <= mtimecmp_lo_reg;
-                        TIMER_MTIMECMP_HI: mmio_resp_rdata_o <= mtimecmp_hi_reg;
+                        TIMER_MTIMECMP_LO: mmio_resp_rdata_o <= mtimecmp_lo_w;
+                        TIMER_MTIMECMP_HI: mmio_resp_rdata_o <= mtimecmp_hi_w;
                         TIMER_MTIME_LO:    mmio_resp_rdata_o <= mtime_lo_reg;
                         TIMER_MTIME_HI:    mmio_resp_rdata_o <= mtime_hi_reg;
                         TIMER_CTRL:        mmio_resp_rdata_o <= {31'h0, timer_en_reg};

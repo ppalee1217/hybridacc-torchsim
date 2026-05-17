@@ -5,20 +5,34 @@ set designer "Student"
 
 set CoreSearchPath /cad/process/ADFP/Executable_Package/Collaterals/IP/stdcell/N16ADFP_StdCell/NLDM/
 # set CoreSearchPath /cad/process/ADFP/Executable_Package/Collaterals/IP/stdcell/N16ADFP_StdCell/CCS/
-set IOSearchPath   /cad/process/ADFP/Executable_Package/Collaterals/IP/stdio/N16ADFP_StdIO/NLDM/
 set SRAMSearchPath /cad/process/ADFP/Executable_Package/Collaterals/IP/sram/N16ADFP_SRAM/NLDM/
 # set MemoryPath ../sim/SRAM
 # set DefintionPath  ../include
 
-set search_path    "$CoreSearchPath $IOSearchPath $SRAMSearchPath $search_path"
+set StdCellMaxLibrary N16ADFP_StdCellss0p72vm40c.db
+set StdCellMinLibrary N16ADFP_StdCellff0p88v125c.db
+set SRAMMaxLibrary    N16ADFP_SRAM_ss0p72v0p72vm40c_100a.db
+set SRAMMinLibrary    N16ADFP_SRAM_ff0p88v0p88v125c_100a.db
 
-set target_library   "N16ADFP_StdCellss0p72vm40c.db    N16ADFP_StdCellff0p88v125c.db \
-                      N16ADFP_StdIOss0p72v1p62v125c.db N16ADFP_StdIOff0p88v1p98vm40c.db \
-                     "
+set UseStdIOLibs 0
+if {[info exists env(HACC_USE_STDIO_LIBS)] && [string trim $env(HACC_USE_STDIO_LIBS)] eq "1"} {
+    set UseStdIOLibs 1
+}
 
-set sram_library     "N16ADFP_SRAM_ss0p72v0p72vm40c_100a.db N16ADFP_SRAM_ff0p88v0p88v125c_100a.db"
+if {$UseStdIOLibs} {
+    set IOSearchPath /cad/process/ADFP/Executable_Package/Collaterals/IP/stdio/N16ADFP_StdIO/NLDM/
+    set stdio_library "N16ADFP_StdIOss0p72v1p62v125c.db N16ADFP_StdIOff0p88v1p98vm40c.db"
+    set search_path "$CoreSearchPath $IOSearchPath $SRAMSearchPath $search_path"
+} else {
+    set stdio_library ""
+    set search_path "$CoreSearchPath $SRAMSearchPath $search_path"
+}
 
-set link_library      "* $target_library $sram_library dw_foundation.sldb"
+set target_library   "$StdCellMaxLibrary"
+
+set sram_library     "$SRAMMaxLibrary $SRAMMinLibrary"
+
+set link_library      "* $target_library $StdCellMinLibrary $sram_library $stdio_library dw_foundation.sldb"
 set symbol_library    "generic_sdb"
 set synthetic_library "dw_foundation.sldb"
 

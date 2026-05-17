@@ -39,6 +39,8 @@ set_input_transition 0.05 [all_inputs]
 # 1. 修正 Operating Conditions
 set_operating_conditions -min_library N16ADFP_StdCellff0p88v125c -min ff0p88v125c \
                          -max_library N16ADFP_StdCellss0p72vm40c -max ss0p72vm40c
+set_min_library N16ADFP_StdCellss0p72vm40c.db -min_version N16ADFP_StdCellff0p88v125c.db
+set_min_library N16ADFP_SRAM_ss0p72v0p72vm40c_100a.db -min_version N16ADFP_SRAM_ff0p88v0p88v125c_100a.db
 
 # 2. 驅動能力設定 — combinational modules have no clk port
 set_driving_cell -library N16ADFP_StdCellss0p72vm40c -lib_cell DFQD1BWP16P90LVT -pin {Q} \

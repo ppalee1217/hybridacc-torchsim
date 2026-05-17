@@ -156,6 +156,7 @@ module AddressGenerateUnit
     s2_t   s2_reg;
 
     logic  run_last_issued_reg;
+    logic  reset_init_done_reg;
 
     // ---------------------------------------------------------------------
     // MMIO read mux (combinational)
@@ -341,6 +342,38 @@ module AddressGenerateUnit
             base_addr_reg     <= 32'h0;
             base_addr_h_reg   <= 32'h0;
             for (int i = 0; i < 4; i++) begin
+                iter_reg[i]   <= 16'h0;
+                stride_reg[i] <= 32'h0;
+                idx_reg[i]    <= 16'h0;
+            end
+            ctrl_reg          <= 32'h0;
+            lane_cfg_reg      <= 32'h0;
+            tag_base_reg      <= 32'h0;
+            tag_stride0_reg   <= 32'h0;
+            tag_stride1_reg   <= 32'h0;
+            tag_ctrl_reg      <= 32'h0;
+            mask_cfg_reg      <= 32'h0;
+            err_code_reg      <= 32'h0;
+            dbg_last_tag_reg  <= 32'h0;
+            dbg_last_addr_reg <= 32'h0;
+
+            busy_reg          <= 1'b0;
+            done_reg          <= 1'b0;
+            stalled_reg       <= 1'b0;
+
+            state_reg         <= AGU_FSM_IDLE;
+            run_last_issued_reg <= 1'b0;
+
+            s0_reg            <= '0;
+            s1_reg            <= '0;
+            n0s0_reg          <= '0;
+            n0s1_reg          <= '0;
+            s2_reg            <= '0;
+            reset_init_done_reg <= 1'b0;
+        end else if (!reset_init_done_reg) begin
+            base_addr_reg     <= 32'h0;
+            base_addr_h_reg   <= 32'h0;
+            for (int i = 0; i < 4; i++) begin
                 iter_reg[i]   <= 16'h1;
                 stride_reg[i] <= 32'h0;
                 idx_reg[i]    <= 16'h0;
@@ -368,6 +401,7 @@ module AddressGenerateUnit
             n0s0_reg          <= '0;
             n0s1_reg          <= '0;
             s2_reg            <= '0;
+            reset_init_done_reg <= 1'b1;
         end else begin
             // pulse defaults
             done_reg    <= 1'b0;

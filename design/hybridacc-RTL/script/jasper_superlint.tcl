@@ -194,14 +194,20 @@ proc hacc_require_directory {path description} {
     }
 }
 
-proc hacc_collect_sources {pkg_files source_patterns extra_hdl} {
+proc hacc_collect_sources {pkg_files preferred_sources source_patterns extra_hdl} {
     set ordered {}
     foreach pkg $pkg_files {
         hacc_unique_append ordered $pkg
     }
+    foreach src $preferred_sources {
+        hacc_unique_append ordered $src
+    }
     foreach pattern $source_patterns {
         foreach src [lsort [glob -nocomplain $pattern]] {
             if {[lsearch -exact $pkg_files $src] >= 0} {
+                continue
+            }
+            if {[lsearch -exact $preferred_sources $src] >= 0} {
                 continue
             }
             hacc_unique_append ordered $src
@@ -287,6 +293,10 @@ set pkg_files [list \
     [file join $src_root Core core_pkg.sv] \
     [file join $src_root Cluster cluster_pkg.sv]]
 
+set ordered_source_files [list \
+    [file join $src_root Cluster ScratchpadMemoryBank.sv] \
+    [file join $src_root Cluster ScratchpadMemory.sv]]
+
 set source_patterns [list \
     [file join $src_root *.sv] \
     [file join $src_root utils *.sv] \
@@ -310,7 +320,7 @@ foreach src_file [concat $pkg_files $default_jasper_hdl $extra_hdl] {
     hacc_require_readable_file $src_file "HDL file"
 }
 
-set ordered_hdl [hacc_collect_sources [concat $pkg_files $default_jasper_hdl] $source_patterns $extra_hdl]
+set ordered_hdl [hacc_collect_sources [concat $pkg_files $default_jasper_hdl] $ordered_source_files $source_patterns $extra_hdl]
 if {[llength $ordered_hdl] == 0} {
     hacc_fail "No RTL source files were collected for JasperGold Superlint"
 }

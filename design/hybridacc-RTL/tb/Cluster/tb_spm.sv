@@ -16,6 +16,7 @@
 //                  * soft reset clears outstanding response
 // Dependencies:  ../tb_common.svh, src/hybridacc_utils_pkg.sv,
 //                src/Cluster/cluster_pkg.sv,
+//                src/Cluster/ScratchpadMemoryBank.sv,
 //                src/Cluster/ScratchpadMemory.sv
 // Revision:
 //   2026/04/27 - Initial version (M1 cluster datapath rewrite)
@@ -26,6 +27,7 @@
 `ifndef GATE_SIM
 `include "../../src/hybridacc_utils_pkg.sv"
 `include "../../src/Cluster/cluster_pkg.sv"
+`include "../../src/Cluster/ScratchpadMemoryBank.sv"
 `include "../../src/Cluster/ScratchpadMemory.sv"
 `endif
 

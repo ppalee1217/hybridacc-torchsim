@@ -16,6 +16,13 @@ typedef void (*LayerRunner)(const LayerConfig* cfg);
 extern const LayerConfig layer_configs[];
 extern const uint32_t num_layers;
 
+/* Linker-defined startup regions */
+extern uint32_t _sbss;
+extern uint32_t _ebss;
+extern uint32_t _stack_clear_start;
+extern uint32_t _stack_clear_end;
+extern uint32_t _stack_top;
+
 static const LayerRunner layer_runners[] = {
 {% for layer in layers %}
     {{ layer.runner }}{{ "," if not loop.last }}
@@ -52,6 +59,22 @@ trap_handler(void) {
 void __attribute__((naked, section(".text.start")))
 _start(void) {
     __asm__ volatile(
+        "la t0, _sbss\n"
+        "la t1, _ebss\n"
+        "1:\n"
+        "bgeu t0, t1, 2f\n"
+        "sw zero, 0(t0)\n"
+        "addi t0, t0, 4\n"
+        "j 1b\n"
+        "2:\n"
+        "la t0, _stack_clear_start\n"
+        "la t1, _stack_clear_end\n"
+        "3:\n"
+        "bgeu t0, t1, 4f\n"
+        "sw zero, 0(t0)\n"
+        "addi t0, t0, 4\n"
+        "j 3b\n"
+        "4:\n"
         "la sp, _stack_top\n"
         "la t0, trap_handler\n"
         "csrw mtvec, t0\n"

@@ -58,12 +58,16 @@ SECTIONS
     /* ── Stack ── */
     _stack_top = ORIGIN(DSRAM) + LENGTH(DSRAM);
     _stack_bottom = _stack_top - _stack_size;
+        _stack_clear_start = _stack_bottom;
+        _stack_clear_end = _stack_top;
 
     /* ── Assertions ── */
     ASSERT(_etext <= ORIGIN(ISRAM) + LENGTH(ISRAM),
            "ERROR: .text overflow in I-SRAM")
     ASSERT(_ebss <= _stack_bottom,
            "ERROR: .data+.bss overflow into stack region")
+        ASSERT((_stack_size & 3) == 0,
+            "ERROR: Stack size must be 4-byte aligned")
     ASSERT(_stack_size >= 1024,
            "ERROR: Stack size too small")
 }

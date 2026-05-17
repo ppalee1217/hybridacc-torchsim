@@ -62,6 +62,10 @@ module DmaEngine import core_pkg::*; (
     input  logic [1:0]  m_cl_axi_r_resp_i,
     output logic        dma_irq_o
 );
+    localparam logic [31:0] DMA_DST_KIND_RESET   = DMA_EP_CLUSTER_SPM;
+    localparam logic [31:0] DMA_COUNT_D_RESET    = 32'h1;
+    localparam logic [31:0] DMA_STRIDE_D0_RESET  = 32'd8;
+
     typedef enum logic [2:0] {
         DMA_ST_IDLE,
         DMA_ST_READ_REQ,
@@ -114,6 +118,7 @@ module DmaEngine import core_pkg::*; (
     logic cl_aw_sent_reg;
     logic cl_w_sent_reg;
     logic irq_pulse_reg;
+    logic reset_init_done_reg;
 
     function automatic logic [31:0] encode_cluster_fabric_addr(input logic [31:0] cluster_id, input logic [31:0] local_addr);
         return {cluster_id[7:0], local_addr[23:0]};
@@ -216,22 +221,22 @@ module DmaEngine import core_pkg::*; (
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
             src_kind_reg <= DMA_EP_DRAM;
-            dst_kind_reg <= DMA_EP_CLUSTER_SPM;
+            dst_kind_reg <= 32'h0;
             src_addr_lo_reg <= 32'h0;
             src_addr_hi_reg <= 32'h0;
             dst_addr_lo_reg <= 32'h0;
             dst_addr_hi_reg <= 32'h0;
             src_cluster_id_reg <= 32'h0;
             dst_cluster_id_reg <= 32'h0;
-            count_d0_reg <= 32'h1;
-            count_d1_reg <= 32'h1;
-            count_d2_reg <= 32'h1;
-            count_d3_reg <= 32'h1;
-            src_stride_d0_reg <= 32'd8;
+            count_d0_reg <= 32'h0;
+            count_d1_reg <= 32'h0;
+            count_d2_reg <= 32'h0;
+            count_d3_reg <= 32'h0;
+            src_stride_d0_reg <= 32'h0;
             src_stride_d1_reg <= 32'h0;
             src_stride_d2_reg <= 32'h0;
             src_stride_d3_reg <= 32'h0;
-            dst_stride_d0_reg <= 32'd8;
+            dst_stride_d0_reg <= 32'h0;
             dst_stride_d1_reg <= 32'h0;
             dst_stride_d2_reg <= 32'h0;
             dst_stride_d3_reg <= 32'h0;
@@ -254,6 +259,16 @@ module DmaEngine import core_pkg::*; (
             cl_w_sent_reg <= 1'b0;
             irq_pulse_reg <= 1'b0;
             state_reg <= DMA_ST_IDLE;
+            reset_init_done_reg <= 1'b0;
+        end else if (!reset_init_done_reg) begin
+            dst_kind_reg <= DMA_DST_KIND_RESET;
+            count_d0_reg <= DMA_COUNT_D_RESET;
+            count_d1_reg <= DMA_COUNT_D_RESET;
+            count_d2_reg <= DMA_COUNT_D_RESET;
+            count_d3_reg <= DMA_COUNT_D_RESET;
+            src_stride_d0_reg <= DMA_STRIDE_D0_RESET;
+            dst_stride_d0_reg <= DMA_STRIDE_D0_RESET;
+            reset_init_done_reg <= 1'b1;
         end else begin
             irq_pulse_reg <= 1'b0;
 

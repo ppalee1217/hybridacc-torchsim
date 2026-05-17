@@ -36,6 +36,7 @@ module Plic import core_pkg::*; #(
 );
     localparam int unsigned NUM_SOURCES = NUM_CLUSTERS + NUM_NLU + 3;
     localparam int unsigned MAX_SOURCES = 64;
+    localparam logic [31:0] PRIORITY_RESET = 32'd1;
 
     logic [31:0] priority_reg [0:MAX_SOURCES];
     logic [31:0] enable_lo_reg;
@@ -45,6 +46,7 @@ module Plic import core_pkg::*; #(
     logic [31:0] pending_hi_reg;
     logic [31:0] claimed_lo_reg;
     logic [31:0] claimed_hi_reg;
+    logic        priority_init_done_reg;
 
     function automatic logic sample_nlu_source(input int unsigned id);
         logic level;
@@ -126,8 +128,9 @@ module Plic import core_pkg::*; #(
             mmio_resp_valid_o  <= 1'b0;
             mmio_resp_rdata_o  <= 32'h0;
             for (int unsigned idx = 0; idx <= MAX_SOURCES; idx++) begin
-                priority_reg[idx] <= 32'd1;
+                priority_reg[idx] <= 32'h0;
             end
+            priority_init_done_reg <= 1'b0;
         end else begin
             logic [31:0] claim_val;
             claim_val = 32'h0;
@@ -140,7 +143,12 @@ module Plic import core_pkg::*; #(
                 end
             end
 
-            if (mmio_req_valid_i) begin
+            if (!priority_init_done_reg) begin
+                for (int unsigned idx = 0; idx <= MAX_SOURCES; idx++) begin
+                    priority_reg[idx] <= PRIORITY_RESET;
+                end
+                priority_init_done_reg <= 1'b1;
+            end else if (mmio_req_valid_i) begin
                 mmio_resp_valid_o <= 1'b1;
                 if (mmio_req_addr_i < PLIC_PENDING_LO) begin
                     int unsigned source;
