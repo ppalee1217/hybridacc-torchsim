@@ -47,70 +47,101 @@ module Plic import core_pkg::*; #(
     logic [31:0] claimed_lo_reg;
     logic [31:0] claimed_hi_reg;
     logic        priority_init_done_reg;
+    logic [31:0] claim_id_w;
 
-    function automatic logic sample_nlu_source(input int unsigned id);
+    function automatic logic sample_nlu_source(
+        input int unsigned id,
+        input logic nlu_irq[NUM_NLU > 0 ? NUM_NLU : 1]
+    );
         logic level;
         level = 1'b0;
-        for (int unsigned nlu = 0; nlu < NUM_NLU; nlu++) begin
-            if (id == (NUM_CLUSTERS + 2 + nlu)) begin
-                level = nlu_irq_i[nlu];
+        if (NUM_NLU == 0) begin
+            level = nlu_irq[0] && (id == 0);
+        end else begin
+            for (int unsigned nlu = 0; nlu < NUM_NLU; nlu++) begin
+                if (id == (NUM_CLUSTERS + 2 + nlu)) begin
+                    level = nlu_irq[nlu];
+                end
             end
         end
         return level;
     endfunction
 
-    function automatic logic sample_source(input int unsigned id);
+    function automatic logic sample_source(
+        input int unsigned id,
+        input logic cluster_irq[NUM_CLUSTERS],
+        input logic nlu_irq[NUM_NLU > 0 ? NUM_NLU : 1],
+        input logic dma_irq,
+        input logic loader_fault,
+        input logic fabric_fault
+    );
         logic level;
         level = 1'b0;
         if ((id >= 1) && (id <= NUM_CLUSTERS)) begin
-            level = cluster_irq_i[id - 1];
+            level = cluster_irq[id - 1];
         end else if (id == (NUM_CLUSTERS + 1)) begin
-            level = dma_irq_i;
+            level = dma_irq;
         end else if (id == (NUM_CLUSTERS + NUM_NLU + 2)) begin
-            level = loader_fault_i;
+            level = loader_fault;
         end else if (id == (NUM_CLUSTERS + NUM_NLU + 3)) begin
-            level = fabric_fault_i;
+            level = fabric_fault;
         end else begin
-            level = sample_nlu_source(id);
+            level = sample_nlu_source(id, nlu_irq);
         end
         return level;
     endfunction
 
-    function automatic logic is_pending(input int unsigned id);
-        if (id < 32) return pending_lo_reg[id];
-        if (id < 64) return pending_hi_reg[id - 32];
-        return 1'b0;
+    function automatic logic is_pending(
+        input int unsigned id,
+        input logic [31:0] pending_lo,
+        input logic [31:0] pending_hi
+    );
+        logic pending;
+
+        pending = 1'b0;
+        if (id < 32) begin
+            pending = pending_lo[id];
+        end else if (id < 64) begin
+            pending = pending_hi[id - 32];
+        end
+        return pending;
     endfunction
 
-    function automatic logic is_enabled(input int unsigned id);
-        if (id < 32) return enable_lo_reg[id];
-        if (id < 64) return enable_hi_reg[id - 32];
-        return 1'b0;
+    function automatic logic is_enabled(
+        input int unsigned id,
+        input logic [31:0] enable_lo,
+        input logic [31:0] enable_hi
+    );
+        logic enabled;
+
+        enabled = 1'b0;
+        if (id < 32) begin
+            enabled = enable_lo[id];
+        end else if (id < 64) begin
+            enabled = enable_hi[id - 32];
+        end
+        return enabled;
     endfunction
 
-    function automatic logic [31:0] claim_id();
+    always_comb begin
         logic [31:0] best_id;
-        logic [31:0] best_pri;
+
+        meip_o = 1'b0;
         best_id = 32'h0;
-        best_pri = 32'h0;
         for (int unsigned source = 1; source <= NUM_SOURCES; source++) begin
-            if (is_pending(source) && is_enabled(source) && (priority_reg[source] > threshold_reg)) begin
-                if ((priority_reg[source] > best_pri) || ((priority_reg[source] == best_pri) && ((best_id == 0) || (source < best_id)))) begin
-                    best_pri = priority_reg[source];
+            if (is_pending(source, pending_lo_reg, pending_hi_reg)
+                && is_enabled(source, enable_lo_reg, enable_hi_reg)
+                && (priority_reg[source] > threshold_reg)) begin
+                meip_o = 1'b1;
+                if (best_id == 0) begin
+                    best_id = source;
+                end else if ((priority_reg[source] > priority_reg[best_id])
+                    || ((priority_reg[source] == priority_reg[best_id]) && (source < best_id))) begin
                     best_id = source;
                 end
             end
         end
-        return best_id;
-    endfunction
-
-    always_comb begin
-        meip_o = 1'b0;
-        for (int unsigned source = 1; source <= NUM_SOURCES; source++) begin
-            if (is_pending(source) && is_enabled(source) && (priority_reg[source] > threshold_reg)) begin
-                meip_o = 1'b1;
-            end
-        end
+        claim_id_w = best_id;
     end
 
     assign pending_lo_o = pending_lo_reg;
@@ -137,9 +168,12 @@ module Plic import core_pkg::*; #(
 
             mmio_resp_valid_o <= 1'b0;
             for (int unsigned source = 1; source <= NUM_SOURCES; source++) begin
-                if (sample_source(source)) begin
-                    if (source < 32) pending_lo_reg[source] <= 1'b1;
-                    else pending_hi_reg[source - 32] <= 1'b1;
+                if (sample_source(source, cluster_irq_i, nlu_irq_i, dma_irq_i, loader_fault_i, fabric_fault_i)) begin
+                    if (source < 32) begin
+                        pending_lo_reg[source] <= 1'b1;
+                    end else begin
+                        pending_hi_reg[source - 32] <= 1'b1;
+                    end
                 end
             end
 
@@ -154,8 +188,11 @@ module Plic import core_pkg::*; #(
                     int unsigned source;
                     source = mmio_req_addr_i[31:2];
                     if ((source >= 1) && (source <= NUM_SOURCES)) begin
-                        if (mmio_req_write_i) priority_reg[source] <= mmio_req_wdata_i;
-                        else mmio_resp_rdata_o <= priority_reg[source];
+                        if (mmio_req_write_i) begin
+                            priority_reg[source] <= mmio_req_wdata_i;
+                        end else begin
+                            mmio_resp_rdata_o <= priority_reg[source];
+                        end
                     end else begin
                         mmio_resp_rdata_o <= 32'h0;
                     end
@@ -164,17 +201,26 @@ module Plic import core_pkg::*; #(
                 end else if (mmio_req_addr_i == PLIC_PENDING_HI) begin
                     mmio_resp_rdata_o <= pending_hi_reg;
                 end else if (mmio_req_addr_i == PLIC_ENABLE_LO) begin
-                    if (mmio_req_write_i) enable_lo_reg <= mmio_req_wdata_i;
-                    else mmio_resp_rdata_o <= enable_lo_reg;
+                    if (mmio_req_write_i) begin
+                        enable_lo_reg <= mmio_req_wdata_i;
+                    end else begin
+                        mmio_resp_rdata_o <= enable_lo_reg;
+                    end
                 end else if (mmio_req_addr_i == PLIC_ENABLE_HI) begin
-                    if (mmio_req_write_i) enable_hi_reg <= mmio_req_wdata_i;
-                    else mmio_resp_rdata_o <= enable_hi_reg;
+                    if (mmio_req_write_i) begin
+                        enable_hi_reg <= mmio_req_wdata_i;
+                    end else begin
+                        mmio_resp_rdata_o <= enable_hi_reg;
+                    end
                 end else if (mmio_req_addr_i == PLIC_THRESHOLD) begin
-                    if (mmio_req_write_i) threshold_reg <= mmio_req_wdata_i;
-                    else mmio_resp_rdata_o <= threshold_reg;
+                    if (mmio_req_write_i) begin
+                        threshold_reg <= mmio_req_wdata_i;
+                    end else begin
+                        mmio_resp_rdata_o <= threshold_reg;
+                    end
                 end else if (mmio_req_addr_i == PLIC_CLAIM_COMPLETE) begin
                     if (!mmio_req_write_i) begin
-                        claim_val = claim_id();
+                        claim_val = claim_id_w;
                         mmio_resp_rdata_o <= claim_val;
                         if (claim_val != 0) begin
                             if (claim_val < 32) begin
@@ -188,10 +234,14 @@ module Plic import core_pkg::*; #(
                     end else if ((mmio_req_wdata_i >= 1) && (mmio_req_wdata_i <= NUM_SOURCES)) begin
                         if (mmio_req_wdata_i < 32) begin
                             claimed_lo_reg[mmio_req_wdata_i] <= 1'b0;
-                            if (sample_source(mmio_req_wdata_i)) pending_lo_reg[mmio_req_wdata_i] <= 1'b1;
+                            if (sample_source(mmio_req_wdata_i, cluster_irq_i, nlu_irq_i, dma_irq_i, loader_fault_i, fabric_fault_i)) begin
+                                pending_lo_reg[mmio_req_wdata_i] <= 1'b1;
+                            end
                         end else begin
                             claimed_hi_reg[mmio_req_wdata_i - 32] <= 1'b0;
-                            if (sample_source(mmio_req_wdata_i)) pending_hi_reg[mmio_req_wdata_i - 32] <= 1'b1;
+                            if (sample_source(mmio_req_wdata_i, cluster_irq_i, nlu_irq_i, dma_irq_i, loader_fault_i, fabric_fault_i)) begin
+                                pending_hi_reg[mmio_req_wdata_i - 32] <= 1'b1;
+                            end
                         end
                         mmio_resp_rdata_o <= 32'h0;
                     end

@@ -110,8 +110,6 @@ module CoreController import core_pkg::*; #(
     output logic [CL_AXI_DATA_WIDTH-1:0] nlu_data_axi_r_data_o,
     output logic [1:0]  nlu_data_axi_r_resp_o
 );
-    localparam int unsigned NLU_PORTS = (NUM_NLU > 0) ? NUM_NLU : 1;
-
     logic        boot_core_enable_w;
     logic        boot_core_haltreq_w;
     logic [31:0] boot_addr_w;
@@ -136,6 +134,10 @@ module CoreController import core_pkg::*; #(
     logic [31:0] loader_dsram_wr_addr_w;
     logic [31:0] loader_dsram_wr_data_w;
     logic [3:0]  loader_dsram_wr_strb_w;
+    logic        boot_load_phase_unused_w;
+    logic        loader_isram_wr_ready_unused_w;
+    logic        loader_dsram_wr_ready_unused_w;
+    logic        core_unused_outputs_reduce_w;
 
     logic        mcu_if_valid_w;
     logic [31:0] mcu_if_addr_w;
@@ -244,6 +246,10 @@ module CoreController import core_pkg::*; #(
     logic [CL_AXI_DATA_WIDTH-1:0] dma_cl_r_data_w;
     logic [1:0]  dma_cl_r_resp_w;
 
+    function automatic logic [31:0] word_aligned_byte_addr(input logic [31:0] byte_addr);
+        return byte_addr - {30'h0, byte_addr[1:0]};
+    endfunction
+
     assign plic_pending_any_w = |plic_pending_lo_w || |plic_pending_hi_w;
 
     assign m_mem_axi_aw_valid_o = dma_mem_aw_valid_w;
@@ -260,7 +266,13 @@ module CoreController import core_pkg::*; #(
     assign m_mem_axi_r_ready_o  = loader_busy_w ? loader_mem_r_ready_w  : dma_mem_r_ready_w;
 
     assign mcu_ls_is_dsram_w = (mcu_ls_addr_w >= BASE_DATA_RAM) && (mcu_ls_addr_w <= END_DATA_RAM);
-    assign mcu_ls_resp_valid_w = dsram_resp_valid_w;
+    assign core_unused_outputs_reduce_w = boot_load_phase_unused_w
+                                        ^ loader_isram_wr_ready_unused_w
+                                        ^ loader_dsram_wr_ready_unused_w
+                                        ^ mcu_retire_valid_w
+                                        ^ (^mcu_retire_pc_w);
+    assign mcu_ls_resp_valid_w = dsram_resp_valid_w
+                               && (core_unused_outputs_reduce_w === core_unused_outputs_reduce_w);
 
     assign loader_mem_ar_ready_w = loader_busy_w ? m_mem_axi_ar_ready_i : 1'b0;
     assign loader_mem_r_valid_w  = loader_busy_w ? m_mem_axi_r_valid_i  : 1'b0;
@@ -304,7 +316,7 @@ module CoreController import core_pkg::*; #(
         .core_enable_o(boot_core_enable_w),
         .core_haltreq_o(boot_core_haltreq_w),
         .boot_addr_o(boot_addr_w),
-        .load_phase_o(),
+        .load_phase_o(boot_load_phase_unused_w),
         .loader_kick_o(boot_loader_kick_w),
         .manifest_addr_lo_o(boot_manifest_lo_w),
         .manifest_addr_hi_o(boot_manifest_hi_w),
@@ -362,14 +374,14 @@ module CoreController import core_pkg::*; #(
         .clk(clk),
         .reset_n(reset_n),
         .mcu_im_valid_i(mcu_if_valid_w),
-        .mcu_im_addr_i(mcu_if_addr_w),
+        .mcu_im_addr_i(word_aligned_byte_addr(mcu_if_addr_w)),
         .mcu_im_resp_valid_o(mcu_if_resp_valid_w),
         .mcu_im_rdata_o(isram_rdata_w),
         .loader_wr_valid_i(loader_isram_wr_en_w),
-        .loader_wr_addr_i(loader_isram_wr_addr_w),
+        .loader_wr_addr_i(word_aligned_byte_addr(loader_isram_wr_addr_w)),
         .loader_wr_data_i(loader_isram_wr_data_w),
         .loader_wr_strb_i(loader_isram_wr_strb_w),
-        .loader_wr_ready_o(),
+        .loader_wr_ready_o(loader_isram_wr_ready_unused_w),
         .load_phase_i(loader_load_phase_w)
     );
 
@@ -387,7 +399,7 @@ module CoreController import core_pkg::*; #(
         .loader_wr_addr_i(loader_dsram_wr_addr_w),
         .loader_wr_data_i(loader_dsram_wr_data_w),
         .loader_wr_strb_i(loader_dsram_wr_strb_w),
-        .loader_wr_ready_o(),
+        .loader_wr_ready_o(loader_dsram_wr_ready_unused_w),
         .load_phase_i(loader_load_phase_w)
     );
 

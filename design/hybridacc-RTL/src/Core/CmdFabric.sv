@@ -86,59 +86,97 @@ module CmdFabric import core_pkg::*; #(
     logic [31:0] pending_addr_reg;
     logic [31:0] pending_target_id_reg;
     logic        pending_write_reg;
+    logic        core_mmio_resp_valid_w;
+    logic [31:0] core_mmio_resp_rdata_w;
+    logic        core_mmio_req_active_w;
+    logic        core_mmio_req_known_w;
+    logic        core_mmio_req_reject_w;
 
     function automatic target_e decode_target(input logic [31:0] addr);
-        if (addr_in_range(addr, BASE_LOCAL_CTRL, END_LOCAL_CTRL)) return TARGET_LOCAL_CTRL;
-        if (addr_in_range(addr, BASE_DMA_MMIO, END_DMA_MMIO)) return TARGET_DMA;
-        if (addr_in_range(addr, BASE_LOCAL_TIMER, END_LOCAL_TIMER)) return TARGET_TIMER;
-        if (addr_in_range(addr, BASE_PLIC, END_PLIC)) return TARGET_PLIC;
-        if (addr_in_range(addr, BASE_CLUSTER_UNICAST, END_CLUSTER_UNICAST)) return TARGET_CLUSTER;
-        if (addr_in_range(addr, BASE_CLUSTER_BCAST, END_CLUSTER_BCAST)) return TARGET_CLUSTER_BC;
-        if (addr_in_range(addr, BASE_NLU, END_NLU)) return TARGET_NLU;
-        return TARGET_FAULT;
+        target_e target;
+
+        target = TARGET_FAULT;
+        if (addr_in_range(addr, BASE_LOCAL_CTRL, END_LOCAL_CTRL)) begin
+            target = TARGET_LOCAL_CTRL;
+        end else if (addr_in_range(addr, BASE_DMA_MMIO, END_DMA_MMIO)) begin
+            target = TARGET_DMA;
+        end else if (addr_in_range(addr, BASE_LOCAL_TIMER, END_LOCAL_TIMER)) begin
+            target = TARGET_TIMER;
+        end else if (addr_in_range(addr, BASE_PLIC, END_PLIC)) begin
+            target = TARGET_PLIC;
+        end else if (addr_in_range(addr, BASE_CLUSTER_UNICAST, END_CLUSTER_UNICAST)) begin
+            target = TARGET_CLUSTER;
+        end else if (addr_in_range(addr, BASE_CLUSTER_BCAST, END_CLUSTER_BCAST)) begin
+            target = TARGET_CLUSTER_BC;
+        end else if (addr_in_range(addr, BASE_NLU, END_NLU)) begin
+            target = TARGET_NLU;
+        end
+        return target;
     endfunction
 
     function automatic logic [31:0] decode_local_offset(input logic [31:0] addr, input target_e target);
+        logic [31:0] offset;
+
+        offset = 32'h0;
         case (target)
-            TARGET_LOCAL_CTRL: return addr - BASE_LOCAL_CTRL;
-            TARGET_DMA:        return addr - BASE_DMA_MMIO;
-            TARGET_TIMER:      return addr - BASE_LOCAL_TIMER;
-            TARGET_PLIC:       return addr - BASE_PLIC;
-            TARGET_CLUSTER:    return {16'h0, addr[15:0]};
-            TARGET_CLUSTER_BC: return addr - BASE_CLUSTER_BCAST;
-            TARGET_NLU:        return {20'h0, addr[11:0]};
-            default:           return 32'h0;
+            TARGET_LOCAL_CTRL: offset = addr - BASE_LOCAL_CTRL;
+            TARGET_DMA:        offset = addr - BASE_DMA_MMIO;
+            TARGET_TIMER:      offset = addr - BASE_LOCAL_TIMER;
+            TARGET_PLIC:       offset = addr - BASE_PLIC;
+            TARGET_CLUSTER:    offset = {16'h0, addr[15:0]};
+            TARGET_CLUSTER_BC: offset = addr - BASE_CLUSTER_BCAST;
+            TARGET_NLU:        offset = {20'h0, addr[11:0]};
+            default:           offset = 32'h0;
         endcase
+        return offset;
     endfunction
 
     function automatic logic [31:0] decode_target_id(input logic [31:0] addr, input target_e target);
+        logic [31:0] target_id;
+
+        target_id = 32'h0;
         case (target)
-            TARGET_CLUSTER: return (addr - BASE_CLUSTER_UNICAST) / CLUSTER_STRIDE;
-            TARGET_NLU:     return (addr - BASE_NLU) / NLU_STRIDE;
-            default:        return 32'h0;
+            TARGET_CLUSTER: target_id = (addr - BASE_CLUSTER_UNICAST) / CLUSTER_STRIDE;
+            TARGET_NLU:     target_id = (addr - BASE_NLU) / NLU_STRIDE;
+            default:        target_id = 32'h0;
         endcase
+        return target_id;
     endfunction
 
-    function automatic logic cluster_mask_selected(input int unsigned idx);
+    function automatic logic cluster_mask_selected(
+        input int unsigned idx,
+        input logic [31:0] mask_lo,
+        input logic [31:0] mask_hi
+    );
+        logic selected;
+
+        selected = 1'b0;
         if (idx < 32) begin
-            return cluster_mask_lo_i[idx];
+            selected = mask_lo[idx];
+        end else if (idx < 64) begin
+            selected = mask_hi[idx - 32];
         end
-        if (idx < 64) begin
-            return cluster_mask_hi_i[idx - 32];
-        end
-        return 1'b0;
+        return selected;
     endfunction
 
-    function automatic logic [31:0] read_local_ctrl(input logic [31:0] off);
+    function automatic logic [31:0] read_local_ctrl(
+        input logic [31:0] off,
+        input logic [31:0] mask_lo,
+        input logic [31:0] mask_hi,
+        input logic [31:0] mmio_err_status,
+        input logic [31:0] last_target_id,
+        input logic [31:0] last_fault_addr,
+        input logic [31:0] last_fault_info
+    );
         logic [31:0] r;
         r = 32'h0;
         unique0 case (off)
-            LOCAL_CLUSTER_MASK_LO: r = cluster_mask_lo_i;
-            LOCAL_CLUSTER_MASK_HI: r = cluster_mask_hi_i;
-            LOCAL_MMIO_ERR_STATUS: r = mmio_err_status_reg;
-            LOCAL_LAST_TARGET_ID:  r = last_target_id_reg;
-            LOCAL_LAST_FAULT_ADDR: r = last_fault_addr_reg;
-            LOCAL_LAST_FAULT_INFO: r = last_fault_info_reg;
+            LOCAL_CLUSTER_MASK_LO: r = mask_lo;
+            LOCAL_CLUSTER_MASK_HI: r = mask_hi;
+            LOCAL_MMIO_ERR_STATUS: r = mmio_err_status;
+            LOCAL_LAST_TARGET_ID:  r = last_target_id;
+            LOCAL_LAST_FAULT_ADDR: r = last_fault_addr;
+            LOCAL_LAST_FAULT_INFO: r = last_fault_info;
             LOCAL_BOOT_REASON:     r = 32'h0;
             LOCAL_FABRIC_CAP0:     r = 32'h0000_0003;
             default:               r = 32'h0;
@@ -146,11 +184,19 @@ module CmdFabric import core_pkg::*; #(
         return r;
     endfunction
 
-    wire request_fire_w = core_mmio_req_valid_i && !pending_valid_reg;
-    wire [31:0] req_addr_w = core_mmio_req_addr_i;
-    wire [31:0] req_wdata_w = core_mmio_req_wdata_i;
-    wire [3:0]  req_wstrb_w = core_mmio_req_wstrb_i;
-    wire        req_write_w = core_mmio_req_write_i;
+    assign core_mmio_req_active_w = (core_mmio_req_valid_i === 1'b1);
+    assign core_mmio_req_known_w = core_mmio_req_active_w
+                                && (core_mmio_req_write_i === core_mmio_req_write_i)
+                                && (core_mmio_req_addr_i === core_mmio_req_addr_i)
+                                && (core_mmio_req_wdata_i === core_mmio_req_wdata_i)
+                                && (core_mmio_req_wstrb_i === core_mmio_req_wstrb_i);
+    assign core_mmio_req_reject_w = core_mmio_req_active_w && !core_mmio_req_known_w && !pending_valid_reg;
+
+    wire request_fire_w = core_mmio_req_known_w && !pending_valid_reg;
+    wire [31:0] req_addr_w = core_mmio_req_known_w ? core_mmio_req_addr_i : 32'h0;
+    wire [31:0] req_wdata_w = core_mmio_req_known_w ? core_mmio_req_wdata_i : 32'h0;
+    wire [3:0]  req_wstrb_w = core_mmio_req_known_w ? core_mmio_req_wstrb_i : 4'h0;
+    wire        req_write_w = core_mmio_req_known_w ? core_mmio_req_write_i : 1'b0;
     wire [2:0]  req_target_w = decode_target(req_addr_w);
     wire [31:0] req_offset_w = decode_local_offset(req_addr_w, decode_target(req_addr_w));
     wire [31:0] req_target_id_w = decode_target_id(req_addr_w, decode_target(req_addr_w));
@@ -158,83 +204,112 @@ module CmdFabric import core_pkg::*; #(
     assign fabric_last_target_o = last_target_id_reg;
     assign fabric_last_addr_o = last_fault_addr_reg;
     assign fabric_mmio_err_status_o = mmio_err_status_reg;
+    assign core_mmio_resp_valid_o = core_mmio_resp_valid_w;
+    assign core_mmio_resp_rdata_o = core_mmio_resp_rdata_w;
 
     always_comb begin
-        core_mmio_resp_valid_o = 1'b0;
-        core_mmio_resp_rdata_o = 32'h0;
+        core_mmio_resp_valid_w = 1'b0;
+        core_mmio_resp_rdata_w = 32'h0;
 
         dma_mmio_req_valid_o = 1'b0;
-        dma_mmio_req_write_o = req_write_w;
-        dma_mmio_req_addr_o  = req_offset_w;
-        dma_mmio_req_wdata_o = req_wdata_w;
+        dma_mmio_req_write_o = 1'b0;
+        dma_mmio_req_addr_o  = 32'h0;
+        dma_mmio_req_wdata_o = 32'h0;
 
         plic_mmio_req_valid_o = 1'b0;
-        plic_mmio_req_write_o = req_write_w;
-        plic_mmio_req_addr_o  = req_offset_w;
-        plic_mmio_req_wdata_o = req_wdata_w;
+        plic_mmio_req_write_o = 1'b0;
+        plic_mmio_req_addr_o  = 32'h0;
+        plic_mmio_req_wdata_o = 32'h0;
 
         timer_mmio_req_valid_o = 1'b0;
-        timer_mmio_req_write_o = req_write_w;
-        timer_mmio_req_addr_o  = req_offset_w;
-        timer_mmio_req_wdata_o = req_wdata_w;
+        timer_mmio_req_write_o = 1'b0;
+        timer_mmio_req_addr_o  = 32'h0;
+        timer_mmio_req_wdata_o = 32'h0;
 
         for (int unsigned idx = 0; idx < NUM_CLUSTERS; idx++) begin
             cl_cmd_req_valid_o[idx] = 1'b0;
-            cl_cmd_req_write_o[idx] = req_write_w;
-            cl_cmd_req_addr_o[idx]  = req_offset_w;
-            cl_cmd_req_wdata_o[idx] = req_wdata_w;
-            cl_cmd_req_wstrb_o[idx] = req_wstrb_w;
+            cl_cmd_req_write_o[idx] = 1'b0;
+            cl_cmd_req_addr_o[idx]  = 32'h0;
+            cl_cmd_req_wdata_o[idx] = 32'h0;
+            cl_cmd_req_wstrb_o[idx] = 4'h0;
         end
 
         for (int unsigned idx = 0; idx < (NUM_NLU > 0 ? NUM_NLU : 1); idx++) begin
             nlu_cmd_req_valid_o[idx] = 1'b0;
-            nlu_cmd_req_write_o[idx] = req_write_w;
-            nlu_cmd_req_addr_o[idx]  = req_offset_w;
-            nlu_cmd_req_wdata_o[idx] = req_wdata_w;
+            nlu_cmd_req_write_o[idx] = 1'b0;
+            nlu_cmd_req_addr_o[idx]  = 32'h0;
+            nlu_cmd_req_wdata_o[idx] = 32'h0;
         end
 
         if (request_fire_w) begin
             unique0 case (req_target_w)
                 TARGET_LOCAL_CTRL: begin
-                    core_mmio_resp_valid_o = 1'b1;
-                    core_mmio_resp_rdata_o = read_local_ctrl(req_offset_w);
+                    core_mmio_resp_valid_w = 1'b1;
+                    core_mmio_resp_rdata_w = read_local_ctrl(req_offset_w,
+                                                             cluster_mask_lo_i,
+                                                             cluster_mask_hi_i,
+                                                             mmio_err_status_reg,
+                                                             last_target_id_reg,
+                                                             last_fault_addr_reg,
+                                                             last_fault_info_reg);
                 end
                 TARGET_DMA: begin
                     dma_mmio_req_valid_o = 1'b1;
-                    core_mmio_resp_valid_o = dma_mmio_resp_valid_i;
-                    core_mmio_resp_rdata_o = dma_mmio_resp_rdata_i;
+                    dma_mmio_req_write_o = req_write_w;
+                    dma_mmio_req_addr_o  = req_offset_w;
+                    dma_mmio_req_wdata_o = req_wdata_w;
+                    core_mmio_resp_valid_w = dma_mmio_resp_valid_i;
+                    core_mmio_resp_rdata_w = dma_mmio_resp_rdata_i;
                 end
                 TARGET_PLIC: begin
                     plic_mmio_req_valid_o = 1'b1;
+                    plic_mmio_req_write_o = req_write_w;
+                    plic_mmio_req_addr_o  = req_offset_w;
+                    plic_mmio_req_wdata_o = req_wdata_w;
                 end
                 TARGET_TIMER: begin
                     timer_mmio_req_valid_o = 1'b1;
+                    timer_mmio_req_write_o = req_write_w;
+                    timer_mmio_req_addr_o  = req_offset_w;
+                    timer_mmio_req_wdata_o = req_wdata_w;
                 end
                 TARGET_CLUSTER: begin
                     if (req_target_id_w < NUM_CLUSTERS) begin
                         cl_cmd_req_valid_o[req_target_id_w] = 1'b1;
+                        cl_cmd_req_write_o[req_target_id_w] = req_write_w;
+                        cl_cmd_req_addr_o[req_target_id_w]  = req_offset_w;
+                        cl_cmd_req_wdata_o[req_target_id_w] = req_wdata_w;
+                        cl_cmd_req_wstrb_o[req_target_id_w] = req_wstrb_w;
                         if (req_write_w) begin
-                            core_mmio_resp_valid_o = cl_cmd_req_ready_i[req_target_id_w];
+                            core_mmio_resp_valid_w = cl_cmd_req_ready_i[req_target_id_w];
                         end else if (cl_cmd_resp_valid_i[req_target_id_w]) begin
-                            core_mmio_resp_valid_o = 1'b1;
-                            core_mmio_resp_rdata_o = cl_cmd_resp_rdata_i[req_target_id_w];
+                            core_mmio_resp_valid_w = 1'b1;
+                            core_mmio_resp_rdata_w = cl_cmd_resp_err_i[req_target_id_w]
+                                                  ? 32'h0
+                                                  : cl_cmd_resp_rdata_i[req_target_id_w];
                         end
                     end else begin
-                        core_mmio_resp_valid_o = 1'b1;
+                        core_mmio_resp_valid_w = 1'b1;
                     end
                 end
                 TARGET_CLUSTER_BC: begin
-                    core_mmio_resp_valid_o = req_write_w;
+                    core_mmio_resp_valid_w = req_write_w;
                     for (int unsigned idx = 0; idx < NUM_CLUSTERS; idx++) begin
-                        if (cluster_mask_selected(idx)) begin
+                        if (cluster_mask_selected(idx, cluster_mask_lo_i, cluster_mask_hi_i)) begin
                             cl_cmd_req_valid_o[idx] = 1'b1;
+                            cl_cmd_req_write_o[idx] = req_write_w;
+                            cl_cmd_req_addr_o[idx]  = req_offset_w;
+                            cl_cmd_req_wdata_o[idx] = req_wdata_w;
+                            cl_cmd_req_wstrb_o[idx] = req_wstrb_w;
                         end
                     end
                     if (!req_write_w) begin
                         for (int unsigned idx = 0; idx < NUM_CLUSTERS; idx++) begin
-                            if (cluster_mask_selected(idx) && cl_cmd_resp_valid_i[idx]) begin
-                                core_mmio_resp_valid_o = 1'b1;
-                                core_mmio_resp_rdata_o = cl_cmd_resp_rdata_i[idx];
+                            if (cluster_mask_selected(idx, cluster_mask_lo_i, cluster_mask_hi_i) && cl_cmd_resp_valid_i[idx]) begin
+                                core_mmio_resp_valid_w = 1'b1;
+                                core_mmio_resp_rdata_w = cl_cmd_resp_err_i[idx]
+                                                      ? 32'h0
+                                                      : cl_cmd_resp_rdata_i[idx];
                             end
                         end
                     end
@@ -242,28 +317,34 @@ module CmdFabric import core_pkg::*; #(
                 TARGET_NLU: begin
                     if (req_target_id_w < (NUM_NLU > 0 ? NUM_NLU : 1)) begin
                         nlu_cmd_req_valid_o[req_target_id_w] = 1'b1;
+                        nlu_cmd_req_write_o[req_target_id_w] = req_write_w;
+                        nlu_cmd_req_addr_o[req_target_id_w]  = req_offset_w;
+                        nlu_cmd_req_wdata_o[req_target_id_w] = req_wdata_w;
                     end else begin
-                        core_mmio_resp_valid_o = 1'b1;
+                        core_mmio_resp_valid_w = 1'b1;
                     end
                 end
                 default: begin
-                    core_mmio_resp_valid_o = 1'b1;
-                    core_mmio_resp_rdata_o = 32'h0;
+                    core_mmio_resp_valid_w = 1'b1;
+                    core_mmio_resp_rdata_w = 32'h0;
                 end
             endcase
+        end else if (core_mmio_req_reject_w) begin
+            core_mmio_resp_valid_w = 1'b1;
+            core_mmio_resp_rdata_w = 32'h0;
         end else if (pending_valid_reg) begin
             unique0 case (pending_target_reg)
                 TARGET_DMA: begin
-                    core_mmio_resp_valid_o = dma_mmio_resp_valid_i;
-                    core_mmio_resp_rdata_o = dma_mmio_resp_rdata_i;
+                    core_mmio_resp_valid_w = dma_mmio_resp_valid_i;
+                    core_mmio_resp_rdata_w = dma_mmio_resp_rdata_i;
                 end
                 TARGET_PLIC: begin
-                    core_mmio_resp_valid_o = plic_mmio_resp_valid_i;
-                    core_mmio_resp_rdata_o = plic_mmio_resp_rdata_i;
+                    core_mmio_resp_valid_w = plic_mmio_resp_valid_i;
+                    core_mmio_resp_rdata_w = plic_mmio_resp_rdata_i;
                 end
                 TARGET_TIMER: begin
-                    core_mmio_resp_valid_o = timer_mmio_resp_valid_i;
-                    core_mmio_resp_rdata_o = timer_mmio_resp_rdata_i;
+                    core_mmio_resp_valid_w = timer_mmio_resp_valid_i;
+                    core_mmio_resp_rdata_w = timer_mmio_resp_rdata_i;
                 end
                 TARGET_CLUSTER: begin
                     if (pending_target_id_reg < NUM_CLUSTERS) begin
@@ -272,15 +353,17 @@ module CmdFabric import core_pkg::*; #(
                         cl_cmd_req_addr_o[pending_target_id_reg]  = pending_addr_reg;
                         cl_cmd_req_wdata_o[pending_target_id_reg] = 32'h0;
                         cl_cmd_req_wstrb_o[pending_target_id_reg] = 4'h0;
-                        core_mmio_resp_valid_o = cl_cmd_resp_valid_i[pending_target_id_reg];
-                        core_mmio_resp_rdata_o = cl_cmd_resp_rdata_i[pending_target_id_reg];
+                        core_mmio_resp_valid_w = cl_cmd_resp_valid_i[pending_target_id_reg];
+                        core_mmio_resp_rdata_w = cl_cmd_resp_err_i[pending_target_id_reg]
+                                              ? 32'h0
+                                              : cl_cmd_resp_rdata_i[pending_target_id_reg];
                     end else begin
-                        core_mmio_resp_valid_o = 1'b1;
+                        core_mmio_resp_valid_w = 1'b1;
                     end
                 end
                 TARGET_CLUSTER_BC: begin
                     for (int unsigned idx = 0; idx < NUM_CLUSTERS; idx++) begin
-                        if (cluster_mask_selected(idx)) begin
+                        if (cluster_mask_selected(idx, cluster_mask_lo_i, cluster_mask_hi_i)) begin
                             cl_cmd_req_valid_o[idx] = 1'b1;
                             cl_cmd_req_write_o[idx] = pending_write_reg;
                             cl_cmd_req_addr_o[idx]  = pending_addr_reg;
@@ -289,23 +372,25 @@ module CmdFabric import core_pkg::*; #(
                         end
                     end
                     for (int unsigned idx = 0; idx < NUM_CLUSTERS; idx++) begin
-                        if (cluster_mask_selected(idx) && cl_cmd_resp_valid_i[idx]) begin
-                            core_mmio_resp_valid_o = 1'b1;
-                            core_mmio_resp_rdata_o = cl_cmd_resp_rdata_i[idx];
+                        if (cluster_mask_selected(idx, cluster_mask_lo_i, cluster_mask_hi_i) && cl_cmd_resp_valid_i[idx]) begin
+                            core_mmio_resp_valid_w = 1'b1;
+                            core_mmio_resp_rdata_w = cl_cmd_resp_err_i[idx]
+                                                  ? 32'h0
+                                                  : cl_cmd_resp_rdata_i[idx];
                         end
                     end
                 end
                 TARGET_NLU: begin
                     if (pending_target_id_reg < (NUM_NLU > 0 ? NUM_NLU : 1)) begin
-                        core_mmio_resp_valid_o = nlu_cmd_resp_valid_i[pending_target_id_reg];
-                        core_mmio_resp_rdata_o = nlu_cmd_resp_rdata_i[pending_target_id_reg];
+                        core_mmio_resp_valid_w = nlu_cmd_resp_valid_i[pending_target_id_reg];
+                        core_mmio_resp_rdata_w = nlu_cmd_resp_rdata_i[pending_target_id_reg];
                     end else begin
-                        core_mmio_resp_valid_o = 1'b1;
+                        core_mmio_resp_valid_w = 1'b1;
                     end
                 end
                 default: begin
-                    core_mmio_resp_valid_o = 1'b1;
-                    core_mmio_resp_rdata_o = 32'h0;
+                    core_mmio_resp_valid_w = 1'b1;
+                    core_mmio_resp_rdata_w = 32'h0;
                 end
             endcase
         end
@@ -323,7 +408,13 @@ module CmdFabric import core_pkg::*; #(
             pending_target_id_reg<= 32'h0;
             pending_write_reg    <= 1'b0;
         end else begin
-            if (request_fire_w) begin
+            if (core_mmio_req_reject_w) begin
+                mmio_err_status_reg[1] <= 1'b1;
+                last_fault_addr_reg <= 32'h0;
+                last_target_id_reg <= 32'h0;
+                last_fault_info_reg <= 32'h2;
+                pending_valid_reg <= 1'b0;
+            end else if (request_fire_w) begin
                 last_fault_addr_reg <= req_addr_w;
                 last_target_id_reg <= req_target_id_w;
                 if (req_target_w == TARGET_FAULT) begin
@@ -344,7 +435,7 @@ module CmdFabric import core_pkg::*; #(
                 end
             end
 
-            if (pending_valid_reg && core_mmio_resp_valid_o) begin
+            if (pending_valid_reg && core_mmio_resp_valid_w) begin
                 pending_valid_reg <= 1'b0;
             end
         end

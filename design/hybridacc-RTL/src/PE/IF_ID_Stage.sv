@@ -83,7 +83,9 @@ module IF_ID_Stage (
         can_advance = ready_in && valid_reg;
 
         if (can_advance && decoder_decode_signals_out_sig.loop_end) begin
-            if (loops_jump_sig) next_pc_candidate = loops_pc_out_sig;
+            if (loops_jump_sig) begin
+                next_pc_candidate = loops_pc_out_sig;
+            end
         end
 
         if (stage_reset) begin
@@ -100,8 +102,11 @@ module IF_ID_Stage (
                 halted_next = 1'b1;
             end
 
-            if (can_advance) pc_next = next_pc_candidate;
-            else pc_next = pc_reg;
+            if (can_advance) begin
+                pc_next = next_pc_candidate;
+            end else begin
+                pc_next = pc_reg;
+            end
         end
     end
 
@@ -113,8 +118,11 @@ module IF_ID_Stage (
         end else if (halted_reg) begin
             valid_next = 1'b0;
         end else begin
-            if (ready_in) valid_next = 1'b1;
-            else valid_next = valid_reg;
+            if (ready_in) begin
+                valid_next = 1'b1;
+            end else begin
+                valid_next = valid_reg;
+            end
         end
     end
 

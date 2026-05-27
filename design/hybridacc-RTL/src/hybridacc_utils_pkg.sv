@@ -13,13 +13,6 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-`ifndef HYBRIDACC_UTILS_PKG_SV
-`define HYBRIDACC_UTILS_PKG_SV
-
-`ifndef DEBUG_MSG
-`define DEBUG_MSG(msg, level)
-`endif
-
 interface vr_if #(type T = logic [31:0]);
     logic valid;
     logic ready;
@@ -221,14 +214,14 @@ package hybridacc_utils_pkg;
         logic        enable;
     } ScanChainFormat;
 
-    function automatic ScanChainFormat parse_scan_chain_data(input logic [31:0] data);
+    function automatic ScanChainFormat parse_scan_chain_data(input logic [26:0] data);
         ScanChainFormat format;
-        format.ps_id      = data[9:4];
-        format.pd_id      = data[15:10];
-        format.pli_id     = data[21:16];
-        format.plo_id     = data[27:22];
-        format.route_mode = PERouterMode'(data[29:28]);
-        format.enable     = data[30];
+        format.ps_id      = data[5:0];
+        format.pd_id      = data[11:6];
+        format.pli_id     = data[17:12];
+        format.plo_id     = data[23:18];
+        format.route_mode = PERouterMode'(data[25:24]);
+        format.enable     = data[26];
         return format;
     endfunction
 
@@ -240,5 +233,3 @@ package hybridacc_utils_pkg;
     } TRACE_PID;
 
 endpackage
-
-`endif

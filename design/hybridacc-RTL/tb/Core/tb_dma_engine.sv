@@ -241,7 +241,7 @@ module tb_dma_engine;
             mmio_write(DMA_DST_CLUSTER_ID, 32'h0);
             mmio_write(DMA_COUNT_D0, 32'd1);
             mmio_write(DMA_CMD_TAG, 32'h55);
-            mmio_write(DMA_CTRL, 32'h1);
+            mmio_write(DMA_CTRL, 32'h9);
 
             wait (dma_irq_o === 1'b1);
             mmio_read(DMA_DONE_TAG, rd);

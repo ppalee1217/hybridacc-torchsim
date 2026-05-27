@@ -120,7 +120,9 @@ module TransformRegFile (
                     end
                 endcase
             end else if (tid_write_en) begin
-                if (tid_write_valid_w) reg_file[tid_idx_w] <= tid_in;
+                if (tid_write_valid_w) begin
+                    reg_file[tid_idx_w] <= tid_in;
+                end
             end else if (vtid_write_en) begin
                 if (vtid_write_valid_w) begin
                     case (vtid_write_base_idx_w)

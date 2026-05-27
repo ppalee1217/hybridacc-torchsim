@@ -51,8 +51,12 @@ module PsumRegFile (
     logic        read_vp64_valid_w;
 
     task automatic clear_all();
-        for (int unsigned i = 0; i < 32; i++) p_regs[i] <= 16'h0000;
-        for (int unsigned i = 0; i < 24; i++) vp64_regs[i] <= '0;
+        for (int unsigned i = 0; i < 32; i++) begin
+            p_regs[i] <= 16'h0000;
+        end
+        for (int unsigned i = 0; i < 24; i++) begin
+            vp64_regs[i] <= '0;
+        end
     endtask
 
     always_comb begin
@@ -103,7 +107,9 @@ module PsumRegFile (
                 clear_all();
             end else if (vpid_write_en) begin
                 if (mode == 0) begin
-                    if (write_scalar_valid_w) p_regs[write_scalar_idx_w] <= p_in;
+                    if (write_scalar_valid_w) begin
+                        p_regs[write_scalar_idx_w] <= p_in;
+                    end
                 end else if (mode == 1) begin
                     if (write_vector_valid_w) begin
                         p_regs[write_vector_base_idx_w + 5'd0] <= vp_in.lanes[0];
@@ -136,7 +142,9 @@ module PsumRegFile (
 
         if (enable) begin
             if (mode == 0) begin
-                if (read_scalar_valid_w) p_out = p_regs[read_scalar_idx_w];
+                if (read_scalar_valid_w) begin
+                    p_out = p_regs[read_scalar_idx_w];
+                end
             end else if (mode == 1) begin
                 if (read_vector_valid_w) begin
                     vp_out.lanes[0] = p_regs[read_vector_base_idx_w + 5'd0];

@@ -1,181 +1,133 @@
 # HybridAcc Synthesis Guide
 
-這份文件是目前 HybridAcc RTL 合成的主操作手冊。
+Repo-wide 操作入口請先看 [../../../doc/index.md](../../../doc/index.md) 與 [../../../doc/user-manual/synthesis-and-postsim.md](../../../doc/user-manual/synthesis-and-postsim.md)；本文件保留 top/unit synthesis 的細節與命名背景。
 
-目前 flow 已整理成：
+這份文件描述目前 `design/hybridacc-RTL` 真正存在的 synthesis target、腳本位置與輸出命名。若和較舊文件衝突，以這份與 `mk/synthesis.mk` 的實作為準。
 
-- clock period 可由 Make 參數指定，不需要改 SDC 檔。
-- 每個 synthesis run 都有自己的 syn/report/work 目錄。
-- 可以同時在不同 shell 合成不同 clock period，不會互相覆寫。
-- 已新增 top-level HybridAcc 合成入口，不只限於 PE/NoC/Cluster unit。
+## 1. 目前可用的 target
 
-## 1. 主要 target
-
-- `make show_syn_config`: 顯示目前這次 synthesis run 會使用的 clock、run name、輸出路徑。
+- `make syn_top CLOCK_PERIOD_NS=1.25`: 合成 top-level `HybridAcc`。
 - `make syn_pe_<Module>`: 合成單一 PE module，例如 `make syn_pe_VADDU`。
 - `make syn_noc_<Module>`: 合成單一 NoC module，例如 `make syn_noc_MBUS`。
 - `make syn_cluster_<Module>`: 合成單一 Cluster module，例如 `make syn_cluster_ComputeCluster`。
-- `make syn_hybridacc`: 合成 top-level `HybridAcc`。
-- `make syn_pe_all`: 合成全部 PE modules。
-- `make syn_noc_all`: 合成全部 NoC modules。
-- `make syn_cluster_all`: 合成全部 Cluster modules。
-- `make synall`: 依序跑 `syn_pe_all`、`syn_noc_all`、`syn_cluster_all`、`syn_hybridacc`。
-- `make syn_report`: 針對目前 run 的 `report/<run>` 產生彙整報告。
-- `make clean_syn`: 只清掉目前 `SYN_RUN_NAME` 的合成產物。
-- `make clean_syn_all`: 清掉所有 synthesis run 的產物。
+- `make syn_pe_all`, `make syn_noc_all`, `make syn_cluster_all`: 批次合成各類 unit。
+- `make synall`: 依序執行 `script/tcl/synthesis/` 下所有 `synthesis_*.tcl` flow；不包含 `syn_top`。
+- `make syn_report`: 以 `uv run python script/python/reporting/syn_report.py` 掃描 `report/` 並產生彙整報告。
+- `make clean_syn`: 目前會刪除整個 `syn/` 與 `report/`。
 
-## 2. 重要參數
+目前沒有 `show_syn_config`、`syn_hybridacc`、`clean_syn_all` 這幾個 target。若看到舊範例，請改用 `syn_top` 或上面的現行 target。
 
-### `CLOCK_PERIOD_NS`
+## 2. 腳本結構
 
-這是最直接的用法。若你只想改 clock period，直接傳這個參數即可。
+目前 canonical synthesis 腳本集中在以下位置：
 
-```bash
-make show_syn_config CLOCK_PERIOD_NS=2
-make syn_hybridacc CLOCK_PERIOD_NS=1.25
-```
+- `script/tcl/synthesis/syn_common.tcl`: 共用 run 設定與路徑 helper。
+- `script/tcl/synthesis/synthesis_pe_units.tcl`: PE unit synthesis。
+- `script/tcl/synthesis/synthesis_noc_units.tcl`: NoC unit synthesis。
+- `script/tcl/synthesis/synthesis_cluster_units.tcl`: Cluster unit synthesis。
+- `script/tcl/synthesis/syn_hybridacc.tcl`: top-level `HybridAcc` synthesis。
+- `script/python/reporting/syn_report.py`: synthesis report parser。
 
-Makefile 會自動把它映射成 synthesis 用的 `SYN_CLOCK_PERIOD_NS`。
+頂層 `script/` 的 synthesis Tcl/Python wrapper 已移除；請使用上面的 canonical 路徑或 Makefile target。
 
-### `SYN_CLOCK_PERIOD_NS`
+新的 Makefile 入口也已拆成 include 架構：
 
-若你想把 synthesis clock 與 simulation plusarg 分開控制，可以直接指定這個變數。
+- `Makefile`: entry point
+- `mk/common.mk`: 共用變數與工具路徑
+- `mk/synthesis.mk`: synthesis target 定義
 
-```bash
-make syn_pe_VADDU SYN_CLOCK_PERIOD_NS=1.5
-```
+## 3. 命名與輸出規則
 
-### `SYN_RUN_NAME`
+top-level synthesis 會依 `CLOCK_PERIOD_NS` 自動產生 run tag，格式為 `clk_<period>ns`。
 
-每次 synthesis run 的名字。若不指定，會依 clock period 自動產生：
+例如 `CLOCK_PERIOD_NS=1.25` 時：
 
-- `CLOCK_PERIOD_NS=2` -> `hybridacc_2ns`
-- `CLOCK_PERIOD_NS=1.25` -> `hybridacc_1d25ns`
+- run tag: `clk_1p25ns`
+- build dir: `build/clk_1p25ns/`
+- netlist root: `syn/clk_1p25ns/HybridAcc/`
+- report root: `report/clk_1p25ns/HybridAcc/`
 
-也可以手動覆寫：
-
-```bash
-make syn_hybridacc CLOCK_PERIOD_NS=1.25 SYN_RUN_NAME=hybridacc_1d25ns_trialA
-```
-
-## 3. 輸出目錄規則
-
-假設這次 run name 是 `hybridacc_1d25ns`，則：
-
-- netlist/SDF 會輸出到 `syn/hybridacc_1d25ns/<Module>/`
-- synthesis log/report 會輸出到 `report/hybridacc_1d25ns/<Module>/`
-- dc_shell work dir 會輸出到 `build_hybridacc_1d25ns_<Module>/`
-
-以 top-level 為例：
+典型輸出如下：
 
 ```text
-syn/hybridacc_1d25ns/HybridAcc/HybridAcc_syn.v
-syn/hybridacc_1d25ns/HybridAcc/HybridAcc.sdf
-report/hybridacc_1d25ns/HybridAcc/syn_compile_HybridAcc.log
-report/hybridacc_1d25ns/HybridAcc/timing_max_rpt_HybridAcc.txt
-build_hybridacc_1d25ns_HybridAcc/
+build/clk_1p25ns/
+syn/clk_1p25ns/HybridAcc/HybridAcc_syn.v
+syn/clk_1p25ns/HybridAcc/HybridAcc.sdf
+report/clk_1p25ns/HybridAcc/syn_compile_HybridAcc.log
+report/clk_1p25ns/HybridAcc/timing_max_rpt_HybridAcc.txt
+report/clk_1p25ns/HybridAcc/power_rpt_HybridAcc.txt
 ```
 
-這樣不同 clock period 的 run 可以共存，也能平行執行。
+unit synthesis 目前仍沿用既有輸出規則：
+
+- netlist/SDF: `syn/<Module>/`
+- report: `report/<Module>/`
+- work dir: `build/`
+
+這代表 top-level synthesis 可以用 clock tag 並列保存，但 unit synthesis 目前共用 `build/`，不適合平行跑多個 unit job。
+
+`make syn_report` 的輸出則是：
+
+```text
+report/pe_synthesis_report_<timestamp>.md
+```
 
 ## 4. 常用操作
 
-### 合成 top-level HybridAcc
+### 4.1 Top-level synthesis
 
 ```bash
-make show_syn_config CLOCK_PERIOD_NS=1.25
-make syn_hybridacc CLOCK_PERIOD_NS=1.25
+make syn_top CLOCK_PERIOD_NS=1.25
 ```
 
-### 合成單一 unit
+### 4.2 單一 unit synthesis
 
 ```bash
-make syn_pe_ProcessElement CLOCK_PERIOD_NS=2
-make syn_noc_NetworkOnChip CLOCK_PERIOD_NS=1.5
-make syn_cluster_ComputeCluster CLOCK_PERIOD_NS=1.25
+make syn_pe_ProcessElement
+make syn_noc_NetworkOnChip
+make syn_cluster_ComputeCluster
 ```
 
-### 跑完整一輪
+### 4.3 批次 unit synthesis
 
 ```bash
-make synall CLOCK_PERIOD_NS=1.25
+make syn_pe_all
+make syn_noc_all
+make syn_cluster_all
 ```
 
-### 產生目前 run 的 synthesis summary
+### 4.4 產生彙整報告
 
 ```bash
-make syn_report CLOCK_PERIOD_NS=1.25
+make syn_report
 ```
 
-輸出會落在：
-
-```text
-report/hybridacc_1d25ns/synthesis_report_<timestamp>.md
-```
-
-## 5. 平行不同 clock period 合成
-
-若你要同時跑兩組不同時脈，直接在不同 shell 啟動即可：
+若要直接呼叫 parser：
 
 ```bash
-make syn_hybridacc CLOCK_PERIOD_NS=2 &
-make syn_hybridacc CLOCK_PERIOD_NS=1.25 &
-wait
+uv run python script/python/reporting/syn_report.py --report-dir ./report --output ./report/manual_summary.md
 ```
 
-若你想顯式指定 run name：
+## 5. 和 gate sim 的對應
+
+top-level gate sim 預設會從目前 clock tag 對應的目錄讀 netlist/SDF，例如：
+
+- `syn/clk_1p25ns/HybridAcc/HybridAcc_syn.v`
+- `syn/clk_1p25ns/HybridAcc/HybridAcc.sdf`
+
+因此要讓 gate sim 和 top-level synthesis 對齊，最直接的作法是沿用相同 `CLOCK_PERIOD_NS`。
+
+例如：
 
 ```bash
-make syn_hybridacc CLOCK_PERIOD_NS=2 SYN_RUN_NAME=hybridacc_2ns &
-make syn_hybridacc CLOCK_PERIOD_NS=1.25 SYN_RUN_NAME=hybridacc_1d25ns &
-wait
+make syn_top CLOCK_PERIOD_NS=1.25
+make gate_sim_tb_hybridacc_smoke MOD_NAME=HybridAcc CLOCK_PERIOD_NS=1.25
 ```
 
-因為 work dir 也已拆開成 `build_<run>_<module>`，不同 run 不會共用 DC 工作目錄。
+## 6. 實務建議
 
-## 6. Gate-level simulation 對應方式
-
-目前 gate sim 會從「當前 synthesis run」去找 netlist，也就是：
-
-- `syn/<SYN_RUN_NAME>/<Module>/<Module>_syn.v`
-
-所以若你要拿 `1.25ns` 那組 netlist 跑 gate sim，請維持同一組 `CLOCK_PERIOD_NS` 或直接指定相同的 `SYN_RUN_NAME`。
-
-範例：
-
-```bash
-make gate_sim_tb_processelement MOD_NAME=ProcessElement CLOCK_PERIOD_NS=1.25
-```
-
-或：
-
-```bash
-make gate_sim_tb_processelement MOD_NAME=ProcessElement SYN_RUN_NAME=hybridacc_1d25ns
-```
-
-## 7. 這次整理後的腳本分工
-
-- `script/syn_common.tcl`: 共用 run 設定，處理 clock period、run tag、輸出目錄。
-- `script/synthesis_pe_units.tcl`: PE unit 合成。
-- `script/synthesis_noc_units.tcl`: NoC unit 合成。
-- `script/synthesis_cluster_units.tcl`: Cluster unit 合成。
-- `script/syn_hybridacc.tcl`: top-level `HybridAcc` 合成。
-- `script/sdc/comb.sdc`: 組合電路 SDC，會尊重外部傳入的 `clk_period`。
-- `script/sdc/seq_unit.sdc`: unit-level sequential SDC，會尊重外部傳入的 `clk_period`。
-- `script/sdc/seq_top.sdc`: top/integration SDC，會尊重外部傳入的 `clk_period`。
-
-## 8. 建議操作順序
-
-若你下一步是開始整顆 HybridAcc 收斂，建議流程如下：
-
-1. `make show_syn_config CLOCK_PERIOD_NS=<target>`
-2. `make syn_hybridacc CLOCK_PERIOD_NS=<target>`
-3. `make syn_report CLOCK_PERIOD_NS=<target>`
-4. 視需要再用相同 `SYN_RUN_NAME` 跑 gate sim 或比對多組時脈結果
-
-如果你要做 sweep：
-
-1. 先決定 clock period 清單
-2. 每個 clock 用自己的 `SYN_RUN_NAME`
-3. 平行啟動多個 `make syn_hybridacc ...`
-4. 分別查看 `report/<run>/HybridAcc/` 與 `report/<run>/synthesis_report_<timestamp>.md`
+1. 若目標是 top-level STA 或 power，先跑 `make syn_top CLOCK_PERIOD_NS=<target>`。
+2. 若只是在做 module-level QoR 比較，再跑 `syn_pe_*`、`syn_noc_*`、`syn_cluster_*`。
+3. `synall` 只會跑 `synthesis_*.tcl`，不會自動補 `syn_top`。
+4. unit synthesis 共用 `build/`，避免同時平行發多個 unit synthesis job。
+5. 報告 parser 請使用 canonical 路徑 `script/python/reporting/syn_report.py` 或 `make syn_report`。

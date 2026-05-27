@@ -50,6 +50,7 @@ module ClusterControlUnit import cluster_pkg::*; (
     logic              stop_pending_reg;
     logic              soft_reset_pending_reg;
     logic              done_sticky_reg;
+    wire               ctrl_reserved_bits_w = |ctrl_wdata_i[31:3];
 
     assign mode_o               = mode_reg;
     assign substate_o           = substate_reg;
@@ -67,11 +68,23 @@ module ClusterControlUnit import cluster_pkg::*; (
         quiesced_w = !busy_w && noc_quiesced_i && spm_quiesced_i;
 
         status_word_o = 32'h0;
-        if (!busy_w)          status_word_o[STATUS_IDLE]     = 1'b1;
-        if (busy_w)           status_word_o[STATUS_BUSY]     = 1'b1;
-        if (done_sticky_reg)  status_word_o[STATUS_DONE]     = 1'b1;
-        if (quiesced_w)       status_word_o[STATUS_QUIESCED] = 1'b1;
-        if (error_code_reg != 32'h0) status_word_o[STATUS_ERROR] = 1'b1;
+        if (!busy_w) begin
+            status_word_o[STATUS_IDLE] = 1'b1;
+        end
+        if (busy_w) begin
+            status_word_o[STATUS_BUSY] = 1'b1;
+        end
+        if (done_sticky_reg) begin
+            status_word_o[STATUS_DONE] = 1'b1;
+        end
+        if (quiesced_w) begin
+            status_word_o[STATUS_QUIESCED] = 1'b1;
+        end
+        if (error_code_reg != 32'h0) begin
+            status_word_o[STATUS_ERROR] = 1'b1;
+        end
+        status_word_o[8] = stop_pending_reg;
+        status_word_o[9] = soft_reset_pending_reg;
 
         noc_action_o      = CLUSTER_ACTION_NONE;
         spm_soft_reset_o  = 1'b0;
@@ -83,7 +96,7 @@ module ClusterControlUnit import cluster_pkg::*; (
             end
         end
 
-        if (write_ctrl_i && (mode_reg == MODE_LAYER_MANAGED)) begin
+        if (write_ctrl_i && (mode_reg == MODE_LAYER_MANAGED) && !ctrl_reserved_bits_w) begin
             if (ctrl_wdata_i[CTRL_SOFT_RESET]) begin
                 if (layer_active_reg || !noc_quiesced_i) begin
                     noc_action_o = CLUSTER_ACTION_NOC_STOP;
@@ -154,7 +167,10 @@ module ClusterControlUnit import cluster_pkg::*; (
                              ctrl_wdata_i[CTRL_SOFT_RESET]);
                 end
                 // synopsys translate_on
-                if (ctrl_wdata_i[CTRL_SOFT_RESET]) begin
+                if (ctrl_reserved_bits_w) begin
+                    error_code_reg <= 32'h1;
+                    substate_reg   <= SUBSTATE_ERROR;
+                end else if (ctrl_wdata_i[CTRL_SOFT_RESET]) begin
                     done_sticky_reg <= 1'b0;
                     if (layer_active_reg || !noc_quiesced_i) begin
                         stop_pending_reg       <= 1'b1;

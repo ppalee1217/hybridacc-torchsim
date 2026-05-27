@@ -84,7 +84,6 @@ module NetworkOnChip #(
     logic          bus_to_noc_resp_ready[NUM_PORTS];
 
     logic scan_chain_enable;
-    ScanChainFormat router_scan_chain_in [NUM_PORTS];
     ScanChainFormat router_scan_chain_out[NUM_PORTS];
     ScanChainFormat mbus_scan_chain_out  [NUM_PORTS];
 
@@ -116,11 +115,12 @@ module NetworkOnChip #(
     logic [63:0] ln_data [NUM_PORTS+1][NUM_PES_PER_PORT];
     logic        ln_valid[NUM_PORTS+1][NUM_PES_PER_PORT];
     logic        ln_ready[NUM_PORTS+1][NUM_PES_PER_PORT];
+    logic        noc_plo_out_valid_w;
 
     always_comb begin
         logic noc_activity_w;
 
-        noc_activity_w = noc_ps_in_valid || noc_pd_in_valid || noc_pli_in_valid || noc_plo_in_valid || noc_plo_out_valid;
+        noc_activity_w = noc_ps_in_valid || noc_pd_in_valid || noc_pli_in_valid || noc_plo_in_valid || noc_plo_out_valid_w;
 
         for (int unsigned port_idx = 0; port_idx < NUM_PORTS; port_idx++) begin
             noc_activity_w |= noc_ps_to_bus_valid[port_idx] || noc_pd_to_bus_valid[port_idx]
@@ -133,6 +133,10 @@ module NetworkOnChip #(
                                || pe_to_bus_plo_valid[port_idx][pe_idx] || pe_busy_sig[port_idx][pe_idx]
                                || ln_valid[port_idx][pe_idx] || ln_valid[port_idx + 1][pe_idx];
             end
+        end
+        for (int unsigned pe_idx = 0; pe_idx < NUM_PES_PER_PORT; pe_idx++) begin
+            noc_activity_w |= (ln_data[NUM_PORTS][pe_idx] !== ln_data[NUM_PORTS][pe_idx])
+                           || (ln_ready[0][pe_idx] !== ln_ready[0][pe_idx]);
         end
 
         quiesced_o = !noc_activity_w;
@@ -155,7 +159,7 @@ module NetworkOnChip #(
         .noc_pd_in_data(noc_pd_in_data), .noc_pd_in_addr(noc_pd_in_addr), .noc_pd_in_mask(noc_pd_in_mask), .noc_pd_in_valid(noc_pd_in_valid), .noc_pd_in_ready(noc_pd_in_ready),
         .noc_pli_in_data(noc_pli_in_data), .noc_pli_in_addr(noc_pli_in_addr), .noc_pli_in_mask(noc_pli_in_mask), .noc_pli_in_valid(noc_pli_in_valid), .noc_pli_in_ready(noc_pli_in_ready),
         .noc_plo_in_data(noc_plo_in_data), .noc_plo_in_valid(noc_plo_in_valid), .noc_plo_in_ready(noc_plo_in_ready),
-        .noc_plo_out_data(noc_plo_out_data), .noc_plo_out_status(noc_plo_out_status), .noc_plo_out_valid(noc_plo_out_valid), .noc_plo_out_ready(noc_plo_out_ready),
+        .noc_plo_out_data(noc_plo_out_data), .noc_plo_out_status(noc_plo_out_status), .noc_plo_out_valid(noc_plo_out_valid_w), .noc_plo_out_ready(noc_plo_out_ready),
         .noc_ps_to_bus_req_data(noc_ps_to_bus_data), .noc_ps_to_bus_req_valid(noc_ps_to_bus_valid), .noc_ps_to_bus_req_ready(noc_ps_to_bus_ready),
         .noc_pd_to_bus_req_data(noc_pd_to_bus_data), .noc_pd_to_bus_req_valid(noc_pd_to_bus_valid), .noc_pd_to_bus_req_ready(noc_pd_to_bus_ready),
         .noc_pli_to_bus_req_data(noc_pli_to_bus_data), .noc_pli_to_bus_req_valid(noc_pli_to_bus_valid), .noc_pli_to_bus_req_ready(noc_pli_to_bus_ready),
@@ -163,6 +167,8 @@ module NetworkOnChip #(
         .bus_to_noc_plo_resp_data(bus_to_noc_resp_data), .bus_to_noc_plo_resp_valid(bus_to_noc_resp_valid), .bus_to_noc_plo_resp_ready(bus_to_noc_resp_ready),
         .scan_chain_enable(scan_chain_enable), .scan_chain_in(mbus_scan_chain_out), .scan_chain_out(router_scan_chain_out)
     );
+
+    assign noc_plo_out_valid = noc_plo_out_valid_w;
 
     genvar i, j;
     generate
@@ -175,7 +181,6 @@ module NetworkOnChip #(
                 .bus_to_pe_pli_req_data(bus_to_pe_pli_data[i]), .bus_to_pe_pli_req_valid(bus_to_pe_pli_valid[i]), .bus_to_pe_pli_req_ready(bus_to_pe_pli_ready[i]),
                 .bus_to_pe_plo_req_data(bus_to_pe_plo_data[i]), .bus_to_pe_plo_req_valid(bus_to_pe_plo_valid[i]), .bus_to_pe_plo_req_ready(bus_to_pe_plo_ready[i]),
                 .pe_to_bus_plo_resp_data(pe_to_bus_plo_data[i]), .pe_to_bus_plo_resp_valid(pe_to_bus_plo_valid[i]), .pe_to_bus_plo_resp_ready(pe_to_bus_plo_ready[i]),
-                .pe_busy(pe_busy_sig[i]),
                 .noc_ps_to_bus_req_data(noc_ps_to_bus_data[i]), .noc_ps_to_bus_req_valid(noc_ps_to_bus_valid[i]), .noc_ps_to_bus_req_ready(noc_ps_to_bus_ready[i]),
                 .noc_pd_to_bus_req_data(noc_pd_to_bus_data[i]), .noc_pd_to_bus_req_valid(noc_pd_to_bus_valid[i]), .noc_pd_to_bus_req_ready(noc_pd_to_bus_ready[i]),
                 .noc_pli_to_bus_req_data(noc_pli_to_bus_data[i]), .noc_pli_to_bus_req_valid(noc_pli_to_bus_valid[i]), .noc_pli_to_bus_req_ready(noc_pli_to_bus_ready[i]),

@@ -1,5 +1,7 @@
 # PE Unit Synthesis Guide
 
+Repo-wide 操作入口請先看 [../../../doc/index.md](../../../doc/index.md) 與 [../../../doc/user-manual/synthesis-and-postsim.md](../../../doc/user-manual/synthesis-and-postsim.md)；本文件保留 unit synthesis 的細節與歷史背景。
+
 本文件說明如何使用 Makefile 驅動 Synopsys Design Compiler 進行 PE 各 module 的獨立合成，以及如何產生彙整報告。
 
 合成流程已針對**組合電路**與**序向電路**使用不同的 SDC 約束檔，確保每種電路類型都能獲得正確的時序約束。
@@ -34,7 +36,7 @@
 | License Server | `SNPSLMD_LICENSE_FILE=26585@lstn` |
 | 製程 | TSMC N16ADFP (16nm FinFET) |
 | Cell Library | `N16ADFP_StdCellss0p72vm40c.db` (slow) / `N16ADFP_StdCellff0p88v125c.db` (fast) |
-| Python | 3.6+ (for `syn_report.py`) |
+| Python | 3.6+ via `uv run` (for `script/python/reporting/syn_report.py`) |
 
 ### 環境設定
 
@@ -48,6 +50,8 @@ export SNPSLMD_LICENSE_FILE=26585@lstn
 
 > **Note**: Makefile 已設定 `export SNPSLMD_LICENSE_FILE`，正常使用 `make` 指令時不需額外 export。
 
+> **Structure note**: 目前 synthesis 的正式 Tcl 在 `script/tcl/synthesis/`，report parser 在 `script/python/reporting/`；頂層 `script/` 的 synthesis Tcl/Python wrapper 已移除。
+
 ---
 
 ## 2. 目錄結構
@@ -56,13 +60,26 @@ export SNPSLMD_LICENSE_FILE=26585@lstn
 
 ```
 hybridacc-RTL/
-├── Makefile                        # 合成/模擬主控
+├── Makefile                        # entry Makefile，include mk/*.mk
+├── mk/
+│   ├── common.mk                   # 共用變數、路徑與工具設定
+│   └── synthesis.mk                # synthesis targets
 ├── script/
 │   ├── synopsys_dc.setup           # DC 環境設定（library path, target lib）
-│   ├── DC.sdc                      # 序向電路時序約束（physical clock on port clk）
-│   ├── DC_comb.sdc                 # 組合電路時序約束（virtual clock, no clk port）
-│   ├── synthesis_pe_units.tcl      # PE 模組參數化合成腳本（自動選擇 SDC）
-│   └── syn_report.py               # 報告解析 Python 腳本
+│   ├── sdc/
+│   │   ├── DC.sdc                  # 序向電路時序約束（physical clock on port clk）
+│   │   ├── DC_comb.sdc             # 組合電路時序約束（virtual clock, no clk port）
+│   │   └── seq_top.sdc             # top-level HybridAcc 約束
+│   ├── tcl/
+│   │   └── synthesis/
+│   │       ├── syn_common.tcl
+│   │       ├── synthesis_pe_units.tcl
+│   │       ├── synthesis_noc_units.tcl
+│   │       ├── synthesis_cluster_units.tcl
+│   │       └── syn_hybridacc.tcl
+│   ├── python/
+│   │   └── reporting/
+│   │       └── syn_report.py       # 報告解析 Python 腳本
 ├── src/                            # RTL 原始碼
 │   ├── hybridacc_utils_pkg.sv      # 共用 package（FP16, type defs）
 │   ├── FIFO.sv
@@ -71,21 +88,28 @@ hybridacc-RTL/
 │       ├── DataMemory.sv
 │       ├── Decoder.sv
 │       └── ...
-├── build/                          # DC 工作目錄（自動建立）
-│   └── .synopsys_dc.setup          # 自動從 script/ 複製
+├── build/                          # DC 工作目錄（unit flow 共用；top-level 另有 clk_<period>ns/）
+│   ├── .synopsys_dc.setup
+│   └── clk_<period>ns/
 ├── syn/                            # 合成輸出（自動建立）
-│   └── <ModuleName>/
+│   ├── <ModuleName>/
 │       ├── <ModuleName>_syn.v      # Gate-level netlist
 │       └── <ModuleName>.sdf        # 時序標注檔
+│   └── clk_<period>ns/
+│       └── HybridAcc/
+│           ├── HybridAcc_syn.v
+│           └── HybridAcc.sdf
 └── report/                         # 合成報告（自動建立）
-    ├── pe_synthesis_report.md      # 彙整 Markdown 報告
-    └── <ModuleName>/
+    ├── pe_synthesis_report_<timestamp>.md
+    ├── <ModuleName>/
         ├── syn_compile_<ModuleName>.log    # DC 完整編譯 log
         ├── timing_max_rpt_<ModuleName>.txt # Setup timing report
         ├── timing_min_rpt_<ModuleName>.txt # Hold timing report
         ├── area_rpt_<ModuleName>.txt       # Area report
         ├── power_rpt_<ModuleName>.txt      # Power report
         └── cell_rpt_<ModuleName>.txt       # Cell usage report
+    └── clk_<period>ns/
+        └── HybridAcc/
 ```
 
 ---
@@ -233,7 +257,7 @@ set clk_period 1.0    # 改為 2.0 代表 500 MHz，0.5 代表 2 GHz
 
 ## 5. 合成流程概覽
 
-每個模組的合成流程由 `synthesis_pe_units.tcl` 定義。TCL 腳本會**自動判斷模組類型**並選擇正確的 SDC。
+每個模組的合成流程由 `script/tcl/synthesis/synthesis_pe_units.tcl` 定義。TCL 腳本會**自動判斷模組類型**並選擇正確的 SDC。
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -338,7 +362,7 @@ IF_ID_Stage → EXE_M_Stage → EXE_A_Stage → PErouter → ProcessElement
 make syn_report
 ```
 
-這會呼叫 `script/syn_report.py` 掃描 `report/` 目錄，自動偵測已完成合成的模組，產生：
+這會呼叫 `uv run python script/python/reporting/syn_report.py` 掃描 `report/` 目錄，自動偵測已完成合成的模組，產生：
 
 ```
 report/pe_synthesis_report.md
@@ -411,7 +435,7 @@ report/pe_synthesis_report.md
 
 ```bash
 # 自動偵測已完成的模組，產生報告
-python3 script/syn_report.py
+uv run python script/python/reporting/syn_report.py
 
 # 或透過 Makefile
 make syn_report
@@ -421,16 +445,16 @@ make syn_report
 
 ```bash
 # 只看特定模組
-python3 script/syn_report.py --modules VADDU VMULU LoopController
+uv run python script/python/reporting/syn_report.py --modules VADDU VMULU LoopController
 
 # 包含全部 15 個 PE 模組（即使尚未合成，會顯示缺失警告）
-python3 script/syn_report.py --all
+uv run python script/python/reporting/syn_report.py --all
 
 # 自訂輸出路徑
-python3 script/syn_report.py --output my_report.md
+uv run python script/python/reporting/syn_report.py --output my_report.md
 
 # 自訂報告目錄
-python3 script/syn_report.py --report-dir ./report --output summary.md
+uv run python script/python/reporting/syn_report.py --report-dir ./report --output summary.md
 ```
 
 ### 報告內容
@@ -472,7 +496,7 @@ Error: Can't find port 'clk' in design 'VADDU'.
 TCL 腳本中定義了 `MOD_COMBINATIONAL` 清單：
 
 ```tcl
-# synthesis_pe_units.tcl
+# script/tcl/synthesis/synthesis_pe_units.tcl
 set MOD_COMBINATIONAL {Decoder VMULU VADDU}
 ```
 
@@ -489,7 +513,7 @@ INFO: VADDU is COMBINATIONAL — using DC_comb.sdc (virtual clock)
 3. 模組是否實例化含暫存器的子模組？
 
 任一條件為「是」→ **序向電路**，不需修改（預設使用 `DC.sdc`）。
-全部為「否」→ **純組合電路**，需要將模組名稱加入 `MOD_COMBINATIONAL` 清單和 `syn_report.py` 的 `COMBINATIONAL_MODULES` 集合。
+全部為「否」→ **純組合電路**，需要將模組名稱加入 `script/tcl/synthesis/synthesis_pe_units.tcl` 的 `MOD_COMBINATIONAL` 清單，以及 `script/python/reporting/syn_report.py` 的 `COMBINATIONAL_MODULES` 集合。
 
 ### Q: 合成失敗，找不到 dc_shell
 
@@ -535,7 +559,7 @@ slack (VIOLATED)  -0.1234
 
 ### Q: 只有部分模組完成合成，可以先產生報告嗎？
 
-**A**: 可以。`syn_report.py` 預設只掃描有 timing report 的模組：
+**A**: 可以。`script/python/reporting/syn_report.py` 預設只掃描有 timing report 的模組：
 
 ```bash
 # 只會列出已完成合成的模組
@@ -639,4 +663,4 @@ make syn_pe_all && make syn_report
 | `DC.sdc` | Physical clock (`clk` port) | DataMemory, InstructionMemory, LoopController, PsumRegFile, TransformRegFile, LDMA, SDMA, IF_ID_Stage, EXE_M_Stage, EXE_A_Stage, PErouter, ProcessElement |
 | `DC_comb.sdc` | Virtual clock (no port) | **Decoder, VMULU, VADDU** |
 
-> SDC 選擇由 `synthesis_pe_units.tcl` 中的 `MOD_COMBINATIONAL` 清單自動控制，使用者無需手動指定。
+> SDC 選擇由 `script/tcl/synthesis/synthesis_pe_units.tcl` 中的 `MOD_COMBINATIONAL` 清單自動控制，使用者無需手動指定。

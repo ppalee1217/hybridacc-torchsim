@@ -89,6 +89,16 @@ module PErouter #(
     logic route_pli_from_bus;
     logic route_plo_to_bus;
     logic noc_plo_req_fire;
+    logic noc_ps_req_ready_w;
+    logic noc_pd_req_ready_w;
+    logic noc_pli_req_ready_w;
+    logic noc_plo_req_ready_w;
+    logic ln_pli_ready_w;
+    logic ln_plo_valid_w;
+    logic pe_ps_valid_w;
+    logic pe_pd_valid_w;
+    logic pe_pd_set_valid_w;
+    logic pe_pli_valid_w;
     logic pending_noc_resp_reg;
     noc_response_t noc_plo_resp_reg;
 
@@ -122,30 +132,30 @@ module PErouter #(
         route_plo_to_bus = (route_mode == PLI_FROM_LN_PLO_TO_BUS)
                         || (route_mode == PLI_FROM_BUS_PLO_TO_BUS);
 
-        noc_ps_req_ready = enable && !ps_full;
-        noc_pd_req_ready = enable && !pd_full;
-        noc_pli_req_ready = enable && route_pli_from_bus && !pli_full;
-        noc_plo_req_ready = enable && route_plo_to_bus && !plo_empty && !pending_noc_resp_reg;
+        noc_ps_req_ready_w = enable && !ps_full;
+        noc_pd_req_ready_w = enable && !pd_full;
+        noc_pli_req_ready_w = enable && route_pli_from_bus && !pli_full;
+        noc_plo_req_ready_w = enable && route_plo_to_bus && !plo_empty && !pending_noc_resp_reg;
 
          // Keep intentionally ignored request sideband fields in the logic cone
          // so structural lint does not flag them as unloaded inputs.
-         noc_plo_req_fire = noc_plo_req_valid && noc_plo_req_ready
+         noc_plo_req_fire = noc_plo_req_valid && noc_plo_req_ready_w
                    && (noc_plo_req_data === noc_plo_req_data);
 
-        ln_pli_ready = (route_mode == PLI_FROM_LN_PLO_TO_LN || route_mode == PLI_FROM_LN_PLO_TO_BUS) && !pli_full;
+        ln_pli_ready_w = (route_mode == PLI_FROM_LN_PLO_TO_LN || route_mode == PLI_FROM_LN_PLO_TO_BUS) && !pli_full;
 
-         ps_push = noc_ps_req_valid && noc_ps_req_ready
+         ps_push = noc_ps_req_valid && noc_ps_req_ready_w
              && (noc_ps_req_data.mask === noc_ps_req_data.mask)
              && (noc_ps_req_data.addr != PE_CMD_ADDRESS);
-         pd_push = noc_pd_req_valid && noc_pd_req_ready
+         pd_push = noc_pd_req_valid && noc_pd_req_ready_w
              && (noc_pd_req_data.addr === noc_pd_req_data.addr)
              && (noc_pd_req_data.mask[63:4] === noc_pd_req_data.mask[63:4]);
-         pli_push = ((noc_pli_req_valid && noc_pli_req_ready) || (ln_pli_valid && ln_pli_ready))
+         pli_push = ((noc_pli_req_valid && noc_pli_req_ready_w) || (ln_pli_valid && ln_pli_ready_w))
               && (noc_pli_req_data.addr === noc_pli_req_data.addr)
               && (noc_pli_req_data.mask === noc_pli_req_data.mask);
         plo_push = pe_plo_valid && !plo_full;
 
-        if (noc_ps_req_valid && noc_ps_req_ready && (noc_ps_req_data.addr == PE_CMD_ADDRESS)) begin
+        if (noc_ps_req_valid && noc_ps_req_ready_w && (noc_ps_req_data.addr == PE_CMD_ADDRESS)) begin
             case (message_command_t'(noc_ps_req_data.data[3:0]))
                 CMD_RESET: pe_reset = 1'b1;
                 CMD_START_PE: pe_start = 1'b1;
@@ -155,38 +165,60 @@ module PErouter #(
                     im_write_addr = $bits(im_write_addr)'((noc_ps_req_data.data >> PE_ROUTER_IM_ADDR_OFFSET) & PE_ROUTER_IM_ADDR_MASK);
                     im_write_data = $bits(im_write_data)'((noc_ps_req_data.data >> PE_ROUTER_IM_DATA_OFFSET) & PE_ROUTER_IM_DATA_MASK);
                 end
-                default: ;
+                default: begin
+                    pe_reset = 1'b0;
+                    pe_start = 1'b0;
+                    pe_program = 1'b0;
+                    im_write_en = 1'b0;
+                    im_write_addr = 16'h0;
+                    im_write_data = 16'h0;
+                end
             endcase
         end
 
         pe_ps_data = ps_fifo_dout;
-        pe_ps_valid = !ps_empty;
-        ps_pop = pe_ps_valid && pe_ps_ready;
+    pe_ps_valid_w = !ps_empty;
+    pe_ps_valid = pe_ps_valid_w;
+    ps_pop = pe_ps_valid_w && pe_ps_ready;
 
         pe_pd_data = pd_fifo_dout;
-        pe_pd_valid = !pd_empty;
-        pd_pop = pe_pd_valid && pe_pd_ready;
+    pe_pd_valid_w = !pd_empty;
+    pe_pd_valid = pe_pd_valid_w;
+    pd_pop = pe_pd_valid_w && pe_pd_ready;
 
         pe_pd_set_data = pd_set_dout;
-        pe_pd_set_valid = pd_set_valid_i;
-        pd_pop_set = pe_pd_set_valid && pe_pd_set_ready;
+    pe_pd_set_valid_w = pd_set_valid_i;
+    pe_pd_set_valid = pe_pd_set_valid_w;
+    pd_pop_set = pe_pd_set_valid_w && pe_pd_set_ready;
 
         pe_pli_data = pli_fifo_dout;
-        pe_pli_valid = !pli_empty;
-        pli_pop = pe_pli_valid && pe_pli_ready;
+    pe_pli_valid_w = !pli_empty;
+    pe_pli_valid = pe_pli_valid_w;
+    pli_pop = pe_pli_valid_w && pe_pli_ready;
 
         pe_plo_ready = !plo_full;
         ln_plo_data = plo_fifo_dout;
-        ln_plo_valid = (route_mode == PLI_FROM_LN_PLO_TO_LN || route_mode == PLI_FROM_BUS_PLO_TO_LN)
+    ln_plo_valid_w = (route_mode == PLI_FROM_LN_PLO_TO_LN || route_mode == PLI_FROM_BUS_PLO_TO_LN)
                     && !plo_empty
                     && !noc_plo_req_fire;
+    ln_plo_valid = ln_plo_valid_w;
+
+    noc_ps_req_ready = noc_ps_req_ready_w;
+    noc_pd_req_ready = noc_pd_req_ready_w;
+    noc_pli_req_ready = noc_pli_req_ready_w;
+    noc_plo_req_ready = noc_plo_req_ready_w;
+    ln_pli_ready = ln_pli_ready_w;
 
         noc_plo_resp_data = noc_plo_resp_reg;
         noc_plo_resp_valid = pending_noc_resp_reg;
 
-        if (ln_plo_valid && ln_plo_ready) plo_pop = 1'b1;
-        else if (noc_plo_req_fire) plo_pop = 1'b1;
-        else plo_pop = 1'b0;
+    if (ln_plo_valid_w && ln_plo_ready) begin
+            plo_pop = 1'b1;
+        end else if (noc_plo_req_fire) begin
+            plo_pop = 1'b1;
+        end else begin
+            plo_pop = 1'b0;
+        end
     end
 
     always_ff @(posedge clk or negedge reset_n) begin

@@ -1,5 +1,7 @@
 # HybridAcc RTL Firmware Regression README
 
+Repo-wide 操作入口請先看 [../../../doc/index.md](../../../doc/index.md) 與 [../../../doc/user-manual/rtl-firmware-regression.md](../../../doc/user-manual/rtl-firmware-regression.md)；本文件保留 single-wave regression 的 subsystem 細節。
+
 本文件只整理目前最常用的 single-wave RTL/VCS firmware regression 流程，目的不是取代完整模擬指南，而是把日後最常查的資訊集中在一頁內。
 
 目前固定收斂的 workload 只有三個 `hybridacc-cc` example YAML：

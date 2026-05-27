@@ -175,6 +175,19 @@ module tb_hybridacc_smoke;
         .controller_irq_o(controller_irq_o)
     );
 
+`ifdef GATE_SIM
+`ifdef TB_SDF_FILE
+    initial begin
+        $display("[TB] Loading SDF for gate-level simulation: %0s", `TB_SDF_FILE);
+        $sdf_annotate(`TB_SDF_FILE, dut);
+    end
+`else
+    initial begin
+        $display("[TB] GATE_SIM without TB_SDF_FILE define; skipping SDF annotation");
+    end
+`endif
+`endif
+
     task automatic host_write(input logic [31:0] addr, input logic [31:0] data);
         @(negedge clk);
         s_ctrl_aw_addr_i = addr;

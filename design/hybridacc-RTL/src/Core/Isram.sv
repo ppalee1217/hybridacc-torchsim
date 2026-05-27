@@ -48,6 +48,7 @@ module Isram import core_pkg::*; #(
     macro_word_t sram_d     [NUM_MACROS];
     macro_word_t sram_q     [NUM_MACROS];
     logic        sram_pudelay_unused [NUM_MACROS];
+    logic        sram_pudelay_unused_reduce;
 
     logic        im_resp_valid_reg;
     logic        im_resp_upper32_reg;
@@ -66,11 +67,7 @@ module Isram import core_pkg::*; #(
     endfunction
 
     function automatic logic byte_addr_upper32(input logic [31:0] byte_addr);
-        logic [31:0] wrapped_addr;
-        begin
-            wrapped_addr = wrap_byte_addr(byte_addr);
-            return wrapped_addr[2];
-        end
+        return byte_addr[2];
     endfunction
 
     function automatic macro_word_t word32_to_macro_data(
@@ -107,15 +104,18 @@ module Isram import core_pkg::*; #(
         end
     endfunction
 
-    assign loader_wr_ready_o = load_phase_i;
+    always_comb begin
+        sram_pudelay_unused_reduce = 1'b0;
+        for (int unsigned macro_idx = 0; macro_idx < NUM_MACROS; macro_idx++) begin
+            sram_pudelay_unused_reduce ^= sram_pudelay_unused[macro_idx];
+        end
+    end
+
+    assign loader_wr_ready_o = load_phase_i
+                             && (sram_pudelay_unused_reduce === sram_pudelay_unused_reduce);
     assign mcu_im_resp_valid_o = im_resp_valid_reg;
 
     always_comb begin
-        macro_sel_t  macro_sel;
-        macro_addr_t macro_addr;
-        macro_word_t macro_data;
-        macro_word_t macro_bweb;
-
         for (int unsigned macro_idx = 0; macro_idx < NUM_MACROS; macro_idx++) begin
             sram_ceb[macro_idx]  = 1'b1;
             sram_web[macro_idx]  = 1'b1;
@@ -125,20 +125,14 @@ module Isram import core_pkg::*; #(
         end
 
         if (load_phase_i && loader_wr_valid_i) begin
-            macro_sel  = byte_addr_to_macro_sel(loader_wr_addr_i);
-            macro_addr = byte_addr_to_macro_addr(loader_wr_addr_i);
-            macro_data = word32_to_macro_data(loader_wr_addr_i, loader_wr_data_i);
-            macro_bweb = strb32_to_macro_bweb(loader_wr_addr_i, loader_wr_strb_i);
-
-            sram_ceb[macro_sel]  = 1'b0;
-            sram_web[macro_sel]  = 1'b0;
-            sram_bweb[macro_sel] = macro_bweb;
-            sram_addr[macro_sel] = macro_addr;
-            sram_d[macro_sel]    = macro_data;
+            sram_ceb[byte_addr_to_macro_sel(loader_wr_addr_i)]  = 1'b0;
+            sram_web[byte_addr_to_macro_sel(loader_wr_addr_i)]  = 1'b0;
+            sram_bweb[byte_addr_to_macro_sel(loader_wr_addr_i)] = strb32_to_macro_bweb(loader_wr_addr_i, loader_wr_strb_i);
+            sram_addr[byte_addr_to_macro_sel(loader_wr_addr_i)] = byte_addr_to_macro_addr(loader_wr_addr_i);
+            sram_d[byte_addr_to_macro_sel(loader_wr_addr_i)]    = word32_to_macro_data(loader_wr_addr_i, loader_wr_data_i);
         end else if (mcu_im_valid_i) begin
-            macro_sel = byte_addr_to_macro_sel(mcu_im_addr_i);
-            sram_ceb[macro_sel]  = 1'b0;
-            sram_addr[macro_sel] = byte_addr_to_macro_addr(mcu_im_addr_i);
+            sram_ceb[byte_addr_to_macro_sel(mcu_im_addr_i)]  = 1'b0;
+            sram_addr[byte_addr_to_macro_sel(mcu_im_addr_i)] = byte_addr_to_macro_addr(mcu_im_addr_i);
         end
     end
 
@@ -165,6 +159,52 @@ module Isram import core_pkg::*; #(
                            : sram_q[im_resp_macro_sel_reg][31:0];
         end
     end
+
+    // Debug logic to track byte-level writes and detect read-before-write scenarios.
+    // synopsys translate_off
+    bit debug_byte_written [0:SRAM_BYTES-1];
+
+    always_ff @(posedge clk) begin : proc_read_before_write_debug
+        logic [31:0] debug_write_base;
+        logic [31:0] debug_read_base;
+        logic [3:0]  debug_missing_mask;
+
+        debug_write_base   = 32'h0;
+        debug_read_base    = 32'h0;
+        debug_missing_mask = 4'h0;
+
+        if ((load_phase_i === 1'b1)
+            && (loader_wr_valid_i === 1'b1)
+            && (loader_wr_addr_i === loader_wr_addr_i)
+            && (loader_wr_strb_i === loader_wr_strb_i)) begin
+            debug_write_base = wrap_byte_addr(loader_wr_addr_i & ~32'h3);
+            for (int unsigned byte_idx = 0; byte_idx < 4; byte_idx++) begin
+                if (loader_wr_strb_i[byte_idx]) begin
+                    debug_byte_written[wrap_byte_addr(debug_write_base + byte_idx)] <= 1'b1;
+                end
+            end
+        end
+
+        if ((reset_n === 1'b1)
+            && (load_phase_i === 1'b0)
+            && (mcu_im_valid_i === 1'b1)
+            && (mcu_im_addr_i === mcu_im_addr_i)) begin
+            debug_read_base = wrap_byte_addr(mcu_im_addr_i & ~32'h3);
+            for (int unsigned byte_idx = 0; byte_idx < 4; byte_idx++) begin
+                if (!debug_byte_written[wrap_byte_addr(debug_read_base + byte_idx)]) begin
+                    debug_missing_mask[byte_idx] = 1'b1;
+                end
+            end
+            if (debug_missing_mask != 4'h0) begin
+                $display("[%0t] [WARN][Isram] read-before-write req=0x%08x aligned=0x%08x missing_byte_mask=0x%1x",
+                         $time,
+                         mcu_im_addr_i,
+                         debug_read_base,
+                         debug_missing_mask);
+            end
+        end
+    end
+    // synopsys translate_on
 
     generate
         for (genvar macro = 0; macro < NUM_MACROS_GEN; macro++) begin : gen_isram_macro

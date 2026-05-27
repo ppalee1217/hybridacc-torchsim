@@ -25,8 +25,6 @@ module ComputeCluster import cluster_pkg::*; #(
     parameter int unsigned SPM_NUM_BANKS_PER_GROUP     = 3,
     parameter int unsigned SPM_SRAM_BANK_WIDTH_BITS    = 64,
     parameter int unsigned SPM_SRAM_BANK_DEPTH_WORDS   = 8192,
-    parameter int unsigned SPM_SRAM_BANK_LATENCY       = 1,
-    parameter int unsigned SPM_SRAM_BANK_PIPELINE_DEPTH= 1,
     parameter int unsigned SPM_ADDR_WIDTH              = 32,
     parameter int unsigned NOC_NUM_PORTS               = 3,
     parameter int unsigned NOC_PORT_WIDTH_BITS         = 64,
@@ -169,6 +167,8 @@ module ComputeCluster import cluster_pkg::*; #(
 
     logic noc_command_mode_sig;
     logic [31:0] noc_command_data_sig;
+    logic ccu_noc_command_valid_w;
+    logic [31:0] ccu_noc_command_data_w;
     logic [31:0] noc_last_cmd_reg;
 
     logic ccu_write_mode_sig;
@@ -199,6 +199,9 @@ module ComputeCluster import cluster_pkg::*; #(
 
     logic [7:0]  spm_cfg_map_w;
     logic [31:0] cmd_stub_reg0_w;
+    logic [31:0] rd_mux_rdata_w;
+    logic        rd_mux_err_w;
+    logic        rd_mux_known_w;
 
     wire noc_quiesced_w;
     wire spm_quiesced_w;
@@ -209,8 +212,10 @@ module ComputeCluster import cluster_pkg::*; #(
     logic [31:0] rd_hddu_offset_w;
     logic [31:0] wr_noc_offset_w;
     logic [31:0] rd_noc_offset_w;
-    logic [31:0] wr_cluster_offset_w;
-    logic [31:0] rd_cluster_offset_w;
+    logic [7:0]  wr_cluster_offset_w;
+    logic [7:0]  rd_cluster_offset_w;
+    logic [31:0] spm_readback_w;
+    logic [31:0] cluster_readback_w;
 
     function automatic logic in_range(input logic [31:0] addr, input logic [31:0] base, input logic [31:0] size);
         return (addr >= base) && (addr < (base + size));
@@ -239,42 +244,6 @@ module ComputeCluster import cluster_pkg::*; #(
         return cmd;
     endfunction
 
-    function automatic logic [31:0] spm_readback(input logic [31:0] off);
-        logic [31:0] r;
-        r = 32'h0;
-        unique0 case (off)
-            K_SPM_CFG_MAP:       r = {24'h0, spm_cfg_map_w};
-            K_SPM_ARB_POLICY:    r = {31'h0, spm_arb_policy_reg};
-            K_SPM_PMU_CYCLE_LO:  r = spm_pmu_cycle_cnt_sig[31:0];
-            K_SPM_PMU_CYCLE_HI:  r = spm_pmu_cycle_cnt_sig[63:32];
-            K_SPM_PMU_ARB_LO:    r = spm_pmu_arb_stall_cnt_sig[31:0];
-            K_SPM_PMU_ARB_HI:    r = spm_pmu_arb_stall_cnt_sig[63:32];
-            K_SPM_PMU_CREDIT_LO: r = spm_pmu_credit_stall_cnt_sig[31:0];
-            K_SPM_PMU_CREDIT_HI: r = spm_pmu_credit_stall_cnt_sig[63:32];
-            default: begin
-                for (int unsigned p = 0; p < SPM_NUM_NOC_CHANNEL; p++) begin
-                    if (off == (K_SPM_PMU_PORT_BASE + p*8))       r = spm_pmu_port_txn_cnt_sig[p][31:0];
-                    if (off == (K_SPM_PMU_PORT_BASE + p*8 + 4))   r = spm_pmu_port_txn_cnt_sig[p][63:32];
-                end
-            end
-        endcase
-        return r;
-    endfunction
-
-    function automatic logic [31:0] cluster_readback(input logic [31:0] off);
-        logic [31:0] r;
-        r = 32'h0;
-        unique0 case (off)
-            CLUSTER_REG_MODE:       r = ccu_mode_sig;
-            CLUSTER_REG_CTRL:       r = 32'h0;
-            CLUSTER_REG_STATUS:     r = ccu_status_word_sig;
-            CLUSTER_REG_ERROR_CODE: r = ccu_error_code_sig;
-            CLUSTER_REG_SUBSTATE:   r = ccu_substate_sig;
-            default:                r = 32'h0;
-        endcase
-        return r;
-    endfunction
-
     function automatic logic [31:0] noc_status_word(input logic quiesced);
         logic [31:0] r;
         r = 32'h0;
@@ -283,10 +252,30 @@ module ComputeCluster import cluster_pkg::*; #(
         return r;
     endfunction
 
-    wire cmd_wr_fire = power_enable_i && cmd_req_valid_i && cmd_req_write_i;
-    wire cmd_rd_fire = power_enable_i && cmd_req_valid_i && !cmd_req_write_i;
-    wire ahb_wr_fire = power_enable_i && hsel_i && hready_i && htrans_i[1] && hwrite_i;
-    wire ahb_rd_fire = power_enable_i && hsel_i && hready_i && htrans_i[1] && !hwrite_i;
+    always_comb begin
+        rd_mux_known_w = (rd_mux_rdata_w === rd_mux_rdata_w) && (rd_mux_err_w === rd_mux_err_w);
+    end
+
+    wire cmd_req_active_w = (cmd_req_valid_i === 1'b1);
+    wire cmd_req_write_known_w = (cmd_req_write_i === cmd_req_write_i);
+    wire cmd_req_payload_known_w = (cmd_req_addr_i === cmd_req_addr_i)
+                                 && (cmd_req_wdata_i === cmd_req_wdata_i)
+                                 && (cmd_req_wstrb_i === cmd_req_wstrb_i);
+    wire cmd_wr_fire = (power_enable_i === 1'b1)
+                    && cmd_req_active_w
+                    && cmd_req_write_known_w
+                    && (cmd_req_write_i === 1'b1)
+                    && cmd_req_payload_known_w;
+    wire cmd_rd_fire = (power_enable_i === 1'b1)
+                    && cmd_req_active_w
+                    && cmd_req_write_known_w
+                    && (cmd_req_write_i === 1'b0)
+                    && (cmd_req_addr_i === cmd_req_addr_i);
+    wire ahb_transfer_w = (power_enable_i === 1'b1) && (hsel_i === 1'b1) && (hready_i === 1'b1) && ((htrans_i == 2'b10) || (htrans_i == 2'b11));
+    wire ahb_prot_supported_w = (hprot_i == 4'b0011);
+    wire ahb_supported_w = (hsize_i == 3'b010) && (hburst_i == 3'b000) && ahb_prot_supported_w;
+    wire ahb_wr_fire = (ahb_transfer_w === 1'b1) && (ahb_supported_w === 1'b1) && (hwrite_i === 1'b1);
+    wire ahb_rd_fire = (ahb_transfer_w === 1'b1) && (ahb_supported_w === 1'b1) && (hwrite_i === 1'b0);
 
     wire [31:0] wr_addr_w  = cmd_wr_fire ? cmd_req_addr_i  : haddr_i;
     wire [31:0] wr_data_w  = cmd_wr_fire ? apply_wstrb(32'h0, cmd_req_wdata_i, cmd_req_wstrb_i) : hwdata_i;
@@ -296,9 +285,9 @@ module ComputeCluster import cluster_pkg::*; #(
 
     assign local_reset_n = reset_n && power_enable_i;
 
-    assign cmd_req_ready_o = power_enable_i;
-    assign hready_o        = power_enable_i;
-    assign hresp_o         = 1'b0;
+    assign cmd_req_ready_o = (power_enable_i === 1'b1);
+    assign hready_o        = (power_enable_i === 1'b1);
+    assign hresp_o         = ahb_transfer_w && !ahb_supported_w;
 
     assign s_axi_awready_o = power_enable_i ? s_axi_awready_sig : 1'b0;
     assign s_axi_wready_o  = power_enable_i ? s_axi_wready_sig  : 1'b0;
@@ -317,8 +306,8 @@ module ComputeCluster import cluster_pkg::*; #(
     assign rd_hddu_offset_w    = {20'h0, rd_addr_w[11:0]};
     assign wr_noc_offset_w     = {24'h0, wr_addr_w[7:0]};
     assign rd_noc_offset_w     = {24'h0, rd_addr_w[7:0]};
-    assign wr_cluster_offset_w = {24'h0, wr_addr_w[7:0]};
-    assign rd_cluster_offset_w = {24'h0, rd_addr_w[7:0]};
+    assign wr_cluster_offset_w = wr_addr_w[7:0];
+    assign rd_cluster_offset_w = rd_addr_w[7:0];
 
     assign spm_cfg_update_pulse = wr_valid_w && in_range(wr_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE) && (wr_spm_offset_w == K_SPM_CFG_UPDATE) && wr_data_w[0];
     assign spm_pmu_rst_pulse    = wr_valid_w && in_range(wr_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE) && (wr_spm_offset_w == K_SPM_PMU_CTRL) && wr_data_w[0];
@@ -342,9 +331,31 @@ module ComputeCluster import cluster_pkg::*; #(
 
     assign spm_soft_reset_sig = ccu_spm_soft_reset_sig;
 
-    assign noc_command_mode_sig = (ccu_noc_action_sig != CLUSTER_ACTION_NONE)
-                               || (wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && (wr_noc_offset_w == K_NOC_CMD_DATA));
-    assign noc_command_data_sig = (ccu_noc_action_sig != CLUSTER_ACTION_NONE) ? compose_noc_cmd(ccu_noc_action_sig) : wr_data_w;
+    wire direct_noc_command_valid_w = (wr_valid_w === 1'b1)
+                                    && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE)
+                                    && (wr_noc_offset_w == K_NOC_CMD_DATA);
+
+    always_comb begin
+        ccu_noc_command_valid_w = 1'b0;
+        ccu_noc_command_data_w  = 32'h0;
+        unique0 case (ccu_noc_action_sig)
+            CLUSTER_ACTION_NOC_START,
+            CLUSTER_ACTION_NOC_STOP,
+            CLUSTER_ACTION_NOC_RESET: begin
+                ccu_noc_command_valid_w = 1'b1;
+                ccu_noc_command_data_w  = compose_noc_cmd(ccu_noc_action_sig);
+            end
+            default: begin
+                ccu_noc_command_valid_w = 1'b0;
+                ccu_noc_command_data_w  = 32'h0;
+            end
+        endcase
+    end
+
+    assign noc_command_mode_sig = ccu_noc_command_valid_w || direct_noc_command_valid_w;
+    assign noc_command_data_sig = ccu_noc_command_valid_w    ? ccu_noc_command_data_w
+                                : direct_noc_command_valid_w ? wr_data_w
+                                : 32'h0;
     assign hddu_noc_plo_req_data.addr = hddu_noc_plo_addr;
 
     assign spm_cfg_map_w   = reset_init_done_reg ? spm_cfg_map_reg : K_SPM_CFG_MAP_RESET;
@@ -355,42 +366,80 @@ module ComputeCluster import cluster_pkg::*; #(
                            || s_axi_bvalid_sig || s_axi_rvalid_sig);
 
     always_comb begin
+        spm_readback_w = 32'h0;
+        unique0 case (rd_spm_offset_w)
+            K_SPM_CFG_MAP:       spm_readback_w = {24'h0, spm_cfg_map_w};
+            K_SPM_ARB_POLICY:    spm_readback_w = {31'h0, spm_arb_policy_reg};
+            K_SPM_PMU_CYCLE_LO:  spm_readback_w = spm_pmu_cycle_cnt_sig[31:0];
+            K_SPM_PMU_CYCLE_HI:  spm_readback_w = spm_pmu_cycle_cnt_sig[63:32];
+            K_SPM_PMU_ARB_LO:    spm_readback_w = spm_pmu_arb_stall_cnt_sig[31:0];
+            K_SPM_PMU_ARB_HI:    spm_readback_w = spm_pmu_arb_stall_cnt_sig[63:32];
+            K_SPM_PMU_CREDIT_LO: spm_readback_w = spm_pmu_credit_stall_cnt_sig[31:0];
+            K_SPM_PMU_CREDIT_HI: spm_readback_w = spm_pmu_credit_stall_cnt_sig[63:32];
+            default: begin
+                for (int unsigned p = 0; p < SPM_NUM_NOC_CHANNEL; p++) begin
+                    if (rd_spm_offset_w == (K_SPM_PMU_PORT_BASE + p*8)) begin
+                        spm_readback_w = spm_pmu_port_txn_cnt_sig[p][31:0];
+                    end
+                    if (rd_spm_offset_w == (K_SPM_PMU_PORT_BASE + p*8 + 4)) begin
+                        spm_readback_w = spm_pmu_port_txn_cnt_sig[p][63:32];
+                    end
+                end
+            end
+        endcase
+    end
+
+    always_comb begin
+        cluster_readback_w = 32'h0;
+        unique0 case (rd_cluster_offset_w)
+            CLUSTER_REG_MODE:       cluster_readback_w = ccu_mode_sig;
+            CLUSTER_REG_CTRL:       cluster_readback_w = 32'h0;
+            CLUSTER_REG_STATUS: begin
+                cluster_readback_w = ccu_status_word_sig;
+                cluster_readback_w[8] = ccu_status_word_sig[8] | ccu_stop_pending_sig;
+                cluster_readback_w[9] = ccu_status_word_sig[9] | ccu_soft_reset_pending_sig;
+            end
+            CLUSTER_REG_ERROR_CODE: cluster_readback_w = ccu_error_code_sig;
+            CLUSTER_REG_SUBSTATE:   cluster_readback_w = ccu_substate_sig;
+            default:                cluster_readback_w = 32'h0;
+        endcase
+    end
+
+    always_comb begin
+        rd_mux_rdata_w = 32'h0;
+        rd_mux_err_w   = 1'b0;
         cmd_resp_valid_o = cmd_rd_fire;
         cmd_resp_rdata_o = 32'h0;
         cmd_resp_err_o   = 1'b0;
         hrdata_o         = 32'h0;
 
         if (rd_valid_w) begin
-            logic [31:0] rdata;
-            logic        err;
-            rdata = 32'h0;
-            err   = 1'b0;
             if (cmd_rd_fire && (rd_addr_w == 32'h0000_0000)) begin
-                rdata = cmd_stub_reg0_w;
+                rd_mux_rdata_w = cmd_stub_reg0_w;
             end else if (cmd_rd_fire && (rd_addr_w == 32'h0000_0004)) begin
-                rdata = cmd_stub_reg1;
+                rd_mux_rdata_w = cmd_stub_reg1;
             end else if (in_range(rd_addr_w, K_CMD_SPM_BASE, K_CMD_SPM_SIZE)) begin
-                rdata = spm_readback(rd_spm_offset_w);
+                rd_mux_rdata_w = spm_readback_w;
             end else if (in_range(rd_addr_w, K_CMD_HDDU_BASE, K_CMD_HDDU_SIZE)) begin
-                rdata = hddu_mmio_rdata_sig;
+                rd_mux_rdata_w = hddu_mmio_rdata_sig;
             end else if (in_range(rd_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE)) begin
                 if (rd_noc_offset_w == K_NOC_STATUS) begin
-                    rdata = noc_status_word(noc_quiesced_w);
+                    rd_mux_rdata_w = noc_status_word(noc_quiesced_w);
                 end else begin
-                    rdata = noc_last_cmd_reg;
+                    rd_mux_rdata_w = noc_last_cmd_reg;
                 end
             end else if (in_range(rd_addr_w, K_CMD_CLUSTER_BASE, K_CMD_CLUSTER_SIZE)) begin
-                rdata = cluster_readback(rd_cluster_offset_w);
+                rd_mux_rdata_w = cluster_readback_w;
             end else begin
-                err = 1'b1;
+                rd_mux_err_w = 1'b1;
             end
 
             if (cmd_rd_fire) begin
-                cmd_resp_rdata_o = rdata;
-                cmd_resp_err_o   = err;
+                cmd_resp_rdata_o = rd_mux_known_w ? rd_mux_rdata_w : 32'h0;
+                cmd_resp_err_o   = rd_mux_err_w || !rd_mux_known_w;
             end
             if (ahb_rd_fire) begin
-                hrdata_o         = rdata;
+                hrdata_o         = rd_mux_known_w ? rd_mux_rdata_w : 32'h0;
             end
         end
     end
@@ -426,7 +475,10 @@ module ComputeCluster import cluster_pkg::*; #(
                 unique0 case (wr_spm_offset_w)
                     K_SPM_CFG_MAP:    spm_cfg_map_reg    <= wr_data_w[7:0];
                     K_SPM_ARB_POLICY: spm_arb_policy_reg <= wr_data_w[0];
-                    default: ;
+                    default: begin
+                        spm_cfg_map_reg    <= spm_cfg_map_reg;
+                        spm_arb_policy_reg <= spm_arb_policy_reg;
+                    end
                 endcase
             end
             if (wr_valid_w && in_range(wr_addr_w, K_CMD_NOC_BASE, K_CMD_NOC_SIZE) && (wr_noc_offset_w == K_NOC_CMD_DATA)) begin
@@ -477,8 +529,6 @@ module ComputeCluster import cluster_pkg::*; #(
         .BANKS_PER_GROUP(SPM_NUM_BANKS_PER_GROUP),
         .BANK_DATA_WIDTH(SPM_SRAM_BANK_WIDTH_BITS),
         .BANK_DEPTH(SPM_SRAM_BANK_DEPTH_WORDS),
-        .SRAM_BANK_LATENCY(SPM_SRAM_BANK_LATENCY),
-        .SRAM_BANK_PIPELINE_DEPTH(SPM_SRAM_BANK_PIPELINE_DEPTH),
         .ADDR_WIDTH(SPM_ADDR_WIDTH)
     ) spm (
         .clk(clk),
@@ -487,7 +537,6 @@ module ComputeCluster import cluster_pkg::*; #(
         .soft_reset_i(spm_soft_reset_sig),
         .config_map_i(spm_cfg_map_w),
         .config_update_i(spm_cfg_update_pulse),
-        .arb_policy_i(spm_arb_policy_reg),
         .spm_req_valid_i(hddu_spm_req_valid_sig),
         .spm_req_ready_o(hddu_spm_req_ready_sig),
         .spm_req_i(hddu_spm_req_payload_sig),
@@ -519,7 +568,6 @@ module ComputeCluster import cluster_pkg::*; #(
 
     HybridDataDeliverUnit #(
         .SPM_ADDR_BITS(SPM_ADDR_WIDTH),
-        .NOC_TAG_BITS(6),
         .DATA_BITS(HDDU_DATA_BITS)
     ) hddu (
         .clk(clk),

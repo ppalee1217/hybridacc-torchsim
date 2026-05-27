@@ -28,7 +28,7 @@ module InstructionMemory #(
     localparam int unsigned DEPTH_WORDS = MEM_BYTES / WORD_BYTES;
     localparam int unsigned WORD_ADDR_W = 15;
     localparam int unsigned ADDR_INDEX_W = (DEPTH_WORDS <= 1) ? 1 : $clog2(DEPTH_WORDS);
-    localparam logic [WORD_ADDR_W:0] DEPTH_WORDS_COUNT = DEPTH_WORDS;
+    localparam logic [WORD_ADDR_W:0] DEPTH_WORDS_COUNT = (WORD_ADDR_W + 1)'(DEPTH_WORDS);
 
     logic [15:0] mem [0:DEPTH_WORDS-1];
     logic [WORD_ADDR_W-1:0] im_write_word_addr_w;
@@ -42,8 +42,8 @@ module InstructionMemory #(
     assign im_read_word_addr_w  = im_read_addr[15:1];
     assign im_write_index_w = im_write_word_addr_w[ADDR_INDEX_W-1:0];
     assign im_read_index_w  = im_read_word_addr_w[ADDR_INDEX_W-1:0];
-    assign im_write_addr_valid_w = ({1'b0, im_write_word_addr_w} < DEPTH_WORDS_COUNT);
-    assign im_read_addr_valid_w  = ({1'b0, im_read_word_addr_w} < DEPTH_WORDS_COUNT);
+    assign im_write_addr_valid_w = !im_write_addr[0] && ({1'b0, im_write_word_addr_w} < DEPTH_WORDS_COUNT);
+    assign im_read_addr_valid_w  = !im_read_addr[0] && ({1'b0, im_read_word_addr_w} < DEPTH_WORDS_COUNT);
 
     // synopsys translate_off
     initial begin

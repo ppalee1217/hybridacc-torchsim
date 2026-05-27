@@ -111,7 +111,6 @@ module DmaEngine import core_pkg::*; (
     logic [31:0] remaining_beats_reg;
     logic [31:0] remaining_rows_reg;
     logic [63:0] read_data_reg;
-    logic [1:0]  read_resp_reg;
 
     logic mem_aw_sent_reg;
     logic mem_w_sent_reg;
@@ -119,50 +118,10 @@ module DmaEngine import core_pkg::*; (
     logic cl_w_sent_reg;
     logic irq_pulse_reg;
     logic reset_init_done_reg;
+    logic [31:0] read_mmio_rdata_w;
 
-    function automatic logic [31:0] encode_cluster_fabric_addr(input logic [31:0] cluster_id, input logic [31:0] local_addr);
-        return {cluster_id[7:0], local_addr[23:0]};
-    endfunction
-
-    function automatic logic [31:0] read_mmio(input logic [31:0] off);
-        logic [31:0] r;
-        r = 32'h0;
-        unique0 case (off)
-            DMA_CAP0:           r = 32'h0000_0001;
-            DMA_STATUS: begin
-                r[0] = (state_reg == DMA_ST_IDLE) || (state_reg == DMA_ST_DONE) || (state_reg == DMA_ST_ERROR);
-                r[1] = (state_reg == DMA_ST_DONE);
-                r[2] = (state_reg == DMA_ST_ERROR);
-            end
-            DMA_CTRL:           r = ctrl_reg;
-            DMA_SRC_KIND:       r = src_kind_reg;
-            DMA_DST_KIND:       r = dst_kind_reg;
-            DMA_SRC_ADDR_LO:    r = src_addr_lo_reg;
-            DMA_SRC_ADDR_HI:    r = src_addr_hi_reg;
-            DMA_DST_ADDR_LO:    r = dst_addr_lo_reg;
-            DMA_DST_ADDR_HI:    r = dst_addr_hi_reg;
-            DMA_SRC_CLUSTER_ID: r = src_cluster_id_reg;
-            DMA_DST_CLUSTER_ID: r = dst_cluster_id_reg;
-            DMA_COUNT_D0:       r = count_d0_reg;
-            DMA_COUNT_D1:       r = count_d1_reg;
-            DMA_COUNT_D2:       r = count_d2_reg;
-            DMA_COUNT_D3:       r = count_d3_reg;
-            DMA_SRC_STRIDE_D0:  r = src_stride_d0_reg;
-            DMA_SRC_STRIDE_D1:  r = src_stride_d1_reg;
-            DMA_SRC_STRIDE_D2:  r = src_stride_d2_reg;
-            DMA_SRC_STRIDE_D3:  r = src_stride_d3_reg;
-            DMA_DST_STRIDE_D0:  r = dst_stride_d0_reg;
-            DMA_DST_STRIDE_D1:  r = dst_stride_d1_reg;
-            DMA_DST_STRIDE_D2:  r = dst_stride_d2_reg;
-            DMA_DST_STRIDE_D3:  r = dst_stride_d3_reg;
-            DMA_CMD_TAG:        r = cmd_tag_reg;
-            DMA_DONE_TAG:       r = done_tag_reg;
-            DMA_ERR_CODE:       r = err_code_reg;
-            DMA_ERR_INFO:       r = err_info_reg;
-            DMA_DEBUG_STATE:    r = state_reg;
-            default:            r = 32'h0;
-        endcase
-        return r;
+    function automatic logic [31:0] encode_cluster_fabric_addr(input logic [7:0] cluster_id, input logic [23:0] local_addr);
+        return {cluster_id, local_addr};
     endfunction
 
     wire dma_busy_w = (state_reg != DMA_ST_IDLE) && (state_reg != DMA_ST_DONE) && (state_reg != DMA_ST_ERROR);
@@ -170,8 +129,47 @@ module DmaEngine import core_pkg::*; (
     wire dma_clear_done_w = mmio_req_valid_i && mmio_req_write_i && (mmio_req_addr_i == DMA_CTRL) && mmio_req_wdata_i[1];
 
     assign mmio_resp_valid_o = mmio_req_valid_i;
-    assign mmio_resp_rdata_o = mmio_req_write_i ? 32'h0 : read_mmio(mmio_req_addr_i);
+    assign mmio_resp_rdata_o = mmio_req_write_i ? 32'h0 : read_mmio_rdata_w;
     assign dma_irq_o = ctrl_reg[3] && irq_pulse_reg;
+
+    always_comb begin
+        read_mmio_rdata_w = 32'h0;
+        unique0 case (mmio_req_addr_i)
+            DMA_CAP0:           read_mmio_rdata_w = 32'h0000_0001;
+            DMA_STATUS: begin
+                read_mmio_rdata_w[0] = (state_reg == DMA_ST_IDLE) || (state_reg == DMA_ST_DONE) || (state_reg == DMA_ST_ERROR);
+                read_mmio_rdata_w[1] = (state_reg == DMA_ST_DONE);
+                read_mmio_rdata_w[2] = (state_reg == DMA_ST_ERROR);
+            end
+            DMA_CTRL:           read_mmio_rdata_w = ctrl_reg;
+            DMA_SRC_KIND:       read_mmio_rdata_w = src_kind_reg;
+            DMA_DST_KIND:       read_mmio_rdata_w = dst_kind_reg;
+            DMA_SRC_ADDR_LO:    read_mmio_rdata_w = src_addr_lo_reg;
+            DMA_SRC_ADDR_HI:    read_mmio_rdata_w = src_addr_hi_reg;
+            DMA_DST_ADDR_LO:    read_mmio_rdata_w = dst_addr_lo_reg;
+            DMA_DST_ADDR_HI:    read_mmio_rdata_w = dst_addr_hi_reg;
+            DMA_SRC_CLUSTER_ID: read_mmio_rdata_w = src_cluster_id_reg;
+            DMA_DST_CLUSTER_ID: read_mmio_rdata_w = dst_cluster_id_reg;
+            DMA_COUNT_D0:       read_mmio_rdata_w = count_d0_reg;
+            DMA_COUNT_D1:       read_mmio_rdata_w = count_d1_reg;
+            DMA_COUNT_D2:       read_mmio_rdata_w = count_d2_reg;
+            DMA_COUNT_D3:       read_mmio_rdata_w = count_d3_reg;
+            DMA_SRC_STRIDE_D0:  read_mmio_rdata_w = src_stride_d0_reg;
+            DMA_SRC_STRIDE_D1:  read_mmio_rdata_w = src_stride_d1_reg;
+            DMA_SRC_STRIDE_D2:  read_mmio_rdata_w = src_stride_d2_reg;
+            DMA_SRC_STRIDE_D3:  read_mmio_rdata_w = src_stride_d3_reg;
+            DMA_DST_STRIDE_D0:  read_mmio_rdata_w = dst_stride_d0_reg;
+            DMA_DST_STRIDE_D1:  read_mmio_rdata_w = dst_stride_d1_reg;
+            DMA_DST_STRIDE_D2:  read_mmio_rdata_w = dst_stride_d2_reg;
+            DMA_DST_STRIDE_D3:  read_mmio_rdata_w = dst_stride_d3_reg;
+            DMA_CMD_TAG:        read_mmio_rdata_w = cmd_tag_reg;
+            DMA_DONE_TAG:       read_mmio_rdata_w = done_tag_reg;
+            DMA_ERR_CODE:       read_mmio_rdata_w = err_code_reg;
+            DMA_ERR_INFO:       read_mmio_rdata_w = err_info_reg;
+            DMA_DEBUG_STATE:    read_mmio_rdata_w = state_reg;
+            default:            read_mmio_rdata_w = 32'h0;
+        endcase
+    end
 
     assign m_mem_axi_aw_len_o = 8'h00;
     assign m_mem_axi_ar_len_o = 8'h00;
@@ -190,12 +188,12 @@ module DmaEngine import core_pkg::*; (
         m_mem_axi_ar_valid_o = 1'b0;
         m_mem_axi_ar_addr_o  = current_src_addr_reg;
         m_cl_axi_aw_valid_o  = 1'b0;
-        m_cl_axi_aw_addr_o   = encode_cluster_fabric_addr(dst_cluster_id_reg, current_dst_addr_reg);
+        m_cl_axi_aw_addr_o   = encode_cluster_fabric_addr(dst_cluster_id_reg[7:0], current_dst_addr_reg[23:0]);
         m_cl_axi_w_valid_o   = 1'b0;
         m_cl_axi_w_data_o    = read_data_reg;
         m_cl_axi_w_strb_o    = '1;
         m_cl_axi_ar_valid_o  = 1'b0;
-        m_cl_axi_ar_addr_o   = encode_cluster_fabric_addr(src_cluster_id_reg, current_src_addr_reg);
+        m_cl_axi_ar_addr_o   = encode_cluster_fabric_addr(src_cluster_id_reg[7:0], current_src_addr_reg[23:0]);
 
         unique0 case (state_reg)
             DMA_ST_READ_REQ: begin
@@ -252,7 +250,6 @@ module DmaEngine import core_pkg::*; (
             remaining_beats_reg <= 32'h0;
             remaining_rows_reg <= 32'h0;
             read_data_reg <= 64'h0;
-            read_resp_reg <= 2'b00;
             mem_aw_sent_reg <= 1'b0;
             mem_w_sent_reg <= 1'b0;
             cl_aw_sent_reg <= 1'b0;
@@ -326,8 +323,16 @@ module DmaEngine import core_pkg::*; (
                     DMA_DST_STRIDE_D3:  dst_stride_d3_reg <= mmio_req_wdata_i;
                     DMA_CMD_TAG:        cmd_tag_reg <= mmio_req_wdata_i;
                     DMA_DONE_TAG:       done_tag_reg <= mmio_req_wdata_i;
-                    DMA_ERR_CODE:       if (mmio_req_wdata_i == 32'h0) err_code_reg <= DMA_ERR_NONE;
-                    DMA_ERR_INFO:       if (mmio_req_wdata_i == 32'h0) err_info_reg <= 32'h0;
+                    DMA_ERR_CODE: begin
+                        if (mmio_req_wdata_i == 32'h0) begin
+                            err_code_reg <= DMA_ERR_NONE;
+                        end
+                    end
+                    DMA_ERR_INFO: begin
+                        if (mmio_req_wdata_i == 32'h0) begin
+                            err_info_reg <= 32'h0;
+                        end
+                    end
                     default: ;
                 endcase
             end
@@ -393,8 +398,7 @@ module DmaEngine import core_pkg::*; (
                         end
                         // synopsys translate_on
                         read_data_reg <= m_mem_axi_r_data_i;
-                        read_resp_reg <= m_mem_axi_r_resp_i;
-                        if (m_mem_axi_r_resp_i != 2'b00) begin
+                        if ((m_mem_axi_r_resp_i != 2'b00) || !m_mem_axi_r_last_i) begin
                             err_code_reg <= DMA_ERR_DRAM_AXI;
                             state_reg <= DMA_ST_ERROR;
                         end else begin
@@ -415,7 +419,6 @@ module DmaEngine import core_pkg::*; (
                         end
                         // synopsys translate_on
                         read_data_reg <= m_cl_axi_r_data_i;
-                        read_resp_reg <= m_cl_axi_r_resp_i;
                         if (m_cl_axi_r_resp_i != 2'b00) begin
                             err_code_reg <= DMA_ERR_CLUSTER_RESP;
                             state_reg <= DMA_ST_ERROR;
@@ -439,8 +442,12 @@ module DmaEngine import core_pkg::*; (
                                      read_data_reg);
                         end
                         // synopsys translate_on
-                        if (m_mem_axi_aw_ready_i) mem_aw_sent_reg <= 1'b1;
-                        if (m_mem_axi_w_ready_i)  mem_w_sent_reg <= 1'b1;
+                        if (m_mem_axi_aw_ready_i) begin
+                            mem_aw_sent_reg <= 1'b1;
+                        end
+                        if (m_mem_axi_w_ready_i) begin
+                            mem_w_sent_reg <= 1'b1;
+                        end
                         if ((m_mem_axi_aw_ready_i || mem_aw_sent_reg) && (m_mem_axi_w_ready_i || mem_w_sent_reg)) begin
                             state_reg <= DMA_ST_WRITE_WAIT;
                         end
@@ -455,8 +462,12 @@ module DmaEngine import core_pkg::*; (
                                      read_data_reg);
                         end
                         // synopsys translate_on
-                        if (m_cl_axi_aw_ready_i) cl_aw_sent_reg <= 1'b1;
-                        if (m_cl_axi_w_ready_i)  cl_w_sent_reg <= 1'b1;
+                        if (m_cl_axi_aw_ready_i) begin
+                            cl_aw_sent_reg <= 1'b1;
+                        end
+                        if (m_cl_axi_w_ready_i) begin
+                            cl_w_sent_reg <= 1'b1;
+                        end
                         if ((m_cl_axi_aw_ready_i || cl_aw_sent_reg) && (m_cl_axi_w_ready_i || cl_w_sent_reg)) begin
                             state_reg <= DMA_ST_WRITE_WAIT;
                         end
@@ -484,19 +495,19 @@ module DmaEngine import core_pkg::*; (
                                 state_reg <= DMA_ST_DONE;
                             end else begin
                                 remaining_rows_reg <= remaining_rows_reg - 32'd1;
-                                current_src_row_base_reg <= current_src_row_base_reg + src_stride_d1_reg;
-                                current_dst_row_base_reg <= current_dst_row_base_reg + dst_stride_d1_reg;
-                                current_src_addr_reg <= current_src_row_base_reg + src_stride_d1_reg;
-                                current_dst_addr_reg <= current_dst_row_base_reg + dst_stride_d1_reg;
+                                current_src_row_base_reg <= $bits(current_src_row_base_reg)'(current_src_row_base_reg + src_stride_d1_reg);
+                                current_dst_row_base_reg <= $bits(current_dst_row_base_reg)'(current_dst_row_base_reg + dst_stride_d1_reg);
+                                current_src_addr_reg <= $bits(current_src_addr_reg)'(current_src_row_base_reg + src_stride_d1_reg);
+                                current_dst_addr_reg <= $bits(current_dst_addr_reg)'(current_dst_row_base_reg + dst_stride_d1_reg);
                                 remaining_beats_reg <= count_d0_reg;
                                 mem_aw_sent_reg <= 1'b0;
                                 mem_w_sent_reg <= 1'b0;
                                 state_reg <= DMA_ST_READ_REQ;
                             end
                         end else begin
-                            remaining_beats_reg <= remaining_beats_reg - 32'd1;
-                            current_src_addr_reg <= current_src_addr_reg + src_stride_d0_reg;
-                            current_dst_addr_reg <= current_dst_addr_reg + dst_stride_d0_reg;
+                            remaining_beats_reg <= $bits(remaining_beats_reg)'(remaining_beats_reg - 32'd1);
+                            current_src_addr_reg <= $bits(current_src_addr_reg)'(current_src_addr_reg + src_stride_d0_reg);
+                            current_dst_addr_reg <= $bits(current_dst_addr_reg)'(current_dst_addr_reg + dst_stride_d0_reg);
                             mem_aw_sent_reg <= 1'b0;
                             mem_w_sent_reg <= 1'b0;
                             state_reg <= DMA_ST_READ_REQ;
@@ -523,19 +534,19 @@ module DmaEngine import core_pkg::*; (
                                 state_reg <= DMA_ST_DONE;
                             end else begin
                                 remaining_rows_reg <= remaining_rows_reg - 32'd1;
-                                current_src_row_base_reg <= current_src_row_base_reg + src_stride_d1_reg;
-                                current_dst_row_base_reg <= current_dst_row_base_reg + dst_stride_d1_reg;
-                                current_src_addr_reg <= current_src_row_base_reg + src_stride_d1_reg;
-                                current_dst_addr_reg <= current_dst_row_base_reg + dst_stride_d1_reg;
+                                current_src_row_base_reg <= $bits(current_src_row_base_reg)'(current_src_row_base_reg + src_stride_d1_reg);
+                                current_dst_row_base_reg <= $bits(current_dst_row_base_reg)'(current_dst_row_base_reg + dst_stride_d1_reg);
+                                current_src_addr_reg <= $bits(current_src_addr_reg)'(current_src_row_base_reg + src_stride_d1_reg);
+                                current_dst_addr_reg <= $bits(current_dst_addr_reg)'(current_dst_row_base_reg + dst_stride_d1_reg);
                                 remaining_beats_reg <= count_d0_reg;
                                 cl_aw_sent_reg <= 1'b0;
                                 cl_w_sent_reg <= 1'b0;
                                 state_reg <= DMA_ST_READ_REQ;
                             end
                         end else begin
-                            remaining_beats_reg <= remaining_beats_reg - 32'd1;
-                            current_src_addr_reg <= current_src_addr_reg + src_stride_d0_reg;
-                            current_dst_addr_reg <= current_dst_addr_reg + dst_stride_d0_reg;
+                            remaining_beats_reg <= $bits(remaining_beats_reg)'(remaining_beats_reg - 32'd1);
+                            current_src_addr_reg <= $bits(current_src_addr_reg)'(current_src_addr_reg + src_stride_d0_reg);
+                            current_dst_addr_reg <= $bits(current_dst_addr_reg)'(current_dst_addr_reg + dst_stride_d0_reg);
                             cl_aw_sent_reg <= 1'b0;
                             cl_w_sent_reg <= 1'b0;
                             state_reg <= DMA_ST_READ_REQ;

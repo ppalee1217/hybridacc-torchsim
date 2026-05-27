@@ -35,11 +35,10 @@ module asyncFIFO #(
     localparam int unsigned MAX_ELEMENTS = DEPTH * CHUNKS_PER_PUSH;
     localparam int unsigned OUT_T_BITS   = $bits(OUT_T);
     localparam int PTR_W = (MAX_ELEMENTS <= 1) ? 1 : $clog2(MAX_ELEMENTS);
-    localparam logic [PTR_W-1:0] PTR_LAST = MAX_ELEMENTS - 1;
     localparam logic [PTR_W-1:0] PTR_ONE  = {{(PTR_W-1){1'b0}}, 1'b1};
-    localparam logic [PTR_W:0]   MAX_COUNT = MAX_ELEMENTS;
-    localparam logic [PTR_W:0]   SET_COUNT = CHUNKS_PER_PUSH;
-    localparam logic [PTR_W:0]   FULL_COUNT = MAX_ELEMENTS - CHUNKS_PER_PUSH;
+    localparam logic [PTR_W:0]   MAX_COUNT = (PTR_W + 1)'(MAX_ELEMENTS);
+    localparam logic [PTR_W:0]   SET_COUNT = (PTR_W + 1)'(CHUNKS_PER_PUSH);
+    localparam logic [PTR_W:0]   FULL_COUNT = (PTR_W + 1)'(MAX_ELEMENTS - CHUNKS_PER_PUSH);
     localparam logic [PTR_W:0]   CNT_ONE = {{PTR_W{1'b0}}, 1'b1};
 
     OUT_T mem [0:MAX_ELEMENTS-1];
@@ -58,70 +57,11 @@ module asyncFIFO #(
     logic [PTR_W-1:0] rd_ptr_next_w;
     logic [PTR_W:0]   cnt_next_w;
 
-    function automatic logic [PTR_W:0] count_add(
-        input logic [PTR_W:0] lhs,
-        input logic [PTR_W:0] rhs
-    );
-        logic [PTR_W:0] result;
-        logic           carry;
-
-        carry = 1'b0;
-        for (int i = 0; i <= PTR_W; i++) begin
-            result[i] = lhs[i] ^ rhs[i] ^ carry;
-            carry = (lhs[i] & rhs[i]) | (lhs[i] & carry) | (rhs[i] & carry);
-        end
-        return result;
-    endfunction
-
-    function automatic logic [PTR_W:0] count_sub(
-        input logic [PTR_W:0] lhs,
-        input logic [PTR_W:0] rhs
-    );
-        logic [PTR_W:0] result;
-        logic           borrow;
-
-        borrow = 1'b0;
-        for (int i = 0; i <= PTR_W; i++) begin
-            result[i] = lhs[i] ^ rhs[i] ^ borrow;
-            borrow = (~lhs[i] & rhs[i]) | (~(lhs[i] ^ rhs[i]) & borrow);
-        end
-        return result;
-    endfunction
-
-    function automatic logic [PTR_W-1:0] ptr_add_count(
-        input logic [PTR_W-1:0] ptr,
-        input logic [PTR_W:0]   amount
-    );
-        logic [PTR_W-1:0] result;
-        logic             carry;
-
-        carry = 1'b0;
-        for (int i = 0; i < PTR_W; i++) begin
-            result[i] = ptr[i] ^ amount[i] ^ carry;
-            carry = (ptr[i] & amount[i]) | (ptr[i] & carry) | (amount[i] & carry);
-        end
-        return result;
-    endfunction
-
-    function automatic logic [PTR_W-1:0] ptr_inc_if(
-        input logic [PTR_W-1:0] ptr,
-        input logic             enable
-    );
-        logic [PTR_W:0] amount;
-
-        amount = '0;
-        amount[0] = enable;
-        return ptr_add_count(ptr, amount);
-    endfunction
-
     function automatic logic [PTR_W-1:0] ptr_add(
         input logic [PTR_W-1:0] ptr,
-        input int unsigned      amount
+        input logic [PTR_W-1:0] amount
     );
-        logic [PTR_W:0] amount_bits;
-
-        amount_bits = amount[PTR_W:0];
-        return ptr_add_count(ptr, amount_bits);
+        return ptr + amount;
     endfunction
 
     always_comb begin
@@ -134,33 +74,36 @@ module asyncFIFO #(
 
         mask_popcount_w = '0;
         for (int unsigned i = 0; i < CHUNKS_PER_PUSH; i++) begin
-            mask_popcount_w = count_add(mask_popcount_w, {{PTR_W{1'b0}}, mask_in[i]});
+            mask_popcount_w = mask_popcount_w + {{PTR_W{1'b0}}, mask_in[i]};
         end
 
         do_pop_set_w = pop_set && set_valid_w;
         do_pop_w = pop && !fifo_empty_w && !do_pop_set_w;
 
         remaining_after_pop_w = cnt_reg;
-        remaining_after_pop_w = count_sub(
-            remaining_after_pop_w,
-            ({(PTR_W+1){do_pop_w}} & CNT_ONE) | ({(PTR_W+1){do_pop_set_w}} & SET_COUNT)
-        );
+        if (do_pop_set_w) begin
+            remaining_after_pop_w = cnt_reg - SET_COUNT;
+        end else if (do_pop_w) begin
+            remaining_after_pop_w = cnt_reg - CNT_ONE;
+        end
 
-        do_push_w = push && (count_add(remaining_after_pop_w, mask_popcount_w) <= MAX_COUNT);
+        do_push_w = push && ((remaining_after_pop_w + mask_popcount_w) <= MAX_COUNT);
 
         wr_ptr_next_w = wr_ptr_reg;
         for (int unsigned i = 0; i < CHUNKS_PER_PUSH; i++) begin
-            wr_ptr_next_w = ptr_inc_if(wr_ptr_next_w, do_push_w && mask_in[i]);
+            if (do_push_w && mask_in[i]) begin
+                wr_ptr_next_w = wr_ptr_next_w + PTR_ONE;
+            end
         end
 
-        rd_ptr_next_w = ptr_add_count(
-            rd_ptr_reg,
-            ({(PTR_W+1){do_pop_w}} & CNT_ONE) | ({(PTR_W+1){do_pop_set_w}} & SET_COUNT)
-        );
-        cnt_next_w = count_add(
-            remaining_after_pop_w,
-            mask_popcount_w & {(PTR_W+1){do_push_w}}
-        );
+        rd_ptr_next_w = rd_ptr_reg;
+        if (do_pop_set_w) begin
+            rd_ptr_next_w = rd_ptr_reg + SET_COUNT[PTR_W-1:0];
+        end else if (do_pop_w) begin
+            rd_ptr_next_w = rd_ptr_reg + PTR_ONE;
+        end
+
+        cnt_next_w = remaining_after_pop_w + (do_push_w ? mask_popcount_w : '0);
     end
 
     always_comb begin
@@ -169,7 +112,7 @@ module asyncFIFO #(
 
         if (set_valid_w) begin
             for (int unsigned i = 0; i < CHUNKS_PER_PUSH; i++) begin
-                data_out_set[(i*OUT_T_BITS) +: OUT_T_BITS] = mem[ptr_add(rd_ptr_reg, i)];
+                data_out_set[(i*OUT_T_BITS) +: OUT_T_BITS] = mem[ptr_add(rd_ptr_reg, $bits(rd_ptr_reg)'(i))];
             end
         end
     end
@@ -179,7 +122,9 @@ module asyncFIFO #(
             wr_ptr_reg <= '0;
             rd_ptr_reg <= '0;
             cnt_reg <= '0;
-            for (int unsigned i = 0; i < MAX_ELEMENTS; i++) mem[i] <= '0;
+            for (int unsigned i = 0; i < MAX_ELEMENTS; i++) begin
+                mem[i] <= '0;
+            end
         end else begin
             logic [PTR_W-1:0] wr_write_ptr;
 
@@ -188,7 +133,7 @@ module asyncFIFO #(
                 for (int unsigned i = 0; i < CHUNKS_PER_PUSH; i++) begin
                     if (mask_in[i]) begin
                         mem[wr_write_ptr] <= data_in[(i*OUT_T_BITS) +: OUT_T_BITS];
-                        wr_write_ptr = ptr_inc_if(wr_write_ptr, 1'b1);
+                        wr_write_ptr = wr_write_ptr + PTR_ONE;
                     end
                 end
             end

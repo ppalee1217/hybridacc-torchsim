@@ -92,12 +92,16 @@ module ClusterDataFabric import core_pkg::*; #(
     logic [CL_AXI_DATA_WIDTH-1:0] rd_r_data_reg;
     logic [1:0]  rd_r_resp_reg;
 
-    function automatic logic [CLUSTER_ID_WIDTH-1:0] decode_cluster_id(input logic [31:0] addr);
-        return addr[24 +: CLUSTER_ID_WIDTH];
+    function automatic logic [CLUSTER_ID_WIDTH-1:0] decode_cluster_id(input logic [CLUSTER_ID_WIDTH-1:0] cluster_id);
+        return cluster_id;
     endfunction
 
-    function automatic logic [31:0] decode_local_addr(input logic [31:0] addr);
-        return {8'h0, addr[23:0]};
+    function automatic logic [31:0] decode_local_addr(input logic [23:0] local_addr);
+        return {8'h0, local_addr};
+    endfunction
+
+    function automatic logic decode_high_addr_ok(input logic [6:0] high_addr);
+        return high_addr == 7'h00;
     endfunction
 
     always_comb begin
@@ -164,21 +168,37 @@ module ClusterDataFabric import core_pkg::*; #(
         end else begin
             if (!wr_active_reg && !wr_b_valid_reg) begin
                 if (s_dma_axi_aw_valid_i && s_dma_axi_w_valid_i) begin
-                    wr_active_reg <= 1'b1;
-                    wr_issue_reg <= 1'b1;
                     wr_owner_reg <= OWNER_DMA;
-                    wr_cluster_reg <= decode_cluster_id(s_dma_axi_aw_addr_i);
-                    wr_local_addr_reg <= decode_local_addr(s_dma_axi_aw_addr_i);
+                    wr_cluster_reg <= decode_cluster_id(s_dma_axi_aw_addr_i[24 +: CLUSTER_ID_WIDTH]);
+                    wr_local_addr_reg <= decode_local_addr(s_dma_axi_aw_addr_i[23:0]);
                     wr_data_reg <= s_dma_axi_w_data_i;
                     wr_strb_reg <= s_dma_axi_w_strb_i;
+                    if (decode_high_addr_ok(s_dma_axi_aw_addr_i[31:25])
+                        && (decode_cluster_id(s_dma_axi_aw_addr_i[24 +: CLUSTER_ID_WIDTH]) < NUM_CLUSTERS)) begin
+                        wr_active_reg <= 1'b1;
+                        wr_issue_reg <= 1'b1;
+                    end else begin
+                        wr_active_reg <= 1'b0;
+                        wr_issue_reg <= 1'b0;
+                        wr_b_valid_reg <= 1'b1;
+                        wr_b_resp_reg <= 2'b10;
+                    end
                 end else if (s_nlu_axi_aw_valid_i && s_nlu_axi_w_valid_i) begin
-                    wr_active_reg <= 1'b1;
-                    wr_issue_reg <= 1'b1;
                     wr_owner_reg <= OWNER_NLU;
-                    wr_cluster_reg <= decode_cluster_id(s_nlu_axi_aw_addr_i);
-                    wr_local_addr_reg <= decode_local_addr(s_nlu_axi_aw_addr_i);
+                    wr_cluster_reg <= decode_cluster_id(s_nlu_axi_aw_addr_i[24 +: CLUSTER_ID_WIDTH]);
+                    wr_local_addr_reg <= decode_local_addr(s_nlu_axi_aw_addr_i[23:0]);
                     wr_data_reg <= s_nlu_axi_w_data_i;
                     wr_strb_reg <= s_nlu_axi_w_strb_i;
+                    if (decode_high_addr_ok(s_nlu_axi_aw_addr_i[31:25])
+                        && (decode_cluster_id(s_nlu_axi_aw_addr_i[24 +: CLUSTER_ID_WIDTH]) < NUM_CLUSTERS)) begin
+                        wr_active_reg <= 1'b1;
+                        wr_issue_reg <= 1'b1;
+                    end else begin
+                        wr_active_reg <= 1'b0;
+                        wr_issue_reg <= 1'b0;
+                        wr_b_valid_reg <= 1'b1;
+                        wr_b_resp_reg <= 2'b10;
+                    end
                 end
             end
 
@@ -200,17 +220,35 @@ module ClusterDataFabric import core_pkg::*; #(
 
             if (!rd_active_reg && !rd_r_valid_reg) begin
                 if (s_dma_axi_ar_valid_i) begin
-                    rd_active_reg <= 1'b1;
-                    rd_issue_reg <= 1'b1;
                     rd_owner_reg <= OWNER_DMA;
-                    rd_cluster_reg <= decode_cluster_id(s_dma_axi_ar_addr_i);
-                    rd_local_addr_reg <= decode_local_addr(s_dma_axi_ar_addr_i);
+                    rd_cluster_reg <= decode_cluster_id(s_dma_axi_ar_addr_i[24 +: CLUSTER_ID_WIDTH]);
+                    rd_local_addr_reg <= decode_local_addr(s_dma_axi_ar_addr_i[23:0]);
+                    if (decode_high_addr_ok(s_dma_axi_ar_addr_i[31:25])
+                        && (decode_cluster_id(s_dma_axi_ar_addr_i[24 +: CLUSTER_ID_WIDTH]) < NUM_CLUSTERS)) begin
+                        rd_active_reg <= 1'b1;
+                        rd_issue_reg <= 1'b1;
+                    end else begin
+                        rd_active_reg <= 1'b0;
+                        rd_issue_reg <= 1'b0;
+                        rd_r_valid_reg <= 1'b1;
+                        rd_r_data_reg <= '0;
+                        rd_r_resp_reg <= 2'b10;
+                    end
                 end else if (s_nlu_axi_ar_valid_i) begin
-                    rd_active_reg <= 1'b1;
-                    rd_issue_reg <= 1'b1;
                     rd_owner_reg <= OWNER_NLU;
-                    rd_cluster_reg <= decode_cluster_id(s_nlu_axi_ar_addr_i);
-                    rd_local_addr_reg <= decode_local_addr(s_nlu_axi_ar_addr_i);
+                    rd_cluster_reg <= decode_cluster_id(s_nlu_axi_ar_addr_i[24 +: CLUSTER_ID_WIDTH]);
+                    rd_local_addr_reg <= decode_local_addr(s_nlu_axi_ar_addr_i[23:0]);
+                    if (decode_high_addr_ok(s_nlu_axi_ar_addr_i[31:25])
+                        && (decode_cluster_id(s_nlu_axi_ar_addr_i[24 +: CLUSTER_ID_WIDTH]) < NUM_CLUSTERS)) begin
+                        rd_active_reg <= 1'b1;
+                        rd_issue_reg <= 1'b1;
+                    end else begin
+                        rd_active_reg <= 1'b0;
+                        rd_issue_reg <= 1'b0;
+                        rd_r_valid_reg <= 1'b1;
+                        rd_r_data_reg <= '0;
+                        rd_r_resp_reg <= 2'b10;
+                    end
                 end
             end
 

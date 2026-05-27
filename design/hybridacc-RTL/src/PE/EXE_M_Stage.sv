@@ -79,6 +79,10 @@ module EXE_M_Stage (
     logic internal_stall_w;
     logic advancing_w;
     logic out_valid_w;
+    logic ready_out_w;
+    logic stall_dl_w;
+    logic stall_ps_w;
+    logic stall_pd_w;
 
     always_comb begin
         ps_data_vec = u64_to_v_fp16(ps_data);
@@ -117,28 +121,29 @@ module EXE_M_Stage (
     );
 
     DataMemory DM (
-        .clk(clk), .reset_n(reset_n), .bank_sel(sdma_bank_sel),
+        .clk(clk), .bank_sel(sdma_bank_sel),
         .dm_write_en(dm_write_en), .dm_write_addr(dm_write_addr), .dm_write_data(dm_write_data), .dm_write_mask(dm_write_mask),
         .dm_read_addr(dm_read_addr), .dm_read_data(dm_read_data)
     );
 
     logic swap_stall;
 
-    always_comb begin
-        swap_stall = valid_reg && decode_reg.is_swap && sdma_busy;
-        stall_DL = ldma_stall | sdma_stall | swap_stall;
-        stall_PS = valid_reg && decode_reg.sys_sdma_act && !ps_valid;
-        stall_PD = valid_reg && ((decode_reg.pd_load && !pd_valid) || (decode_reg.pd_load_v && !pd_set_valid));
-
-        internal_stall_w = stall_DL | stall_PS | stall_PD;
-        advancing_w = valid_reg && ready_in && !internal_stall_w;
-        out_valid_w = valid_reg && !internal_stall_w;
-    end
+    assign swap_stall = valid_reg && decode_reg.is_swap && sdma_busy;
+    assign stall_dl_w = ldma_stall | sdma_stall | swap_stall;
+    assign stall_ps_w = valid_reg && decode_reg.sys_sdma_act && !ps_valid;
+    assign stall_pd_w = valid_reg && ((decode_reg.pd_load && !pd_valid) || (decode_reg.pd_load_v && !pd_set_valid));
+    assign internal_stall_w = stall_dl_w | stall_ps_w | stall_pd_w;
+    assign advancing_w = valid_reg && ready_in && !internal_stall_w;
+    assign out_valid_w = valid_reg && !internal_stall_w;
+    assign ready_out_w = pe_running && !halted_reg && !internal_stall_w && (ready_in || !valid_reg);
 
     always_comb begin
-        ready_out = pe_running && !halted_reg && !internal_stall_w && (ready_in || !valid_reg);
+        ready_out = ready_out_w;
         valid_out = out_valid_w;
         halted_out = halted_reg;
+        stall_DL = stall_dl_w;
+        stall_PS = stall_ps_w;
+        stall_PD = stall_pd_w;
 
         EXE_A_decode_signals_out = out_valid_w ? decode_reg : pe_decode_signals_zero();
         vmul_out_out = out_valid_w ? vmul_result : '0;
@@ -192,11 +197,13 @@ module EXE_M_Stage (
             valid_reg <= 1'b0;
             halted_reg <= 1'b0;
         end else begin
-            if (ready_out) begin
+            if (ready_out_w) begin
                 decode_reg <= ID_decode_signals_in;
                 valid_reg <= valid_in;
             end
-            if (valid_in && ready_out && ID_decode_signals_in.halt) halted_reg <= 1'b1;
+            if (valid_in && ready_out_w && ID_decode_signals_in.halt) begin
+                halted_reg <= 1'b1;
+            end
         end
     end
 endmodule

@@ -73,21 +73,27 @@ module LDMA (
             LOAD_BYTE: begin
                 out_v = v & 64'hFF;
                 if (dma_broadcast) begin
-                    for (int i = 0; i < 4; i++) b |= (out_v << (i*16));
+                    for (int i = 0; i < 4; i++) begin
+                        b |= (out_v << (i*16));
+                    end
                     out_v = b;
                 end
             end
             LOAD_HALF: begin
                 out_v = v & 64'hFFFF;
                 if (dma_broadcast) begin
-                    for (int i = 0; i < 4; i++) b |= (out_v << (i*16));
+                    for (int i = 0; i < 4; i++) begin
+                        b |= (out_v << (i*16));
+                    end
                     out_v = b;
                 end
             end
             LOAD_WORD: begin
                 out_v = v & 64'hFFFF_FFFF;
                 if (dma_broadcast) begin
-                    for (int i = 0; i < 2; i++) b |= (out_v << (i*32));
+                    for (int i = 0; i < 2; i++) begin
+                        b |= (out_v << (i*32));
+                    end
                     out_v = b;
                 end
             end
@@ -126,20 +132,50 @@ module LDMA (
         request_type_next = request_type_reg;
 
         // Static configuration updates
-        if (set_addr) dma_base_static_next = imm;
-        if (set_len) dma_len_static_next = imm;
-        if (set_loop) dma_loop_static_next = imm;
+        if (set_addr) begin
+            dma_base_static_next = imm;
+        end
+        if (set_len) begin
+            dma_len_static_next = imm;
+        end
+        if (set_loop) begin
+            dma_loop_static_next = imm;
+        end
         if (set_mode) begin
             dma_stride_static_next = imm;
             case (mode)
-                3'd0: begin request_type_static_next = LOAD_BYTE;  dma_broadcast_static_next = 1'b0; end
-                3'd1: begin request_type_static_next = LOAD_HALF;  dma_broadcast_static_next = 1'b0; end
-                3'd2: begin request_type_static_next = LOAD_WORD;  dma_broadcast_static_next = 1'b0; end
-                3'd3: begin request_type_static_next = LOAD_DWORD; dma_broadcast_static_next = 1'b0; end
-                3'd4: begin request_type_static_next = LOAD_BYTE;  dma_broadcast_static_next = 1'b1; end
-                3'd5: begin request_type_static_next = LOAD_HALF;  dma_broadcast_static_next = 1'b1; end
-                3'd6: begin request_type_static_next = LOAD_WORD;  dma_broadcast_static_next = 1'b1; end
-                default: begin request_type_static_next = LOAD_DWORD; dma_broadcast_static_next = 1'b0; end
+                3'd0: begin
+                    request_type_static_next = LOAD_BYTE;
+                    dma_broadcast_static_next = 1'b0;
+                end
+                3'd1: begin
+                    request_type_static_next = LOAD_HALF;
+                    dma_broadcast_static_next = 1'b0;
+                end
+                3'd2: begin
+                    request_type_static_next = LOAD_WORD;
+                    dma_broadcast_static_next = 1'b0;
+                end
+                3'd3: begin
+                    request_type_static_next = LOAD_DWORD;
+                    dma_broadcast_static_next = 1'b0;
+                end
+                3'd4: begin
+                    request_type_static_next = LOAD_BYTE;
+                    dma_broadcast_static_next = 1'b1;
+                end
+                3'd5: begin
+                    request_type_static_next = LOAD_HALF;
+                    dma_broadcast_static_next = 1'b1;
+                end
+                3'd6: begin
+                    request_type_static_next = LOAD_WORD;
+                    dma_broadcast_static_next = 1'b1;
+                end
+                default: begin
+                    request_type_static_next = LOAD_DWORD;
+                    dma_broadcast_static_next = 1'b0;
+                end
             endcase
         end
 
@@ -166,8 +202,9 @@ module LDMA (
                     request_type_next = request_type_static_reg;
                     dma_broadcast_next = dma_broadcast_static_reg;
                     dma_offset_next = 16'h0;
-                    if (dma_len_static_reg == 16'h0) state_next = IDLE;
-                    else begin
+                    if (dma_len_static_reg == 16'h0) begin
+                        state_next = IDLE;
+                    end else begin
                         dma_offset_next = dma_stride_static_bytes;
                         state_next = LOAD_WAIT;
                     end
@@ -262,7 +299,11 @@ module LDMA (
                     dm_read_addr = dma_base_reg[8:0] + dma_offset_next[8:0];
                 end
             end
-            default: ;
+            default: begin
+                dm_read_addr = dma_base_reg[8:0] + dma_offset_reg[8:0];
+                dmrv_out = dmrv_reg;
+                dl_stall_out = 1'b0;
+            end
         endcase
     end
 endmodule

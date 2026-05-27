@@ -54,6 +54,7 @@ module ScratchpadMemoryBank #(
     bank_word_t  sram_q   [MACROS_PER_BANK];
     logic        sram_pudelay_unused[MACROS_PER_BANK];
     macro_sel_t  read_macro_sel_reg;
+    logic        pudelay_w;
 
     function automatic macro_sel_t row_to_macro_sel(input bank_row_t row_idx);
         return macro_sel_t'(row_idx / MACRO_DEPTH);
@@ -64,9 +65,10 @@ module ScratchpadMemoryBank #(
     endfunction
 
     always_comb begin
-        PUDELAY = sram_pudelay_unused[0];
+        pudelay_w = 1'b0;
         Q       = sram_q[read_macro_sel_reg];
         for (int unsigned macro_idx = 0; macro_idx < MACROS_PER_BANK; macro_idx++) begin
+            pudelay_w ^= sram_pudelay_unused[macro_idx];
             sram_ceb[macro_idx]  = 1'b1;
             sram_web[macro_idx]  = 1'b1;
             sram_bweb[macro_idx] = {BANK_DATA_WIDTH{1'b1}};
@@ -75,18 +77,17 @@ module ScratchpadMemoryBank #(
         end
 
         if (!CEB) begin
-            macro_sel_t macro_sel;
-
-            macro_sel = row_to_macro_sel(A);
-            sram_ceb[macro_sel]  = 1'b0;
-            sram_web[macro_sel]  = WEB;
-            sram_addr[macro_sel] = row_to_macro_addr(A);
+            sram_ceb[row_to_macro_sel(A)]  = 1'b0;
+            sram_web[row_to_macro_sel(A)]  = WEB;
+            sram_addr[row_to_macro_sel(A)] = row_to_macro_addr(A);
             if (!WEB) begin
-                sram_bweb[macro_sel] = BWEB;
-                sram_d[macro_sel]    = D;
+                sram_bweb[row_to_macro_sel(A)] = BWEB;
+                sram_d[row_to_macro_sel(A)]    = D;
             end
         end
     end
+
+    assign PUDELAY = pudelay_w;
 
     // Match hard-macro behavior: the bank carries no explicit reset state.
     always_ff @(posedge CLK) begin

@@ -119,6 +119,8 @@ end
         noc_plo_resp_ready = 0; // Prevent immediate pop
         pe_plo_data = 64'hCAFE_BABE_0000_0001;
         pe_plo_valid = 1; @(posedge clk); pe_plo_valid = 0;
+        @(posedge clk);
+        noc_plo_req_valid = 1; @(posedge clk); noc_plo_req_valid = 0;
         @(posedge clk); @(negedge clk);
         `CHECK_BIT("PLO BUS: noc_plo_resp_valid=1", noc_plo_resp_valid, 1'b1)
         `CHECK_VAL("PLO BUS: data correct", noc_plo_resp_data.data, 64'hCAFE_BABE_0000_0001)

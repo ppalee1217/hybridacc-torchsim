@@ -65,12 +65,12 @@ module TS1N16ADFPCLLLVTA128X64M4SWSHOD (
                 logic [WIDTH-1:0] read_word;
                 int unsigned      base_byte_addr;
 
-                base_byte_addr = (A * BYTES_PER_WORD) + byte_window_offset;
+                base_byte_addr = $unsigned(($unsigned(A) * BYTES_PER_WORD) + $unsigned(byte_window_offset));
                 if (!WEB) begin
                     for (int i = 0; i < WIDTH; i++) begin
                         int unsigned write_byte_addr;
 
-                        write_byte_addr = base_byte_addr + (i / 8);
+                        write_byte_addr = $unsigned(base_byte_addr + (i / 8));
                         if (!BWEB[i]) begin
                             byte_mem[write_byte_addr][i % 8] <= D[i];
                         end

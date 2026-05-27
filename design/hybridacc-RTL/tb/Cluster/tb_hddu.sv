@@ -107,6 +107,7 @@ module tb_hddu;
         .noc_plo_in_status(noc_plo_in_status),
         .noc_plo_in_valid(noc_plo_in_valid),
         .noc_plo_in_ready(noc_plo_in_ready),
+        .noc_quiesced_i(1'b1),
         .mmio_addr(mmio_addr),
         .mmio_write(mmio_write),
         .mmio_wdata(mmio_wdata),
@@ -155,6 +156,7 @@ module tb_hddu;
         // -------------------------------------------------------------
         // Test 1: PS send plane (AGU0 -> SPM read -> NoC PS request)
         // -------------------------------------------------------------
+        mmio_write32(32'h0000_0808, 32'h0000_0001); // enable PS plane only
         cfg_agu_base_tag(0, 32'h0000_0020, 32'h0000_0003);
         mmio_write32(32'h0000_0800, 32'h0000_0001); // START
 
@@ -179,6 +181,7 @@ module tb_hddu;
         // -------------------------------------------------------------
         // Test 2: PLO receive plane (AGU3 -> NoC addr req -> NoC resp -> SPM write)
         // -------------------------------------------------------------
+        mmio_write32(32'h0000_0808, 32'h0000_0008); // enable PLO receive plane only
         cfg_agu_base_tag(3, 32'h0000_0040, 32'h0000_0005);
         mmio_write32(32'h0000_0800, 32'h0000_0001); // START again
 

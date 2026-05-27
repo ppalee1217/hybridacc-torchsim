@@ -110,26 +110,10 @@ module NoCRouter #(
         return {mask, addr, data};
     endfunction
 
-    function automatic logic [TDW-1:0] req_data(input logic [REQ_W-1:0] p);
-        return p[TDW-1:0];
-    endfunction
-    function automatic logic [15:0] req_addr(input logic [REQ_W-1:0] p);
-        return p[TDW +: 16];
-    endfunction
-    function automatic logic [63:0] req_mask(input logic [REQ_W-1:0] p);
-        return p[(TDW+16) +: 64];
-    endfunction
-
     function automatic logic [RESP_W-1:0] pack_resp(
         input logic [TDW-1:0] data, input logic [1:0] status
     );
         return {status, data};
-    endfunction
-    function automatic logic [TDW-1:0] resp_data_f(input logic [RESP_W-1:0] p);
-        return p[TDW-1:0];
-    endfunction
-    function automatic logic [1:0] resp_status_f(input logic [RESP_W-1:0] p);
-        return p[TDW +: 2];
     endfunction
 
     // =====================================================================
@@ -187,6 +171,85 @@ module NoCRouter #(
     logic           pending_read_ultra_next;
 
     logic           rx_stall;
+    logic           command_mode_active_w;
+    logic           command_is_scan_chain_w;
+
+    logic [TDW-1:0] ps_req_data_w;
+    logic [7:0]     ps_req_addr_w;
+    logic [7:0]     ps_req_addr_high_w;
+    logic [63:0]    ps_req_mask_w;
+    logic           ps_req_is_ultra_w;
+    logic [7:0]     ps_req_baddr_w;
+    logic           ps_req_all_rdy_w;
+
+    logic [TDW-1:0] pd_req_data_w;
+    logic [7:0]     pd_req_addr_w;
+    logic [7:0]     pd_req_addr_high_w;
+    logic [63:0]    pd_req_mask_w;
+    logic           pd_req_is_ultra_w;
+    logic [7:0]     pd_req_baddr_w;
+    logic           pd_req_all_rdy_w;
+
+    logic [TDW-1:0] pli_req_data_w;
+    logic [7:0]     pli_req_addr_w;
+    logic [7:0]     pli_req_addr_high_w;
+    logic [63:0]    pli_req_mask_w;
+    logic           pli_req_is_ultra_w;
+    logic [7:0]     pli_req_baddr_w;
+    logic           pli_req_all_rdy_w;
+
+    logic [7:0]     plo_req_addr_w;
+    logic [7:0]     plo_req_addr_high_w;
+    logic           plo_req_is_ultra_w;
+    logic [7:0]     plo_req_baddr_w;
+    logic           plo_req_all_rdy_w;
+
+    logic [TDW-1:0]       plo_resp_collected_w;
+    logic [NUM_PORTS-1:0] plo_resp_vrx_w;
+    logic                 plo_resp_all_ok_w;
+    logic                 plo_resp_err_w;
+    logic                 plo_resp_seen_w;
+    logic                 req_decode_known_w;
+    logic                 plo_resp_decode_known_w;
+
+    always_comb begin
+        command_mode_active_w = (command_mode === 1'b1) && (command_data === command_data);
+        command_is_scan_chain_w = command_mode_active_w
+                               && (message_command_t'(command_data[3:0]) == CMD_NOC_SCAN_CHAIN);
+
+        req_decode_known_w = (ps_req_data_w === ps_req_data_w)
+                          && (ps_req_addr_w === ps_req_addr_w)
+                          && (ps_req_addr_high_w === ps_req_addr_high_w)
+                          && (ps_req_mask_w === ps_req_mask_w)
+                          && (ps_req_is_ultra_w === ps_req_is_ultra_w)
+                          && (ps_req_baddr_w === ps_req_baddr_w)
+                          && (ps_req_all_rdy_w === ps_req_all_rdy_w)
+                          && (pd_req_data_w === pd_req_data_w)
+                          && (pd_req_addr_w === pd_req_addr_w)
+                          && (pd_req_addr_high_w === pd_req_addr_high_w)
+                          && (pd_req_mask_w === pd_req_mask_w)
+                          && (pd_req_is_ultra_w === pd_req_is_ultra_w)
+                          && (pd_req_baddr_w === pd_req_baddr_w)
+                          && (pd_req_all_rdy_w === pd_req_all_rdy_w)
+                          && (pli_req_data_w === pli_req_data_w)
+                          && (pli_req_addr_w === pli_req_addr_w)
+                          && (pli_req_addr_high_w === pli_req_addr_high_w)
+                          && (pli_req_mask_w === pli_req_mask_w)
+                          && (pli_req_is_ultra_w === pli_req_is_ultra_w)
+                          && (pli_req_baddr_w === pli_req_baddr_w)
+                          && (pli_req_all_rdy_w === pli_req_all_rdy_w)
+                          && (plo_req_addr_w === plo_req_addr_w)
+                          && (plo_req_addr_high_w === plo_req_addr_high_w)
+                          && (plo_req_is_ultra_w === plo_req_is_ultra_w)
+                          && (plo_req_baddr_w === plo_req_baddr_w)
+                          && (plo_req_all_rdy_w === plo_req_all_rdy_w);
+
+        plo_resp_decode_known_w = (plo_resp_collected_w === plo_resp_collected_w)
+                               && (plo_resp_vrx_w === plo_resp_vrx_w)
+                               && (plo_resp_all_ok_w === plo_resp_all_ok_w)
+                               && (plo_resp_err_w === plo_resp_err_w)
+                               && (plo_resp_seen_w === plo_resp_seen_w);
+    end
 
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
@@ -229,8 +292,8 @@ module NoCRouter #(
     always_comb begin
         if (!resp_fifo_empty) begin
             noc_plo_out_valid  = 1'b1;
-            noc_plo_out_data   = resp_data_f(resp_fifo_out);
-            noc_plo_out_status = NOC_RESPONSE_STATUS'(resp_status_f(resp_fifo_out));
+            noc_plo_out_data   = resp_fifo_out[TDW-1:0];
+            noc_plo_out_status = NOC_RESPONSE_STATUS'(resp_fifo_out[TDW +: 2]);
             resp_fifo_pop      = noc_plo_out_ready;
         end else begin
             noc_plo_out_valid  = 1'b0;
@@ -244,14 +307,20 @@ module NoCRouter #(
     // Block C — PS request processing (ESL process_requests_noc_ps)
     // =====================================================================
     always_comb begin
+        ps_req_data_w = '0;
+        ps_req_addr_w = '0;
+        ps_req_addr_high_w = '0;
+        ps_req_mask_w = '0;
+        ps_req_is_ultra_w = 1'b0;
+        ps_req_baddr_w = '0;
+        ps_req_all_rdy_w = 1'b1;
         ps_fifo_pop = 1'b0;
         for (int unsigned i = 0; i < NUM_PORTS; i++) begin
             noc_ps_to_bus_req_valid[i] = 1'b0;
             noc_ps_to_bus_req_data[i]  = '0;
         end
 
-        if (command_mode &&
-            (message_command_t'(command_data[3:0]) != CMD_NOC_SCAN_CHAIN)) begin
+        if (command_mode_active_w && !command_is_scan_chain_w) begin
             // Sideband PE command bypass
             for (int unsigned i = 0; i < NUM_PORTS; i++) begin
                 noc_ps_to_bus_req_valid[i]     = 1'b1;
@@ -259,26 +328,36 @@ module NoCRouter #(
                 noc_ps_to_bus_req_data[i].data = {32'b0, command_data};
                 noc_ps_to_bus_req_data[i].mask = '0;
             end
-        end else if (!ps_fifo_empty) begin
-            automatic logic [TDW-1:0] f_data  = req_data(ps_fifo_out);
-            automatic logic [15:0]    f_addr  = req_addr(ps_fifo_out);
-            automatic logic [63:0]    f_mask  = req_mask(ps_fifo_out);
-            automatic logic           is_ultra = f_addr[6];
-            automatic logic [7:0]     baddr   = (f_addr[7] ? 8'h40 : 8'h00) | {2'b0, f_addr[5:0]};
-            automatic logic           all_rdy = 1'b1;
+        end else begin
+            if (!ps_fifo_empty) begin
+                ps_req_data_w = ps_fifo_out[TDW-1:0];
+                ps_req_addr_w = ps_fifo_out[TDW +: 8];
+                ps_req_addr_high_w = ps_fifo_out[TDW+8 +: 8];
+                ps_req_mask_w = ps_fifo_out[(TDW+16) +: 64];
+                ps_req_is_ultra_w = ps_req_addr_w[6];
+                ps_req_baddr_w = (ps_req_addr_w[7] ? 8'h40 : 8'h00) | {2'b0, ps_req_addr_w[5:0]};
+                ps_req_all_rdy_w = 1'b1;
 
-            for (int unsigned i = 0; i < NUM_PORTS; i++) begin
-                noc_ps_to_bus_req_data[i].addr = {8'b0, baddr};
-                noc_ps_to_bus_req_data[i].mask = f_mask;
-                noc_ps_to_bus_req_data[i].data = is_ultra ? f_data[64*i +: 64]
-                                                          : f_data[63:0];
-            end
-            for (int unsigned i = 0; i < NUM_PORTS; i++)
-                if (!noc_ps_to_bus_req_ready[i]) all_rdy = 1'b0;
-            if (all_rdy) begin
-                for (int unsigned i = 0; i < NUM_PORTS; i++)
-                    noc_ps_to_bus_req_valid[i] = 1'b1;
-                ps_fifo_pop = 1'b1;
+                for (int unsigned i = 0; i < NUM_PORTS; i++) begin
+                    noc_ps_to_bus_req_data[i].addr = {8'b0, ps_req_baddr_w};
+                    noc_ps_to_bus_req_data[i].mask = ps_req_mask_w;
+                    noc_ps_to_bus_req_data[i].data = ps_req_is_ultra_w ? ps_req_data_w[64*i +: 64]
+                                                                       : ps_req_data_w[63:0];
+                end
+                for (int unsigned i = 0; i < NUM_PORTS; i++) begin
+                    if (!noc_ps_to_bus_req_ready[i]) begin
+                        ps_req_all_rdy_w = 1'b0;
+                    end
+                end
+                if (ps_req_addr_high_w !== ps_req_addr_high_w) begin
+                    ps_req_all_rdy_w = 1'b0;
+                end
+                if (ps_req_all_rdy_w && req_decode_known_w) begin
+                    for (int unsigned i = 0; i < NUM_PORTS; i++) begin
+                        noc_ps_to_bus_req_valid[i] = 1'b1;
+                    end
+                    ps_fifo_pop = 1'b1;
+                end
             end
         end
     end
@@ -287,30 +366,45 @@ module NoCRouter #(
     // Block D — PD request processing
     // =====================================================================
     always_comb begin
+        pd_req_data_w = '0;
+        pd_req_addr_w = '0;
+        pd_req_addr_high_w = '0;
+        pd_req_mask_w = '0;
+        pd_req_is_ultra_w = 1'b0;
+        pd_req_baddr_w = '0;
+        pd_req_all_rdy_w = 1'b1;
         pd_fifo_pop = 1'b0;
         for (int unsigned i = 0; i < NUM_PORTS; i++) begin
             noc_pd_to_bus_req_valid[i] = 1'b0;
             noc_pd_to_bus_req_data[i]  = '0;
         end
         if (!pd_fifo_empty) begin
-            automatic logic [TDW-1:0] f_data  = req_data(pd_fifo_out);
-            automatic logic [15:0]    f_addr  = req_addr(pd_fifo_out);
-            automatic logic [63:0]    f_mask  = req_mask(pd_fifo_out);
-            automatic logic           is_ultra = f_addr[6];
-            automatic logic [7:0]     baddr   = (f_addr[7] ? 8'h40 : 8'h00) | {2'b0, f_addr[5:0]};
-            automatic logic           all_rdy = 1'b1;
+            pd_req_data_w = pd_fifo_out[TDW-1:0];
+            pd_req_addr_w = pd_fifo_out[TDW +: 8];
+            pd_req_addr_high_w = pd_fifo_out[TDW+8 +: 8];
+            pd_req_mask_w = pd_fifo_out[(TDW+16) +: 64];
+            pd_req_is_ultra_w = pd_req_addr_w[6];
+            pd_req_baddr_w = (pd_req_addr_w[7] ? 8'h40 : 8'h00) | {2'b0, pd_req_addr_w[5:0]};
+            pd_req_all_rdy_w = 1'b1;
 
             for (int unsigned i = 0; i < NUM_PORTS; i++) begin
-                noc_pd_to_bus_req_data[i].addr = {8'b0, baddr};
-                noc_pd_to_bus_req_data[i].mask = f_mask;
-                noc_pd_to_bus_req_data[i].data = is_ultra ? f_data[64*i +: 64]
-                                                          : f_data[63:0];
+                noc_pd_to_bus_req_data[i].addr = {8'b0, pd_req_baddr_w};
+                noc_pd_to_bus_req_data[i].mask = pd_req_mask_w;
+                noc_pd_to_bus_req_data[i].data = pd_req_is_ultra_w ? pd_req_data_w[64*i +: 64]
+                                                                   : pd_req_data_w[63:0];
             end
-            for (int unsigned i = 0; i < NUM_PORTS; i++)
-                if (!noc_pd_to_bus_req_ready[i]) all_rdy = 1'b0;
-            if (all_rdy) begin
-                for (int unsigned i = 0; i < NUM_PORTS; i++)
+            for (int unsigned i = 0; i < NUM_PORTS; i++) begin
+                if (!noc_pd_to_bus_req_ready[i]) begin
+                    pd_req_all_rdy_w = 1'b0;
+                end
+            end
+            if (pd_req_addr_high_w !== pd_req_addr_high_w) begin
+                pd_req_all_rdy_w = 1'b0;
+            end
+            if (pd_req_all_rdy_w && req_decode_known_w) begin
+                for (int unsigned i = 0; i < NUM_PORTS; i++) begin
                     noc_pd_to_bus_req_valid[i] = 1'b1;
+                end
                 pd_fifo_pop = 1'b1;
             end
         end
@@ -320,30 +414,45 @@ module NoCRouter #(
     // Block E — PLI request processing
     // =====================================================================
     always_comb begin
+        pli_req_data_w = '0;
+        pli_req_addr_w = '0;
+        pli_req_addr_high_w = '0;
+        pli_req_mask_w = '0;
+        pli_req_is_ultra_w = 1'b0;
+        pli_req_baddr_w = '0;
+        pli_req_all_rdy_w = 1'b1;
         pli_fifo_pop = 1'b0;
         for (int unsigned i = 0; i < NUM_PORTS; i++) begin
             noc_pli_to_bus_req_valid[i] = 1'b0;
             noc_pli_to_bus_req_data[i]  = '0;
         end
         if (!pli_fifo_empty) begin
-            automatic logic [TDW-1:0] f_data  = req_data(pli_fifo_out);
-            automatic logic [15:0]    f_addr  = req_addr(pli_fifo_out);
-            automatic logic [63:0]    f_mask  = req_mask(pli_fifo_out);
-            automatic logic           is_ultra = f_addr[6];
-            automatic logic [7:0]     baddr   = (f_addr[7] ? 8'h40 : 8'h00) | {2'b0, f_addr[5:0]};
-            automatic logic           all_rdy = 1'b1;
+            pli_req_data_w = pli_fifo_out[TDW-1:0];
+            pli_req_addr_w = pli_fifo_out[TDW +: 8];
+            pli_req_addr_high_w = pli_fifo_out[TDW+8 +: 8];
+            pli_req_mask_w = pli_fifo_out[(TDW+16) +: 64];
+            pli_req_is_ultra_w = pli_req_addr_w[6];
+            pli_req_baddr_w = (pli_req_addr_w[7] ? 8'h40 : 8'h00) | {2'b0, pli_req_addr_w[5:0]};
+            pli_req_all_rdy_w = 1'b1;
 
             for (int unsigned i = 0; i < NUM_PORTS; i++) begin
-                noc_pli_to_bus_req_data[i].addr = {8'b0, baddr};
-                noc_pli_to_bus_req_data[i].mask = f_mask;
-                noc_pli_to_bus_req_data[i].data = is_ultra ? f_data[64*i +: 64]
-                                                           : f_data[63:0];
+                noc_pli_to_bus_req_data[i].addr = {8'b0, pli_req_baddr_w};
+                noc_pli_to_bus_req_data[i].mask = pli_req_mask_w;
+                noc_pli_to_bus_req_data[i].data = pli_req_is_ultra_w ? pli_req_data_w[64*i +: 64]
+                                                                     : pli_req_data_w[63:0];
             end
-            for (int unsigned i = 0; i < NUM_PORTS; i++)
-                if (!noc_pli_to_bus_req_ready[i]) all_rdy = 1'b0;
-            if (all_rdy) begin
-                for (int unsigned i = 0; i < NUM_PORTS; i++)
+            for (int unsigned i = 0; i < NUM_PORTS; i++) begin
+                if (!noc_pli_to_bus_req_ready[i]) begin
+                    pli_req_all_rdy_w = 1'b0;
+                end
+            end
+            if (pli_req_addr_high_w !== pli_req_addr_high_w) begin
+                pli_req_all_rdy_w = 1'b0;
+            end
+            if (pli_req_all_rdy_w && req_decode_known_w) begin
+                for (int unsigned i = 0; i < NUM_PORTS; i++) begin
                     noc_pli_to_bus_req_valid[i] = 1'b1;
+                end
                 pli_fifo_pop = 1'b1;
             end
         end
@@ -353,6 +462,11 @@ module NoCRouter #(
     // Block F — PLO request processing (ESL process_requests_noc_plo)
     // =====================================================================
     always_comb begin
+        plo_req_addr_w = '0;
+        plo_req_addr_high_w = '0;
+        plo_req_is_ultra_w = 1'b0;
+        plo_req_baddr_w = '0;
+        plo_req_all_rdy_w = 1'b1;
         plo_fifo_pop            = 1'b0;
         pending_read_next       = 1'b0;
         pending_read_ultra_next = 1'b0;
@@ -365,23 +479,32 @@ module NoCRouter #(
             pending_read_next       = pending_read_reg;
             pending_read_ultra_next = pending_read_ultra_reg;
         end else if (!plo_fifo_empty) begin
-            automatic logic [15:0] f_addr   = plo_fifo_out;
-            automatic logic        is_ultra  = f_addr[6];
-            automatic logic [7:0]  baddr    = (f_addr[7] ? 8'h40 : 8'h00) | {2'b0, f_addr[5:0]};
-            automatic logic        all_rdy  = 1'b1;
+            plo_req_addr_w = plo_fifo_out[7:0];
+            plo_req_addr_high_w = plo_fifo_out[15:8];
+            plo_req_is_ultra_w = plo_req_addr_w[6];
+            plo_req_baddr_w = (plo_req_addr_w[7] ? 8'h40 : 8'h00) | {2'b0, plo_req_addr_w[5:0]};
+            plo_req_all_rdy_w = 1'b1;
 
-            for (int unsigned i = 0; i < NUM_PORTS; i++)
-                noc_plo_to_bus_req_data[i].addr = {8'b0, baddr};
+            for (int unsigned i = 0; i < NUM_PORTS; i++) begin
+                noc_plo_to_bus_req_data[i].addr = {8'b0, plo_req_baddr_w};
+            end
 
-            for (int unsigned i = 0; i < NUM_PORTS; i++)
-                if (!noc_plo_to_bus_req_ready[i]) all_rdy = 1'b0;
+            for (int unsigned i = 0; i < NUM_PORTS; i++) begin
+                if (!noc_plo_to_bus_req_ready[i]) begin
+                    plo_req_all_rdy_w = 1'b0;
+                end
+            end
+            if (plo_req_addr_high_w !== plo_req_addr_high_w) begin
+                plo_req_all_rdy_w = 1'b0;
+            end
 
-            if (all_rdy) begin
-                for (int unsigned i = 0; i < NUM_PORTS; i++)
+            if (plo_req_all_rdy_w && req_decode_known_w) begin
+                for (int unsigned i = 0; i < NUM_PORTS; i++) begin
                     noc_plo_to_bus_req_valid[i] = 1'b1;
+                end
                 plo_fifo_pop            = 1'b1;
                 pending_read_next       = 1'b1;
-                pending_read_ultra_next = is_ultra;
+                pending_read_ultra_next = plo_req_is_ultra_w;
             end
         end
     end
@@ -390,50 +513,62 @@ module NoCRouter #(
     // Block G — PLO response collection (ESL process_responses_plo)
     // =====================================================================
     always_comb begin
+        plo_resp_collected_w = '0;
+        plo_resp_vrx_w = '0;
+        plo_resp_all_ok_w = 1'b1;
+        plo_resp_err_w = 1'b0;
+        plo_resp_seen_w = 1'b0;
         resp_fifo_push = 1'b0;
         resp_fifo_in   = '0;
         rx_stall       = 1'b0;
-        for (int unsigned i = 0; i < NUM_PORTS; i++)
+        for (int unsigned i = 0; i < NUM_PORTS; i++) begin
             bus_to_noc_plo_resp_ready[i] = 1'b0;
+        end
 
         if (pending_read_reg) begin
-            automatic logic [TDW-1:0]       collected = '0;
-            automatic logic [NUM_PORTS-1:0] vrx       = '0;
-            automatic logic                 all_ok    = 1'b1;
-            automatic logic                 err       = 1'b0;
-
             for (int unsigned i = 0; i < NUM_PORTS; i++) begin
                 if (bus_to_noc_plo_resp_valid[i]) begin
-                    vrx[i] = 1'b1;
-                    if (bus_to_noc_plo_resp_data[i].status == NOC_ERROR)
-                        err = 1'b1;
+                    plo_resp_vrx_w[i] = 1'b1;
+                    if (bus_to_noc_plo_resp_data[i].status == NOC_ERROR) begin
+                        plo_resp_err_w = 1'b1;
+                    end
                 end
             end
 
             if (pending_read_ultra_reg) begin
                 for (int unsigned i = 0; i < NUM_PORTS; i++) begin
-                    if (!vrx[i]) all_ok = 1'b0;
-                    else collected[64*i +: 64] = bus_to_noc_plo_resp_data[i].data;
-                end
-            end else begin
-                automatic logic seen = 1'b0;
-                for (int unsigned i = 0; i < NUM_PORTS; i++) begin
-                    if (vrx[i]) begin
-                        if (seen) err = 1'b1;
-                        seen = 1'b1;
-                        collected[63:0] = bus_to_noc_plo_resp_data[i].data;
+                    if (!plo_resp_vrx_w[i]) begin
+                        plo_resp_all_ok_w = 1'b0;
+                    end else begin
+                        plo_resp_collected_w[64*i +: 64] = bus_to_noc_plo_resp_data[i].data;
                     end
                 end
-                if (!seen) all_ok = 1'b0;
+            end else begin
+                plo_resp_seen_w = 1'b0;
+                for (int unsigned i = 0; i < NUM_PORTS; i++) begin
+                    if (plo_resp_vrx_w[i]) begin
+                        if (plo_resp_seen_w) begin
+                            plo_resp_err_w = 1'b1;
+                        end
+                        plo_resp_seen_w = 1'b1;
+                        plo_resp_collected_w[63:0] = bus_to_noc_plo_resp_data[i].data;
+                    end
+                end
+                if (!plo_resp_seen_w) begin
+                    plo_resp_all_ok_w = 1'b0;
+                end
             end
 
-            if (all_ok) begin
+            if (plo_resp_all_ok_w && plo_resp_decode_known_w) begin
                 if (!resp_fifo_full) begin
-                    for (int unsigned i = 0; i < NUM_PORTS; i++)
-                        if (vrx[i]) bus_to_noc_plo_resp_ready[i] = 1'b1;
+                    for (int unsigned i = 0; i < NUM_PORTS; i++) begin
+                        if (plo_resp_vrx_w[i]) begin
+                            bus_to_noc_plo_resp_ready[i] = 1'b1;
+                        end
+                    end
                     resp_fifo_push = 1'b1;
-                    resp_fifo_in   = pack_resp(collected,
-                                               err ? NOC_ERROR : NOC_OK);
+                    resp_fifo_in   = pack_resp(plo_resp_collected_w,
+                                               plo_resp_err_w ? NOC_ERROR : NOC_OK);
                 end else begin
                     rx_stall = 1'b1;
                 end
@@ -449,9 +584,8 @@ module NoCRouter #(
     always_comb begin
         scan_chain_data_next   = scan_chain_data_reg;
         scan_chain_enable_next = 1'b0;
-        if (command_mode &&
-            (message_command_t'(command_data[3:0]) == CMD_NOC_SCAN_CHAIN)) begin
-            scan_chain_data_next   = parse_scan_chain_data(command_data);
+        if (command_is_scan_chain_w) begin
+            scan_chain_data_next   = parse_scan_chain_data(command_data[30:4]);
             scan_chain_enable_next = 1'b1;
         end
     end
@@ -460,8 +594,11 @@ module NoCRouter #(
     // Block I — Scan-chain output
     // =====================================================================
     always_comb begin
-        scan_chain_enable = scan_chain_enable_reg;
-        if (scan_chain_enable_reg) begin
+        logic scan_tail_known;
+
+        scan_tail_known = (scan_chain_in[NUM_PORTS-1] === scan_chain_in[NUM_PORTS-1]);
+        scan_chain_enable = scan_chain_enable_reg && scan_tail_known;
+        if (scan_chain_enable_reg && scan_tail_known) begin
             scan_chain_out[0] = scan_chain_data_reg;
             for (int unsigned i = 1; i < NUM_PORTS; i++)
                 scan_chain_out[i] = scan_chain_in[i-1];
@@ -474,16 +611,16 @@ module NoCRouter #(
     // synopsys translate_off
     always_ff @(posedge clk) begin
         if (reset_n && ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))) begin
-            if (command_mode && (message_command_t'(command_data[3:0]) != CMD_NOC_SCAN_CHAIN)) begin
+            if (command_mode_active_w && !command_is_scan_chain_w) begin
                 $display("[%0t] [TRACE][NOC] sideband_cmd data=0x%08x opcode=0x%01x",
                          $time,
                          command_data,
                          command_data[3:0]);
             end
-            if (command_mode && (message_command_t'(command_data[3:0]) == CMD_NOC_SCAN_CHAIN)) begin
+            if (command_is_scan_chain_w) begin
                 automatic ScanChainFormat trace_fmt;
 
-                trace_fmt = parse_scan_chain_data(command_data);
+                trace_fmt = parse_scan_chain_data(command_data[30:4]);
                 $display("[%0t] [TRACE][NOC] scan_chain enable=%0b ps=%0d pd=%0d pli=%0d plo=%0d route=%0d",
                          $time,
                          trace_fmt.enable,

@@ -16,8 +16,7 @@
 //   None
 //-----------------------------------------------------------------------------
 module SectionLoader import core_pkg::*; #(
-    parameter int unsigned ISRAM_BYTES_P = ISRAM_BYTES,
-    parameter int unsigned DSRAM_BYTES_P = DATA_SRAM_BYTES
+    parameter int unsigned ISRAM_BYTES_P = ISRAM_BYTES
 ) (
     input  logic clk,
     input  logic reset_n,
@@ -63,15 +62,22 @@ module SectionLoader import core_pkg::*; #(
     logic [31:0] dram_addr_reg;
     logic [31:0] local_addr_reg;
     logic [31:0] data_word_reg;
+    logic        load_phase_w;
 
-    function automatic logic [31:0] make_status(input loader_state_e st, input logic [31:0] remaining);
+    function automatic logic [31:0] make_status(input loader_state_e st, input logic [15:0] remaining);
         logic [31:0] status;
         status = 32'h0;
-        if ((st != LD_IDLE) && (st != LD_DONE) && (st != LD_ERR)) status[0] = 1'b1;
-        if (st == LD_DONE) status[1] = 1'b1;
-        if (st == LD_ERR) status[2] = 1'b1;
+        if ((st != LD_IDLE) && (st != LD_DONE) && (st != LD_ERR)) begin
+            status[0] = 1'b1;
+        end
+        if (st == LD_DONE) begin
+            status[1] = 1'b1;
+        end
+        if (st == LD_ERR) begin
+            status[2] = 1'b1;
+        end
         status[7:4] = st;
-        status[31:16] = remaining[15:0];
+        status[31:16] = remaining;
         return status;
     endfunction
 
@@ -81,10 +87,11 @@ module SectionLoader import core_pkg::*; #(
     assign m_mem_axi_r_ready_o = (state_reg == LD_WAIT_R)
                               && (m_mem_axi_r_data_i[MEM_AXI_DATA_WIDTH-1:32] === m_mem_axi_r_data_i[MEM_AXI_DATA_WIDTH-1:32])
                               && (m_mem_axi_r_last_i === m_mem_axi_r_last_i);
-    assign load_phase_o = (state_reg != LD_IDLE) && (state_reg != LD_DONE) && (state_reg != LD_ERR);
-    assign busy_o = load_phase_o;
+    assign load_phase_w = (state_reg != LD_IDLE) && (state_reg != LD_DONE) && (state_reg != LD_ERR);
+    assign load_phase_o = load_phase_w;
+    assign busy_o = load_phase_w;
     assign done_o = (state_reg == LD_DONE);
-    assign status_o = make_status(state_reg, remaining_words_reg);
+    assign status_o = make_status(state_reg, remaining_words_reg[15:0]);
 
     always_comb begin
         isram_wr_en_o = 1'b0;
@@ -160,9 +167,9 @@ module SectionLoader import core_pkg::*; #(
                         remaining_words_reg <= 32'h0;
                         state_reg <= LD_DONE;
                     end else begin
-                        remaining_words_reg <= remaining_words_reg - 32'd1;
-                        dram_addr_reg <= dram_addr_reg + 32'd8;
-                        local_addr_reg <= local_addr_reg + 32'd4;
+                        remaining_words_reg <= $bits(remaining_words_reg)'(remaining_words_reg - 32'd1);
+                        dram_addr_reg <= $bits(dram_addr_reg)'(dram_addr_reg + 32'd8);
+                        local_addr_reg <= $bits(local_addr_reg)'(local_addr_reg + 32'd4);
                         state_reg <= LD_FETCH;
                     end
                 end

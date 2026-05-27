@@ -112,33 +112,40 @@ module CoreMcu import core_pkg::*; (
     logic        is_inst_sram_w;
     logic        is_mmio_w;
     logic        mmio_word_access_w;
+    logic        ls_req_valid_w;
+    logic        ls_req_write_w;
+    logic        mmio_req_valid_w;
+    logic        mmio_req_write_w;
     logic [31:0] ls_wdata_w;
     logic [3:0]  ls_wstrb_w;
-    logic        [63:0] mul_ss_w;
-    logic        [63:0] mul_su_w;
+    logic        [31:0] mul_ss_hi_w;
+    logic        [31:0] mul_su_hi_w;
     logic        [63:0] mul_uu_w;
 
-    function automatic logic [31:0] imm_i_decode(input logic [31:0] instr);
-        return {{20{instr[31]}}, instr[31:20]};
+    function automatic logic [31:0] imm_i_decode(input logic [11:0] imm_bits);
+        return {{20{imm_bits[11]}}, imm_bits};
     endfunction
 
-    function automatic logic [31:0] imm_s_decode(input logic [31:0] instr);
-        return {{20{instr[31]}}, instr[31:25], instr[11:7]};
+    function automatic logic [31:0] imm_s_decode(input logic [6:0] imm_hi, input logic [4:0] imm_lo);
+        return {{20{imm_hi[6]}}, imm_hi, imm_lo};
     endfunction
 
-    function automatic logic [31:0] imm_b_decode(input logic [31:0] instr);
-        return {{19{instr[31]}}, instr[31], instr[7], instr[30:25], instr[11:8], 1'b0};
+    function automatic logic [31:0] imm_b_decode(input logic sign_bit, input logic bit_11, input logic [5:0] bits_10_5, input logic [3:0] bits_4_1);
+        return {{19{sign_bit}}, sign_bit, bit_11, bits_10_5, bits_4_1, 1'b0};
     endfunction
 
-    function automatic logic [31:0] imm_u_decode(input logic [31:0] instr);
-        return {instr[31:12], 12'h000};
+    function automatic logic [31:0] imm_u_decode(input logic [19:0] imm_bits);
+        return {imm_bits, 12'h000};
     endfunction
 
-    function automatic logic [31:0] imm_j_decode(input logic [31:0] instr);
-        return {{11{instr[31]}}, instr[31], instr[19:12], instr[20], instr[30:21], 1'b0};
+    function automatic logic [31:0] imm_j_decode(input logic [19:0] imm_bits);
+        return {{11{imm_bits[19]}}, imm_bits[19], imm_bits[7:0], imm_bits[8], imm_bits[18:9], 1'b0};
     endfunction
 
     function automatic logic csr_supported(input logic [11:0] csr_addr);
+        logic supported;
+
+        supported = 1'b0;
         unique case (csr_addr)
             CSR_MSTATUS,
             CSR_MISA,
@@ -150,12 +157,16 @@ module CoreMcu import core_pkg::*; (
             CSR_MTVAL,
             CSR_MIP,
             CSR_MCYCLE,
-            CSR_MINSTRET: return 1'b1;
-            default: return 1'b0;
+            CSR_MINSTRET: supported = 1'b1;
+            default: supported = 1'b0;
         endcase
+        return supported;
     endfunction
 
     function automatic logic csr_writable(input logic [11:0] csr_addr);
+        logic writable;
+
+        writable = 1'b0;
         unique case (csr_addr)
             CSR_MSTATUS,
             CSR_MIE,
@@ -165,9 +176,10 @@ module CoreMcu import core_pkg::*; (
             CSR_MCAUSE,
             CSR_MTVAL,
             CSR_MCYCLE,
-            CSR_MINSTRET: return 1'b1;
-            default: return 1'b0;
+            CSR_MINSTRET: writable = 1'b1;
+            default: writable = 1'b0;
         endcase
+        return writable;
     endfunction
 
     function automatic logic [31:0] load_result_decode(
@@ -175,14 +187,18 @@ module CoreMcu import core_pkg::*; (
         input logic [1:0]  byte_offset,
         input logic [31:0] raw_data
     );
+        logic [31:0] result;
+
+        result = 32'h0;
         unique0 case (funct3)
-            3'b000: return {{24{raw_data[byte_offset*8 + 7]}}, raw_data[byte_offset*8 +: 8]};
-            3'b001: return {{16{raw_data[byte_offset[1]*16 + 15]}}, raw_data[byte_offset[1]*16 +: 16]};
-            3'b010: return raw_data;
-            3'b100: return {24'h0, raw_data[byte_offset*8 +: 8]};
-            3'b101: return {16'h0, raw_data[byte_offset[1]*16 +: 16]};
-            default: return 32'h0;
+            3'b000: result = {{24{raw_data[byte_offset*8 + 7]}}, raw_data[byte_offset*8 +: 8]};
+            3'b001: result = {{16{raw_data[byte_offset[1]*16 + 15]}}, raw_data[byte_offset[1]*16 +: 16]};
+            3'b010: result = raw_data;
+            3'b100: result = {24'h0, raw_data[byte_offset*8 +: 8]};
+            3'b101: result = {16'h0, raw_data[byte_offset[1]*16 +: 16]};
+            default: result = 32'h0;
         endcase
+        return result;
     endfunction
 
     assign instr_w    = instr_reg;
@@ -194,11 +210,11 @@ module CoreMcu import core_pkg::*; (
     assign rd_idx_w   = instr_w[11:7];
     assign rs1_data_w = (rs1_idx_w == 5'd0) ? 32'h0 : gpr_reg[rs1_idx_w];
     assign rs2_data_w = (rs2_idx_w == 5'd0) ? 32'h0 : gpr_reg[rs2_idx_w];
-    assign imm_i_w    = imm_i_decode(instr_w);
-    assign imm_s_w    = imm_s_decode(instr_w);
-    assign imm_b_w    = imm_b_decode(instr_w);
-    assign imm_u_w    = imm_u_decode(instr_w);
-    assign imm_j_w    = imm_j_decode(instr_w);
+    assign imm_i_w    = imm_i_decode(instr_w[31:20]);
+    assign imm_s_w    = imm_s_decode(instr_w[31:25], instr_w[11:7]);
+    assign imm_b_w    = imm_b_decode(instr_w[31], instr_w[7], instr_w[30:25], instr_w[11:8]);
+    assign imm_u_w    = imm_u_decode(instr_w[31:12]);
+    assign imm_j_w    = imm_j_decode(instr_w[31:12]);
     assign csr_addr_w = instr_w[31:20];
     assign mip_w = {20'h0, irq_meip_i, 3'h0, irq_mtip_i, 3'h0, irq_msip_i, 3'h0};
     assign irq_meip_take_w = irq_meip_i && mstatus_reg[3] && mie_reg[11] && !in_trap_reg;
@@ -206,7 +222,7 @@ module CoreMcu import core_pkg::*; (
     assign irq_msip_take_w = irq_msip_i && mstatus_reg[3] && mie_reg[3] && !in_trap_reg;
     assign is_load_w  = (opcode_w == 7'b0000011);
     assign is_store_w = (opcode_w == 7'b0100011);
-    assign ls_addr_w  = rs1_data_w + (is_store_w ? imm_s_w : imm_i_w);
+    assign ls_addr_w  = $bits(ls_addr_w)'(rs1_data_w + (is_store_w ? imm_s_w : imm_i_w));
     assign is_data_sram_w = (ls_addr_w >= BASE_DATA_RAM) && (ls_addr_w <= END_DATA_RAM);
     assign is_inst_sram_w = (ls_addr_w >= BASE_INST_RAM) && (ls_addr_w <= END_INST_RAM);
     assign is_mmio_w = addr_in_range(ls_addr_w, BASE_LOCAL_CTRL, END_LOCAL_CTRL)
@@ -217,8 +233,8 @@ module CoreMcu import core_pkg::*; (
                     || addr_in_range(ls_addr_w, BASE_CLUSTER_BCAST, END_CLUSTER_BCAST)
                     || addr_in_range(ls_addr_w, BASE_NLU, END_NLU);
     assign mmio_word_access_w = (funct3_w == 3'b010) && (ls_addr_w[1:0] == 2'b00);
-    assign mul_ss_w = $unsigned($signed({{32{rs1_data_w[31]}}, rs1_data_w}) * $signed({{32{rs2_data_w[31]}}, rs2_data_w}));
-    assign mul_su_w = $unsigned($signed({{32{rs1_data_w[31]}}, rs1_data_w}) * $signed({32'h0, rs2_data_w}));
+    assign mul_ss_hi_w = 32'((($signed({{32{rs1_data_w[31]}}, rs1_data_w}) * $signed({{32{rs2_data_w[31]}}, rs2_data_w})) >>> 32));
+    assign mul_su_hi_w = 32'((($signed({{32{rs1_data_w[31]}}, rs1_data_w}) * $signed({32'h0, rs2_data_w})) >>> 32));
     assign mul_uu_w = {32'h0, rs1_data_w} * {32'h0, rs2_data_w};
 
     always_comb begin
@@ -248,13 +264,13 @@ module CoreMcu import core_pkg::*; (
             3'b000: begin
                 load_supported_w = is_load_w;
                 store_supported_w = is_store_w;
-                ls_wdata_w = rs2_data_w << (8 * ls_addr_w[1:0]);
-                ls_wstrb_w = 4'b0001 << ls_addr_w[1:0];
+                ls_wdata_w = $bits(ls_wdata_w)'(rs2_data_w << (8 * ls_addr_w[1:0]));
+                ls_wstrb_w = $bits(ls_wstrb_w)'(4'b0001 << ls_addr_w[1:0]);
             end
             3'b001: begin
                 load_supported_w = is_load_w && (ls_addr_w[0] == 1'b0);
                 store_supported_w = is_store_w && (ls_addr_w[0] == 1'b0);
-                ls_wdata_w = rs2_data_w << (8 * ls_addr_w[1:0]);
+                ls_wdata_w = $bits(ls_wdata_w)'(rs2_data_w << (8 * ls_addr_w[1:0]));
                 ls_wstrb_w = ls_addr_w[1] ? 4'b1100 : 4'b0011;
             end
             3'b010: begin
@@ -282,23 +298,27 @@ module CoreMcu import core_pkg::*; (
                          && !mmio_pending_reg;
     assign if_addr_o      = pc_reg;
 
-    assign ls_req_valid_o = running_reg
+    assign ls_req_valid_w = running_reg
                          && instr_valid_reg
                          && ((is_load_w && load_supported_w && is_data_sram_w)
                           || (is_store_w && store_supported_w && is_data_sram_w));
-    assign ls_req_write_o = instr_valid_reg && is_store_w && store_supported_w && is_data_sram_w;
-    assign ls_req_addr_o  = ls_addr_w;
-    assign ls_req_wdata_o = ls_wdata_w;
-    assign ls_req_wstrb_o = (running_reg && instr_valid_reg && is_store_w && store_supported_w && is_data_sram_w) ? ls_wstrb_w : 4'h0;
+    assign ls_req_write_w = instr_valid_reg && is_store_w && store_supported_w && is_data_sram_w;
+    assign ls_req_valid_o = (ls_req_valid_w === 1'b1);
+    assign ls_req_write_o = (ls_req_valid_w === 1'b1) ? ls_req_write_w : 1'b0;
+    assign ls_req_addr_o  = (ls_req_valid_w === 1'b1) ? ls_addr_w : 32'h0;
+    assign ls_req_wdata_o = (ls_req_valid_w === 1'b1) ? ls_wdata_w : 32'h0;
+    assign ls_req_wstrb_o = (ls_req_valid_w === 1'b1) && (ls_req_write_w === 1'b1) ? ls_wstrb_w : 4'h0;
 
-    assign mmio_req_valid_o = running_reg
+    assign mmio_req_valid_w = running_reg
                            && instr_valid_reg
                            && ((is_load_w && load_supported_w && mmio_word_access_w && is_mmio_w)
                             || (is_store_w && store_supported_w && mmio_word_access_w && is_mmio_w));
-    assign mmio_req_write_o = instr_valid_reg && is_store_w;
-    assign mmio_req_addr_o  = ls_addr_w;
-    assign mmio_req_wdata_o = rs2_data_w;
-    assign mmio_req_wstrb_o = (running_reg && instr_valid_reg && is_store_w && store_supported_w && mmio_word_access_w && is_mmio_w) ? 4'hF : 4'h0;
+    assign mmio_req_write_w = instr_valid_reg && is_store_w && store_supported_w && mmio_word_access_w && is_mmio_w;
+    assign mmio_req_valid_o = (mmio_req_valid_w === 1'b1);
+    assign mmio_req_write_o = (mmio_req_valid_w === 1'b1) ? mmio_req_write_w : 1'b0;
+    assign mmio_req_addr_o  = (mmio_req_valid_w === 1'b1) ? ls_addr_w : 32'h0;
+    assign mmio_req_wdata_o = (mmio_req_valid_w === 1'b1) ? rs2_data_w : 32'h0;
+    assign mmio_req_wstrb_o = (mmio_req_valid_w === 1'b1) && (mmio_req_write_w === 1'b1) ? 4'hF : 4'h0;
 
     assign core_running_w   = reset_init_done_reg ? running_reg : 1'b0;
     assign core_halted_w    = reset_init_done_reg ? halted_reg : 1'b1;
@@ -365,7 +385,7 @@ module CoreMcu import core_pkg::*; (
             end else begin
                 pc_reg <= next_pc_value;
             end
-            instret_reg <= instret_reg + 64'd1;
+            instret_reg <= $bits(instret_reg)'(instret_reg + 64'd1);
             retire_valid_o <= 1'b1;
         end
     endtask
@@ -440,7 +460,7 @@ module CoreMcu import core_pkg::*; (
             logic        mmio_pending_write;
             logic [4:0]  mmio_pending_rd_index;
 
-            cycle_reg <= cycle_reg + 64'd1;
+            cycle_reg <= $bits(cycle_reg)'(cycle_reg + 64'd1);
             retire_valid_o <= 1'b0;
             gpr_reg[0] <= 32'h0;
 
@@ -462,7 +482,7 @@ module CoreMcu import core_pkg::*; (
             if (core_haltreq_i) begin
                 halt_core(cause_reg);
             end else if (running_reg) begin
-                next_pc           = pc_reg + 32'd4;
+                next_pc           = $bits(next_pc)'(pc_reg + 32'd4);
                 rd_value          = 32'h0;
                 rd_index          = rd_idx_w;
                 rd_write_en       = 1'b0;
@@ -492,7 +512,7 @@ module CoreMcu import core_pkg::*; (
                     if (ls_resp_valid_i) begin
                         ls_pending_reg <= 1'b0;
                         retire_instruction(
-                            pc_reg + 32'd4,
+                            $bits(pc_reg)'(pc_reg + 32'd4),
                             1'b1,
                             pending_load_rd_index_reg,
                             load_result_decode(pending_load_funct3_reg, pending_load_addr_lsb_reg, ls_resp_rdata_i),
@@ -505,7 +525,7 @@ module CoreMcu import core_pkg::*; (
                     if (mmio_resp_valid_i) begin
                         mmio_pending_reg <= 1'b0;
                         retire_instruction(
-                            pc_reg + 32'd4,
+                            $bits(pc_reg)'(pc_reg + 32'd4),
                             !mmio_pending_write_reg,
                             mmio_pending_rd_index_reg,
                             mmio_resp_rdata_i,
@@ -529,20 +549,20 @@ module CoreMcu import core_pkg::*; (
                         end
                         7'b0010111: begin
                             rd_write_en = 1'b1;
-                            rd_value    = pc_reg + imm_u_w;
+                            rd_value    = $bits(rd_value)'(pc_reg + imm_u_w);
                             retire_fire = 1'b1;
                         end
                         7'b1101111: begin
                             rd_write_en = 1'b1;
-                            rd_value    = pc_reg + 32'd4;
-                            next_pc     = pc_reg + imm_j_w;
+                            rd_value    = $bits(rd_value)'(pc_reg + 32'd4);
+                            next_pc     = $bits(next_pc)'(pc_reg + imm_j_w);
                             retire_fire = 1'b1;
                         end
                         7'b1100111: begin
                             if (funct3_w == 3'b000) begin
                                 rd_write_en = 1'b1;
-                                rd_value    = pc_reg + 32'd4;
-                                next_pc     = (rs1_data_w + imm_i_w) & ~32'h1;
+                                rd_value    = $bits(rd_value)'(pc_reg + 32'd4);
+                                next_pc     = $bits(next_pc)'((rs1_data_w + imm_i_w) & ~32'h1);
                                 retire_fire = 1'b1;
                             end else begin
                                 halt_fire  = 1'b1;
@@ -564,14 +584,14 @@ module CoreMcu import core_pkg::*; (
                             endcase
                             if (!halt_fire) begin
                                 if (branch_taken) begin
-                                    next_pc = pc_reg + imm_b_w;
+                                    next_pc = $bits(next_pc)'(pc_reg + imm_b_w);
                                 end
                                 retire_fire = 1'b1;
                             end
                         end
                         7'b0010011: begin
                             unique0 case (funct3_w)
-                                3'b000: rd_value = rs1_data_w + imm_i_w;
+                                3'b000: rd_value = $bits(rd_value)'(rs1_data_w + imm_i_w);
                                 3'b010: rd_value = ($signed(rs1_data_w) < $signed(imm_i_w)) ? 32'd1 : 32'd0;
                                 3'b011: rd_value = (rs1_data_w < imm_i_w) ? 32'd1 : 32'd0;
                                 3'b100: rd_value = rs1_data_w ^ imm_i_w;
@@ -579,7 +599,7 @@ module CoreMcu import core_pkg::*; (
                                 3'b111: rd_value = rs1_data_w & imm_i_w;
                                 3'b001: begin
                                     if (funct7_w == 7'b0000000) begin
-                                        rd_value = rs1_data_w << instr_w[24:20];
+                                        rd_value = $bits(rd_value)'(rs1_data_w << instr_w[24:20]);
                                     end else begin
                                         halt_fire  = 1'b1;
                                         halt_cause = 32'd2;
@@ -603,13 +623,13 @@ module CoreMcu import core_pkg::*; (
                         end
                         7'b0110011: begin
                             unique0 case ({funct7_w, funct3_w})
-                                {7'b0000000, 3'b000}: rd_value = rs1_data_w + rs2_data_w;
-                                {7'b0100000, 3'b000}: rd_value = rs1_data_w - rs2_data_w;
+                                {7'b0000000, 3'b000}: rd_value = $bits(rd_value)'(rs1_data_w + rs2_data_w);
+                                {7'b0100000, 3'b000}: rd_value = $bits(rd_value)'(rs1_data_w - rs2_data_w);
                                 {7'b0000001, 3'b000}: rd_value = mul_uu_w[31:0];
-                                {7'b0000001, 3'b001}: rd_value = mul_ss_w[63:32];
-                                {7'b0000001, 3'b010}: rd_value = mul_su_w[63:32];
+                                {7'b0000001, 3'b001}: rd_value = mul_ss_hi_w;
+                                {7'b0000001, 3'b010}: rd_value = mul_su_hi_w;
                                 {7'b0000001, 3'b011}: rd_value = mul_uu_w[63:32];
-                                {7'b0000000, 3'b001}: rd_value = rs1_data_w << rs2_data_w[4:0];
+                                {7'b0000000, 3'b001}: rd_value = $bits(rd_value)'(rs1_data_w << rs2_data_w[4:0]);
                                 {7'b0000000, 3'b010}: rd_value = ($signed(rs1_data_w) < $signed(rs2_data_w)) ? 32'd1 : 32'd0;
                                 {7'b0000000, 3'b011}: rd_value = (rs1_data_w < rs2_data_w) ? 32'd1 : 32'd0;
                                 {7'b0000000, 3'b100}: rd_value = rs1_data_w ^ rs2_data_w;
@@ -781,7 +801,6 @@ module CoreMcu import core_pkg::*; (
                         end
                         retire_instruction(next_pc, rd_write_en, rd_index, rd_value, csr_write_en, csr_write_addr, csr_write_value);
                     end
-                end else begin
                 end
             end
         end

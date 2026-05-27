@@ -27,9 +27,9 @@ module LoopController #(
 );
     localparam int unsigned LOOP_SIZE_W = $clog2(LOOP_STACK_DEPTH + 1);
     localparam int unsigned LOOP_INDEX_W = (LOOP_STACK_DEPTH <= 1) ? 1 : $clog2(LOOP_STACK_DEPTH);
-    localparam logic [LOOP_SIZE_W-1:0] LOOP_DEPTH_COUNT = LOOP_STACK_DEPTH;
-    localparam logic [LOOP_INDEX_W-1:0] LOOP_INDEX_ONE = 1;
-    localparam logic [LOOP_INDEX_W-1:0] LOOP_INDEX_TWO = 2;
+    localparam logic [LOOP_SIZE_W-1:0] LOOP_DEPTH_COUNT = LOOP_SIZE_W'(LOOP_STACK_DEPTH);
+    localparam logic [LOOP_INDEX_W-1:0] LOOP_INDEX_ONE = LOOP_INDEX_W'(1);
+    localparam logic [LOOP_INDEX_W-1:0] LOOP_INDEX_TWO = LOOP_INDEX_W'(2);
 
     // Stack storage — holds levels below the current top
     logic [15:0] loop_start_pc [0:LOOP_STACK_DEPTH-1];
@@ -80,21 +80,23 @@ module LoopController #(
             top_pc_reg        <= pc_in;
             loop_size_reg     <= loop_size_reg + 1'b1;
 
-        end else if (loop_end_en && (loop_size_reg > 0)) begin
-            if (top_at_last) begin
-                // === Pop: restore sub-top from array ===
-                loop_size_reg <= loop_size_reg - 1'b1;
-                if (loop_size_reg >= 2) begin
-                    top_remaining_reg <= loop_remaining[loop_restore_index_w];
-                    top_pc_reg        <= loop_start_pc[loop_restore_index_w];
+        end else begin
+            if (loop_end_en && (loop_size_reg > 0)) begin
+                if (top_at_last) begin
+                    // === Pop: restore sub-top from array ===
+                    loop_size_reg <= loop_size_reg - 1'b1;
+                    if (loop_size_reg >= 2) begin
+                        top_remaining_reg <= loop_remaining[loop_restore_index_w];
+                        top_pc_reg        <= loop_start_pc[loop_restore_index_w];
+                    end else begin
+                        top_remaining_reg <= 16'h0000;
+                        top_pc_reg        <= 16'h0000;
+                    end
                 end else begin
-                    top_remaining_reg <= 16'h0000;
-                    top_pc_reg        <= 16'h0000;
+                    // === Decrement: use pre-computed top_rem_dec ===
+                    top_remaining_reg                <= top_rem_dec;
+                    loop_remaining[loop_top_index_w] <= top_rem_dec;
                 end
-            end else begin
-                // === Decrement: use pre-computed top_rem_dec ===
-                top_remaining_reg                 <= top_rem_dec;
-                loop_remaining[loop_top_index_w] <= top_rem_dec;
             end
         end
     end

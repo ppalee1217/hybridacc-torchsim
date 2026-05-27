@@ -14,7 +14,9 @@
 //   None
 //-----------------------------------------------------------------------------
 `include "../tb_common.svh"
+`ifndef GATE_SIM
 `include "../../src/hybridacc_utils_pkg.sv"
+`endif
 `ifndef GATE_SIM
 `include "../../src/NoC/MBUS.sv"
 `endif
@@ -76,14 +78,14 @@ module tb_mbus;
     generate for (gi = 0; gi < N; gi++) begin : g_conv
         // DUT outputs → TB structured signals
         assign router_enable[gi]            = g_router_enable[gi];
-        assign router_mode[gi]              = PERouterMode'(g_router_mode[gi*PMW +: PMW]);
-        assign bus_to_pe_ps_req_data[gi]    = g_bus_to_pe_ps_req_data[gi*NRQ +: NRQ];
+        assign router_mode[gi]              = PERouterMode'(g_router_mode[(N-1-gi)*PMW +: PMW]);
+        assign bus_to_pe_ps_req_data[gi]    = g_bus_to_pe_ps_req_data[(N-1-gi)*NRQ +: NRQ];
         assign bus_to_pe_ps_req_valid[gi]   = g_bus_to_pe_ps_req_valid[gi];
-        assign bus_to_pe_pd_req_data[gi]    = g_bus_to_pe_pd_req_data[gi*NRQ +: NRQ];
+        assign bus_to_pe_pd_req_data[gi]    = g_bus_to_pe_pd_req_data[(N-1-gi)*NRQ +: NRQ];
         assign bus_to_pe_pd_req_valid[gi]   = g_bus_to_pe_pd_req_valid[gi];
-        assign bus_to_pe_pli_req_data[gi]   = g_bus_to_pe_pli_req_data[gi*NRQ +: NRQ];
+        assign bus_to_pe_pli_req_data[gi]   = g_bus_to_pe_pli_req_data[(N-1-gi)*NRQ +: NRQ];
         assign bus_to_pe_pli_req_valid[gi]  = g_bus_to_pe_pli_req_valid[gi];
-        assign bus_to_pe_plo_req_data[gi]   = g_bus_to_pe_plo_req_data[gi*NAQ +: NAQ];
+        assign bus_to_pe_plo_req_data[gi]   = g_bus_to_pe_plo_req_data[(N-1-gi)*NAQ +: NAQ];
         assign bus_to_pe_plo_req_valid[gi]  = g_bus_to_pe_plo_req_valid[gi];
         assign pe_to_bus_plo_resp_ready[gi] = g_pe_to_bus_plo_resp_ready[gi];
         // TB structured signals → DUT inputs
@@ -91,7 +93,7 @@ module tb_mbus;
         assign g_bus_to_pe_pd_req_ready[gi]              = bus_to_pe_pd_req_ready[gi];
         assign g_bus_to_pe_pli_req_ready[gi]             = bus_to_pe_pli_req_ready[gi];
         assign g_bus_to_pe_plo_req_ready[gi]             = bus_to_pe_plo_req_ready[gi];
-        assign g_pe_to_bus_plo_resp_data[gi*NRS +: NRS]  = pe_to_bus_plo_resp_data[gi];
+        assign g_pe_to_bus_plo_resp_data[(N-1-gi)*NRS +: NRS]  = pe_to_bus_plo_resp_data[gi];
         assign g_pe_to_bus_plo_resp_valid[gi]            = pe_to_bus_plo_resp_valid[gi];
         assign g_pe_busy[gi]                             = pe_busy[gi];
     end endgenerate
@@ -104,7 +106,6 @@ module tb_mbus;
         .bus_to_pe_pli_req_data(g_bus_to_pe_pli_req_data), .bus_to_pe_pli_req_valid(g_bus_to_pe_pli_req_valid), .bus_to_pe_pli_req_ready(g_bus_to_pe_pli_req_ready),
         .bus_to_pe_plo_req_data(g_bus_to_pe_plo_req_data), .bus_to_pe_plo_req_valid(g_bus_to_pe_plo_req_valid), .bus_to_pe_plo_req_ready(g_bus_to_pe_plo_req_ready),
         .pe_to_bus_plo_resp_data(g_pe_to_bus_plo_resp_data), .pe_to_bus_plo_resp_valid(g_pe_to_bus_plo_resp_valid), .pe_to_bus_plo_resp_ready(g_pe_to_bus_plo_resp_ready),
-        .pe_busy(g_pe_busy),
         .noc_ps_to_bus_req_data(noc_ps_to_bus_req_data), .noc_ps_to_bus_req_valid(noc_ps_to_bus_req_valid), .noc_ps_to_bus_req_ready(noc_ps_to_bus_req_ready),
         .noc_pd_to_bus_req_data(noc_pd_to_bus_req_data), .noc_pd_to_bus_req_valid(noc_pd_to_bus_req_valid), .noc_pd_to_bus_req_ready(noc_pd_to_bus_req_ready),
         .noc_pli_to_bus_req_data(noc_pli_to_bus_req_data), .noc_pli_to_bus_req_valid(noc_pli_to_bus_req_valid), .noc_pli_to_bus_req_ready(noc_pli_to_bus_req_ready),
@@ -120,7 +121,6 @@ module tb_mbus;
         .bus_to_pe_pli_req_data(bus_to_pe_pli_req_data), .bus_to_pe_pli_req_valid(bus_to_pe_pli_req_valid), .bus_to_pe_pli_req_ready(bus_to_pe_pli_req_ready),
         .bus_to_pe_plo_req_data(bus_to_pe_plo_req_data), .bus_to_pe_plo_req_valid(bus_to_pe_plo_req_valid), .bus_to_pe_plo_req_ready(bus_to_pe_plo_req_ready),
         .pe_to_bus_plo_resp_data(pe_to_bus_plo_resp_data), .pe_to_bus_plo_resp_valid(pe_to_bus_plo_resp_valid), .pe_to_bus_plo_resp_ready(pe_to_bus_plo_resp_ready),
-        .pe_busy(pe_busy),
         .noc_ps_to_bus_req_data(noc_ps_to_bus_req_data), .noc_ps_to_bus_req_valid(noc_ps_to_bus_req_valid), .noc_ps_to_bus_req_ready(noc_ps_to_bus_req_ready),
         .noc_pd_to_bus_req_data(noc_pd_to_bus_req_data), .noc_pd_to_bus_req_valid(noc_pd_to_bus_req_valid), .noc_pd_to_bus_req_ready(noc_pd_to_bus_req_ready),
         .noc_pli_to_bus_req_data(noc_pli_to_bus_req_data), .noc_pli_to_bus_req_valid(noc_pli_to_bus_req_valid), .noc_pli_to_bus_req_ready(noc_pli_to_bus_req_ready),
@@ -200,7 +200,7 @@ module tb_mbus;
         pe_to_bus_plo_resp_data[0].data = 64'hDEAD;
         pe_to_bus_plo_resp_data[0].status = NOC_OK;
         pe_to_bus_plo_resp_valid[0] = 1;
-        #(`TB_SETTLE);
+        @(posedge clk); #(`TB_SETTLE);
         check("PLO_resp: valid forwarded", bus_to_noc_plo_resp_valid === 1'b1);
         check("PLO_resp: data correct", bus_to_noc_plo_resp_data.data === 64'hDEAD);
         pe_to_bus_plo_resp_valid[0] = 0;

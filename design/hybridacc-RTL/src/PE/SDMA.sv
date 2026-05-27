@@ -122,13 +122,20 @@ module SDMA (
         case (state_reg)
             IDLE: begin
                 // Configuration (only in IDLE)
-                if (set_addr) dma_base_static_next = imm;
-                else if (set_len) dma_len_static_next = inc16(imm);
-                else if (set_loop) dma_loop_static_next = inc16(imm) | {15'h0, (&imm)};
-                else if (set_mode) dma_stride_static_next = imm;
+                if (set_addr) begin
+                    dma_base_static_next = imm;
+                end else if (set_len) begin
+                    dma_len_static_next = inc16(imm);
+                end else if (set_loop) begin
+                    dma_loop_static_next = inc16(imm) | {15'h0, (&imm)};
+                end else if (set_mode) begin
+                    dma_stride_static_next = imm;
+                end
 
                 // Allow swap even when idle
-                if (swap_in) bank_sel_active_next = ~bank_sel_active_reg;
+                if (swap_in) begin
+                    bank_sel_active_next = ~bank_sel_active_reg;
+                end
 
                 // Start background store task
                 if (active) begin
@@ -242,7 +249,9 @@ module SDMA (
 
         case (state_reg)
             RUN: busy = 1'b1;
-            default: ;
+            default: begin
+                busy = 1'b0;
+            end
         endcase
 
         ps_ready = (state_reg == RUN) && (dma_len_active_rem_reg > 16'd0);

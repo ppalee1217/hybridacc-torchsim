@@ -15,7 +15,9 @@
 //   None
 //-----------------------------------------------------------------------------
 `include "../tb_common.svh"
+`ifndef GATE_SIM
 `include "../../src/hybridacc_utils_pkg.sv"
+`endif
 `ifndef GATE_SIM
 `include "../../src/FIFO.sv"
 `include "../../src/NoC/NoCRouter.sv"
@@ -78,24 +80,24 @@ module tb_nocrouter;
     genvar gi;
     generate for (gi = 0; gi < NP; gi++) begin : g_conv
         // DUT outputs → TB
-        assign noc_ps_to_bus_req_data[gi]    = g_noc_ps_to_bus_req_data[gi*NRQ +: NRQ];
+        assign noc_ps_to_bus_req_data[gi]    = g_noc_ps_to_bus_req_data[(NP-1-gi)*NRQ +: NRQ];
         assign noc_ps_to_bus_req_valid[gi]   = g_noc_ps_to_bus_req_valid[gi];
-        assign noc_pd_to_bus_req_data[gi]    = g_noc_pd_to_bus_req_data[gi*NRQ +: NRQ];
+        assign noc_pd_to_bus_req_data[gi]    = g_noc_pd_to_bus_req_data[(NP-1-gi)*NRQ +: NRQ];
         assign noc_pd_to_bus_req_valid[gi]   = g_noc_pd_to_bus_req_valid[gi];
-        assign noc_pli_to_bus_req_data[gi]   = g_noc_pli_to_bus_req_data[gi*NRQ +: NRQ];
+        assign noc_pli_to_bus_req_data[gi]   = g_noc_pli_to_bus_req_data[(NP-1-gi)*NRQ +: NRQ];
         assign noc_pli_to_bus_req_valid[gi]  = g_noc_pli_to_bus_req_valid[gi];
-        assign noc_plo_to_bus_req_data[gi]   = g_noc_plo_to_bus_req_data[gi*NAQ +: NAQ];
+        assign noc_plo_to_bus_req_data[gi]   = g_noc_plo_to_bus_req_data[(NP-1-gi)*NAQ +: NAQ];
         assign noc_plo_to_bus_req_valid[gi]  = g_noc_plo_to_bus_req_valid[gi];
         assign bus_to_noc_plo_resp_ready[gi] = g_bus_to_noc_plo_resp_ready[gi];
-        assign scan_chain_out[gi]            = g_scan_chain_out[gi*SCW +: SCW];
+        assign scan_chain_out[gi]            = g_scan_chain_out[(NP-1-gi)*SCW +: SCW];
         // TB → DUT inputs
         assign g_noc_ps_to_bus_req_ready[gi]              = noc_ps_to_bus_req_ready[gi];
         assign g_noc_pd_to_bus_req_ready[gi]              = noc_pd_to_bus_req_ready[gi];
         assign g_noc_pli_to_bus_req_ready[gi]             = noc_pli_to_bus_req_ready[gi];
         assign g_noc_plo_to_bus_req_ready[gi]             = noc_plo_to_bus_req_ready[gi];
-        assign g_bus_to_noc_plo_resp_data[gi*NRS +: NRS]  = bus_to_noc_plo_resp_data[gi];
+        assign g_bus_to_noc_plo_resp_data[(NP-1-gi)*NRS +: NRS]  = bus_to_noc_plo_resp_data[gi];
         assign g_bus_to_noc_plo_resp_valid[gi]            = bus_to_noc_plo_resp_valid[gi];
-        assign g_scan_chain_in[gi*SCW +: SCW]             = scan_chain_in[gi];
+        assign g_scan_chain_in[(NP-1-gi)*SCW +: SCW]             = scan_chain_in[gi];
     end endgenerate
 
     NoCRouter dut (
@@ -221,7 +223,6 @@ module tb_nocrouter;
         bus_to_noc_plo_resp_data[0].data = 64'hDEAD_0000;
         bus_to_noc_plo_resp_data[0].status = NOC_OK;
         bus_to_noc_plo_resp_valid[0] = 1;
-        #(`TB_SETTLE);
         @(posedge clk); // resp_fifo push; after edge Block B sees non-empty resp_fifo
         #(`TB_SETTLE);
         check("PLO resp: valid", noc_plo_out_valid === 1'b1);

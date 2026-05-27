@@ -14,9 +14,6 @@
 // Additional Comments:
 //   None
 //-----------------------------------------------------------------------------
-`ifndef CORE_PKG_SV
-`define CORE_PKG_SV
-
 package core_pkg;
 
     localparam int unsigned CORE_XLEN        = 32;
@@ -275,28 +272,4 @@ package core_pkg;
         return merged;
     endfunction
 
-    function automatic logic [63:0] apply_wstrb64(
-        input logic [63:0] current,
-        input logic [63:0] wdata,
-        input logic [7:0]  wstrb
-    );
-        logic [63:0] merged;
-        merged = current;
-        for (int byte_idx = 0; byte_idx < 8; byte_idx++) begin
-            if (wstrb[byte_idx]) begin
-                merged[byte_idx*8 +: 8] = wdata[byte_idx*8 +: 8];
-            end
-        end
-        return merged;
-    endfunction
-
-    function automatic int unsigned plic_num_sources(
-        input int unsigned num_clusters,
-        input int unsigned num_nlu
-    );
-        return num_clusters + num_nlu + 3;
-    endfunction
-
 endpackage : core_pkg
-
-`endif // CORE_PKG_SV

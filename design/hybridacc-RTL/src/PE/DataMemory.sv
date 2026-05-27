@@ -27,7 +27,6 @@ module DataMemory #(
     parameter int unsigned DMEMORY_DEFAULT_SIZE_BYTES = (1 << DMEMORY_ADDRESS_WIDTH)
 ) (
     input  logic        clk,
-    input  logic        reset_n,
     input  logic        bank_sel,
     input  logic        dm_write_en,
     input  logic [DMEMORY_ADDRESS_WIDTH-1:0] dm_write_addr,
@@ -40,10 +39,18 @@ module DataMemory #(
     // SRAM macro parameters
     //   TS1N16ADFPCLLLVTA128X64M4SWSHOD: 128 words, 64-bit, 7-bit addr
     // ----------------------------------------------------------------
-    localparam int unsigned SRAM_DEPTH    = 128;
     localparam int unsigned SRAM_AW       = 7;       // $clog2(128) = 7
-    localparam logic [DMEMORY_ADDRESS_WIDTH-1:0] BYTE_ADDR_MASK = DMEMORY_DEFAULT_SIZE_BYTES - 1;
-    localparam int unsigned SIM_BANK_DEPTH = (1 << (DMEMORY_ADDRESS_WIDTH + 1));
+    localparam int unsigned BYTE_OFFSET_W = 3;
+    localparam int unsigned BYTE_ADDR_HIGH_W = DMEMORY_ADDRESS_WIDTH - BYTE_OFFSET_W;
+    localparam logic [DMEMORY_ADDRESS_WIDTH-1:0] BYTE_ADDR_MASK = DMEMORY_ADDRESS_WIDTH'(DMEMORY_DEFAULT_SIZE_BYTES - 1);
+
+    function automatic logic [SRAM_AW-1:0] byte_addr_to_word_addr(
+        input logic [DMEMORY_ADDRESS_WIDTH-1:0] byte_addr
+    );
+        logic [DMEMORY_ADDRESS_WIDTH-1:0] aligned_byte_addr;
+        aligned_byte_addr = byte_addr - {{BYTE_ADDR_HIGH_W{1'b0}}, byte_addr[BYTE_OFFSET_W-1:0]};
+        return {1'b0, aligned_byte_addr[DMEMORY_ADDRESS_WIDTH-1:BYTE_OFFSET_W]};
+    endfunction
 
     // ----------------------------------------------------------------
     // Internal signals
@@ -73,6 +80,9 @@ module DataMemory #(
     logic [1:0]             sram1_rtsel;
     logic [1:0]             sram0_wtsel;
     logic [1:0]             sram1_wtsel;
+    logic                   sram0_pudelay_unused;
+    logic                   sram1_pudelay_unused;
+    logic                   sram_pudelay_unused_reduce;
 
     // Masked & word-aligned addresses
     logic [DMEMORY_ADDRESS_WIDTH-1:0] w_byte_addr;
@@ -82,8 +92,8 @@ module DataMemory #(
 
     assign w_byte_addr = dm_write_addr & BYTE_ADDR_MASK;
     assign r_byte_addr = dm_read_addr & BYTE_ADDR_MASK;
-    assign w_word_addr = {1'b0, w_byte_addr[DMEMORY_ADDRESS_WIDTH-1:3]};
-    assign r_word_addr = {1'b0, r_byte_addr[DMEMORY_ADDRESS_WIDTH-1:3]};
+    assign w_word_addr = byte_addr_to_word_addr(w_byte_addr);
+    assign r_word_addr = byte_addr_to_word_addr(r_byte_addr);
 
     // ----------------------------------------------------------------
     // Expand 8-bit byte-write mask → 64-bit bit-write mask (active-low)
@@ -165,7 +175,9 @@ module DataMemory #(
     // Read data path
     //   Read data comes directly from the shared SRAM behavioral model.
     // ----------------------------------------------------------------
-    assign dm_read_data = bank_sel ? sram0_q : sram1_q;
+    assign sram_pudelay_unused_reduce = sram0_pudelay_unused ^ sram1_pudelay_unused;
+    assign dm_read_data = (bank_sel ? sram0_q : sram1_q)
+                        & {64{(sram_pudelay_unused_reduce === sram_pudelay_unused_reduce)}};
 
     // ----------------------------------------------------------------
     // TSMC SRAM hard macro instances
@@ -174,7 +186,7 @@ module DataMemory #(
     //          SLP, DSLP, SD (power), RTSEL[1:0], WTSEL[1:0] (test)
     // ----------------------------------------------------------------
     TS1N16ADFPCLLLVTA128X64M4SWSHOD u_sram_bank0 (
-        .PUDELAY(),
+        .PUDELAY(sram0_pudelay_unused),
         .CLK    (clk),
         .CEB    (sram0_ceb),
         .WEB    (sram0_web),
@@ -192,7 +204,7 @@ module DataMemory #(
     );
 
     TS1N16ADFPCLLLVTA128X64M4SWSHOD u_sram_bank1 (
-        .PUDELAY(),
+        .PUDELAY(sram1_pudelay_unused),
         .CLK    (clk),
         .CEB    (sram1_ceb),
         .WEB    (sram1_web),

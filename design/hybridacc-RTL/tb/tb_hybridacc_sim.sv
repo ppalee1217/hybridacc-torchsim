@@ -78,6 +78,7 @@ module tb_hybridacc_sim;
     localparam int unsigned DEFAULT_FW_BYTES = 1184;
     localparam int unsigned DEFAULT_MAX_LOADER_CYCLES = MAX_FW_BYTES * 2;
     localparam int unsigned DEFAULT_MAX_CORE_CYCLES   = 500000;
+    localparam int unsigned DEFAULT_PROGRESS_CYCLES   = 5000;
     localparam logic [31:0] DEFAULT_DRAM_MIRROR_BASE  = 32'h8000_0000;
 
     logic clk, reset_n;
@@ -127,6 +128,11 @@ module tb_hybridacc_sim;
     byte unsigned golden_output_image[];
     logic        dram_r_pending_reg;
     logic [31:0] dram_r_addr_reg;
+    logic        dram_aw_pending_reg;
+    logic [31:0] dram_aw_addr_reg;
+    logic        dram_w_pending_reg;
+    logic [63:0] dram_w_data_reg;
+    logic [7:0]  dram_w_strb_reg;
     logic [31:0] last_retire_pc;
 
     string fw_mem_path;
@@ -138,12 +144,84 @@ module tb_hybridacc_sim;
     integer golden_output_bytes;
     integer max_loader_cycles;
     integer max_core_cycles;
+    integer progress_cycles = DEFAULT_PROGRESS_CYCLES;
     logic [31:0] dram_mirror_base;
     logic [31:0] golden_output_base;
+    logic [31:0] last_host_read_addr;
+    logic [31:0] last_host_read_data;
+    logic [31:0] last_axi_aw_addr;
+    logic [31:0] last_axi_ar_addr;
+
+    longint unsigned tb_cycle_count;
+    longint unsigned axi_aw_count;
+    longint unsigned axi_w_count;
+    longint unsigned axi_ar_count;
+    longint unsigned axi_r_count;
+    longint unsigned retire_event_count;
+
+    typedef enum int unsigned {
+        TB_PHASE_RESET = 0,
+        TB_PHASE_LOADER_WAIT,
+        TB_PHASE_CORE_WAIT,
+        TB_PHASE_DONE
+    } tb_progress_phase_e;
+
+    tb_progress_phase_e tb_progress_phase;
 
     int pass_count = 0;
     int fail_count = 0;
     int x_fail_count = 0;
+
+    function automatic string tb_progress_phase_name(input tb_progress_phase_e phase);
+        begin
+            case (phase)
+                TB_PHASE_RESET:       return "reset";
+                TB_PHASE_LOADER_WAIT: return "loader_wait";
+                TB_PHASE_CORE_WAIT:   return "core_wait";
+                TB_PHASE_DONE:        return "done";
+                default:              return "unknown";
+            endcase
+        end
+    endfunction
+
+    task automatic print_progress(input longint unsigned current_tb_cycles);
+`ifndef GATE_SIM
+        $display("[TB_PROGRESS] time=%0t phase=%0s tb_cycles=%0d mcycle=%0d instret=%0d retire_events=%0d last_retire_pc=0x%08x loader_done=%0b core_halted=%0b irq=%0b aw=%0d w=%0d ar=%0d r=%0d pending_r=%0b last_aw=0x%08x last_ar=0x%08x",
+                 $time,
+                 tb_progress_phase_name(tb_progress_phase),
+                 current_tb_cycles,
+                 dut.core_ctrl.core_mcu.cycle_reg,
+                 dut.core_ctrl.core_mcu.instret_reg,
+                 retire_event_count,
+                 last_retire_pc,
+                 dut.core_ctrl.loader_done_w,
+                 dut.core_ctrl.mcu_halted_w,
+                 controller_irq_o,
+                 axi_aw_count,
+                 axi_w_count,
+                 axi_ar_count,
+                 axi_r_count,
+                 dram_r_pending_reg,
+                 last_axi_aw_addr,
+                 last_axi_ar_addr);
+`else
+        $display("[TB_PROGRESS] time=%0t phase=%0s tb_cycles=%0d irq=%0b aw=%0d w=%0d ar=%0d r=%0d pending_r=%0b last_aw=0x%08x last_ar=0x%08x last_host_read_addr=0x%08x last_host_read_data=0x%08x",
+                 $time,
+                 tb_progress_phase_name(tb_progress_phase),
+                 current_tb_cycles,
+                 controller_irq_o,
+                 axi_aw_count,
+                 axi_w_count,
+                 axi_ar_count,
+                 axi_r_count,
+                 dram_r_pending_reg,
+                 last_axi_aw_addr,
+                 last_axi_ar_addr,
+                 last_host_read_addr,
+                 last_host_read_data);
+`endif
+        $fflush();
+    endtask
 
 `ifdef TB_ENABLE_FSDB_DUMP
     string wave_dump_file = "tb_hybridacc_sim.fsdb";
@@ -370,6 +448,8 @@ module tb_hybridacc_sim;
         while (!s_ctrl_r_valid_o) @(posedge clk);
         #(`TB_SETTLE);
         data = s_ctrl_r_data_o;
+        last_host_read_addr = addr;
+        last_host_read_data = data;
         @(posedge clk);
         s_ctrl_r_ready_i = 1'b0;
     endtask
@@ -563,9 +643,15 @@ module tb_hybridacc_sim;
     endtask
 
     always @(posedge clk or negedge reset_n) begin
+        longint unsigned next_tb_cycle_count;
         if (!reset_n) begin
             dram_r_pending_reg <= 1'b0;
             dram_r_addr_reg <= 32'h0;
+            dram_aw_pending_reg <= 1'b0;
+            dram_aw_addr_reg <= 32'h0;
+            dram_w_pending_reg <= 1'b0;
+            dram_w_data_reg <= 64'h0;
+            dram_w_strb_reg <= 8'h0;
             m_mem_axi_aw_ready_i <= 1'b1;
             m_mem_axi_w_ready_i <= 1'b1;
             m_mem_axi_b_valid_i <= 1'b0;
@@ -575,31 +661,113 @@ module tb_hybridacc_sim;
             m_mem_axi_r_data_i <= 64'h0;
             m_mem_axi_r_resp_i <= 2'b00;
             m_mem_axi_r_last_i <= 1'b0;
+            tb_cycle_count <= 64'd0;
+            axi_aw_count <= 64'd0;
+            axi_w_count <= 64'd0;
+            axi_ar_count <= 64'd0;
+            axi_r_count <= 64'd0;
+            retire_event_count <= 64'd0;
+            last_host_read_addr <= 32'h0;
+            last_host_read_data <= 32'h0;
+            last_axi_aw_addr <= 32'h0;
+            last_axi_ar_addr <= 32'h0;
+            tb_progress_phase <= TB_PHASE_RESET;
         end else begin
+            logic        aw_fire;
+            logic        w_fire;
+            logic        ar_fire;
+            logic        aw_pending_next;
+            logic        w_pending_next;
+            logic [31:0] aw_addr_sample;
+            logic [31:0] aw_addr_next;
+            logic [63:0] w_data_sample;
+            logic [63:0] w_data_next;
+            logic [7:0]  w_strb_sample;
+            logic [7:0]  w_strb_next;
+            logic [31:0] ar_addr_sample;
+            logic [63:0] write_old_word;
+            logic [63:0] write_merged_word;
+
+            next_tb_cycle_count = tb_cycle_count + 1;
+            tb_cycle_count <= next_tb_cycle_count;
             m_mem_axi_b_valid_i <= 1'b0;
             m_mem_axi_r_valid_i <= 1'b0;
             m_mem_axi_r_last_i <= 1'b0;
-            if (m_mem_axi_aw_valid_o && m_mem_axi_w_valid_o) begin
-                dram_store_word(
-                    m_mem_axi_aw_addr_o,
-                    merge_write_strobes(
-                        dram_load_word(m_mem_axi_aw_addr_o),
-                        m_mem_axi_w_data_o,
-                        m_mem_axi_w_strb_o
-                    )
+            aw_fire = m_mem_axi_aw_valid_o && m_mem_axi_aw_ready_i;
+            w_fire = m_mem_axi_w_valid_o && m_mem_axi_w_ready_i;
+            ar_fire = m_mem_axi_ar_valid_o && m_mem_axi_ar_ready_i;
+
+            aw_addr_sample = m_mem_axi_aw_addr_o;
+            w_data_sample = m_mem_axi_w_data_o;
+            w_strb_sample = m_mem_axi_w_strb_o;
+            ar_addr_sample = m_mem_axi_ar_addr_o;
+
+`ifdef GATE_SIM
+            if (aw_fire || w_fire || ar_fire) begin
+                #(`TB_SETTLE);
+                aw_addr_sample = m_mem_axi_aw_addr_o;
+                w_data_sample = m_mem_axi_w_data_o;
+                w_strb_sample = m_mem_axi_w_strb_o;
+                ar_addr_sample = m_mem_axi_ar_addr_o;
+            end
+`endif
+
+            aw_pending_next = dram_aw_pending_reg;
+            aw_addr_next = dram_aw_addr_reg;
+            w_pending_next = dram_w_pending_reg;
+            w_data_next = dram_w_data_reg;
+            w_strb_next = dram_w_strb_reg;
+
+            if (aw_fire) begin
+                axi_aw_count <= axi_aw_count + 1;
+                last_axi_aw_addr <= aw_addr_sample;
+                aw_pending_next = 1'b1;
+                aw_addr_next = aw_addr_sample;
+            end
+            if (w_fire) begin
+                axi_w_count <= axi_w_count + 1;
+                w_pending_next = 1'b1;
+                w_data_next = w_data_sample;
+                w_strb_next = w_strb_sample;
+            end
+            if (aw_pending_next && w_pending_next) begin
+                write_old_word = dram_load_word(aw_addr_next);
+                write_merged_word = merge_write_strobes(
+                    write_old_word,
+                    w_data_next,
+                    w_strb_next
                 );
+                dram_store_word(
+                    aw_addr_next,
+                    write_merged_word
+                );
+                aw_pending_next = 1'b0;
+                w_pending_next = 1'b0;
                 m_mem_axi_b_valid_i <= 1'b1;
             end
-            if (m_mem_axi_ar_valid_o && m_mem_axi_ar_ready_i) begin
+            if (ar_fire) begin
+                axi_ar_count <= axi_ar_count + 1;
+                last_axi_ar_addr <= ar_addr_sample;
                 dram_r_pending_reg <= 1'b1;
-                dram_r_addr_reg <= m_mem_axi_ar_addr_o;
+                dram_r_addr_reg <= ar_addr_sample;
             end
+            dram_aw_pending_reg <= aw_pending_next;
+            dram_aw_addr_reg <= aw_addr_next;
+            dram_w_pending_reg <= w_pending_next;
+            dram_w_data_reg <= w_data_next;
+            dram_w_strb_reg <= w_strb_next;
             if (dram_r_pending_reg && m_mem_axi_r_ready_o) begin
+                logic [63:0] read_word;
+                axi_r_count <= axi_r_count + 1;
                 dram_r_pending_reg <= 1'b0;
+                read_word = dram_load_word(dram_r_addr_reg);
                 m_mem_axi_r_valid_i <= 1'b1;
-                m_mem_axi_r_data_i <= dram_load_word(dram_r_addr_reg);
+                m_mem_axi_r_data_i <= read_word;
                 m_mem_axi_r_resp_i <= 2'b00;
                 m_mem_axi_r_last_i <= 1'b1;
+            end
+            if ((progress_cycles > 0) && ((next_tb_cycle_count % progress_cycles) == 0)) begin
+                print_progress(next_tb_cycle_count);
             end
         end
     end
@@ -609,6 +777,7 @@ module tb_hybridacc_sim;
             last_retire_pc <= 32'h0;
 `ifndef GATE_SIM
         end else if (dut.core_ctrl.mcu_retire_valid_w) begin
+            retire_event_count <= retire_event_count + 1;
             last_retire_pc <= dut.core_ctrl.mcu_retire_pc_w;
 `endif
         end
@@ -645,6 +814,9 @@ module tb_hybridacc_sim;
 
         @(posedge reset_n);
         @(posedge clk);
+
+        void'($value$plusargs("TB_PROGRESS_CYCLES=%d", progress_cycles));
+        tb_progress_phase = TB_PHASE_LOADER_WAIT;
 
         max_loader_cycles = DEFAULT_MAX_LOADER_CYCLES;
         if (!$value$plusargs("MAX_LOADER_CYCLES=%d", max_loader_cycles)) begin
@@ -691,6 +863,7 @@ module tb_hybridacc_sim;
 
         host_write(CORE_BOOT_ADDR, 32'h0000_0000);
         host_write(HACC_CTRL, 32'h0000_0001);
+    tb_progress_phase = TB_PHASE_CORE_WAIT;
 
         core_halted = 1'b0;
         for (int cycle = 0; cycle < max_core_cycles; cycle++) begin
@@ -756,6 +929,9 @@ module tb_hybridacc_sim;
             golden_match = 1'b1;
             $display("[TB] Skipping exact golden compare; use external fp16 comparator for regression verdict");
         end
+
+        tb_progress_phase = TB_PHASE_DONE;
+        print_progress(tb_cycle_count);
 
     `ifndef GATE_SIM
         $display("[TB_RESULT] tb_hybridacc_sim instret=%0d mcycle=%0d last_retire_pc=0x%08x pass_tests=%0d total_tests=%0d fail_tests=%0d first_fail=%0d",

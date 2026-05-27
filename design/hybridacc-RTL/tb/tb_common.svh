@@ -114,14 +114,20 @@ module tb_clock_reset #(
     output logic clk,
     output logic reset_n
 );
-    int  clock_period_ns;
+    real clock_period_ns;
     real half_period_ns;
+    string clock_period_arg;
 
     initial begin
         clock_period_ns = CLK_PERIOD_NS;
-        void'($value$plusargs("CLOCK_PERIOD_NS=%d", clock_period_ns));
-        if (clock_period_ns <= 0) begin
-            $display("[TB] Invalid CLOCK_PERIOD_NS=%0d, fallback to %0d", clock_period_ns, CLK_PERIOD_NS);
+        if ($value$plusargs("CLOCK_PERIOD_NS=%s", clock_period_arg)) begin
+            if ($sscanf(clock_period_arg, "%f", clock_period_ns) != 1) begin
+                $display("[TB] Invalid CLOCK_PERIOD_NS=%0s, fallback to %0d", clock_period_arg, CLK_PERIOD_NS);
+                clock_period_ns = CLK_PERIOD_NS;
+            end
+        end
+        if (clock_period_ns <= 0.0) begin
+            $display("[TB] Invalid CLOCK_PERIOD_NS=%0f, fallback to %0d", clock_period_ns, CLK_PERIOD_NS);
             clock_period_ns = CLK_PERIOD_NS;
         end
         half_period_ns = clock_period_ns / 2.0;

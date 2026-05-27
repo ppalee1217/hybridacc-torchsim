@@ -14,7 +14,9 @@
 //   None
 //-----------------------------------------------------------------------------
 `include "../tb_common.svh"
+`ifndef GATE_SIM
 `include "../../src/hybridacc_utils_pkg.sv"
+`endif
 `ifndef GATE_SIM
 `include "../../src/PE/InstructionMemory.sv"
 `include "../../src/PE/Decoder.sv"
@@ -49,17 +51,20 @@ initial begin
 end
 `endif
 
-    // Registered sampling for reliable gate-level post-sim checking
+    // Sample after the falling edge so synchronous updates have time to settle in gate-level runs.
     pe_decode_signals_t ID_decode_signals_out_sampled;
     logic valid_out_sampled;
     logic [15:0] pc_out_sampled;
     logic halted_out_sampled;
-    always_ff @(posedge clk) begin
-        ID_decode_signals_out_sampled <= ID_decode_signals_out;
-        valid_out_sampled <= valid_out;
-        pc_out_sampled <= pc_out;
-        halted_out_sampled <= halted_out;
-    end
+    task automatic sample_outputs();
+        begin
+            #(`TB_SETTLE);
+            ID_decode_signals_out_sampled = ID_decode_signals_out;
+            valid_out_sampled = valid_out;
+            pc_out_sampled = pc_out;
+            halted_out_sampled = halted_out;
+        end
+    endtask
 
     int pass_count = 0;
     int fail_count = 0;
@@ -69,7 +74,7 @@ end
         logic [15:0] stalled_pc;
         stage_reset=0; pe_running=0; ready_in=1; pc_init_value=0; im_write_en=0; im_write_addr=0; im_write_data=0;
         @(posedge reset_n);
-        @(posedge clk); @(posedge clk); @(negedge clk);
+        @(posedge clk); @(posedge clk); @(negedge clk); sample_outputs();
 
         // Test 1: Reset state
         `CHECK_BIT("Reset: valid_out=0", valid_out_sampled, 1'b0)
@@ -87,48 +92,56 @@ end
 
         // Test 3: Start running
         pe_running = 1;
-        @(posedge clk); @(posedge clk); @(negedge clk);
+        repeat (4) begin
+            @(posedge clk); @(negedge clk); sample_outputs();
+            if ((valid_out_sampled === 1'b1) &&
+                (pc_out_sampled === 16'h0000) &&
+                (ID_decode_signals_out_sampled.nop === 1'b1)) begin
+                break;
+            end
+        end
         `CHECK_BIT("Run1: valid_out=1", valid_out_sampled, 1'b1)
         `CHECK_VAL("Run1: pc=0", pc_out_sampled, 16'h0000)
         `CHECK_BIT("Run1: NOP decoded", ID_decode_signals_out_sampled.nop, 1'b1)
 
         // Test 4: PC advances to next instruction
-        @(posedge clk); @(negedge clk);
+        @(posedge clk); @(negedge clk); sample_outputs();
         `CHECK_VAL("Run2: pc=2", pc_out_sampled, 16'h0002)
 
         // Test 5: HALT instruction halts pipeline
-        @(posedge clk); @(negedge clk);
+        @(posedge clk); @(negedge clk); sample_outputs();
         `CHECK_VAL("Run3: pc=4", pc_out_sampled, 16'h0004)
         `CHECK_BIT("Run3: halt decoded", ID_decode_signals_out_sampled.halt, 1'b1)
-        @(posedge clk); @(negedge clk);
+        @(posedge clk); @(negedge clk); sample_outputs();
         `CHECK_BIT("PostHalt: halted_out=1", halted_out_sampled, 1'b1)
         `CHECK_BIT("PostHalt: valid_out=0", valid_out_sampled, 1'b0)
 
         // Test 6: Stage reset clears halt
-        stage_reset = 1; @(posedge clk); stage_reset = 0; @(posedge clk); @(negedge clk);
+        stage_reset = 1; @(posedge clk); @(negedge clk); sample_outputs();
         `CHECK_BIT("StageReset: halted_out=0", halted_out_sampled, 1'b0)
         `CHECK_BIT("StageReset: valid_out=0", valid_out_sampled, 1'b0)
+        stage_reset = 0; @(posedge clk); @(negedge clk); sample_outputs();
 
         // Test 7: Stall when ready_in=0
         pe_running = 1;
-        @(posedge clk); @(negedge clk); // valid becomes 1
+        @(posedge clk); @(negedge clk); sample_outputs(); // valid becomes 1
         ready_in = 0;
-        @(posedge clk); @(posedge clk); @(negedge clk);
+        @(posedge clk); @(posedge clk); @(negedge clk); sample_outputs();
         stalled_pc = pc_out_sampled;
-        @(posedge clk); @(negedge clk);
+        @(posedge clk); @(negedge clk); sample_outputs();
         `CHECK_VAL("Stall: PC held", pc_out_sampled, stalled_pc)
         ready_in = 1;
-        @(posedge clk); @(posedge clk); @(negedge clk);
+        @(posedge clk); @(posedge clk); @(negedge clk); sample_outputs();
         `CHECK_COND("Unstall: PC advanced", pc_out_sampled !== stalled_pc, pc_out_sampled)
 
         // Test 8: pe_running=0 stops output
         pe_running = 0;
-        @(posedge clk); @(posedge clk); @(negedge clk);
+        @(posedge clk); @(posedge clk); @(negedge clk); sample_outputs();
         `CHECK_BIT("NotRunning: valid_out=0", valid_out_sampled, 1'b0)
 
         // Test 9: pc_init_value
         pe_running = 0;
-        stage_reset = 1; pc_init_value = 16'h0002; @(posedge clk); stage_reset = 0; @(posedge clk); @(negedge clk);
+        stage_reset = 1; pc_init_value = 16'h0002; @(posedge clk); stage_reset = 0; @(posedge clk); @(negedge clk); sample_outputs();
         `CHECK_VAL("PcInit: pc set", pc_out_sampled, 16'h0002)
 
         `TB_SUMMARY("tb_if_id_stage")

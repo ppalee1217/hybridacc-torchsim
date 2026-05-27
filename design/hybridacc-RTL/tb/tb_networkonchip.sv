@@ -69,11 +69,12 @@ module tb_networkonchip;
 
         @(posedge reset_n);
         noc_ps_in_valid=1; noc_ps_in_data=64'h1;
+        #(`TB_SETTLE);
+        `TB_ASSERT(noc_ps_in_ready==1'b1, "NetworkOnChip should accept simple PS traffic");
         @(posedge clk);
         noc_ps_in_valid=0;
 
         repeat(5) @(posedge clk);
-        `TB_ASSERT(noc_ps_in_ready==1'b1, "NetworkOnChip should accept simple PS traffic");
         $display("tb_networkonchip PASS");
         $finish;
     end

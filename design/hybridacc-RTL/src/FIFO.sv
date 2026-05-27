@@ -28,7 +28,8 @@ module FIFO #(
     input  logic clear
 );
     localparam int PTR_W = (DEPTH <= 1) ? 1 : $clog2(DEPTH);
-    localparam logic [PTR_W:0]   DEPTH_COUNT = DEPTH;
+    localparam logic [PTR_W-1:0] PTR_ONE = {{(PTR_W-1){1'b0}}, 1'b1};
+    localparam logic [PTR_W:0]   DEPTH_COUNT = (PTR_W + 1)'(DEPTH);
     localparam logic [PTR_W:0]   CNT_ONE = {{PTR_W{1'b0}}, 1'b1};
 
     T mem [0:DEPTH-1];
@@ -42,51 +43,6 @@ module FIFO #(
     logic [PTR_W-1:0] rd_ptr_next_w;
     logic [PTR_W:0]   cnt_next_w;
 
-    function automatic logic [PTR_W:0] count_add(
-        input logic [PTR_W:0] lhs,
-        input logic [PTR_W:0] rhs
-    );
-        logic [PTR_W:0] result;
-        logic           carry;
-
-        carry = 1'b0;
-        for (int i = 0; i <= PTR_W; i++) begin
-            result[i] = lhs[i] ^ rhs[i] ^ carry;
-            carry = (lhs[i] & rhs[i]) | (lhs[i] & carry) | (rhs[i] & carry);
-        end
-        return result;
-    endfunction
-
-    function automatic logic [PTR_W:0] count_sub(
-        input logic [PTR_W:0] lhs,
-        input logic [PTR_W:0] rhs
-    );
-        logic [PTR_W:0] result;
-        logic           borrow;
-
-        borrow = 1'b0;
-        for (int i = 0; i <= PTR_W; i++) begin
-            result[i] = lhs[i] ^ rhs[i] ^ borrow;
-            borrow = (~lhs[i] & rhs[i]) | (~(lhs[i] ^ rhs[i]) & borrow);
-        end
-        return result;
-    endfunction
-
-    function automatic logic [PTR_W-1:0] ptr_inc_if(
-        input logic [PTR_W-1:0] ptr,
-        input logic             enable
-    );
-        logic [PTR_W-1:0] result;
-        logic             carry;
-
-        carry = enable;
-        for (int i = 0; i < PTR_W; i++) begin
-            result[i] = ptr[i] ^ carry;
-            carry = ptr[i] & carry;
-        end
-        return result;
-    endfunction
-
     assign data_out = (cnt_reg > 0) ? mem[rd_ptr_reg] : '0;
 
     always_comb begin
@@ -98,12 +54,14 @@ module FIFO #(
         do_pop_w = pop && !fifo_empty_w;
         do_push_w = push && (!fifo_full_w || pop);
 
-        wr_ptr_next_w = ptr_inc_if(wr_ptr_reg, do_push_w);
-        rd_ptr_next_w = ptr_inc_if(rd_ptr_reg, do_pop_w);
-        cnt_next_w = count_add(
-            count_sub(cnt_reg, {(PTR_W+1){do_pop_w}} & CNT_ONE),
-            {(PTR_W+1){do_push_w}} & CNT_ONE
-        );
+        wr_ptr_next_w = wr_ptr_reg + (do_push_w ? PTR_ONE : '0);
+        rd_ptr_next_w = rd_ptr_reg + (do_pop_w ? PTR_ONE : '0);
+        cnt_next_w = cnt_reg;
+        if (do_pop_w && !do_push_w) begin
+            cnt_next_w = cnt_reg - CNT_ONE;
+        end else if (do_push_w && !do_pop_w) begin
+            cnt_next_w = cnt_reg + CNT_ONE;
+        end
     end
 
     always_ff @(posedge clk or negedge reset_n) begin
@@ -111,12 +69,16 @@ module FIFO #(
             wr_ptr_reg <= '0;
             rd_ptr_reg <= '0;
             cnt_reg <= '0;
-            for (int unsigned i = 0; i < DEPTH; i++) mem[i] <= '0;
+            for (int unsigned i = 0; i < DEPTH; i++) begin
+                mem[i] <= '0;
+            end
         end else if (clear) begin
             wr_ptr_reg <= '0;
             rd_ptr_reg <= '0;
             cnt_reg <= '0;
-            for (int unsigned i = 0; i < DEPTH; i++) mem[i] <= '0;
+            for (int unsigned i = 0; i < DEPTH; i++) begin
+                mem[i] <= '0;
+            end
         end else begin
             if (do_push_w) begin
                 mem[wr_ptr_reg] <= data_in;

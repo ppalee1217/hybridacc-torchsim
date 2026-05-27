@@ -39,11 +39,9 @@ module tb_spm;
 
     logic clk, reset_n;
     logic pmu_rst_i;
-    logic drop_noc_resp_i;
     logic soft_reset_i;
     logic [7:0] config_map_i;
     logic config_update_i;
-    logic arb_policy_i;
 
     logic            spm_req_valid_i [NUM_PORTS];
     logic            spm_req_ready_o [NUM_PORTS];
@@ -84,11 +82,9 @@ module tb_spm;
         .clk(clk),
         .reset_n(reset_n),
         .pmu_rst_i(pmu_rst_i),
-        .drop_noc_resp_i(drop_noc_resp_i),
         .soft_reset_i(soft_reset_i),
         .config_map_i(config_map_i),
         .config_update_i(config_update_i),
-        .arb_policy_i(arb_policy_i),
         .spm_req_valid_i(spm_req_valid_i),
         .spm_req_ready_o(spm_req_ready_o),
         .spm_req_i(spm_req_i),
@@ -229,11 +225,9 @@ module tb_spm;
 
     initial begin
         pmu_rst_i = 0;
-        drop_noc_resp_i = 0;
         soft_reset_i = 0;
         config_map_i = 8'hE4; // default: p0->0, p1->1, p2->2, p3->3
         config_update_i = 0;
-        arb_policy_i = 0;
         s_axi_awvalid_i = 0;
         s_axi_awaddr_i = 0;
         s_axi_wvalid_i = 0;

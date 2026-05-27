@@ -25,7 +25,7 @@
 module AddressGenerateUnit
     import cluster_pkg::*;
 #(
-    parameter int unsigned AGU_INDEX = 0
+    parameter logic [1:0] AGU_INDEX = 2'd0
 ) (
     input  logic        clk,
     input  logic        reset_n,
@@ -180,6 +180,7 @@ module AddressGenerateUnit
                 cfg_rdata[STATUS_DONE]     = done_reg;
                 cfg_rdata[STATUS_QUIESCED] = ~busy_reg & ~stalled_reg;
                 cfg_rdata[STATUS_ERROR]    = 1'b0;
+                cfg_rdata[31:30]           = AGU_INDEX[1:0];
             end
             AGU_REG_LANE_CFG:     cfg_rdata = lane_cfg_reg;
             AGU_REG_TAG_BASE:     cfg_rdata = tag_base_reg;
@@ -220,10 +221,10 @@ module AddressGenerateUnit
         norm_iter = (v == 16'd0) ? 16'd1 : v;
     endfunction
 
-    function automatic logic [15:0] calc_tag(input logic [5:0]  tag_base,
-                                             input logic [31:0] tag_mul);
-        logic [31:0] sum;
-        sum = {26'd0, tag_base} + tag_mul;
+    function automatic logic [15:0] calc_tag(input logic [5:0] tag_base,
+                                             input logic [5:0] tag_mul);
+        logic [5:0] sum;
+        sum = tag_base + tag_mul;
         calc_tag = {10'd0, sum[5:0]};
     endfunction
 
@@ -237,7 +238,8 @@ module AddressGenerateUnit
 
     // Compute next loop indices without side effects so it can be used in always_comb.
     function automatic loop_next_t compute_next_loop(
-        input logic [15:0] cur0, cur1, cur2, cur3
+        input logic [15:0] cur0, cur1, cur2, cur3,
+        input logic [15:0] iter0, iter1, iter2, iter3
     );
         loop_next_t result;
         logic [16:0] tmp;
@@ -247,23 +249,23 @@ module AddressGenerateUnit
         result.nxt3 = cur3;
         result.all_done = 1'b0;
 
-        tmp = {1'b0, result.nxt0} + 17'd1;
-        if (tmp[15:0] < iter_reg[0]) begin
+        tmp = $bits(tmp)'({1'b0, result.nxt0} + 17'd1);
+        if (tmp[15:0] < iter0) begin
             result.nxt0 = tmp[15:0];
         end else begin
             result.nxt0 = 16'd0;
-            tmp = {1'b0, result.nxt1} + 17'd1;
-            if (tmp[15:0] < iter_reg[1]) begin
+            tmp = $bits(tmp)'({1'b0, result.nxt1} + 17'd1);
+            if (tmp[15:0] < iter1) begin
                 result.nxt1 = tmp[15:0];
             end else begin
                 result.nxt1 = 16'd0;
-                tmp = {1'b0, result.nxt2} + 17'd1;
-                if (tmp[15:0] < iter_reg[2]) begin
+                tmp = $bits(tmp)'({1'b0, result.nxt2} + 17'd1);
+                if (tmp[15:0] < iter2) begin
                     result.nxt2 = tmp[15:0];
                 end else begin
                     result.nxt2 = 16'd0;
-                    tmp = {1'b0, result.nxt3} + 17'd1;
-                    if (tmp[15:0] < iter_reg[3]) begin
+                    tmp = $bits(tmp)'({1'b0, result.nxt3} + 17'd1);
+                    if (tmp[15:0] < iter3) begin
                         result.nxt3 = tmp[15:0];
                     end else begin
                         result.nxt3 = 16'd0;
@@ -273,6 +275,25 @@ module AddressGenerateUnit
             end
         end
         return result;
+    endfunction
+
+    function automatic logic compute_loop_all_done(
+        input logic [15:0] cur0, cur1, cur2, cur3,
+        input logic [15:0] iter0, iter1, iter2, iter3
+    );
+        logic [16:0] next0;
+        logic [16:0] next1;
+        logic [16:0] next2;
+        logic [16:0] next3;
+
+        next0 = $bits(next0)'({1'b0, cur0} + 17'd1);
+        next1 = $bits(next1)'({1'b0, cur1} + 17'd1);
+        next2 = $bits(next2)'({1'b0, cur2} + 17'd1);
+        next3 = $bits(next3)'({1'b0, cur3} + 17'd1);
+        return (next0[15:0] >= iter0)
+            && (next1[15:0] >= iter1)
+            && (next2[15:0] >= iter2)
+            && (next3[15:0] >= iter3);
     endfunction
 
     // ---------------------------------------------------------------------
@@ -311,10 +332,6 @@ module AddressGenerateUnit
         issue_payload_w               = '0;
         issue_payload_valid_w         = 1'b0;
         if ((state_reg == AGU_FSM_RUN) && ~run_last_issued_reg && s0_ready) begin
-            loop_next_t loop_next_w;
-
-            loop_next_w = compute_next_loop(idx_reg[0], idx_reg[1], idx_reg[2], idx_reg[3]);
-
             issue_payload_valid_w = 1'b1;
             issue_payload_w.valid       = 1'b1;
             issue_payload_w.idx0        = idx_reg[0];
@@ -332,7 +349,10 @@ module AddressGenerateUnit
             issue_payload_w.tag_stride1 = tag_stride1_reg[7:0];
             issue_payload_w.mask        = mask_cfg_reg[15:0];
             issue_payload_w.ultra       = ctrl_reg[AGU_CTRL_ULTRA_BIT];
-            issue_payload_w.last        = loop_next_w.all_done;
+            issue_payload_w.last        = compute_loop_all_done(
+                idx_reg[0], idx_reg[1], idx_reg[2], idx_reg[3],
+                iter_reg[0], iter_reg[1], iter_reg[2], iter_reg[3]
+            );
         end
     end
 
@@ -443,7 +463,26 @@ module AddressGenerateUnit
                     AGU_REG_TAG_CTRL:     tag_ctrl_reg    <= cfg_wdata;
                     AGU_REG_MASK_CFG:     mask_cfg_reg    <= cfg_wdata;
                     AGU_REG_ERR_CODE:     err_code_reg    <= cfg_wdata;
-                    default: ;
+                    default: begin
+                        base_addr_reg   <= base_addr_reg;
+                        base_addr_h_reg <= base_addr_h_reg;
+                        iter_reg[0]     <= iter_reg[0];
+                        iter_reg[1]     <= iter_reg[1];
+                        iter_reg[2]     <= iter_reg[2];
+                        iter_reg[3]     <= iter_reg[3];
+                        stride_reg[0]   <= stride_reg[0];
+                        stride_reg[1]   <= stride_reg[1];
+                        stride_reg[2]   <= stride_reg[2];
+                        stride_reg[3]   <= stride_reg[3];
+                        ctrl_reg        <= ctrl_reg;
+                        lane_cfg_reg    <= lane_cfg_reg;
+                        tag_base_reg    <= tag_base_reg;
+                        tag_stride0_reg <= tag_stride0_reg;
+                        tag_stride1_reg <= tag_stride1_reg;
+                        tag_ctrl_reg    <= tag_ctrl_reg;
+                        mask_cfg_reg    <= mask_cfg_reg;
+                        err_code_reg    <= err_code_reg;
+                    end
                 endcase
             end
 
@@ -458,7 +497,9 @@ module AddressGenerateUnit
                              AGU_INDEX);
                 end
                 // synopsys translate_on
-                for (int i = 0; i < 4; i++) idx_reg[i] <= 16'h0;
+                for (int i = 0; i < 4; i++) begin
+                    idx_reg[i] <= 16'h0;
+                end
                 s0_reg              <= '0;
                 s1_reg              <= '0;
                 n0s0_reg            <= '0;
@@ -519,7 +560,9 @@ module AddressGenerateUnit
                              ctrl_reg[AGU_CTRL_ULTRA_BIT]);
                 end
                 // synopsys translate_on
-                for (int i = 0; i < 4; i++) idx_reg[i] <= 16'h0;
+                for (int i = 0; i < 4; i++) begin
+                    idx_reg[i] <= 16'h0;
+                end
                 s0_reg              <= '0;
                 s1_reg              <= '0;
                 n0s0_reg            <= '0;
@@ -563,28 +606,30 @@ module AddressGenerateUnit
                     state_reg <= AGU_FSM_IDLE;  // ESL: DONE then IDLE next; collapse to single edge
                     busy_reg  <= 1'b0;
                     done_reg  <= 1'b1;
-                end else if (out_fire) begin
-                    // stay RUN
                 end
 
-                if (backpressure) stalled_reg <= 1'b1;
+                if (backpressure) begin
+                    stalled_reg <= 1'b1;
+                end
 
                 // ----- s2 update -----
                 if (move_n0s1_to_s2) begin
                     s2_reg.valid <= 1'b1;
                     s2_reg.addr  <= n0s1_reg.total[31:0];
-                    s2_reg.tag   <= calc_tag(n0s1_reg.tag_base, n0s1_reg.tag_mul);
+                    s2_reg.tag   <= calc_tag(n0s1_reg.tag_base, n0s1_reg.tag_mul[5:0]);
                     s2_reg.mask  <= n0s1_reg.mask;
                     s2_reg.ultra <= n0s1_reg.ultra;
                     s2_reg.last  <= n0s1_reg.last;
                 end else if (bypass_s1_to_s2) begin
                     logic [49:0] s01_w, s23_w, total_w;
-                    s01_w   = {2'b0, s1_reg.prod0} + {2'b0, s1_reg.prod1};
-                    s23_w   = {2'b0, s1_reg.prod2} + {2'b0, s1_reg.prod3};
-                    total_w = s01_w + s23_w + {18'd0, s1_reg.base_addr};
+                    logic [50:0] total_ext_w;
+                    s01_w   = $bits(s01_w)'({2'b0, s1_reg.prod0} + {2'b0, s1_reg.prod1});
+                    s23_w   = $bits(s23_w)'({2'b0, s1_reg.prod2} + {2'b0, s1_reg.prod3});
+                    total_ext_w = {1'b0, s01_w} + {1'b0, s23_w} + {19'd0, s1_reg.base_addr};
+                    total_w = total_ext_w[49:0];
                     s2_reg.valid <= 1'b1;
                     s2_reg.addr  <= total_w[31:0];
-                    s2_reg.tag   <= calc_tag(s1_reg.tag_base, s1_reg.tag_mul);
+                    s2_reg.tag   <= calc_tag(s1_reg.tag_base, s1_reg.tag_mul[5:0]);
                     s2_reg.mask  <= s1_reg.mask;
                     s2_reg.ultra <= s1_reg.ultra;
                     s2_reg.last  <= s1_reg.last;
@@ -628,7 +673,6 @@ module AddressGenerateUnit
                 // ----- s1 update -----
                 if (s1_ready) begin
                     s0_t src_w;
-                    logic src_valid;
                     logic [31:0] tag_index_w;
                     logic [31:0] tag_stride_w;
                     logic [47:0] prod0_w;
@@ -637,21 +681,18 @@ module AddressGenerateUnit
                     logic [47:0] prod3_w;
 
                     src_w     = '0;
-                    src_valid = 1'b0;
                     prod0_w   = '0;
                     prod1_w   = '0;
                     prod2_w   = '0;
                     prod3_w   = '0;
 
                     if (move_s0_to_s1) begin
-                        src_w     = s0_reg;
-                        src_valid = 1'b1;
+                        src_w = s0_reg;
                     end else if (issue_payload_valid_w) begin
-                        src_w     = issue_payload_w;
-                        src_valid = 1'b1;
+                        src_w = issue_payload_w;
                     end
 
-                    if (src_valid) begin
+                    if (src_w.valid) begin
                         case (src_w.tag_level)
                             2'd0: begin
                                 tag_index_w  = {16'd0, src_w.idx0};
@@ -705,12 +746,17 @@ module AddressGenerateUnit
                 if (issue_payload_valid_w &&
                     (issue_consumed_by_s1 || (s0_ready && !issue_consumed_by_s1))) begin
                     loop_next_t loop_next_w;
-                    loop_next_w = compute_next_loop(idx_reg[0], idx_reg[1], idx_reg[2], idx_reg[3]);
+                    loop_next_w = compute_next_loop(
+                        idx_reg[0], idx_reg[1], idx_reg[2], idx_reg[3],
+                        iter_reg[0], iter_reg[1], iter_reg[2], iter_reg[3]
+                    );
                     idx_reg[0] <= loop_next_w.nxt0;
                     idx_reg[1] <= loop_next_w.nxt1;
                     idx_reg[2] <= loop_next_w.nxt2;
                     idx_reg[3] <= loop_next_w.nxt3;
-                    if (loop_next_w.all_done) run_last_issued_reg <= 1'b1;
+                    if (loop_next_w.all_done) begin
+                        run_last_issued_reg <= 1'b1;
+                    end
                 end
 
                 // ----- debug capture -----

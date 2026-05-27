@@ -14,7 +14,9 @@
 //   None
 //-----------------------------------------------------------------------------
 `include "../tb_common.svh"
+`ifndef GATE_SIM
 `include "../../src/hybridacc_utils_pkg.sv"
+`endif
 `ifndef GATE_SIM
 `include "../../src/PE/TransformRegFile.sv"
 `endif
@@ -54,21 +56,21 @@ end
         enable=1; shift_en=0; shift_mode=0; tid=0; tid_in=0; tid_write_en=0; vtid_in='0; vtid_write_en=0;
         clear_regs=0; use_vcounter=0; clear_vcounter=0; incr_vcounter=0;
         @(posedge reset_n);
-        @(posedge clk); @(negedge clk);
+        @(posedge clk); @(negedge clk); #(`TB_SETTLE);
 
         // Test 1: Reset state
-        tid = 0; @(negedge clk);
+        tid = 0; @(negedge clk); #(`TB_SETTLE);
         `CHECK_VAL("Reset: vtid_out=0", vtid_out, '0)
 
         // Test 2: Scalar write to tid=0 (read via vtid_out which reads reg[0], reg[3], reg[6], reg[9])
         tid = 0; tid_in = 16'h1111; tid_write_en = 1;
-        @(posedge clk); tid_write_en = 0; @(negedge clk);
+        @(posedge clk); tid_write_en = 0; @(negedge clk); #(`TB_SETTLE);
         `CHECK_VAL("ScalarWrite: vtid_out[0]=0x1111", vtid_out.lanes[0], 16'h1111)
 
         // Test 3: Scalar write to tid=3 (maps to vtid_out.lanes[1] when reading from base=0)
         tid = 3; tid_in = 16'h3333; tid_write_en = 1;
         @(posedge clk); tid_write_en = 0;
-        tid = 0; @(negedge clk);
+        tid = 0; @(negedge clk); #(`TB_SETTLE);
         `CHECK_VAL("ScalarWrite3: vtid_out[1]=0x3333", vtid_out.lanes[1], 16'h3333)
 
         // Test 4: Vector write (vtid_write_en, writes to tid, tid+3, tid+6, tid+9)
@@ -80,7 +82,16 @@ end
         vtid_in.lanes[2] = 16'hAA66;
         vtid_in.lanes[3] = 16'hAA99;
         vtid_write_en = 1;
-        @(posedge clk); vtid_write_en = 0; @(negedge clk);
+        @(posedge clk); vtid_write_en = 0;
+        repeat (4) begin
+            @(posedge clk); @(negedge clk); #(`TB_SETTLE);
+            if ((vtid_out.lanes[0] === 16'hAA00) &&
+                (vtid_out.lanes[1] === 16'hAA33) &&
+                (vtid_out.lanes[2] === 16'hAA66) &&
+                (vtid_out.lanes[3] === 16'hAA99)) begin
+                break;
+            end
+        end
         `CHECK_VAL("VecWrite: vtid_out[0]=0xAA00", vtid_out.lanes[0], 16'hAA00)
         `CHECK_VAL("VecWrite: vtid_out[1]=0xAA33", vtid_out.lanes[1], 16'hAA33)
         `CHECK_VAL("VecWrite: vtid_out[2]=0xAA66", vtid_out.lanes[2], 16'hAA66)
@@ -88,7 +99,7 @@ end
 
         // Test 5: Clear all registers
         clear_regs = 1; @(posedge clk); clear_regs = 0;
-        tid = 0; @(negedge clk);
+        tid = 0; @(negedge clk); #(`TB_SETTLE);
         `CHECK_VAL("Clear: vtid_out=0", vtid_out, '0)
 
         // Test 6: Shift K3 mode
@@ -103,7 +114,7 @@ end
         shift_en = 1; shift_mode = 32'd0; // K3
         @(posedge clk); shift_en = 0;
         // After shift, read tid=0 to see reg[0,3,6,9]
-        tid = 0; @(negedge clk);
+        tid = 0; @(negedge clk); #(`TB_SETTLE);
         // reg[0] mask[0]=1 => reg[0]=old reg[1]=0x0101
         `CHECK_VAL("ShiftK3: reg[0]=0x0101", vtid_out.lanes[0], 16'h0101)
 
@@ -120,18 +131,18 @@ end
         use_vcounter = 1; tid = 1;
         incr_vcounter = 1; @(posedge clk); incr_vcounter = 0;
         // vcounter should now be 1, read base=1 => reg[1,4,7,10]
-        @(negedge clk);
+        @(negedge clk); #(`TB_SETTLE);
         `CHECK_VAL("Vcounter: vtid_out[0]=reg[1]=0x0201", vtid_out.lanes[0], 16'h0201)
         use_vcounter = 0;
 
         // Test 8: Enable gating
-        enable = 0; tid = 0; @(negedge clk);
+        enable = 0; tid = 0; @(negedge clk); #(`TB_SETTLE);
         `CHECK_VAL("EnableOff: vtid_out=0", vtid_out, '0)
-        enable = 1; @(negedge clk);
+        enable = 1; @(negedge clk); #(`TB_SETTLE);
         `CHECK_COND("EnableOn: vtid_out!=0", vtid_out.lanes[0] !== 16'h0000, vtid_out.lanes[0])
 
         // Test 9: Out-of-bounds tid (tid+9 >= 12 => vtid_out should be 0)
-        tid = 5; @(negedge clk); // 5+9=14 >= 12
+        tid = 5; @(negedge clk); #(`TB_SETTLE); // 5+9=14 >= 12
         `CHECK_VAL("OOB: vtid_out=0", vtid_out, '0)
 
         // Test 10: Shift K5 mode (mask=12'b0011_1100_1111)
@@ -157,7 +168,7 @@ end
         // Actually for K5: 12'b0011_1100_1111 = {bit[11]=0, bit[10]=0, bit[9]=1, bit[8]=1, bit[7]=1, bit[6]=1, bit[5]=0, bit[4]=0, bit[3]=1, bit[2]=1, bit[1]=1, bit[0]=1}
         shift_en = 1; shift_mode = 32'd1; // K5
         @(posedge clk); shift_en = 0;
-        tid = 0; @(negedge clk);
+        tid = 0; @(negedge clk); #(`TB_SETTLE);
         // vtid_out reads reg[0,3,6,9]
         // reg[0]: mask[0]=1 -> old reg[1] = 0x0301
         `CHECK_VAL("ShiftK5: reg[0]=0x0301", vtid_out.lanes[0], 16'h0301)

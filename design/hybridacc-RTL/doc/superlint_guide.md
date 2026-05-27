@@ -1,11 +1,10 @@
 # HybridAcc Superlint Tcl Guide
 
+Repo-wide 操作入口請先看 [../../../doc/index.md](../../../doc/index.md) 與 [../../../doc/user-manual/lint-and-formal.md](../../../doc/user-manual/lint-and-formal.md)；本文件保留 Jasper/Superlint 的 subsystem 細節。
+
 ## 範圍
 
-這份文件整理以下兩類腳本的用途與實際執行流程：
-
-1. `design/hybridacc-RTL/script` 目錄下和 Superlint 直接相關的 Tcl 檔。
-2. `design/hybridacc-RTL/script/superlint/tcl` 目錄下的查詢、探針與局部抽取腳本。
+這份文件整理 `design/hybridacc-RTL/script/tcl/superlint` 目錄下所有 Superlint Tcl 的用途與實際執行流程；主流程、waiver、query、probe 與局部抽取腳本都已統一放在這個目錄。
 
 本文重點不是 JasperGold 本身的通用語法，而是這個專案內各個 Tcl 檔如何分工、彼此如何調用，以及它們在實際 debug / report 流程中的位置。
 
@@ -15,8 +14,8 @@
 
 | 檔案 | 角色 | 是否為主入口 |
 | --- | --- | --- |
-| `script/jasper_superlint.tcl` | 建立完整 HybridAcc Superlint run：找 project root、收集 RTL、analyze、elaborate、載入 rule、套用 waiver、extract、prove、report | 是 |
-| `script/jasper_superlint_waivers.tcl` | 在 elaborate 後、extract 前，對專案既知且接受的 warning/error 類型做 instance/module 級排除 | 否，由 `jasper_superlint.tcl` source |
+| `script/tcl/superlint/jasper_superlint.tcl` | 建立完整 HybridAcc Superlint run：找 project root、收集 RTL、analyze、elaborate、載入 rule、套用 waiver、extract、prove、report | 是 |
+| `script/tcl/superlint/jasper_superlint_waivers.tcl` | 在 elaborate 後、extract 前，對專案既知且接受的 warning/error 類型做 instance/module 級排除 | 否，由 canonical 主流程 source |
 
 ### 輔助腳本總類
 
@@ -30,19 +29,21 @@
 
 ## 核心結論
 
-這一組腳本的真正主入口只有一個：`script/jasper_superlint.tcl`。
+這一組腳本的真正主入口只有一個：`script/tcl/superlint/jasper_superlint.tcl`。
 
-`script/superlint/tcl` 下面的大多數檔案都不是被主流程自動呼叫。它們是各自獨立的 Jasper Tcl entry point，執行模式通常是：
+`script/tcl/superlint` 下面的大多數檔案都不是被主流程自動呼叫。它們是各自獨立的 Jasper Tcl entry point，執行模式通常是：
 
 1. 自己偵測 RTL root。
 2. 設定一些全域變數或環境覆寫，例如 run dir、skip prove、skip report。
-3. `source script/jasper_superlint.tcl`，借用主腳本完成 compile / elaborate / rule load / waiver load。
+3. `source script/tcl/superlint/jasper_superlint.tcl`，借用 canonical 主腳本完成 compile / elaborate / rule load / waiver load。
 4. 再做自己的 `check_superlint -list`、`check_superlint -extract -instances`、`get_design_info` 或 `help`。
 5. 印出固定格式結果後 `exit`。
 
 也就是說，這些 helper script 和主腳本的關係是「重用主流程」，不是「由主流程調用」。
 
-## 主入口：script/jasper_superlint.tcl
+目前 Makefile 已提供這幾個實際入口：`make superlint_report`、`make superlint_hotspot`、`make superlint`。它們會在 tcsh 環境下啟動 Jasper，並呼叫 `script/tcl/superlint` 裡的 query script。
+
+## 主入口：script/tcl/superlint/jasper_superlint.tcl
 
 ### 主要責任
 
@@ -61,9 +62,10 @@
 | `HACC_JG_CLOCK` | 指定 clock name，或設 `NONE` |
 | `HACC_JG_RESET_EXPR` | 指定 reset expression，或設 `NONE` |
 | `HACC_JG_BBOX_A` | `elaborate -bbox_a` 數值 |
-| `HACC_JG_BBOX_MODULES` | 額外 blackbox module list |
+| `HACC_JG_BBOX_MODULES` | vendor/IP blackbox module list；預設包含 `DW_fp_mult`、`DW_fp_add`，並在 SRAM stub 開啟時追加 SRAM macro |
 | `HACC_JG_BBOX_MUL_THRESHOLD` | `elaborate -bbox_mul` 門檻 |
 | `HACC_JG_USE_DW_STUBS` | 是否編入 DesignWare stub，預設開啟 |
+| `HACC_JG_USE_SRAM_STUBS` | 是否編入 Jasper-only SRAM macro stub，預設開啟 |
 | `HACC_JG_DISABLE_DOMAINS` | 關閉某些 rule domain |
 | `HACC_JG_ENABLE_TAGS` | 只打開指定 tags |
 | `HACC_JG_DISABLE_TAGS` | 額外關閉指定 tags |
@@ -114,9 +116,10 @@
 
 1. 預設 top 是 `HybridAcc`。
 2. 預設 run dir 是 `<project_root>/jasper/superlint_<RUN_TAG>`。
-3. 若 `HACC_JG_USE_DW_STUBS=1`，會自動加入 `script/jasper_dw_fp_stubs.sv`，並追加 `+define+HACC_JASPER_DW_STUBS`。
-4. 若不用 stub，才改走 `HACC_JG_BBOX_MODULES` 對 `DW_fp_mult`、`DW_fp_add` 做 blackbox。
-5. 若有 `HACC_JG_WAIVER_TCL`，會在稍後 elaborate/clock/reset 完成後 source 進來。
+3. 若 `HACC_JG_USE_DW_STUBS=1`，會自動加入 `script/jasper_dw_fp_stubs.sv`，追加 `+define+HACC_JASPER_DW_STUBS`，並把 `DW_fp_mult`、`DW_fp_add` 放入 `elaborate -bbox_m`。這樣 Jasper 可解析 module 介面，但不會把 stub 內部的簡化行為當成 RTL style warning。
+4. 若 `HACC_JG_USE_SRAM_STUBS=1`，會自動加入 `script/TS1N16ADFPCLLLVTA128X64M4SWSHOD.sv`，並把 SRAM macro module 放入 `elaborate -bbox_m`。此 stub 只服務 Jasper Superlint，VCS pre-sim 仍使用 `src/utils/SRAM_Wrapper.sv` 內的 behavioral SRAM model。
+5. 若使用者覆寫 `HACC_JG_BBOX_MODULES`，腳本仍會在 DW/SRAM stub 開啟時把對應 stub module 補回 blackbox 清單，避免 helper model 內部警告污染 strict no-waiver 結果。
+6. 若有 `HACC_JG_WAIVER_TCL`，會在稍後 elaborate/clock/reset 完成後 source 進來。
 
 #### 3. 組 RTL 清單與 include dir
 
@@ -204,7 +207,7 @@ include dir 則至少包含：
 
 ```mermaid
 flowchart TD
-    A[jg -superlint script/jasper_superlint.tcl] --> B[偵測 script path 與 project root]
+   A[jg -superlint script/tcl/superlint/jasper_superlint.tcl] --> B[偵測 script path 與 project root]
     B --> C[初始化 env / Tcl 覆寫參數]
     C --> D[收集 RTL 與 include dirs]
     D --> E[建立並切到 run dir]
@@ -214,7 +217,7 @@ flowchart TD
     H --> I[elaborate top]
     I --> J[設定 clock / reset]
     J --> K{有 waiver Tcl?}
-    K -- yes --> L[source jasper_superlint_waivers.tcl]
+   K -- yes --> L[source script/tcl/superlint/jasper_superlint_waivers.tcl]
     K -- no --> M[略過 waiver]
     L --> N{skip extract?}
     M --> N
@@ -230,7 +233,7 @@ flowchart TD
     T --> U
 ```
 
-## Waiver 檔：script/jasper_superlint_waivers.tcl
+## Waiver 檔：script/tcl/superlint/jasper_superlint_waivers.tcl
 
 ### 在主流程中的位置
 
@@ -315,11 +318,11 @@ flowchart TD
 
 請注意：
 
-1. `jasper_superlint.tcl` 是唯一會 source 這份 waiver 的腳本。
+1. canonical `jasper_superlint.tcl` 是唯一會 source 這份 waiver 的腳本。
 2. 多數 helper script 雖然不直接 source waiver，但因為它們會 source `jasper_superlint.tcl`，所以預設仍然會間接套用這份 waiver。
 3. 如果 helper script 想停用 waiver，必須在 source 主腳本前把 `HACC_JG_WAIVER_TCL` 設成 `NONE` 或指向別的檔案。
 
-## script/superlint/tcl 的共通模式
+## script/tcl/superlint 的共通模式
 
 除了純 help probe 之外，大部分 helper script 都長得很像，差別只在最後那幾段 query。
 
@@ -353,7 +356,7 @@ flowchart TD
 
 ### 全設計統計與報告類
 
-#### `script/superlint/tcl/jasper_warning_query.tcl`
+#### `script/tcl/superlint/jasper_warning_query.tcl`
 
 用途：
 
@@ -373,7 +376,7 @@ flowchart TD
 
 這支很適合當作 warning backlog 的總覽入口。
 
-#### `script/superlint/tcl/jasper_report_query.tcl`
+#### `script/tcl/superlint/jasper_report_query.tcl`
 
 用途：
 
@@ -391,7 +394,7 @@ flowchart TD
 
 這支比較像完整摘要報表，適合快速判斷 warning/error 的大方向。
 
-#### `script/superlint/tcl/jasper_warning_hotspot_query.tcl`
+#### `script/tcl/superlint/jasper_warning_hotspot_query.tcl`
 
 用途：
 
@@ -421,7 +424,7 @@ flowchart TD
 3. 依 `source_location` 做計數排序
 4. 每個 tag 輸出最多 40 筆 hotspot
 
-#### `script/superlint/tcl/jasper_error_hotspot_query.tcl`
+#### `script/tcl/superlint/jasper_error_hotspot_query.tcl`
 
 用途與上一支類似，但目標是 error tag。固定分析：
 
@@ -435,7 +438,7 @@ flowchart TD
 
 輸出的是各 tag 的 source hotspot 排名。
 
-#### `script/superlint/tcl/jasper_ctcl_hotspot_query.tcl`
+#### `script/tcl/superlint/jasper_ctcl_hotspot_query.tcl`
 
 用途：
 
@@ -452,7 +455,7 @@ flowchart TD
 
 這支的重點是除了 source 之外，還保留 instance 維度，方便往設計階層追。
 
-#### `script/superlint/tcl/jasper_lat_notrtm_query.tcl`
+#### `script/tcl/superlint/jasper_lat_notrtm_query.tcl`
 
 用途：
 
@@ -461,7 +464,7 @@ flowchart TD
 
 這是一支單 tag、低輸出量的小型專用查詢腳本。
 
-#### `script/superlint/tcl/jasper_dead_logic_query.tcl`
+#### `script/tcl/superlint/jasper_dead_logic_query.tcl`
 
 用途：
 
@@ -488,7 +491,7 @@ flowchart TD
 
 這種模式比全設計 extract 更適合針對局部 warning/error 做快速迭代。
 
-#### `script/superlint/tcl/jasper_module_extract_query.tcl`
+#### `script/tcl/superlint/jasper_module_extract_query.tcl`
 
 用途：
 
@@ -504,7 +507,7 @@ flowchart TD
 3. `MODULE_WARNING_COUNT`
 4. `MODULE_WARNING_DETAILS_BEGIN/END`
 
-#### `script/superlint/tcl/jasper_perouter_extract_query.tcl`
+#### `script/tcl/superlint/jasper_perouter_extract_query.tcl`
 
 用途：
 
@@ -513,7 +516,7 @@ flowchart TD
 
 這是 `jasper_module_extract_query.tcl` 的特化版，省去傳入 module name。
 
-#### `script/superlint/tcl/jasper_hddu_extract_query.tcl`
+#### `script/tcl/superlint/jasper_hddu_extract_query.tcl`
 
 用途：
 
@@ -524,7 +527,7 @@ flowchart TD
 
 適合在 HDDU comb loop 收斂過程中反覆使用。
 
-#### `script/superlint/tcl/jasper_hddu_error_query.tcl`
+#### `script/tcl/superlint/jasper_hddu_error_query.tcl`
 
 用途：
 
@@ -538,7 +541,7 @@ flowchart TD
 3. `MODULE_ERROR_COUNT`
 4. `MODULE_ERROR_DETAILS_BEGIN/END`
 
-#### `script/superlint/tcl/jasper_exe_m_extract_query.tcl`
+#### `script/tcl/superlint/jasper_exe_m_extract_query.tcl`
 
 用途：
 
@@ -549,7 +552,7 @@ flowchart TD
 
 ### 比較、驗證與欄位探索類
 
-#### `script/superlint/tcl/jasper_perouter_exclude_probe.tcl`
+#### `script/tcl/superlint/jasper_perouter_exclude_probe.tcl`
 
 用途：
 
@@ -563,7 +566,7 @@ flowchart TD
 1. 驗證 PErouter 專屬 exclusion 是否足以壓低 warning。
 2. 對照沒有額外 exclusion 時的 `jasper_perouter_extract_query.tcl` 結果。
 
-#### `script/superlint/tcl/jasper_warning_detail_probe.tcl`
+#### `script/tcl/superlint/jasper_warning_detail_probe.tcl`
 
 用途：
 
@@ -594,7 +597,7 @@ flowchart TD
 
 如果欄位不支援，會輸出 `FIELD_FAIL`。這支的用途不是產生正式報告，而是摸清 Jasper `check_superlint -get` 在這個版本能取哪些 metadata。
 
-#### `script/superlint/tcl/jasper_property_probe.tcl`
+#### `script/tcl/superlint/jasper_property_probe.tcl`
 
 用途：
 
@@ -607,7 +610,7 @@ flowchart TD
 
 這三支不負責報告設計問題，而是查 Jasper 命令行為。
 
-#### `script/superlint/tcl/jasper_help_probe.tcl`
+#### `script/tcl/superlint/jasper_help_probe.tcl`
 
 用途：
 
@@ -617,7 +620,7 @@ flowchart TD
 
 這支完全不 source 主腳本，也不需要 RTL compile。
 
-#### `script/superlint/tcl/jasper_help_elaborate.tcl`
+#### `script/tcl/superlint/jasper_help_elaborate.tcl`
 
 用途：
 
@@ -625,7 +628,7 @@ flowchart TD
 
 通常在確認 `elaborate` 參數語法時使用，例如 `-bbox_mul` 的接受形式。
 
-#### `script/superlint/tcl/jasper_rtlds_help_probe.tcl`
+#### `script/tcl/superlint/jasper_rtlds_help_probe.tcl`
 
 用途：
 
@@ -661,7 +664,7 @@ helper_query_or_probe.tcl
 
 以下檔案都不是 `jasper_superlint.tcl` 自動呼叫的子流程：
 
-1. `script/superlint/tcl` 下的所有 query/probe/help 腳本
+1. `script/tcl/superlint` 下的所有 query/probe/help 腳本
 2. 它們彼此之間也沒有互相 source 的關係
 
 所以從操作角度看，它們都是「獨立入口」。
@@ -670,7 +673,7 @@ helper_query_or_probe.tcl
 
 ### 想跑完整 Superlint
 
-用：`script/jasper_superlint.tcl`
+用：`script/tcl/superlint/jasper_superlint.tcl`。
 
 適用：
 
@@ -707,4 +710,4 @@ helper_query_or_probe.tcl
 
 ## 一句話總結
 
-在這個專案中，Superlint 的真正執行核心是 `script/jasper_superlint.tcl`，`script/jasper_superlint_waivers.tcl` 是它在 extract 前插入的專案排除規則，而 `script/superlint/tcl` 底下的其他檔案則幾乎都是獨立的後處理或局部診斷入口，它們透過 `source jasper_superlint.tcl` 重用同一套 compile/elaborate/waiver 基礎，再做各自的 query 或 probe。
+在這個專案中，Superlint 的真正執行核心是 `script/tcl/superlint/jasper_superlint.tcl`，`script/tcl/superlint/jasper_superlint_waivers.tcl` 是它在 extract 前插入的專案排除規則，而 `script/tcl/superlint` 底下的其他檔案則幾乎都是獨立的後處理或局部診斷入口；它們會 source canonical 主流程重用同一套 compile/elaborate/waiver 基礎，再做各自的 query 或 probe。

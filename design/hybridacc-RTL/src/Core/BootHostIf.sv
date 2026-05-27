@@ -62,6 +62,30 @@ module BootHostIf import core_pkg::*; #(
 );
     localparam logic [31:0] DEFAULT_CLUSTER_MASK_LO = (NUM_CLUSTERS >= 32) ? 32'hFFFF_FFFF : ((32'h1 << NUM_CLUSTERS) - 1);
     localparam logic [31:0] DEFAULT_CLUSTER_MASK_HI = (NUM_CLUSTERS > 32) ? ((32'h1 << (NUM_CLUSTERS - 32)) - 1) : 32'h0;
+    localparam logic [11:0] CSR_HACC_CAP0           = HACC_CAP0[11:0];
+    localparam logic [11:0] CSR_HACC_CAP1           = HACC_CAP1[11:0];
+    localparam logic [11:0] CSR_HACC_CTRL           = HACC_CTRL[11:0];
+    localparam logic [11:0] CSR_HACC_STATUS         = HACC_STATUS[11:0];
+    localparam logic [11:0] CSR_CORE_BOOT_ADDR      = CORE_BOOT_ADDR[11:0];
+    localparam logic [11:0] CSR_CORE_PC_SNAPSHOT    = CORE_PC_SNAPSHOT[11:0];
+    localparam logic [11:0] CSR_CORE_CAUSE_SNAPSHOT = CORE_CAUSE_SNAPSHOT[11:0];
+    localparam logic [11:0] CSR_MANIFEST_ADDR_LO    = MANIFEST_ADDR_LO[11:0];
+    localparam logic [11:0] CSR_MANIFEST_ADDR_HI    = MANIFEST_ADDR_HI[11:0];
+    localparam logic [11:0] CSR_MANIFEST_SIZE       = MANIFEST_SIZE[11:0];
+    localparam logic [11:0] CSR_MANIFEST_KICK       = MANIFEST_KICK[11:0];
+    localparam logic [11:0] CSR_LOADER_STATUS       = LOADER_STATUS[11:0];
+    localparam logic [11:0] CSR_LOADER_ERR_CODE     = LOADER_ERR_CODE[11:0];
+    localparam logic [11:0] CSR_LOADER_ERR_INFO     = LOADER_ERR_INFO[11:0];
+    localparam logic [11:0] CSR_IRQ_SUMMARY         = IRQ_SUMMARY[11:0];
+    localparam logic [11:0] CSR_IRQ_FORCE_ACK       = IRQ_FORCE_ACK[11:0];
+    localparam logic [11:0] CSR_CLUSTER_MASK_LO     = CLUSTER_MASK_LO[11:0];
+    localparam logic [11:0] CSR_CLUSTER_MASK_HI     = CLUSTER_MASK_HI[11:0];
+    localparam logic [11:0] CSR_LAST_MMIO_TARGET    = LAST_MMIO_TARGET[11:0];
+    localparam logic [11:0] CSR_LAST_MMIO_ADDR      = LAST_MMIO_ADDR[11:0];
+    localparam logic [11:0] CSR_TRACE_BASE          = TRACE_BASE[11:0];
+    localparam logic [11:0] CSR_TRACE_SIZE          = TRACE_SIZE[11:0];
+    localparam logic [11:0] CSR_TRACE_CTRL          = TRACE_CTRL[11:0];
+    localparam logic [11:0] CSR_TRACE_STATUS        = TRACE_STATUS[11:0];
 
     logic [31:0] ctrl_reg;
     logic [31:0] boot_addr_reg;
@@ -77,6 +101,13 @@ module BootHostIf import core_pkg::*; #(
     logic [31:0] trace_ctrl_reg;
     logic [31:0] irq_summary_sticky_reg;
     logic        reset_init_done_reg;
+    logic [31:0] read_csr_rdata_w;
+    logic        ctrl_aw_ready_w;
+    logic        ctrl_w_ready_w;
+    logic        ctrl_ar_ready_w;
+    logic        ctrl_b_valid_reg;
+    logic        ctrl_r_valid_reg;
+    logic [31:0] ctrl_r_data_reg;
 
     logic        wr_addr_valid_reg;
     logic [31:0] wr_addr_reg;
@@ -98,12 +129,24 @@ module BootHostIf import core_pkg::*; #(
     );
         logic [31:0] status;
         status = 32'h0;
-        if (loader_busy)                    status[0] = 1'b1;
-        if (loader_done)                    status[1] = 1'b1;
-        if (core_halted)                    status[2] = 1'b1;
-        if (core_running)                   status[3] = 1'b1;
-        if (loader_err_code != 32'h0)       status[4] = 1'b1;
-        if (loader_busy)                    status[5] = 1'b1;
+        if (loader_busy) begin
+            status[0] = 1'b1;
+        end
+        if (loader_done) begin
+            status[1] = 1'b1;
+        end
+        if (core_halted) begin
+            status[2] = 1'b1;
+        end
+        if (core_running) begin
+            status[3] = 1'b1;
+        end
+        if (loader_err_code != 32'h0) begin
+            status[4] = 1'b1;
+        end
+        if (loader_busy) begin
+            status[5] = 1'b1;
+        end
         return status;
     endfunction
 
@@ -117,43 +160,22 @@ module BootHostIf import core_pkg::*; #(
     );
         logic [31:0] summary;
         summary = sticky;
-        if (loader_done)                summary[0] = 1'b1;
-        if (loader_err_code != 32'h0)   summary[1] = 1'b1;
-        if (core_cause != 32'h0)        summary[2] = 1'b1;
-        if (core_halted)                summary[3] = 1'b1;
-        if (plic_pending_any)           summary[4] = 1'b1;
+        if (loader_done) begin
+            summary[0] = 1'b1;
+        end
+        if (loader_err_code != 32'h0) begin
+            summary[1] = 1'b1;
+        end
+        if (core_cause != 32'h0) begin
+            summary[2] = 1'b1;
+        end
+        if (core_halted) begin
+            summary[3] = 1'b1;
+        end
+        if (plic_pending_any) begin
+            summary[4] = 1'b1;
+        end
         return summary;
-    endfunction
-
-    function automatic logic [31:0] read_csr(input logic [31:0] offset);
-        logic [31:0] r;
-        r = 32'h0;
-        unique0 case (offset)
-            HACC_CAP0:           r = cap0_value();
-            HACC_CAP1:           r = cap1_value();
-            HACC_CTRL:           r = ctrl_reg;
-            HACC_STATUS:         r = hacc_status_word(loader_busy_i, loader_done_i, core_halted_i, core_running_i, loader_err_code_i);
-            CORE_BOOT_ADDR:      r = boot_addr_reg;
-            CORE_PC_SNAPSHOT:    r = core_pc_snapshot_i;
-            CORE_CAUSE_SNAPSHOT: r = core_cause_snapshot_i;
-            MANIFEST_ADDR_LO:    r = manifest_lo_reg;
-            MANIFEST_ADDR_HI:    r = manifest_hi_reg;
-            MANIFEST_SIZE:       r = manifest_size_reg;
-            LOADER_STATUS:       r = loader_status_i;
-            LOADER_ERR_CODE:     r = loader_err_code_i;
-            LOADER_ERR_INFO:     r = loader_err_info_i;
-            IRQ_SUMMARY:         r = irq_summary_word(irq_summary_sticky_reg, loader_done_i, loader_err_code_i, core_cause_snapshot_i, core_halted_i, plic_pending_any_i);
-            CLUSTER_MASK_LO:     r = cluster_mask_lo_w;
-            CLUSTER_MASK_HI:     r = cluster_mask_hi_w;
-            LAST_MMIO_TARGET:    r = fabric_last_target_i;
-            LAST_MMIO_ADDR:      r = fabric_last_addr_i;
-            TRACE_BASE:          r = trace_base_reg;
-            TRACE_SIZE:          r = trace_size_reg;
-            TRACE_CTRL:          r = trace_ctrl_reg;
-            TRACE_STATUS:        r = 32'h0;
-            default:             r = 32'h0;
-        endcase
-        return r;
     endfunction
 
     assign cluster_mask_lo_w = reset_init_done_reg ? cluster_mask_lo_reg : DEFAULT_CLUSTER_MASK_LO;
@@ -170,11 +192,47 @@ module BootHostIf import core_pkg::*; #(
     assign cluster_mask_hi_o = cluster_mask_hi_w;
     assign controller_irq_o  = |irq_summary_word(irq_summary_sticky_reg, loader_done_i, loader_err_code_i, core_cause_snapshot_i, core_halted_i, plic_pending_any_i);
 
-    assign s_ctrl_aw_ready_o = !wr_addr_valid_reg && !s_ctrl_b_valid_o;
-    assign s_ctrl_w_ready_o  = (wr_addr_valid_reg || s_ctrl_aw_valid_i) && !s_ctrl_b_valid_o;
-    assign s_ctrl_ar_ready_o = !s_ctrl_r_valid_o && (s_ctrl_ar_addr_i[31:12] === s_ctrl_ar_addr_i[31:12]);
+    assign ctrl_aw_ready_w   = !wr_addr_valid_reg && !ctrl_b_valid_reg;
+    assign ctrl_w_ready_w    = (wr_addr_valid_reg || s_ctrl_aw_valid_i) && !ctrl_b_valid_reg;
+    assign ctrl_ar_ready_w   = !ctrl_r_valid_reg && (s_ctrl_ar_addr_i[31:12] === s_ctrl_ar_addr_i[31:12]);
+    assign s_ctrl_aw_ready_o = ctrl_aw_ready_w;
+    assign s_ctrl_w_ready_o  = ctrl_w_ready_w;
+    assign s_ctrl_ar_ready_o = ctrl_ar_ready_w;
+    assign s_ctrl_b_valid_o  = ctrl_b_valid_reg;
+    assign s_ctrl_r_valid_o  = ctrl_r_valid_reg;
+    assign s_ctrl_r_data_o   = ctrl_r_data_reg;
     assign s_ctrl_b_resp_o   = 2'b00;
     assign s_ctrl_r_resp_o   = 2'b00;
+    wire [11:0] ctrl_write_addr_w = wr_addr_valid_reg ? wr_addr_reg[11:0] : s_ctrl_aw_addr_i[11:0];
+
+    always_comb begin
+        read_csr_rdata_w = 32'h0;
+        unique0 case (s_ctrl_ar_addr_i[11:0])
+            CSR_HACC_CAP0:           read_csr_rdata_w = cap0_value();
+            CSR_HACC_CAP1:           read_csr_rdata_w = cap1_value();
+            CSR_HACC_CTRL:           read_csr_rdata_w = ctrl_reg;
+            CSR_HACC_STATUS:         read_csr_rdata_w = hacc_status_word(loader_busy_i, loader_done_i, core_halted_i, core_running_i, loader_err_code_i);
+            CSR_CORE_BOOT_ADDR:      read_csr_rdata_w = boot_addr_reg;
+            CSR_CORE_PC_SNAPSHOT:    read_csr_rdata_w = core_pc_snapshot_i;
+            CSR_CORE_CAUSE_SNAPSHOT: read_csr_rdata_w = core_cause_snapshot_i;
+            CSR_MANIFEST_ADDR_LO:    read_csr_rdata_w = manifest_lo_reg;
+            CSR_MANIFEST_ADDR_HI:    read_csr_rdata_w = manifest_hi_reg;
+            CSR_MANIFEST_SIZE:       read_csr_rdata_w = manifest_size_reg;
+            CSR_LOADER_STATUS:       read_csr_rdata_w = loader_status_i;
+            CSR_LOADER_ERR_CODE:     read_csr_rdata_w = loader_err_code_i;
+            CSR_LOADER_ERR_INFO:     read_csr_rdata_w = loader_err_info_i;
+            CSR_IRQ_SUMMARY:         read_csr_rdata_w = irq_summary_word(irq_summary_sticky_reg, loader_done_i, loader_err_code_i, core_cause_snapshot_i, core_halted_i, plic_pending_any_i);
+            CSR_CLUSTER_MASK_LO:     read_csr_rdata_w = cluster_mask_lo_w;
+            CSR_CLUSTER_MASK_HI:     read_csr_rdata_w = cluster_mask_hi_w;
+            CSR_LAST_MMIO_TARGET:    read_csr_rdata_w = fabric_last_target_i;
+            CSR_LAST_MMIO_ADDR:      read_csr_rdata_w = fabric_last_addr_i;
+            CSR_TRACE_BASE:          read_csr_rdata_w = trace_base_reg;
+            CSR_TRACE_SIZE:          read_csr_rdata_w = trace_size_reg;
+            CSR_TRACE_CTRL:          read_csr_rdata_w = trace_ctrl_reg;
+            CSR_TRACE_STATUS:        read_csr_rdata_w = 32'h0;
+            default:             read_csr_rdata_w = 32'h0;
+        endcase
+    end
 
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
@@ -191,9 +249,9 @@ module BootHostIf import core_pkg::*; #(
             irq_summary_sticky_reg <= 32'h0;
             wr_addr_valid_reg    <= 1'b0;
             wr_addr_reg          <= 32'h0;
-            s_ctrl_b_valid_o     <= 1'b0;
-            s_ctrl_r_valid_o     <= 1'b0;
-            s_ctrl_r_data_o      <= 32'h0;
+            ctrl_b_valid_reg     <= 1'b0;
+            ctrl_r_valid_reg     <= 1'b0;
+            ctrl_r_data_reg      <= 32'h0;
             loader_kick_o        <= 1'b0;
             reset_init_done_reg  <= 1'b0;
         end else if (!reset_init_done_reg) begin
@@ -205,66 +263,66 @@ module BootHostIf import core_pkg::*; #(
 
             irq_summary_sticky_reg <= irq_summary_word(irq_summary_sticky_reg, loader_done_i, loader_err_code_i, core_cause_snapshot_i, core_halted_i, plic_pending_any_i);
 
-            if (s_ctrl_aw_valid_i && s_ctrl_aw_ready_o) begin
+            if (s_ctrl_aw_valid_i && ctrl_aw_ready_w) begin
                 wr_addr_valid_reg <= 1'b1;
                 wr_addr_reg <= s_ctrl_aw_addr_i;
             end
 
-            if ((wr_addr_valid_reg || s_ctrl_aw_valid_i) && s_ctrl_w_valid_i && s_ctrl_w_ready_o) begin
-                logic [31:0] target_addr;
-                target_addr = wr_addr_valid_reg ? wr_addr_reg : s_ctrl_aw_addr_i;
-                unique0 case (target_addr[11:0])
-                    HACC_CTRL: begin
+            if ((wr_addr_valid_reg || s_ctrl_aw_valid_i) && s_ctrl_w_valid_i && ctrl_w_ready_w) begin
+                unique0 case (ctrl_write_addr_w)
+                    CSR_HACC_CTRL: begin
                         ctrl_reg <= apply_wstrb32(ctrl_reg, s_ctrl_w_data_i, s_ctrl_w_strb_i);
                     end
-                    CORE_BOOT_ADDR: begin
+                    CSR_CORE_BOOT_ADDR: begin
                         boot_addr_reg <= apply_wstrb32(boot_addr_reg, s_ctrl_w_data_i, s_ctrl_w_strb_i);
                     end
-                    MANIFEST_ADDR_LO: begin
+                    CSR_MANIFEST_ADDR_LO: begin
                         manifest_lo_reg <= apply_wstrb32(manifest_lo_reg, s_ctrl_w_data_i, s_ctrl_w_strb_i);
                     end
-                    MANIFEST_ADDR_HI: begin
+                    CSR_MANIFEST_ADDR_HI: begin
                         manifest_hi_reg <= apply_wstrb32(manifest_hi_reg, s_ctrl_w_data_i, s_ctrl_w_strb_i);
                     end
-                    MANIFEST_SIZE: begin
+                    CSR_MANIFEST_SIZE: begin
                         manifest_size_reg <= apply_wstrb32(manifest_size_reg, s_ctrl_w_data_i, s_ctrl_w_strb_i);
                     end
-                    MANIFEST_KICK: begin
-                        if (s_ctrl_w_data_i[0]) loader_kick_o <= 1'b1;
+                    CSR_MANIFEST_KICK: begin
+                        if (s_ctrl_w_data_i[0]) begin
+                            loader_kick_o <= 1'b1;
+                        end
                     end
-                    IRQ_FORCE_ACK: begin
+                    CSR_IRQ_FORCE_ACK: begin
                         irq_summary_sticky_reg <= irq_summary_sticky_reg & ~s_ctrl_w_data_i;
                     end
-                    CLUSTER_MASK_LO: begin
+                    CSR_CLUSTER_MASK_LO: begin
                         cluster_mask_lo_reg <= apply_wstrb32(cluster_mask_lo_reg, s_ctrl_w_data_i, s_ctrl_w_strb_i);
                     end
-                    CLUSTER_MASK_HI: begin
+                    CSR_CLUSTER_MASK_HI: begin
                         cluster_mask_hi_reg <= apply_wstrb32(cluster_mask_hi_reg, s_ctrl_w_data_i, s_ctrl_w_strb_i);
                     end
-                    TRACE_BASE: begin
+                    CSR_TRACE_BASE: begin
                         trace_base_reg <= apply_wstrb32(trace_base_reg, s_ctrl_w_data_i, s_ctrl_w_strb_i);
                     end
-                    TRACE_SIZE: begin
+                    CSR_TRACE_SIZE: begin
                         trace_size_reg <= apply_wstrb32(trace_size_reg, s_ctrl_w_data_i, s_ctrl_w_strb_i);
                     end
-                    TRACE_CTRL: begin
+                    CSR_TRACE_CTRL: begin
                         trace_ctrl_reg <= apply_wstrb32(trace_ctrl_reg, s_ctrl_w_data_i, s_ctrl_w_strb_i);
                     end
                     default: ;
                 endcase
                 wr_addr_valid_reg <= 1'b0;
-                s_ctrl_b_valid_o <= 1'b1;
+                ctrl_b_valid_reg <= 1'b1;
             end
 
-            if (s_ctrl_b_valid_o && s_ctrl_b_ready_i) begin
-                s_ctrl_b_valid_o <= 1'b0;
+            if (ctrl_b_valid_reg && s_ctrl_b_ready_i) begin
+                ctrl_b_valid_reg <= 1'b0;
             end
 
-            if (s_ctrl_ar_valid_i && s_ctrl_ar_ready_o) begin
-                s_ctrl_r_valid_o <= 1'b1;
-                s_ctrl_r_data_o  <= read_csr({20'h0, s_ctrl_ar_addr_i[11:0]});
-            end else if (s_ctrl_r_valid_o && s_ctrl_r_ready_i) begin
-                s_ctrl_r_valid_o <= 1'b0;
+            if (s_ctrl_ar_valid_i && ctrl_ar_ready_w) begin
+                ctrl_r_valid_reg <= 1'b1;
+                ctrl_r_data_reg  <= read_csr_rdata_w;
+            end else if (ctrl_r_valid_reg && s_ctrl_r_ready_i) begin
+                ctrl_r_valid_reg <= 1'b0;
             end
         end
     end

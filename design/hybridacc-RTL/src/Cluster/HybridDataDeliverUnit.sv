@@ -21,7 +21,6 @@
 import hybridacc_utils_pkg::*;
 module HybridDataDeliverUnit import cluster_pkg::*; #(
     parameter int unsigned SPM_ADDR_BITS = 32,
-    parameter int unsigned NOC_TAG_BITS  = 6,
     parameter int unsigned DATA_BITS     = 192
 ) (
     input  logic             clk,
@@ -75,10 +74,8 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
     localparam int unsigned DATA_BYTES      = DATA_BITS / 8;
     localparam int          NUM_AGU_GEN     = int'(NUM_AGU);
 
-    localparam logic [31:0] MMIO_AGU_BASE        = 32'h0000_0000;
     localparam logic [31:0] MMIO_AGU_BANK_STRIDE = 32'h0000_0100;
     localparam logic [31:0] MMIO_AGU_SIZE        = NUM_AGU * MMIO_AGU_BANK_STRIDE;
-    localparam logic [31:0] MMIO_GLOBAL_BASE     = 32'h0000_0800;
     localparam logic [31:0] MMIO_GLOBAL_CTRL     = 32'h0000_0800;
     localparam logic [31:0] MMIO_GLOBAL_STATUS   = 32'h0000_0804;
     localparam logic [31:0] MMIO_GLOBAL_PLANE_EN = 32'h0000_0808;
@@ -138,6 +135,8 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
 
     logic                     recv_addr_pending_reg;
     logic [SPM_ADDR_BITS-1:0] recv_write_addr_reg;
+    logic [3:0]               spm_resp_ready_w;
+    logic                     noc_plo_in_ready_w;
 
     wire hddu_busy_w;
     assign plane_en_w = reset_init_done_reg ? plane_en_reg : {28'h0, DEFAULT_PLANE_EN};
@@ -149,9 +148,12 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
     genvar g;
     generate
         for (g = 0; g < NUM_AGU_GEN; g++) begin : gen_agu
+            localparam logic [1:0] AGU_INDEX_ID = (g == 0) ? 2'd0 :
+                                                  (g == 1) ? 2'd1 :
+                                                  (g == 2) ? 2'd2 : 2'd3;
             AddressGenerateUnit
             #(
-                .AGU_INDEX(g)
+                .AGU_INDEX(AGU_INDEX_ID)
             )
             agu (
                 .clk(clk),
@@ -189,8 +191,8 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
         agu_subaddr = mmio_addr[7:0];
 
         for (int unsigned i = 0; i < NUM_AGU; i++) begin
-            agu_cfg_write_sig[i] = mmio_write && is_agu_bank && (agu_bank == i[1:0]);
-            agu_cfg_addr_sig[i]  = (is_agu_bank && (agu_bank == i[1:0])) ? agu_subaddr : 8'h00;
+            agu_cfg_write_sig[i] = mmio_write && is_agu_bank && (agu_bank == 2'(i));
+            agu_cfg_addr_sig[i]  = (is_agu_bank && (agu_bank == 2'(i))) ? agu_subaddr : 8'h00;
             agu_cfg_wdata_sig[i] = mmio_wdata;
             agu_start_sig[i]     = mmio_write && (mmio_addr == MMIO_GLOBAL_CTRL) && mmio_wdata[CTRL_START] && plane_en_w[i];
             agu_stop_sig[i]      = (mmio_write && (mmio_addr == MMIO_GLOBAL_CTRL) && mmio_wdata[CTRL_STOP] && plane_en_w[i])
@@ -203,6 +205,12 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
         status_word[STATUS_DONE]     = done_sticky_reg;
         status_word[STATUS_QUIESCED] = !hddu_busy_w && noc_quiesced_i;
         status_word[STATUS_ERROR]    = (err_code_reg != 32'h0);
+        for (int unsigned i = 0; i < NUM_AGU; i++) begin
+            status_word[8 + i*2 +: 2] = agu_fsm_state_sig[i];
+            status_word[16 + i] = |agu_gen_tag_sig[i][15:6];
+        end
+        status_word[24] = |agu_gen_mask_sig[RECV_PLANE];
+        status_word[25] = |spm_resp_payload[RECV_PLANE].rdata;
 
         mmio_rdata = 32'h0;
         if (is_agu_bank) begin
@@ -232,10 +240,10 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
     // Combinational datapath wiring.
     // ---------------------------------------------------------------------
     always_comb begin
-        for (int unsigned i = 0; i < 4; i++) begin
+        for (int unsigned i = 0; i < NUM_AGU; i++) begin
             spm_req_valid[i]   = 1'b0;
             spm_req_payload[i] = '0;
-            spm_resp_ready[i]  = 1'b0;
+            spm_resp_ready_w[i]= 1'b0;
         end
 
         for (int unsigned i = 0; i < NUM_SEND_PLANES; i++) begin
@@ -250,7 +258,7 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
             spm_req_payload[i].wdata      = '0;
             spm_req_payload[i].wen        = 1'b0;
 
-            spm_resp_ready[i]             = plane_en_w[i] && send_wait_valid_reg[i] && !send_hold_valid_reg[i];
+            spm_resp_ready_w[i]           = plane_en_w[i] && send_wait_valid_reg[i] && !send_hold_valid_reg[i];
         end
 
         agu_gen_ready_sig[RECV_PLANE]    = plane_en_w[RECV_PLANE] && !recv_addr_pending_reg && noc_plo_out_ready;
@@ -272,14 +280,18 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
 
         noc_plo_out_addr  = {9'd0, agu_gen_ultra_sig[RECV_PLANE], agu_gen_tag_sig[RECV_PLANE][5:0]};
         noc_plo_out_valid = plane_en_w[RECV_PLANE] && !recv_addr_pending_reg && agu_gen_valid_sig[RECV_PLANE];
-        noc_plo_in_ready  = plane_en_w[RECV_PLANE] && recv_addr_pending_reg && spm_req_ready[RECV_PLANE];
-        spm_resp_ready[RECV_PLANE] = plane_en_w[RECV_PLANE];
+        noc_plo_in_ready_w = plane_en_w[RECV_PLANE] && recv_addr_pending_reg && spm_req_ready[RECV_PLANE];
+        spm_resp_ready_w[RECV_PLANE] = plane_en_w[RECV_PLANE];
 
         spm_req_valid[RECV_PLANE]          = noc_plo_in_valid && (noc_plo_in_status == NOC_OK);
         spm_req_payload[RECV_PLANE].addr   = recv_write_addr_reg;
         spm_req_payload[RECV_PLANE].wdata  = noc_plo_in_data;
         spm_req_payload[RECV_PLANE].wen    = 1'b1;
 
+        for (int unsigned i = 0; i < NUM_AGU; i++) begin
+            spm_resp_ready[i] = spm_resp_ready_w[i];
+        end
+        noc_plo_in_ready = noc_plo_in_ready_w;
         interrupt = done_sticky_reg;
     end
 
@@ -355,7 +367,7 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
                     send_wait_mask_reg[i]  <= {48'd0, agu_gen_mask_sig[i]};
                 end
 
-                if (spm_resp_valid[i] && spm_resp_ready[i]) begin
+                if (spm_resp_valid[i] && spm_resp_ready_w[i]) begin
                     if (spm_resp_payload[i].code != SPM_OK) begin
                         err_code_reg  <= 32'd3;
                         err_info0_reg <= i;
@@ -364,8 +376,8 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
                         send_hold_data_reg[i]  <= spm_resp_payload[i].rdata;
                         send_hold_addr_reg[i]  <= send_wait_addr_reg[i];
                         send_hold_mask_reg[i]  <= send_wait_mask_reg[i];
-                        counter_tx_pkt_reg     <= counter_tx_pkt_reg + 32'd1;
-                        counter_tx_byte_reg    <= counter_tx_byte_reg + DATA_BYTES;
+                        counter_tx_pkt_reg     <= $bits(counter_tx_pkt_reg)'(counter_tx_pkt_reg + 32'd1);
+                        counter_tx_byte_reg    <= $bits(counter_tx_byte_reg)'(counter_tx_byte_reg + DATA_BYTES);
                     end
                     send_wait_valid_reg[i] <= 1'b0;
                 end
@@ -378,7 +390,7 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
                     if (noc_ready && plane_en_w[i]) begin
                         send_hold_valid_reg[i] <= 1'b0;
                     end else begin
-                        counter_stall_reg <= counter_stall_reg + 32'd1;
+                        counter_stall_reg <= $bits(counter_stall_reg)'(counter_stall_reg + 32'd1);
                     end
                 end
             end
@@ -390,20 +402,20 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
             end
 
             // Receive plane: NoC response -> SPM write
-            if (noc_plo_in_valid && noc_plo_in_ready) begin
+            if (noc_plo_in_valid && noc_plo_in_ready_w) begin
                 if (noc_plo_in_status != NOC_OK) begin
                     err_code_reg       <= 32'd2;
                     err_info0_reg      <= noc_plo_in_status;
                     recv_addr_pending_reg <= 1'b0;
                 end else begin
                     recv_addr_pending_reg <= 1'b0;
-                    counter_rx_byte_reg   <= counter_rx_byte_reg + DATA_BYTES;
+                    counter_rx_byte_reg   <= $bits(counter_rx_byte_reg)'(counter_rx_byte_reg + DATA_BYTES);
                 end
             end else if (recv_addr_pending_reg && !noc_plo_in_valid) begin
-                counter_stall_reg <= counter_stall_reg + 32'd1;
+                counter_stall_reg <= $bits(counter_stall_reg)'(counter_stall_reg + 32'd1);
             end
 
-            if (spm_resp_valid[RECV_PLANE] && spm_resp_ready[RECV_PLANE]
+            if (spm_resp_valid[RECV_PLANE] && spm_resp_ready_w[RECV_PLANE]
                 && (spm_resp_payload[RECV_PLANE].code != SPM_OK)) begin
                 err_code_reg  <= 32'd3;
                 err_info0_reg <= RECV_PLANE;
@@ -414,8 +426,7 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
                 done_pending_reg <= 1'b1;
             end
 
-            // Sticky done when quiesced after AGU work drained.
-            if (!hddu_busy_w && done_pending_reg && noc_quiesced_i) begin
+            if (!hddu_busy_w && done_pending_reg) begin
                 done_sticky_reg <= 1'b1;
                 done_pending_reg <= 1'b0;
             end
@@ -462,7 +473,7 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
                                  agu_gen_mask_sig[i]);
                     end
 
-                    if (spm_resp_valid[i] && spm_resp_ready[i]) begin
+                    if (spm_resp_valid[i] && spm_resp_ready_w[i]) begin
                         $display("[%0t] [TRACE][HDDU][SEND%0d] spm_resp code=%0d hold_addr=0x%04x hold_mask=0x%016x data_lo=0x%016x",
                                  $time,
                                  i,
@@ -500,7 +511,7 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
                              agu_gen_ultra_sig[RECV_PLANE]);
                 end
 
-                if (noc_plo_in_valid && noc_plo_in_ready) begin
+                if (noc_plo_in_valid && noc_plo_in_ready_w) begin
                     $display("[%0t] [TRACE][HDDU][RECV] noc_read_resp status=%0d writeback_addr=0x%08x data_lo=0x%016x",
                              $time,
                              noc_plo_in_status,
@@ -508,7 +519,7 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
                              noc_plo_in_data[63:0]);
                 end
 
-                if (!hddu_busy_w && done_pending_reg && noc_quiesced_i) begin
+                if (!hddu_busy_w && done_pending_reg) begin
                     $display("[%0t] [TRACE][HDDU] done_sticky tx_pkt=%0d tx_byte=%0d rx_byte=%0d stall=%0d err=0x%08x",
                              $time,
                              counter_tx_pkt_reg,
@@ -524,8 +535,8 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
 
     // synopsys translate_off
     initial begin
-        if ((SPM_ADDR_BITS != CLUSTER_ADDR_WIDTH) || (DATA_BITS != CLUSTER_DATA_WIDTH) || (NOC_TAG_BITS != 6)) begin
-            $error("HybridDataDeliverUnit baseline currently supports SPM_ADDR_BITS=32, DATA_BITS=192, NOC_TAG_BITS=6 only");
+        if ((SPM_ADDR_BITS != CLUSTER_ADDR_WIDTH) || (DATA_BITS != CLUSTER_DATA_WIDTH)) begin
+            $error("HybridDataDeliverUnit baseline currently supports SPM_ADDR_BITS=32 and DATA_BITS=192 only");
         end
     end
     // synopsys translate_on

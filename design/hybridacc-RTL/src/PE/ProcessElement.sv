@@ -78,6 +78,7 @@ module ProcessElement #(
     logic exe_m_stall_dl, exe_m_stall_ps, exe_m_stall_pd;
     logic exe_a_stall_port_pli, exe_a_stall_port_plo;
     logic stage_signal_observed_w;
+    logic stage_signal_unknown_w;
 
     assign stage_signal_observed_w = (^if_id_pc_sig)
                                    ^ exe_m_stall_dl
@@ -85,6 +86,7 @@ module ProcessElement #(
                                    ^ exe_m_stall_pd
                                    ^ exe_a_stall_port_pli
                                    ^ exe_a_stall_port_plo;
+    assign stage_signal_unknown_w = (stage_signal_observed_w !== stage_signal_observed_w);
 
     PErouter #(.PE_FIFO_DEPTH(PE_FIFO_DEPTH)) router (
         .clk(clk), .reset_n(reset_n), .enable(router_enable), .route_mode(router_mode),
@@ -135,17 +137,27 @@ module ProcessElement #(
         pe_running_next = pe_running_reg;
         stage_reset_next = 1'b0;
 
-        if (router_pe_reset) stage_reset_next = 1'b1;
+        if (router_pe_reset) begin
+            stage_reset_next = 1'b1;
+        end
         if (router_pe_start && !pe_running_reg) begin
             stage_reset_next = 1'b1;
             pe_running_next = 1'b1;
         end
-        if (router_pe_program && pe_running_reg) pe_running_next = 1'b0;
-
-        if (pe_running_reg && if_id_halted_sig && exe_m_halted_sig && exe_a_halted_sig)
+        if (router_pe_program && pe_running_reg) begin
             pe_running_next = 1'b0;
+        end
 
-        pe_busy = pe_running_reg | (1'b0 & stage_signal_observed_w);
+        if (pe_running_reg && if_id_halted_sig && exe_m_halted_sig && exe_a_halted_sig) begin
+            pe_running_next = 1'b0;
+        end
+
+        if (stage_signal_unknown_w) begin
+            pe_running_next = 1'b0;
+            stage_reset_next = 1'b1;
+        end
+
+        pe_busy = pe_running_reg;
     end
 
     always_ff @(posedge clk or negedge reset_n) begin

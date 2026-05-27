@@ -1,5 +1,7 @@
 # HybridAcc RTL 模擬測試指南
 
+Repo-wide 操作入口請先看 [../../../doc/index.md](../../../doc/index.md) 與 [../../../doc/user-manual/rtl-simulation.md](../../../doc/user-manual/rtl-simulation.md)；本文件保留完整子系統細節。
+
 本文件整理 HybridAcc RTL 目前可用的模擬測試流程，說明從環境準備、RTL testbench 執行、資料驅動的 NoC/Cluster workload 驗證、top-level firmware bring-up，到 gate-level simulation 的操作步驟。
 
 內容以 [design/hybridacc-RTL/Makefile](../Makefile) 為主，所有指令與輸出路徑都對應目前 repo 中實際存在的 target 與 testbench。
@@ -513,7 +515,7 @@ done
 若只是要重跑目前已收斂好的 single-wave regression，建議直接使用 [design/hybridacc-RTL/Makefile](../Makefile) 內建 target，而不是手動拼每個步驟。Makefile 現在會自動完成下列工作：
 
 1. 對指定 YAML 執行 `uv run hacc-compile`。
-2. 用 `scripts/gen_flat_fw_mem.py` 生成給 `SectionLoader` 使用的 `firmware.mem`。
+2. 用 `uv run hacc-flat-fw-mem` 生成給 `SectionLoader` 使用的 `firmware.mem`。
 3. 生成 `dram_init.bin`、`golden_output.bin`、`golden_meta.txt`。
 4. 執行 `tb_hybridacc_sim.sv`，並帶入 `+SKIP_FW_TEST_SUMMARY +SKIP_GOLDEN_EXACT_CHECK`。
 5. 在 RTL run 結束後，用外部 comparator 做 fp16 容忍比較。

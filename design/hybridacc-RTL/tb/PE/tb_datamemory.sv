@@ -28,7 +28,7 @@ module tb_datamemory;
     tb_clock_reset clk_rst(.clk(clk), .reset_n(reset_n));
 
     DataMemory dut(
-        .clk(clk), .reset_n(reset_n), .bank_sel(bank_sel),
+        .clk(clk), .bank_sel(bank_sel),
         .dm_write_en(dm_write_en), .dm_write_addr(dm_write_addr), .dm_write_data(dm_write_data), .dm_write_mask(dm_write_mask),
         .dm_read_addr(dm_read_addr), .dm_read_data(dm_read_data)
     );

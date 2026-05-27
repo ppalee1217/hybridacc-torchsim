@@ -249,8 +249,6 @@ module EXE_A_Stage (
             S_EXEC_PLI_VADDU: begin
                 pr_incr_pcounter = decode_reg.pr_incr_vcounter;
             end
-            default: begin
-            end
         endcase
     end
 
@@ -321,26 +319,6 @@ module EXE_A_Stage (
     end
 
     // =========================================================================
-    // Helper: Determine next state from a new instruction decode
-    // (shared between IDLE, NORMAL_MODE, EXEC_PLI_VADDU, WAIT_PLO)
-    // =========================================================================
-    function automatic exe_a_state_t classify_new_inst(
-        input pe_decode_signals_t dec,
-        input logic pli_v
-    );
-        if (dec.halt)
-            return S_IDLE;
-        else if (dec.pli_plo_operation)
-            return pli_v ? S_EXEC_PLI_VADDU : S_WAIT_PLI;
-        else if (dec.vaddu_en && dec.vaddu_mode == 32'd0)
-            return S_VMAC_S1;
-        else if (dec.vaddu_en)
-            return S_NORMAL_MODE;
-        else
-            return S_IDLE;
-    endfunction
-
-    // =========================================================================
     // Combinational: Next-State Logic (Main FSM)
     // =========================================================================
     always_comb begin
@@ -366,11 +344,7 @@ module EXE_A_Stage (
             s1_reg0_next   = 16'h0000;
             s1_reg1_next   = 16'h0000;
             s2_reg_next    = 16'h0000;
-        end
-        else if (!pe_running || halted_reg) begin
-            // Keep current state
-        end
-        else begin
+        end else if (pe_running && !halted_reg) begin
             case (state_reg)
                 // ---------------------------------------------------------
                 S_IDLE: begin
