@@ -104,22 +104,32 @@ private:
         wait_cycles(1);
     }
 
-    void send_req(VRDSIG<noc_request_t>& sig, const noc_request_t& req) {
+    bool send_req(VRDSIG<noc_request_t>& sig, const noc_request_t& req, int max_cycles = 200) {
         sig.data_sig.write(req);
         sig.valid_sig.write(true);
-        do {
+        for (int i = 0; i < max_cycles; ++i) {
             wait(clk.posedge_event());
-        } while (!sig.ready_sig.read());
+            if (sig.ready_sig.read()) {
+                sig.valid_sig.write(false);
+                return true;
+            }
+        }
         sig.valid_sig.write(false);
+        return false;
     }
 
-    void send_addr_req(VRDSIG<noc_addr_req_t>& sig, const noc_addr_req_t& req) {
+    bool send_addr_req(VRDSIG<noc_addr_req_t>& sig, const noc_addr_req_t& req, int max_cycles = 200) {
         sig.data_sig.write(req);
         sig.valid_sig.write(true);
-        do {
+        for (int i = 0; i < max_cycles; ++i) {
             wait(clk.posedge_event());
-        } while (!sig.ready_sig.read());
+            if (sig.ready_sig.read()) {
+                sig.valid_sig.write(false);
+                return true;
+            }
+        }
         sig.valid_sig.write(false);
+        return false;
     }
 
     void program_pe(const std::vector<uint16_t>& program) {
@@ -132,7 +142,7 @@ private:
             req.addr = PE_CMD_ADDRESS;
             req.data = cmd;
             req.mask = 0;
-            send_req(ps_sig, req);
+            assert(send_req(ps_sig, req));
         }
     }
 
@@ -141,7 +151,7 @@ private:
         req.addr = PE_CMD_ADDRESS;
         req.data = static_cast<uint64_t>(message_command_t::CMD_START_PE);
         req.mask = 0;
-        send_req(ps_sig, req);
+        assert(send_req(ps_sig, req));
     }
 
     bool wait_for_busy(bool target, int max_cycles) {
@@ -215,13 +225,17 @@ private:
         pli_req.addr = 0x0000;
         pli_req.data = 0x123456789ABCDEF0ULL;
         pli_req.mask = 0;
-        send_req(pli_sig, pli_req);
+        assert(send_req(pli_sig, pli_req));
         std::cout << "Sent PLI request" << std::endl;
 
         noc_addr_req_t plo_req{};
         plo_req.addr = 0x0000;
-        send_addr_req(plo_req_sig, plo_req);
-        std::cout << "Sent PLO requests" << std::endl;
+        bool sent_plo_req = send_addr_req(plo_req_sig, plo_req, 50);
+        if (sent_plo_req) {
+            std::cout << "Sent PLO request" << std::endl;
+        } else {
+            std::cout << "PLO request was not accepted within timeout" << std::endl;
+        }
 
         uint64_t plo_data = 0;
         if (try_read_plo(plo_data)) {
