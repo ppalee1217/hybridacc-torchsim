@@ -124,8 +124,10 @@ end
 
         // Unstall: allow PLO drain
         plo_ready = 1; valid_in = 0; pli_valid = 0;
-        @(posedge clk); @(negedge clk);  // S_WAIT_PLO → drains buffer → S_IDLE
-        `CHECK_BIT("PLO_unstall: stall=0", stall_port_plo, 1'b0)
+        @(posedge clk); @(negedge clk);  // S_WAIT_PLO drain phase
+        `CHECK_BIT("PLO_unstall_drain: stall=1", stall_port_plo, 1'b1)
+        @(posedge clk); @(negedge clk);  // S_WAIT_PLO refill phase → S_IDLE
+        `CHECK_BIT("PLO_unstall_refill: stall=0", stall_port_plo, 1'b0)
 
         // Reset FSM before Test 6
         stage_reset = 1; @(posedge clk); stage_reset = 0; @(posedge clk); @(negedge clk);

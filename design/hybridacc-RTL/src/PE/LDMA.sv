@@ -49,6 +49,7 @@ module LDMA (
     logic [15:0] dma_base_reg, dma_offset_reg, dma_len_reg, dma_stride_reg, dma_loop_reg;
     logic dma_broadcast_reg;
     LDMARequestType request_type_reg;
+    logic [2:0] dm_read_byte_offset_reg;
 
     // Next-state signals (combinational)
     LDMAState state_next;
@@ -59,6 +60,7 @@ module LDMA (
     logic [15:0] dma_base_next, dma_offset_next, dma_len_next, dma_stride_next, dma_loop_next;
     logic dma_broadcast_next;
     LDMARequestType request_type_next;
+    logic [8:0] dm_read_addr_raw;
 
     function automatic logic [63:0] mask_and_broadcast(
         input logic [63:0] v,
@@ -100,6 +102,23 @@ module LDMA (
             default: begin
                 out_v = v;
             end
+        endcase
+        return out_v;
+    endfunction
+
+    function automatic logic [63:0] normalize_read_data(
+        input logic [63:0] v,
+        input LDMARequestType request_type,
+        input logic [2:0] byte_offset
+    );
+        logic [63:0] out_v;
+
+        out_v = v;
+        case (request_type)
+            LOAD_BYTE,
+            LOAD_HALF,
+            LOAD_WORD: out_v = v >> {byte_offset, 3'b000};
+            default:   out_v = v;
         endcase
         return out_v;
     endfunction
@@ -217,7 +236,11 @@ module LDMA (
             LOAD_WAIT: begin
                 state_next = LOAD_PIPELINE;
                 dma_len_next = dma_len_reg - 16'd1;
-                dmrv_next = u64_to_v_fp16(mask_and_broadcast(dm_read_data, request_type_reg, dma_broadcast_reg));
+                dmrv_next = u64_to_v_fp16(mask_and_broadcast(
+                    normalize_read_data(dm_read_data, request_type_reg, dm_read_byte_offset_reg),
+                    request_type_reg,
+                    dma_broadcast_reg
+                ));
             end
             LOAD_PIPELINE: begin
                 if (next) begin
@@ -235,7 +258,11 @@ module LDMA (
                         dma_offset_next = dma_offset_advance;
                         dma_len_next = dma_len_reg - 16'd1;
                     end
-                    dmrv_next = u64_to_v_fp16(mask_and_broadcast(dm_read_data, request_type_reg, dma_broadcast_reg));
+                    dmrv_next = u64_to_v_fp16(mask_and_broadcast(
+                        normalize_read_data(dm_read_data, request_type_reg, dm_read_byte_offset_reg),
+                        request_type_reg,
+                        dma_broadcast_reg
+                    ));
                 end
             end
             DONE: begin
@@ -263,6 +290,7 @@ module LDMA (
             dma_broadcast_reg <= 1'b0;
             request_type_reg <= LOAD_DWORD;
             dma_loop_reg <= 16'h0;
+            dm_read_byte_offset_reg <= 3'b000;
         end else begin
             state_reg <= state_next;
             dmrv_reg <= dmrv_next;
@@ -279,28 +307,33 @@ module LDMA (
             dma_broadcast_reg <= dma_broadcast_next;
             request_type_reg <= request_type_next;
             dma_loop_reg <= dma_loop_next;
+            dm_read_byte_offset_reg <= dm_read_addr_raw[2:0];
         end
     end
 
     // Output combinational logic
     always_comb begin
-        dm_read_addr = dma_base_reg[8:0] + dma_offset_reg[8:0];
+        dm_read_addr_raw = dma_base_reg[8:0] + dma_offset_reg[8:0];
+        dm_read_addr = dm_read_addr_raw;
         dmrv_out = dmrv_reg;
         dl_stall_out = 1'b0;
 
         case (state_reg)
             IDLE: begin
                 if (active && (dma_len_static_reg != 16'h0)) begin
-                    dm_read_addr = dma_base_static_reg[8:0];
+                    dm_read_addr_raw = dma_base_static_reg[8:0];
+                    dm_read_addr = dm_read_addr_raw;
                 end
             end
             LOAD_PIPELINE: begin
                 if (next) begin
-                    dm_read_addr = dma_base_reg[8:0] + dma_offset_next[8:0];
+                    dm_read_addr_raw = dma_base_reg[8:0] + dma_offset_next[8:0];
+                    dm_read_addr = dm_read_addr_raw;
                 end
             end
             default: begin
-                dm_read_addr = dma_base_reg[8:0] + dma_offset_reg[8:0];
+                dm_read_addr_raw = dma_base_reg[8:0] + dma_offset_reg[8:0];
+                dm_read_addr = dm_read_addr_raw;
                 dmrv_out = dmrv_reg;
                 dl_stall_out = 1'b0;
             end

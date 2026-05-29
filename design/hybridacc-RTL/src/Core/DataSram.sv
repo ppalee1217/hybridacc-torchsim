@@ -64,25 +64,6 @@ module DataSram #(
     logic        core_write_en_w;
     logic        core_read_en_w;
 
-`ifdef HACC_SIM_DEBUG_READBACK
-    logic [7:0] debug_mem [0:SRAM_BYTES-1];
-
-    function automatic logic [31:0] debug_read_word(input logic [31:0] byte_addr);
-        logic [31:0] value;
-        logic [31:0] base;
-        begin
-            value = 32'h0;
-            base = wrap_byte_addr(byte_addr & ~32'h3);
-            for (int unsigned byte_idx = 0; byte_idx < 4; byte_idx++) begin
-                if ((base + byte_idx) < SRAM_BYTES) begin
-                    value[byte_idx*8 +: 8] = debug_mem[base + byte_idx];
-                end
-            end
-            return value;
-        end
-    endfunction
-`endif
-
     function automatic logic [31:0] wrap_byte_addr(input logic [31:0] byte_addr);
         return byte_addr & (SRAM_BYTES - 1);
     endfunction

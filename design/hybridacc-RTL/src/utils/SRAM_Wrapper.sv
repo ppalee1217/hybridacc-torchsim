@@ -47,63 +47,27 @@ module TS1N16ADFPCLLLVTA128X64M4SWSHOD (
     localparam int unsigned DEPTH = 128;
     localparam int unsigned WIDTH = 64;
     localparam int unsigned BYTES_PER_WORD = WIDTH / 8;
-    localparam int unsigned BYTE_DEPTH = DEPTH * BYTES_PER_WORD;
-    localparam int unsigned BYTE_WINDOW_LOGICAL_BYTES = BYTE_DEPTH / 2;
-
     logic [WIDTH-1:0] mem [0:DEPTH-1];
-    logic [7:0] byte_mem [0:BYTE_DEPTH-1];
-    logic       byte_window_mode;
-    logic [2:0] byte_window_offset;
 
-    assign PUDELAY = 1'b0 & (RTSEL === RTSEL) & (WTSEL === WTSEL);
-    assign byte_window_mode = SLP & SD & ~DSLP;
-    assign byte_window_offset = {WTSEL[0], RTSEL};
+    assign PUDELAY = 1'b0 & (SLP === SLP) & (DSLP === DSLP) & (SD === SD)
+                         & (RTSEL === RTSEL) & (WTSEL === WTSEL);
 
     always @(posedge CLK) begin
         if (!CEB) begin
-            if (byte_window_mode) begin
-                logic [WIDTH-1:0] read_word;
-                int unsigned      base_byte_addr;
-
-                base_byte_addr = $unsigned(($unsigned(A) * BYTES_PER_WORD) + $unsigned(byte_window_offset));
-                if (!WEB) begin
-                    for (int i = 0; i < WIDTH; i++) begin
-                        int unsigned write_byte_addr;
-
-                        write_byte_addr = $unsigned(base_byte_addr + (i / 8));
-                        if (!BWEB[i]) begin
-                            byte_mem[write_byte_addr][i % 8] <= D[i];
-                        end
-                    end
-                    for (int i = 0; i < BYTES_PER_WORD - 1; i++) begin
-                        byte_mem[BYTE_WINDOW_LOGICAL_BYTES + i] <= 8'h00;
+            if (!WEB) begin
+                for (int i = 0; i < WIDTH; i++) begin
+                    if (!BWEB[i]) begin
+                        mem[A][i] <= D[i];
                     end
                 end
-
-                read_word = '0;
-                for (int i = 0; i < BYTES_PER_WORD; i++) begin
-                    read_word[i*8 +: 8] = byte_mem[base_byte_addr + i];
-                end
-                Q <= read_word;
-            end else if (!SLP && !DSLP && !SD) begin
-                if (!WEB) begin
-                    for (int i = 0; i < WIDTH; i++) begin
-                        if (!BWEB[i]) begin
-                            mem[A][i] <= D[i];
-                        end
-                    end
-                end
-                Q <= mem[A];
             end
+            Q <= mem[A];
         end
     end
 
     initial begin
         for (int i = 0; i < DEPTH; i++) begin
             mem[i] = {WIDTH{1'b0}};
-        end
-        for (int i = 0; i < BYTE_DEPTH; i++) begin
-            byte_mem[i] = 8'h00;
         end
         Q = {WIDTH{1'b0}};
     end

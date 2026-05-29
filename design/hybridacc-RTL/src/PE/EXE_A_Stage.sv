@@ -64,6 +64,7 @@ module EXE_A_Stage (
     // PLO output buffer
     logic             plo_buf_valid_reg;
     logic [63:0]      plo_buf_data_reg;
+    logic             plo_pending_valid_reg;
 
     // VMAC 3-stage pipeline registers
     fp16_t            s1_reg0, s1_reg1, s2_reg_r;
@@ -80,6 +81,7 @@ module EXE_A_Stage (
 
     logic             plo_buf_valid_next;
     logic [63:0]      plo_buf_data_next;
+    logic             plo_pending_valid_next;
     logic             plo_buf_do_pop_w;
     logic             plo_buf_can_push_w;
     logic             plo_buf_produce_w;
@@ -169,7 +171,7 @@ module EXE_A_Stage (
                 ready_out_w = !plo_buf_valid_reg || plo_ready;
             end
             S_WAIT_PLO: begin
-                ready_out_w = plo_ready;
+                ready_out_w = 1'b0;
             end
             default: begin  // S_VMAC_S2, S_VMAC_S3, S_WAIT_PLI
                 ready_out_w = 1'b0;
@@ -258,7 +260,9 @@ module EXE_A_Stage (
     always_comb begin
         plo_buf_do_pop_w = plo_buf_valid_reg && plo_ready;
         plo_buf_can_push_w = !plo_buf_valid_reg || plo_ready;
-        plo_buf_produce_w = (state_reg == S_EXEC_PLI_VADDU || state_reg == S_WAIT_PLO) && plo_buf_can_push_w;
+        plo_buf_produce_w =
+            ((state_reg == S_EXEC_PLI_VADDU) && plo_buf_can_push_w)
+            || ((state_reg == S_WAIT_PLO) && !plo_buf_valid_reg && plo_pending_valid_reg);
         plo_buf_vpsum_data_w = (state_reg == S_WAIT_PLO)
             ? v_fp16_to_u64(vaddu_result_reg)
             : v_fp16_to_u64(vaddu_result_sig);
@@ -301,8 +305,7 @@ module EXE_A_Stage (
         if (state_reg == S_WAIT_PLI) begin
             pli_ready = 1'b1;
         end else if (state_reg == S_IDLE
-                  || state_reg == S_EXEC_PLI_VADDU
-                  || state_reg == S_WAIT_PLO) begin
+                  || state_reg == S_EXEC_PLI_VADDU) begin
             pli_ready = accept_vpsum;
         end
     end
@@ -331,6 +334,7 @@ module EXE_A_Stage (
         pli_data_next      = pli_data_reg;
         vaddu_result_next  = vaddu_result_reg;
         halted_next        = halted_reg;
+        plo_pending_valid_next = plo_pending_valid_reg;
         s1_reg0_next       = s1_reg0;
         s1_reg1_next       = s1_reg1;
         s2_reg_next        = s2_reg_r;
@@ -341,6 +345,7 @@ module EXE_A_Stage (
             decode_s1_next = pe_decode_signals_zero();
             decode_s2_next = pe_decode_signals_zero();
             halted_next    = 1'b0;
+            plo_pending_valid_next = 1'b0;
             s1_reg0_next   = 16'h0000;
             s1_reg1_next   = 16'h0000;
             s2_reg_next    = 16'h0000;
@@ -471,7 +476,8 @@ module EXE_A_Stage (
 
                     if (!(!plo_buf_valid_reg || plo_ready)) begin
                         // PLO buffer full → wait
-                        state_next = S_WAIT_PLO;
+                        state_next             = S_WAIT_PLO;
+                        plo_pending_valid_next = 1'b1;
                     end else begin
                         if (ready_out_w && valid_in) begin
                             decode_next    = EXE_M_decode_signals_in;
@@ -506,37 +512,13 @@ module EXE_A_Stage (
 
                 // ---------------------------------------------------------
                 S_WAIT_PLO: begin
-                    if (!plo_ready) begin
+                    if (plo_buf_valid_reg) begin
                         state_next = S_WAIT_PLO;
+                    end else if (plo_pending_valid_reg) begin
+                        plo_pending_valid_next = 1'b0;
+                        state_next             = S_IDLE;
                     end else begin
-                        if (ready_out_w && valid_in) begin
-                            decode_next    = EXE_M_decode_signals_in;
-                            vmul_data_next = vmul_out_in;
-                            decode_s1_next = pe_decode_signals_zero();
-                            decode_s2_next = pe_decode_signals_zero();
-
-                            if (EXE_M_decode_signals_in.halt) begin
-                                halted_next = 1'b1;
-                                state_next  = S_IDLE;
-                            end
-                            else if (EXE_M_decode_signals_in.pli_plo_operation) begin
-                                if (pli_valid) begin
-                                    pli_data_next = u64_to_v_fp16(pli_data);
-                                    state_next    = S_EXEC_PLI_VADDU;
-                                end else begin
-                                    state_next    = S_WAIT_PLI;
-                                end
-                            end
-                            else if (EXE_M_decode_signals_in.vaddu_en
-                                     && EXE_M_decode_signals_in.vaddu_mode == 32'd0)
-                                state_next = S_VMAC_S1;
-                            else if (EXE_M_decode_signals_in.vaddu_en)
-                                state_next = S_NORMAL_MODE;
-                            else
-                                state_next = S_IDLE;
-                        end else begin
-                            state_next = S_IDLE;
-                        end
+                        state_next = S_IDLE;
                     end
                 end
 
@@ -559,6 +541,7 @@ module EXE_A_Stage (
             halted_reg        <= 1'b0;
             plo_buf_valid_reg <= 1'b0;
             plo_buf_data_reg  <= 64'd0;
+            plo_pending_valid_reg <= 1'b0;
             s1_reg0           <= 16'h0000;
             s1_reg1           <= 16'h0000;
             s2_reg_r          <= 16'h0000;
@@ -573,6 +556,7 @@ module EXE_A_Stage (
             halted_reg        <= halted_next;
             plo_buf_valid_reg <= plo_buf_valid_next;
             plo_buf_data_reg  <= plo_buf_data_next;
+            plo_pending_valid_reg <= plo_pending_valid_next;
             s1_reg0           <= s1_reg0_next;
             s1_reg1           <= s1_reg1_next;
             s2_reg_r          <= s2_reg_next;
