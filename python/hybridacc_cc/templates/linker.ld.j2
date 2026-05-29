@@ -49,7 +49,9 @@ SECTIONS
     .bss : ALIGN(4)
     {
         _sbss = .;
+        *(.sbss .sbss.*)
         *(.bss .bss.*)
+        *(.scommon)
         *(COMMON)
         . = ALIGN(4);
         _ebss = .;

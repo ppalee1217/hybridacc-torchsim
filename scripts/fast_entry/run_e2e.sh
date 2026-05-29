@@ -344,7 +344,7 @@ monitor_parallel_progress() {
     local total="$2"
     local jobs="$3"
     if [[ -t 1 ]]; then
-        uv run python "$SCRIPT_DIR/run_e2e_monitor.py" --status-dir "$status_dir" --total "$total" --jobs "$jobs"
+        uv run hacc-e2e-monitor --status-dir "$status_dir" --total "$total" --jobs "$jobs"
     else
         wait_for_parallel_completion "$status_dir" "$total"
     fi

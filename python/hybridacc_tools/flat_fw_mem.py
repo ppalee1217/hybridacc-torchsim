@@ -157,7 +157,7 @@ def main() -> int:
         print(len(image))
         return 0
     except Exception as exc:  # pragma: no cover - CLI path
-        print(f"gen_flat_fw_mem.py: {exc}", file=sys.stderr)
+        print(f"hacc-flat-fw-mem: {exc}", file=sys.stderr)
         return 1
 
 

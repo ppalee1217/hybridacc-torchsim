@@ -10,6 +10,7 @@ dependencies = [
     "jinja2>=3.1",
     "pandas>=2.0.3",
     "matplotlib>=3.7.5",
+    "reportlab>=4.2",
     "textual>=0.70.0",
     "pyelftools>=0.32",
     "tqdm>=4.67.3",
@@ -28,8 +29,11 @@ trace-parser = "trace_parser.cli:main"
 hacc-compile = "hybridacc_cc.cli:main"
 hacc-setup = "hybridacc_cc.setup_cli:main"
 hacc-sweep = "hybridacc_cc.sweep_tools:main"
+hacc-e2e-monitor = "hybridacc_tools.e2e_monitor:main"
+hacc-flat-fw-mem = "hybridacc_tools.flat_fw_mem:main"
+hacc-wave-gap-summary = "hybridacc_tools.wave_gap_summary:main"
 syn-report = "syn_report_parser.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["./python"]
-include = ["hybridacc_verify*", "trace_parser*", "log_parser*", "hybridacc_cc*", "syn_report_parser*"]
+include = ["hybridacc_verify*", "trace_parser*", "log_parser*", "hybridacc_cc*", "hybridacc_tools*", "syn_report_parser*"]

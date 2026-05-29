@@ -32,6 +32,61 @@ def _normalize_opt_level(opt_level: str, *, leading_dash: bool) -> str:
     return normalized
 
 
+def _derive_binutil_tool(gcc: str, tool_name: str) -> str:
+    """Derive binutils companion name from the configured GCC executable."""
+    gcc_path = Path(gcc)
+    gcc_name = gcc_path.name
+    if gcc_name.endswith("gcc"):
+        return str(gcc_path.with_name(f"{gcc_name[:-3]}{tool_name}"))
+    return tool_name
+
+
+def audit_zero_init_sections(
+    elf_path: Path,
+    readelf_tool: str = "riscv32-unknown-elf-readelf",
+) -> None:
+    """Fail if writable small-data zero-init sections escaped the cleared .bss region."""
+    try:
+        result = subprocess.run(
+            [readelf_tool, "-W", "-S", str(elf_path)],
+            capture_output=True, text=True, check=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"ELF zero-init audit requires '{readelf_tool}' in PATH"
+        ) from exc
+
+    leaked_sections: list[tuple[str, int]] = []
+    for line in result.stdout.splitlines():
+        match = re.match(
+            r"\s*\[\s*\d+\]\s+(\S+)\s+\S+\s+\S+\s+\S+\s+([0-9A-Fa-f]+)\s+\S+\s+(\S+)",
+            line,
+        )
+        if not match:
+            continue
+
+        name = match.group(1)
+        size = int(match.group(2), 16)
+        flags = match.group(3)
+
+        if size == 0:
+            continue
+        if "W" not in flags or "A" not in flags:
+            continue
+        if name.startswith(".sbss") or name == ".scommon" or name.startswith(".gnu.linkonce.sb."):
+            leaked_sections.append((name, size))
+
+    if leaked_sections:
+        formatted = ", ".join(
+            f"{name}={size:#x}" for name, size in leaked_sections
+        )
+        raise ValueError(
+            "ELF zero-init audit failed: found writable small-data zero-init "
+            f"sections outside consolidated .bss: {formatted}. "
+            "Merge .sbss/.scommon into the linker-cleared zero-init region."
+        )
+
+
 def build_gcc_command(
     output_dir: Path,
     elf_name: str = "firmware.elf",
@@ -116,6 +171,11 @@ def compile_firmware(
             f"STDOUT:\n{result.stdout}\n"
             f"STDERR:\n{result.stderr}"
         )
+
+    audit_zero_init_sections(
+        elf_path,
+        readelf_tool=_derive_binutil_tool(gcc, "readelf"),
+    )
 
     return elf_path
 

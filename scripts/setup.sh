@@ -10,13 +10,17 @@ Usage:
   scripts/setup.sh all [--riscv-prefix PATH] [--no-source]
   scripts/setup.sh install <systemc|riscv|pe|python|all> [tool options]
   scripts/setup.sh env [--riscv-prefix PATH] [--no-source]
-  scripts/setup.sh fast <cluster-sim|noc-sim|pe-sim|cluster-test|run-test> [args...]
+    scripts/setup.sh env-check [--strict-eda] [--no-eda]
+    scripts/setup.sh fast <cluster-sim|noc-sim|pe-sim|cluster-test|run-test|hybridacc-sim|core-sim> [args...]
 
 Examples:
   scripts/setup.sh all
   scripts/setup.sh install riscv --prefix \$HOME/.local/riscv
   scripts/setup.sh env --riscv-prefix \$HOME/.local/riscv
+    scripts/setup.sh env-check
   scripts/setup.sh fast cluster-sim run conv_k3c4
+    scripts/setup.sh fast hybridacc-sim build
+    scripts/setup.sh fast core-sim run test_dma
 EOF
 }
 
@@ -69,6 +73,12 @@ run_fast_entry() {
             ;;
         run-test)
             exec "${SCRIPT_DIR}/fast_entry/run_test.sh" "$@"
+            ;;
+        hybridacc-sim)
+            exec "${SCRIPT_DIR}/fast_entry/hybridacc_sim.sh" "$@"
+            ;;
+        core-sim)
+            exec "${SCRIPT_DIR}/fast_entry/core_sim.sh" "$@"
             ;;
         *)
             echo "Unknown fast entry target: ${target}"
@@ -129,6 +139,10 @@ case "${CMD}" in
 
     env)
         "${INSTALL_DIR}/configure_shell_env.sh" "$@"
+        ;;
+
+    env-check|check)
+        "${SCRIPT_DIR}/env_check.sh" "$@"
         ;;
 
     fast)
