@@ -14,7 +14,7 @@
 
 ## 2. 前置條件
 
-- 在 repo root：`/home/easonyeh/hybridacc`
+- 目前位於 repo root
 - `uv sync` 已完成
 - `scripts/setup.sh all` 或 `uv run hacc-setup all` 已完成
 - SystemC 與 RISC-V toolchain 可用

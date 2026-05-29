@@ -17,15 +17,15 @@ Repo-wide 操作入口請先看 [../../../doc/index.md](../../../doc/index.md) �
 建議在 `tcsh` 環境下執行：
 
 ```tcsh
-tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && make rtl_regress_conv2d_1x1_single_wave'
-tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && make rtl_regress_conv2d_3x3_single_wave'
-tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && make rtl_regress_gemm_single_wave'
+cd "$(git rev-parse --show-toplevel)" && tcsh -c 'source ~/.tcshrc; cd design/hybridacc-RTL && make rtl_regress_conv2d_1x1_single_wave'
+cd "$(git rev-parse --show-toplevel)" && tcsh -c 'source ~/.tcshrc; cd design/hybridacc-RTL && make rtl_regress_conv2d_3x3_single_wave'
+cd "$(git rev-parse --show-toplevel)" && tcsh -c 'source ~/.tcshrc; cd design/hybridacc-RTL && make rtl_regress_gemm_single_wave'
 ```
 
 一次跑完三個 case：
 
 ```tcsh
-tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && make rtl_regress_single_wave'
+cd "$(git rev-parse --show-toplevel)" && tcsh -c 'source ~/.tcshrc; cd design/hybridacc-RTL && make rtl_regress_single_wave'
 ```
 
 這組 target 會自動完成：
@@ -38,9 +38,9 @@ tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && m
 
 主要 artefact 會放在：
 
-- `/home/easonyeh/hybridacc/output/rtl-fw-regress/conv2d_1x1_single_wave`
-- `/home/easonyeh/hybridacc/output/rtl-fw-regress/conv2d_3x3_single_wave`
-- `/home/easonyeh/hybridacc/output/rtl-fw-regress/gemm_single_wave`
+- `output/rtl-fw-regress/conv2d_1x1_single_wave`
+- `output/rtl-fw-regress/conv2d_3x3_single_wave`
+- `output/rtl-fw-regress/gemm_single_wave`
 
 主要 log 會放在：
 
@@ -125,19 +125,19 @@ single-wave regression 的 trace 入口是 [design/hybridacc-RTL/Makefile](../Ma
 
 ```tcsh
 # 預設靜默
-tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && make rtl_regress_gemm_single_wave'
+cd "$(git rev-parse --show-toplevel)" && tcsh -c 'source ~/.tcshrc; cd design/hybridacc-RTL && make rtl_regress_gemm_single_wave'
 
 # 只看 runtime 事件
-tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_RUNTIME"'
+cd "$(git rev-parse --show-toplevel)" && tcsh -c 'source ~/.tcshrc; cd design/hybridacc-RTL && make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_RUNTIME"'
 
 # 只看 MMIO programming
-tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_MMIO"'
+cd "$(git rev-parse --show-toplevel)" && tcsh -c 'source ~/.tcshrc; cd design/hybridacc-RTL && make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_MMIO"'
 
 # 同時看 runtime + MMIO
-tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_RUNTIME +TRACE_CLUSTER_MMIO"'
+cd "$(git rev-parse --show-toplevel)" && tcsh -c 'source ~/.tcshrc; cd design/hybridacc-RTL && make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_RUNTIME +TRACE_CLUSTER_MMIO"'
 
 # 一鍵總開關
-tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_DEBUG"'
+cd "$(git rev-parse --show-toplevel)" && tcsh -c 'source ~/.tcshrc; cd design/hybridacc-RTL && make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_DEBUG"'
 ```
 
 建議用法：
@@ -149,7 +149,7 @@ tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && m
 如果要明確關閉 trace，可以傳空值：
 
 ```tcsh
-tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS='
+cd "$(git rev-parse --show-toplevel)" && tcsh -c 'source ~/.tcshrc; cd design/hybridacc-RTL && make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS='
 ```
 
 ## 6. 什麼時候要改用 SIM_PLUSARGS
@@ -159,7 +159,7 @@ tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && m
 如果你是直接跑 testbench，例如：
 
 ```tcsh
-cd /home/easonyeh/hybridacc/design/hybridacc-RTL
+cd design/hybridacc-RTL
 make sim_tb_hybridacc_sim SIM_PLUSARGS="+FW_MEM=... +FW_BYTES=... +TRACE_CLUSTER_RUNTIME +TRACE_CLUSTER_MMIO"
 ```
 
@@ -170,13 +170,13 @@ make sim_tb_hybridacc_sim SIM_PLUSARGS="+FW_MEM=... +FW_BYTES=... +TRACE_CLUSTER
 如果只是日常回歸：
 
 ```tcsh
-tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && make rtl_regress_single_wave'
+cd "$(git rev-parse --show-toplevel)" && tcsh -c 'source ~/.tcshrc; cd design/hybridacc-RTL && make rtl_regress_single_wave'
 ```
 
 如果是針對單一功能性問題追 trace：
 
 ```tcsh
-tcsh -c 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL && make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_RUNTIME +TRACE_CLUSTER_MMIO"'
+cd "$(git rev-parse --show-toplevel)" && tcsh -c 'source ~/.tcshrc; cd design/hybridacc-RTL && make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_RUNTIME +TRACE_CLUSTER_MMIO"'
 ```
 
 如果看到 comparator fail，先判斷是哪一類：

@@ -22,7 +22,7 @@
 
 ## 3. 前置條件
 
-- repo 已存在於 `/home/easonyeh/hybridacc`
+- repo 已 checkout 完成，且後續命令皆以 repo root 為基準
 - `uv` 已可用
 - 若要跑 RTL / EDA flow，站點 `.tcshrc` 已包含 VCS / Synopsys tool 設定
 
@@ -31,7 +31,7 @@
 ### 4.1 進 repo root
 
 ```bash
-cd /home/easonyeh/hybridacc
+cd "$(git rev-parse --show-toplevel)"
 ```
 
 ### 4.2 建立 Python 環境與 setup 入口
@@ -75,14 +75,14 @@ uv run python -m hybridacc_verify.check.compare_golden output/quickstart-conv3x3
 先從最便宜的 smoke 開始：
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_tb_agu'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_tb_hybridacc_smoke'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_tb_agu'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_tb_hybridacc_smoke'
 ```
 
 ### 4.7 跑完整 single-wave firmware regression
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make rtl_regress_single_wave'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make rtl_regress_single_wave'
 ```
 
 ## 5. 跑完後應該看到什麼

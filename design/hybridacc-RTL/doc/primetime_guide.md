@@ -205,9 +205,9 @@ if {![file exists $netlist]} {
 }
 
 set_app_var search_path [list \
-    /cad/process/ADFP/Executable_Package/Collaterals/IP/stdcell/N16ADFP_StdCell/NLDM \
-    /cad/process/ADFP/Executable_Package/Collaterals/IP/sram/N16ADFP_SRAM/NLDM \
-    /usr/cad/synopsys/synthesis/2024.09-sp2/libraries/syn]
+    <stdcell-NLDM-dir> \
+    <sram-NLDM-dir> \
+    <synopsys-library-dir>]
 
 set_app_var link_path [list \
     * \

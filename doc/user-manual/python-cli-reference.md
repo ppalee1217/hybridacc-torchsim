@@ -31,7 +31,7 @@
 ### 4.1 setup
 
 ```bash
-cd /home/easonyeh/hybridacc
+cd "$(git rev-parse --show-toplevel)"
 uv run hacc-setup all
 uv run hacc-setup install all
 uv run hacc-setup env --riscv-prefix $HOME/.local/riscv

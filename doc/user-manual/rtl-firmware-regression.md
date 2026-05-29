@@ -19,7 +19,7 @@
 ## 3. 前置條件
 
 - 在 `tcsh`
-- 工作目錄在 `/home/easonyeh/hybridacc/design/hybridacc-RTL`
+- 工作目錄在 repo root 下的 `design/hybridacc-RTL/`
 - `uv run hacc-compile`、RISC-V toolchain、`vcs` 都可用
 
 ## 4. 主要入口命令
@@ -27,21 +27,21 @@
 ### 4.1 單一 workload
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make rtl_regress_conv2d_1x1_single_wave'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make rtl_regress_conv2d_3x3_single_wave'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make rtl_regress_gemm_single_wave'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make rtl_regress_conv2d_1x1_single_wave'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make rtl_regress_conv2d_3x3_single_wave'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make rtl_regress_gemm_single_wave'
 ```
 
 ### 4.2 一次跑完三個 case
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make rtl_regress_single_wave'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make rtl_regress_single_wave'
 ```
 
 ### 4.3 開 trace debug
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_RUNTIME +TRACE_CLUSTER_MMIO"'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_RUNTIME +TRACE_CLUSTER_MMIO"'
 ```
 
 ## 5. target 內部實際做了什麼
@@ -100,7 +100,7 @@ tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; ma
 範例：
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_RUNTIME +TRACE_CLUSTER_MMIO"'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_RUNTIME +TRACE_CLUSTER_MMIO"'
 ```
 
 ## 9. 成功判準

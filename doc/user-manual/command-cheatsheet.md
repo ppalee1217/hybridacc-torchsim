@@ -3,7 +3,7 @@
 ## 1. repo root 基本入口
 
 ```bash
-cd /home/easonyeh/hybridacc
+cd "$(git rev-parse --show-toplevel)"
 uv sync
 scripts/setup.sh all
 uv run hacc-setup all
@@ -34,7 +34,7 @@ uv run python -m hybridacc_verify.check.compare_golden output/compile-conv3x3
 ## 3. 進 RTL 目錄的 canonical 入口
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make <target>'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make <target>'
 ```
 
 下面所有 RTL / signoff 命令都預設套這個模式。
@@ -42,45 +42,45 @@ tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; ma
 ## 4. RTL smoke / regression
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_tb_agu'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_tb_hybridacc_smoke'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_pe'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_noc'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_cluster'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make rtl_regress_single_wave'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_tb_agu'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_tb_hybridacc_smoke'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_pe'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_noc'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_cluster'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make rtl_regress_single_wave'
 ```
 
 ## 5. firmware regression debug
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_RUNTIME +TRACE_CLUSTER_MMIO"'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make rtl_regress_gemm_single_wave RTL_FW_DEBUG_PLUSARGS="+TRACE_CLUSTER_RUNTIME +TRACE_CLUSTER_MMIO"'
 ```
 
 ## 6. synthesis / signoff
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make syn_top CLOCK_PERIOD_NS=1.25'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make syn_pe_ProcessElement'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make syn_pe_all'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make syn_report'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make primetime_full CLOCK_PERIOD_NS=1.25'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make primepower_full CLOCK_PERIOD_NS=1.25 PRIMEPOWER_FSDB=$PWD/tb_hybridacc_sim.fsdb'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make syn_top CLOCK_PERIOD_NS=1.25'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make syn_pe_ProcessElement'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make syn_pe_all'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make syn_report'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make primetime_full CLOCK_PERIOD_NS=1.25'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make primepower_full CLOCK_PERIOD_NS=1.25 PRIMEPOWER_FSDB=$PWD/tb_hybridacc_sim.fsdb'
 ```
 
 ## 7. gate sim / PrimePower activity
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make gate_sim_tb_hybridacc_smoke MOD_NAME=HybridAcc CLOCK_PERIOD_NS=1.25 GATE_NETLIST_DIR="$PWD/syn/clk_1p25ns" WAVE_DUMP=1 WAVE_DEPTH=0 SIM_PLUSARGS="+SDF_FILE=$PWD/syn/clk_1p25ns/HybridAcc/HybridAcc.sdf"'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make primepower_run CLOCK_PERIOD_NS=1.25 PRIMEPOWER_FSDB=$PWD/tb_hybridacc_sim.fsdb'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make primepower_analyze CLOCK_PERIOD_NS=1.25'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make gate_sim_tb_hybridacc_smoke MOD_NAME=HybridAcc CLOCK_PERIOD_NS=1.25 GATE_NETLIST_DIR="$PWD/syn/clk_1p25ns" WAVE_DUMP=1 WAVE_DEPTH=0 SIM_PLUSARGS="+SDF_FILE=$PWD/syn/clk_1p25ns/HybridAcc/HybridAcc.sdf"'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make primepower_run CLOCK_PERIOD_NS=1.25 PRIMEPOWER_FSDB=$PWD/tb_hybridacc_sim.fsdb'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make primepower_analyze CLOCK_PERIOD_NS=1.25'
 ```
 
 ## 8. Jasper / Superlint
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make superlint'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make superlint_report'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make superlint_hotspot'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make superlint'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make superlint_report'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make superlint_hotspot'
 ```
 
 ## 9. E2E sweep

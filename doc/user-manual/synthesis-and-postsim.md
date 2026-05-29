@@ -7,7 +7,7 @@
 ## 2. 固定工作模式
 
 1. 一律在 `tcsh` 執行。
-2. 工作目錄固定在 `/home/easonyeh/hybridacc/design/hybridacc-RTL`。
+2. 工作目錄固定在 repo root 下的 `design/hybridacc-RTL/`。
 3. top-level synthesis / PrimeTime / PrimePower 的 clock tag 皆使用 `clk_<period>ns`，例如 `clk_1p25ns`。
 
 ## 3. 推薦整體順序
@@ -24,7 +24,7 @@
 ### 4.1 top-level synthesis
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make syn_top CLOCK_PERIOD_NS=1.25'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make syn_top CLOCK_PERIOD_NS=1.25'
 ```
 
 主要輸出：
@@ -36,10 +36,10 @@ tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; ma
 ### 4.2 unit synthesis
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make syn_pe_ProcessElement'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make syn_noc_NetworkOnChip'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make syn_cluster_ComputeCluster'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make syn_pe_all'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make syn_pe_ProcessElement'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make syn_noc_NetworkOnChip'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make syn_cluster_ComputeCluster'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make syn_pe_all'
 ```
 
 ### 4.3 unit module 分類與 SDC 規則
@@ -59,7 +59,7 @@ tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; ma
 ### 4.4 synthesis report parser
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make syn_report'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make syn_report'
 ```
 
 或直接調 parser：
@@ -73,13 +73,13 @@ uv run python script/python/reporting/syn_report.py --report-dir ./report --outp
 ### 5.1 完整流程
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make primetime_full CLOCK_PERIOD_NS=1.25'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make primetime_full CLOCK_PERIOD_NS=1.25'
 ```
 
 ### 5.2 GUI
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make primetime_gui CLOCK_PERIOD_NS=1.25 PRIMETIME_GUI=1'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make primetime_gui CLOCK_PERIOD_NS=1.25 PRIMETIME_GUI=1'
 ```
 
 主要輸出：
@@ -116,13 +116,13 @@ PrimePower 要做 workload-aware analysis，先要有 activity。最常見做法
 ### 6.1 gate sim 產生 FSDB
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make gate_sim_tb_hybridacc_smoke MOD_NAME=HybridAcc CLOCK_PERIOD_NS=1.25 GATE_NETLIST_DIR="$PWD/syn/clk_1p25ns" WAVE_DUMP=1 WAVE_DEPTH=0 SIM_PLUSARGS="+SDF_FILE=$PWD/syn/clk_1p25ns/HybridAcc/HybridAcc.sdf"'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make gate_sim_tb_hybridacc_smoke MOD_NAME=HybridAcc CLOCK_PERIOD_NS=1.25 GATE_NETLIST_DIR="$PWD/syn/clk_1p25ns" WAVE_DUMP=1 WAVE_DEPTH=0 SIM_PLUSARGS="+SDF_FILE=$PWD/syn/clk_1p25ns/HybridAcc/HybridAcc.sdf"'
 ```
 
 ### 6.2 workload regression 產生 FSDB
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make gate_regress_gemm_single_wave CLOCK_PERIOD_NS=1.25 WAVE_DUMP=1 WAVE_DEPTH=0'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make gate_regress_gemm_single_wave CLOCK_PERIOD_NS=1.25 WAVE_DUMP=1 WAVE_DEPTH=0'
 ```
 
 若使用 workload 波形，請立即改名，避免後面被覆蓋：
@@ -136,14 +136,14 @@ mv tb_hybridacc_sim.fsdb primepower/gemm_clk_1p25ns.fsdb
 ### 7.1 完整流程
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make primepower_full CLOCK_PERIOD_NS=1.25 PRIMEPOWER_FSDB=$PWD/tb_hybridacc_sim.fsdb'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make primepower_full CLOCK_PERIOD_NS=1.25 PRIMEPOWER_FSDB=$PWD/tb_hybridacc_sim.fsdb'
 ```
 
 ### 7.2 拆開跑
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make primepower_run CLOCK_PERIOD_NS=1.25 PRIMEPOWER_FSDB=$PWD/tb_hybridacc_sim.fsdb'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make primepower_analyze CLOCK_PERIOD_NS=1.25'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make primepower_run CLOCK_PERIOD_NS=1.25 PRIMEPOWER_FSDB=$PWD/tb_hybridacc_sim.fsdb'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make primepower_analyze CLOCK_PERIOD_NS=1.25'
 ```
 
 重要規則：

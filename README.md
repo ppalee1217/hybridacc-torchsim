@@ -25,7 +25,7 @@ Start from [doc/index.md](doc/index.md) for the full manual split. User-facing c
 Use the repo script to validate local markdown links, then launch the curated docs site from the repo root.
 
 ```bash
-cd /home/easonyeh/hybridacc
+cd "$(git rev-parse --show-toplevel)"
 uv run python scripts/check/validate_markdown_links.py
 uv run python scripts/check/sync_docs_site.py
 uvx --with mkdocs-material mkdocs serve --config-file mkdocs.yml
@@ -38,7 +38,7 @@ CI runs the same checks through [.github/workflows/docs.yml](.github/workflows/d
 Use `uv` for Python tooling.
 
 ```bash
-cd /home/easonyeh/hybridacc
+cd "$(git rev-parse --show-toplevel)"
 uv sync
 scripts/setup.sh all
 scripts/env_check.sh
@@ -81,13 +81,13 @@ uv run hacc-sweep report --manifest output/hacc-conv3x3-sweeps/manifest.json --r
 RTL and EDA flows should run through `tcsh` so the site VCS/Synopsys environment is loaded.
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_tb_corecontroller_smoke'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_tb_corecontroller_smoke'
 ```
 
 The single-wave firmware regression exercises the top-level RTL firmware path:
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make rtl_regress_single_wave'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make rtl_regress_single_wave'
 ```
 
 ## Script Layout

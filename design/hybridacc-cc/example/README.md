@@ -4,7 +4,7 @@
 
 This directory keeps only hand-authored base workloads and a small set of feature regressions.
 
-Run the commands below from the repo root at `/home/easonyeh/hybridacc`.
+Run the commands below from the repo root.
 
 ## Base workloads
 

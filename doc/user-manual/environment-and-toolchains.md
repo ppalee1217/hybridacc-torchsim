@@ -32,7 +32,7 @@
 canonical 入口：
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make <target>'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make <target>'
 ```
 
 ## 3. 工具清單
@@ -52,7 +52,7 @@ tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; ma
 ### 4.1 repo root setup
 
 ```bash
-cd /home/easonyeh/hybridacc
+cd "$(git rev-parse --show-toplevel)"
 uv sync
 scripts/setup.sh all
 ```
@@ -134,8 +134,8 @@ tcsh -ic 'source ~/.tcshrc; command -v vcs; command -v dc_shell; command -v pt_s
 
 | workflow | 工作目錄 |
 | --- | --- |
-| setup / Python / ESL | `/home/easonyeh/hybridacc` |
-| RTL / synthesis / signoff | `/home/easonyeh/hybridacc/design/hybridacc-RTL` |
+| setup / Python / ESL | `repo root` |
+| RTL / synthesis / signoff | `design/hybridacc-RTL/` |
 
 ## 7. 常見依賴問題
 

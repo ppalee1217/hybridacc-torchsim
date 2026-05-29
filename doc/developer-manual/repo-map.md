@@ -38,7 +38,7 @@
 從 repo root 開始：
 
 ```bash
-cd /home/easonyeh/hybridacc
+cd "$(git rev-parse --show-toplevel)"
 uv sync
 scripts/setup.sh all
 ```
@@ -58,7 +58,7 @@ scripts/setup.sh all
 切到：
 
 ```bash
-/home/easonyeh/hybridacc/design/hybridacc-RTL
+design/hybridacc-RTL
 ```
 
 然後在 `tcsh` 中跑 `make` target。

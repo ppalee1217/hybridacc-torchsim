@@ -11,15 +11,15 @@
 ## 2. 固定工作模式
 
 1. 建議在 `tcsh` 執行。
-2. 工作目錄固定在 `/home/easonyeh/hybridacc/design/hybridacc-RTL`。
+2. 工作目錄固定在 repo root 下的 `design/hybridacc-RTL/`。
 3. 真正的 canonical 主流程只有 `script/tcl/superlint/jasper_superlint.tcl`。
 
 ## 3. 主要入口命令
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make superlint'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make superlint_report'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make superlint_hotspot'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make superlint'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make superlint_report'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make superlint_hotspot'
 ```
 
 ### 3.1 什麼時候用哪個 target

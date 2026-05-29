@@ -38,7 +38,7 @@
 一般 Python、compiler、ESL 與 report parser 使用 repo root 的 `bash`/`uv` 入口。
 
 ```bash
-cd /home/easonyeh/hybridacc
+cd "$(git rev-parse --show-toplevel)"
 uv sync
 scripts/env_check.sh
 ```
@@ -46,7 +46,7 @@ scripts/env_check.sh
 RTL / EDA flow 請用 `tcsh` 載入站點工具後再執行 Makefile。
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make <target>'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make <target>'
 ```
 
 ## 4. 文件站與 CI 檢查
@@ -54,7 +54,7 @@ tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; ma
 文件入口變更後，先在 repo root 跑本地檢查，再視需要開啟靜態文件站預覽。
 
 ```bash
-cd /home/easonyeh/hybridacc
+cd "$(git rev-parse --show-toplevel)"
 uv run python scripts/check/validate_markdown_links.py
 uv run python scripts/check/sync_docs_site.py
 uvx --with mkdocs-material mkdocs build --config-file mkdocs.yml

@@ -13,7 +13,7 @@
 ## 2. 固定工作模式
 
 1. 一律在 `tcsh` 執行。
-2. 工作目錄固定在 `/home/easonyeh/hybridacc/design/hybridacc-RTL`。
+2. 工作目錄固定在 repo root 下的 `design/hybridacc-RTL/`。
 3. 先跑最便宜的單元 testbench，再擴到 regression，最後才進 top-level 或 gate sim。
 
 ## 3. 推薦執行順序
@@ -21,29 +21,29 @@
 ### 3.1 最便宜的 smoke
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_tb_agu'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_tb_corecontroller_smoke'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_tb_agu'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_tb_corecontroller_smoke'
 ```
 
 ### 3.2 類別 regression
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_pe'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_noc'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_cluster'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_pe'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_noc'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_cluster'
 ```
 
 ### 3.3 top-level smoke / bring-up
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_tb_hybridacc_smoke'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_tb_hybridacc_sim'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_tb_hybridacc_smoke'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_tb_hybridacc_sim'
 ```
 
 若是手動 bring-up firmware 測試，而不是走 `rtl_regress_*`，通常要額外帶：
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_tb_hybridacc_sim SIM_PLUSARGS="+FW_MEM=/path/to/firmware.mem +FW_BYTES=12345"'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_tb_hybridacc_sim SIM_PLUSARGS="+FW_MEM=/path/to/firmware.mem +FW_BYTES=12345"'
 ```
 
 這條路徑適合單獨 debug 控制面；若要做固定 workload 回歸，仍建議直接用 [rtl-firmware-regression.md](rtl-firmware-regression.md)。
@@ -51,14 +51,14 @@ tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; ma
 ### 3.4 data-driven NoC / Cluster case
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_noc_sim TEST_DATA_DIR=output/noc-sim/conv_k3c4 VERIFY_TOL=0.05 CLOCK_PERIOD_NS=5'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_tb_cluster_sim_advanced TEST_DATA_DIR=output/cluster-sim/<case> VERIFY_TOL=0.02'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_noc_sim TEST_DATA_DIR=output/noc-sim/conv_k3c4 VERIFY_TOL=0.05 CLOCK_PERIOD_NS=5'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_tb_cluster_sim_advanced TEST_DATA_DIR=output/cluster-sim/<case> VERIFY_TOL=0.02'
 ```
 
 ### 3.5 gate-level simulation
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make gate_sim_tb_hybridacc_smoke MOD_NAME=HybridAcc CLOCK_PERIOD_NS=1.25 GATE_NETLIST_DIR="$PWD/syn/clk_1p25ns"'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make gate_sim_tb_hybridacc_smoke MOD_NAME=HybridAcc CLOCK_PERIOD_NS=1.25 GATE_NETLIST_DIR="$PWD/syn/clk_1p25ns"'
 ```
 
 ## 4. target 命名怎麼看
@@ -116,10 +116,10 @@ tail -n 120 sim/log/tb_agu.run.log
 若你已經跑完模擬，想看 parser 彙整：
 
 ```bash
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make postsim_tb_agu'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make postsim_all'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make sim_report'
-tcsh -ic 'source ~/.tcshrc; cd /home/easonyeh/hybridacc/design/hybridacc-RTL; make gate_sim_report'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make postsim_tb_agu'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make postsim_all'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make sim_report'
+cd "$(git rev-parse --show-toplevel)" && tcsh -ic 'source ~/.tcshrc; cd design/hybridacc-RTL; make gate_sim_report'
 ```
 
 最常見輸出：

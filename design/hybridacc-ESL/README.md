@@ -21,7 +21,7 @@ Repo-wide 操作入口請先看 [../../doc/index.md](../../doc/index.md) 與 [..
 從 repo root 執行，可避免相對路徑漂移：
 
 ```bash
-cd /home/easonyeh/hybridacc
+cd "$(git rev-parse --show-toplevel)"
 uv sync
 scripts/setup.sh fast hybridacc-sim build
 ```
@@ -37,10 +37,10 @@ uv run python -m hybridacc_verify.check.compare_golden output/quickstart-conv3x3
 
 ### 2.2 Local build entry
 
-若你只想在 subsystem 內手動 build：
+若你只想在 subsystem 內手動 build，以下命令都從 repo root 開始：
 
 ```bash
-cd /home/easonyeh/hybridacc/design/hybridacc-ESL/simulator
+cd design/hybridacc-ESL/simulator
 mkdir -p build && cd build
 cmake ..
 cmake --build . -j"$(nproc)"
@@ -49,7 +49,7 @@ cmake --build . -j"$(nproc)"
 測試專案則在 `test/` 目錄下獨立建置：
 
 ```bash
-cd /home/easonyeh/hybridacc/design/hybridacc-ESL/test
+cd design/hybridacc-ESL/test
 mkdir -p build && cd build
 cmake ..
 cmake --build . -j"$(nproc)"
@@ -62,7 +62,7 @@ cmake --build . -j"$(nproc)"
 日常 cluster / NoC / PE 測試，優先走 repo root 的 `scripts/setup.sh fast ...`：
 
 ```bash
-cd /home/easonyeh/hybridacc
+cd "$(git rev-parse --show-toplevel)"
 scripts/setup.sh fast cluster-sim build
 scripts/setup.sh fast cluster-sim run --advanced -d output/cluster-sim conv_k3c4
 ```
