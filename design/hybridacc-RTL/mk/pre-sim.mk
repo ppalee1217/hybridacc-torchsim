@@ -41,7 +41,7 @@ define summarize_tb
 endef
 
 .PHONY: sim_all sim_pe sim_noc sim_cluster presim_fast sim_noc_sim sim_noc_sim_all \
-	rtl_regress_single_wave rtl_regress_conv2d_1x1_single_wave rtl_regress_conv2d_3x3_single_wave rtl_regress_gemm_single_wave \
+	rtl_regress_single_wave rtl_regress_conv2d_1x1_single_wave rtl_regress_conv2d_3x3_single_wave rtl_regress_conv2d_3x3_four_wave rtl_regress_conv2d_3x3_multi_wave rtl_regress_gemm_single_wave \
 	compile_tb_hybridacc_sim sim_report postsim_all
 
 help::
@@ -57,6 +57,8 @@ help::
 	@echo "  rtl_regress_single_wave             - Compile 3 hybridacc-cc single-wave YAMLs and run RTL/VCS firmware regression"
 	@echo "  rtl_regress_conv2d_1x1_single_wave  - Run RTL/VCS firmware regression for conv2d_1x1_single_wave.yaml"
 	@echo "  rtl_regress_conv2d_3x3_single_wave  - Run RTL/VCS firmware regression for conv2d_3x3_single_wave.yaml"
+	@echo "  rtl_regress_conv2d_3x3_four_wave    - Run RTL/VCS firmware regression for conv2d_3x3_four_wave.yaml (4 temporal waves)"
+	@echo "  rtl_regress_conv2d_3x3_multi_wave   - Alias of rtl_regress_conv2d_3x3_four_wave"
 	@echo "  rtl_regress_gemm_single_wave        - Run RTL/VCS firmware regression for gemm_single_wave.yaml"
 	@echo "  compile_tb_hybridacc_sim            - Pre-sim: compile tb_hybridacc_sim.simv (cached; skips if .sv sources unchanged)"
 	@echo "  sim_report           - Generate a pre-sim report from sim/log/"
@@ -186,7 +188,10 @@ endef
 
 $(eval $(call run_rtl_fw_regress,conv2d_1x1_single_wave,$(RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_YAML),$(RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_OUT),$(RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_LOG_PREFIX)))
 $(eval $(call run_rtl_fw_regress,conv2d_3x3_single_wave,$(RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_YAML),$(RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_OUT),$(RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_LOG_PREFIX)))
+$(eval $(call run_rtl_fw_regress,conv2d_3x3_four_wave,$(RTL_REGRESS_CONV2D_3X3_FOUR_WAVE_YAML),$(RTL_REGRESS_CONV2D_3X3_FOUR_WAVE_OUT),$(RTL_REGRESS_CONV2D_3X3_FOUR_WAVE_LOG_PREFIX)))
 $(eval $(call run_rtl_fw_regress,gemm_single_wave,$(RTL_REGRESS_GEMM_SINGLE_WAVE_YAML),$(RTL_REGRESS_GEMM_SINGLE_WAVE_OUT),$(RTL_REGRESS_GEMM_SINGLE_WAVE_LOG_PREFIX)))
+
+rtl_regress_conv2d_3x3_multi_wave: rtl_regress_conv2d_3x3_four_wave
 
 rtl_regress_single_wave:
 	@set -e; \

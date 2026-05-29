@@ -125,12 +125,15 @@ SUPERLINT_FAST_LOG ?= $(SUPERLINT_FAST_ITER_DIR)/superlint.log
 HACC_CC_EXAMPLE_ROOT := $(REPO_ROOT)/design/hybridacc-cc/example
 RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_YAML := $(HACC_CC_EXAMPLE_ROOT)/conv1x1/conv2d_1x1_single_wave.yaml
 RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_YAML := $(HACC_CC_EXAMPLE_ROOT)/conv3x3/conv2d_3x3_single_wave.yaml
+RTL_REGRESS_CONV2D_3X3_FOUR_WAVE_YAML := $(HACC_CC_EXAMPLE_ROOT)/conv3x3/conv2d_3x3_four_wave.yaml
 RTL_REGRESS_GEMM_SINGLE_WAVE_YAML := $(HACC_CC_EXAMPLE_ROOT)/gemm/gemm_single_wave.yaml
 RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_OUT := $(RTL_FW_REGRESS_ROOT)/conv2d_1x1_single_wave
 RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_OUT := $(RTL_FW_REGRESS_ROOT)/conv2d_3x3_single_wave
+RTL_REGRESS_CONV2D_3X3_FOUR_WAVE_OUT := $(RTL_FW_REGRESS_ROOT)/conv2d_3x3_four_wave
 RTL_REGRESS_GEMM_SINGLE_WAVE_OUT := $(RTL_FW_REGRESS_ROOT)/gemm_single_wave
 RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim_conv2d_1x1_single_wave
 RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim_conv2d_3x3_single_wave
+RTL_REGRESS_CONV2D_3X3_FOUR_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim_conv2d_3x3_four_wave
 RTL_REGRESS_GEMM_SINGLE_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim_gemm_single_wave
 
 TB_ALL := $(shell find tb -type f -name 'tb_*.sv' ! -path 'tb/Cluster/tb_sram.sv')

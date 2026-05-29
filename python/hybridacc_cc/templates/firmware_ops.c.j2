@@ -1069,6 +1069,32 @@ static void prefetch_start(void) {
     }
 }
 
+static void prefetch_start_serialized(void) {
+    if (prefetch_count > 0) {
+        for (uint32_t i = 0; i < prefetch_count; i++) {
+            PrefetchOp* op = &prefetch_queue[i];
+
+            /* The current DMA engine accepts only one live submit.
+             * Serialize multi-op conv3x3 prefetch so later descriptors do not
+             * overwrite the active command's MMIO shadow/tag state. */
+            if (i > 0) {
+                dma_wait_tag(prefetch_last_tag);
+            }
+
+            dma_tag++;
+            if (op->is_2d) {
+                dma_load_2d(op->dram_addr, op->spm_addr, 0,
+                            op->beat_count, op->row_count,
+                            op->src_row_stride, op->dst_row_stride,
+                            dma_tag);
+            } else {
+                dma_load(op->dram_addr, op->spm_addr, 0, op->beat_count, dma_tag);
+            }
+            prefetch_last_tag = dma_tag;
+        }
+    }
+}
+
 static void prefetch_wait_all(void) {
     if (prefetch_count > 0) {
         dma_wait_tag(prefetch_last_tag);
@@ -1200,7 +1226,7 @@ static inline void prefetch_wave_inputs_conv_3x3(const TilingParams* t,
                         spatial->pd_src_row_stride,
                         spatial->pd_dst_row_stride);
 
-    prefetch_start();
+    prefetch_start_serialized();
 }
 
 static inline void prefetch_wave_inputs_conv_1x1(const TilingParams* t,
