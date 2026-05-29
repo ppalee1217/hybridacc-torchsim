@@ -1,0 +1,1105 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EXE_A_Stage — PLO Stale Replay 修改前後分析</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: 'Segoe UI', 'Noto Sans TC', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+a { color: #58a6ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ── Layout ── */
+.page-header {
+  background: linear-gradient(135deg, #161b22 0%, #1c2128 100%);
+  border-bottom: 1px solid #30363d;
+  padding: 32px 48px 24px;
+}
+.page-header h1 { font-size: 24px; color: #f0f6fc; font-weight: 700; }
+.page-header .subtitle { color: #8b949e; margin-top: 6px; font-size: 13px; }
+
+.toc {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 20px 28px;
+  margin: 28px 48px;
+  max-width: 520px;
+}
+.toc h3 { color: #8b949e; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 10px; }
+.toc ol { padding-left: 20px; }
+.toc li { margin: 4px 0; }
+
+.content { padding: 0 48px 64px; }
+
+section { margin-bottom: 52px; }
+section > h2 {
+  font-size: 18px;
+  font-weight: 700;
+  color: #f0f6fc;
+  border-bottom: 2px solid #21262d;
+  padding-bottom: 10px;
+  margin-bottom: 22px;
+}
+section > h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #e6edf3;
+  margin: 22px 0 10px;
+}
+p { color: #c9d1d9; margin-bottom: 10px; }
+
+/* ── Summary Box ── */
+.summary-box {
+  background: #1c2128;
+  border: 1px solid #30363d;
+  border-left: 4px solid #f85149;
+  border-radius: 6px;
+  padding: 18px 24px;
+  margin-bottom: 24px;
+}
+.summary-box.fix {
+  border-left-color: #3fb950;
+}
+.summary-box h4 { color: #f0f6fc; margin-bottom: 8px; font-size: 14px; }
+.summary-box ul { padding-left: 18px; }
+.summary-box li { margin: 4px 0; color: #c9d1d9; }
+
+/* ── Change Table ── */
+.change-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.change-table th {
+  background: #21262d;
+  color: #8b949e;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 8px 14px;
+  text-align: left;
+  border-bottom: 1px solid #30363d;
+}
+.change-table td {
+  padding: 8px 14px;
+  border-bottom: 1px solid #21262d;
+  vertical-align: top;
+}
+.change-table tr:hover td { background: #161b22; }
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.badge-red   { background: #3d1515; color: #f85149; border: 1px solid #f85149; }
+.badge-green { background: #0d2318; color: #3fb950; border: 1px solid #3fb950; }
+.badge-blue  { background: #0d1f3d; color: #58a6ff; border: 1px solid #58a6ff; }
+
+/* ── Code Blocks ── */
+.code-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin: 16px 0;
+}
+.code-panel {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.code-panel.before { border-top: 3px solid #f85149; }
+.code-panel.after  { border-top: 3px solid #3fb950; }
+
+.code-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: #1c2128;
+  border-bottom: 1px solid #30363d;
+  font-size: 12px;
+  font-weight: 600;
+}
+.code-panel.before .code-panel-header { color: #f85149; }
+.code-panel.after  .code-panel-header { color: #3fb950; }
+
+pre {
+  padding: 14px 16px;
+  overflow-x: auto;
+  font-family: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  tab-size: 4;
+}
+
+/* SV syntax coloring */
+.kw   { color: #569cd6; }          /* keywords */
+.ty   { color: #4ec9b0; }          /* types */
+.sig  { color: #9cdcfe; }          /* signal names */
+.num  { color: #b5cea8; }          /* numbers */
+.cmt  { color: #6a9955; font-style: italic; } /* comments */
+.hi   { background: #3d3008; color: #ffd700; font-weight: 600; }   /* highlight change */
+.hi-r { background: #3d1515; color: #ff8080; }  /* removed */
+.hi-g { background: #0d2318; color: #7ee787; }  /* added */
+.str  { color: #ce9178; }
+
+/* ── SVG diagram wrappers ── */
+.diagram-wrap {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 24px;
+  margin: 16px 0;
+  overflow-x: auto;
+}
+.diagram-caption {
+  text-align: center;
+  color: #8b949e;
+  font-size: 12px;
+  margin-top: 12px;
+}
+
+/* ── Callout ── */
+.callout {
+  background: #1c2128;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 14px 18px;
+  margin: 14px 0;
+}
+.callout.warn { border-left: 4px solid #d29922; }
+.callout.info { border-left: 4px solid #58a6ff; }
+.callout.ok   { border-left: 4px solid #3fb950; }
+.callout strong { color: #f0f6fc; }
+
+/* ── Single wide panel ── */
+.code-single {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 14px 0;
+}
+.code-single-header {
+  padding: 8px 14px;
+  background: #1c2128;
+  border-bottom: 1px solid #30363d;
+  font-size: 12px;
+  color: #8b949e;
+  font-weight: 600;
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════ HEADER -->
+<div class="page-header">
+  <h1>EXE_A_Stage &mdash; PLO FIFO Stale Replay 修改前後分析</h1>
+  <div class="subtitle">
+    設計檔案：<code>design/hybridacc-RTL/src/PE/EXE_A_Stage.sv</code>
+    &nbsp;|&nbsp; Gate GEMM single-wave mismatch root-cause fix
+    &nbsp;|&nbsp; 2026-05-27
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ TOC -->
+<nav class="toc">
+  <h3>目錄</h3>
+  <ol>
+    <li><a href="#s1">問題摘要</a></li>
+    <li><a href="#s2">訊號相依圖（Bug 根源）</a></li>
+    <li><a href="#s3">時序波形比較</a></li>
+    <li><a href="#s4">FSM 狀態圖</a></li>
+    <li><a href="#s5">RTL 修改明細（8 處）</a></li>
+    <li><a href="#s6">驗證要點</a></li>
+  </ol>
+</nav>
+
+<div class="content">
+
+<!-- ═══════════════════════════════════════════════════════ S1 -->
+<section id="s1">
+  <h2>1. 問題摘要</h2>
+
+  <div class="summary-box">
+    <h4>🐛 Bug 現象</h4>
+    <ul>
+      <li>Gate GEMM single-wave：每 48 個 fp16 輸出中，前 12 個與 RTL/golden 吻合，後 36 個以週期 3 重複前段。</li>
+      <li>Root cause 鎖定在 <code>p2pe0.exe_a_stage</code> 的 <code>S_WAIT_PLO</code> release cycle。</li>
+      <li>18/18 個 <code>S_WAIT_PLO</code> settled PLO sample 滿足 <code>plo == vaddu_result_reg</code>，
+          且 <code>plo != vaddu_result_sig</code>（stale replay）。</li>
+      <li>RTL pre-sim 不重現：RTL 踩到同一條路徑，但 pop+produce 同拍的 rollover 語義在 RTL 正確，gate 失真。</li>
+    </ul>
+  </div>
+
+  <div class="summary-box fix">
+    <h4>✅ 修正方向</h4>
+    <ul>
+      <li>保留現有 8-state FSM encoding，<strong>不新增 state</strong>，<strong>不動 PErouter / ProcessElement</strong>。</li>
+      <li>新增 1-bit <code>plo_pending_valid_reg</code>：顯式記錄「有待補回 buffer 的 pending VPSUM」。</li>
+      <li>把 <code>S_WAIT_PLO</code> 的 release 拆成兩個 cycle：先 drain（僅 pop），再 refill（僅 produce）。</li>
+      <li>消除 <code>plo_buf_do_pop_w &amp;&amp; plo_buf_produce_w</code> 同拍成立的可能性。</li>
+      <li><code>S_WAIT_PLO</code> 期間 <code>ready_out_w</code> 恆為 0，禁止 upstream 同拍前推。</li>
+    </ul>
+  </div>
+
+  <h3>修改影響面總覽</h3>
+  <table class="change-table">
+    <thead>
+      <tr>
+        <th>#</th><th>修改點</th><th>類型</th><th>說明</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td>新增 <code>plo_pending_valid_reg/next</code></td><td><span class="badge badge-blue">新增暫存器</span></td><td>顯式 pending-valid，1 bit</td></tr>
+      <tr><td>2</td><td><code>plo_buf_produce_w</code></td><td><span class="badge badge-red">邏輯修改</span></td><td>拆成 execute produce 與 refill produce，互斥條件</td></tr>
+      <tr><td>3</td><td>PLO buffer next-state <code>always_comb</code></td><td><span class="badge badge-red">邏輯修改</span></td><td>加入 <code>plo_pending_valid_next</code> 管理</td></tr>
+      <tr><td>4</td><td><code>ready_out_w</code> S_WAIT_PLO case</td><td><span class="badge badge-red">邏輯修改</span></td><td>從 <code>plo_ready</code> 改為常數 <code>0</code></td></tr>
+      <tr><td>5</td><td><code>pli_ready</code> 條件</td><td><span class="badge badge-red">邏輯修改</span></td><td>移除 S_WAIT_PLO 的 pli accept 路徑</td></tr>
+      <tr><td>6</td><td>Main FSM：S_EXEC_PLI_VADDU</td><td><span class="badge badge-red">邏輯修改</span></td><td>進 S_WAIT_PLO 時置 <code>plo_pending_valid_next=1</code></td></tr>
+      <tr><td>7</td><td>Main FSM：S_WAIT_PLO</td><td><span class="badge badge-red">邏輯修改</span></td><td>改成兩相控制，基於 buf_valid 和 pending_valid</td></tr>
+      <tr><td>8</td><td>Sequential always_ff</td><td><span class="badge badge-green">新增更新</span></td><td>加入 <code>plo_pending_valid_reg</code> 的 reset 與更新</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ S2 -->
+<section id="s2">
+  <h2>2. 訊號相依圖（Bug 根源）</h2>
+
+  <p>下圖顯示 bug 的組合邏輯相依關係：<code>plo_ready</code> 同時影響 <code>plo_buf_do_pop_w</code> 與
+  <code>plo_buf_can_push_w</code>，導致在 S_WAIT_PLO 的 release cycle 中，pop 與 produce 同拍成立。</p>
+
+  <!-- Signal dependency SVG -->
+  <div class="diagram-wrap">
+    <svg width="860" height="320" viewBox="0 0 860 320" xmlns="http://www.w3.org/2000/svg"
+         style="display:block;margin:auto;">
+      <defs>
+        <marker id="arrowRed" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="#f85149"/>
+        </marker>
+        <marker id="arrowGreen" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="#3fb950"/>
+        </marker>
+        <marker id="arrowGray" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="#8b949e"/>
+        </marker>
+      </defs>
+
+      <!-- ---- Column 0: Inputs ---- -->
+      <!-- plo_buf_valid_reg -->
+      <rect x="10" y="40" width="170" height="36" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="95" y="63" text-anchor="middle" fill="#9cdcfe" font-size="12" font-family="monospace">plo_buf_valid_reg</text>
+
+      <!-- plo_ready -->
+      <rect x="10" y="140" width="170" height="36" rx="6" fill="#1c2128" stroke="#f85149" stroke-width="2"/>
+      <text x="95" y="163" text-anchor="middle" fill="#f85149" font-size="12" font-family="monospace">plo_ready</text>
+      <text x="95" y="122" text-anchor="middle" fill="#8b949e" font-size="11">（來自 PErouter）</text>
+      <text x="95" y="135" text-anchor="middle" fill="#8b949e" font-size="11">= !plo_full</text>
+
+      <!-- state_reg -->
+      <rect x="10" y="240" width="170" height="36" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="95" y="263" text-anchor="middle" fill="#9cdcfe" font-size="12" font-family="monospace">state_reg</text>
+
+      <!-- ---- Column 1: Intermediate ---- -->
+      <!-- plo_buf_do_pop_w -->
+      <rect x="250" y="60" width="160" height="36" rx="6" fill="#1c2128" stroke="#d29922"/>
+      <text x="330" y="83" text-anchor="middle" fill="#e3b341" font-size="12" font-family="monospace">plo_buf_do_pop_w</text>
+
+      <!-- plo_buf_can_push_w -->
+      <rect x="250" y="150" width="160" height="36" rx="6" fill="#1c2128" stroke="#d29922"/>
+      <text x="330" y="173" text-anchor="middle" fill="#e3b341" font-size="12" font-family="monospace">plo_buf_can_push_w</text>
+
+      <!-- ---- Column 2: plo_buf_produce_w ---- -->
+      <rect x="490" y="105" width="180" height="36" rx="6" fill="#3d1515" stroke="#f85149" stroke-width="2"/>
+      <text x="580" y="128" text-anchor="middle" fill="#f85149" font-size="12" font-family="monospace">plo_buf_produce_w</text>
+
+      <!-- ---- Column 3: Outputs ---- -->
+      <!-- plo_buf_valid_next -->
+      <rect x="750" y="60" width="100" height="36" rx="6" fill="#1c2128" stroke="#3fb950"/>
+      <text x="800" y="78" text-anchor="middle" fill="#3fb950" font-size="11" font-family="monospace">plo_buf_</text>
+      <text x="800" y="91" text-anchor="middle" fill="#3fb950" font-size="11" font-family="monospace">valid_next</text>
+
+      <!-- plo_buf_data_next -->
+      <rect x="750" y="150" width="100" height="36" rx="6" fill="#1c2128" stroke="#3fb950"/>
+      <text x="800" y="168" text-anchor="middle" fill="#3fb950" font-size="11" font-family="monospace">plo_buf_</text>
+      <text x="800" y="181" text-anchor="middle" fill="#3fb950" font-size="11" font-family="monospace">data_next</text>
+
+      <!-- Arrows: inputs → intermediates -->
+      <!-- plo_buf_valid_reg → do_pop (AND) -->
+      <line x1="180" y1="58" x2="250" y2="76" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+      <!-- plo_ready → do_pop (AND) -->
+      <line x1="180" y1="150" x2="250" y2="82" stroke="#f85149" stroke-width="2" marker-end="url(#arrowRed)"/>
+      <!-- plo_buf_valid_reg → can_push (OR via NOT) -->
+      <line x1="180" y1="62" x2="250" y2="158" stroke="#8b949e" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowGray)"/>
+      <!-- plo_ready → can_push (OR) -->
+      <line x1="180" y1="155" x2="250" y2="165" stroke="#f85149" stroke-width="2" marker-end="url(#arrowRed)"/>
+
+      <!-- Labels on first arrows -->
+      <text x="207" y="62" fill="#8b949e" font-size="10">AND</text>
+      <text x="207" y="165" fill="#8b949e" font-size="10">OR</text>
+
+      <!-- can_push → produce_w AND with state -->
+      <line x1="410" y1="168" x2="490" y2="128" stroke="#f85149" stroke-width="2" marker-end="url(#arrowRed)"/>
+      <!-- state → produce_w -->
+      <line x1="180" y1="258" x2="490" y2="135" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+      <text x="310" y="230" fill="#8b949e" font-size="10">state==S_WAIT_PLO</text>
+      <text x="440" y="155" fill="#8b949e" font-size="10">AND</text>
+
+      <!-- produce_w → outputs -->
+      <line x1="670" y1="115" x2="750" y2="80" stroke="#f85149" stroke-width="2" marker-end="url(#arrowRed)"/>
+      <line x1="670" y1="125" x2="750" y2="162" stroke="#f85149" stroke-width="2" marker-end="url(#arrowRed)"/>
+
+      <!-- do_pop → valid_next -->
+      <line x1="410" y1="78" x2="750" y2="78" stroke="#8b949e" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowGray)"/>
+
+      <!-- RED BUG annotation -->
+      <rect x="466" y="86" width="228" height="68" rx="4" fill="none" stroke="#f85149" stroke-dasharray="5,3"/>
+      <text x="580" y="82" text-anchor="middle" fill="#f85149" font-size="11" font-weight="bold">🐛 BUG: 同拍 pop + produce</text>
+
+      <!-- vaddu_result_reg annotation for data mux -->
+      <rect x="10" y="283" width="170" height="30" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="95" y="303" text-anchor="middle" fill="#9cdcfe" font-size="11" font-family="monospace">vaddu_result_reg</text>
+      <line x1="180" y1="298" x2="750" y2="175" stroke="#8b949e" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#arrowGray)"/>
+      <text x="420" y="268" fill="#f85149" font-size="11">stale reg → data_next</text>
+    </svg>
+    <div class="diagram-caption">圖 2-1：修改前的組合邏輯相依圖。<code>plo_ready</code> 同時驅動 pop 與 produce，在 S_WAIT_PLO 產生同拍衝突。</div>
+  </div>
+
+  <div class="callout warn">
+    <strong>關鍵觀察：</strong>
+    <code>plo_buf_can_push_w = !plo_buf_valid_reg || plo_ready</code>。
+    在 S_WAIT_PLO 的 release cycle（<code>plo_buf_valid_reg=1, plo_ready=1</code>），
+    <code>can_push_w=1</code> 且 <code>do_pop_w=1</code> 同時成立，
+    導致 <code>plo_buf_produce_w=1</code> 與 <code>plo_buf_do_pop_w=1</code> 在同一拍並行觸發。
+    RTL 在此情況下能維持正確 rollover，但 gate 失真成 stale replay。
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ S3 -->
+<section id="s3">
+  <h2>3. 時序波形比較</h2>
+
+  <h3>3.1 Bug 時序（修改前）</h3>
+  <div class="diagram-wrap">
+    <svg width="820" height="310" viewBox="0 0 820 310" xmlns="http://www.w3.org/2000/svg"
+         style="display:block;margin:auto;">
+
+      <!-- Background grid -->
+      <rect width="820" height="310" fill="#0d1117"/>
+
+      <!-- Cycle headers -->
+      <text x="130" y="20" fill="#8b949e" font-size="11" text-anchor="middle">T₀</text>
+      <text x="260" y="20" fill="#8b949e" font-size="11" text-anchor="middle">T₁</text>
+      <text x="390" y="20" fill="#f85149" font-size="11" text-anchor="middle" font-weight="bold">T₂ (release)</text>
+      <text x="520" y="20" fill="#8b949e" font-size="11" text-anchor="middle">T₃</text>
+      <text x="650" y="20" fill="#8b949e" font-size="11" text-anchor="middle">T₄</text>
+
+      <!-- Vertical dividers -->
+      <line x1="65" y1="28" x2="65" y2="305" stroke="#21262d" stroke-width="1"/>
+      <line x1="195" y1="28" x2="195" y2="305" stroke="#21262d" stroke-width="1"/>
+      <line x1="325" y1="28" x2="325" y2="305" stroke="#21262d" stroke-width="1"/>
+      <line x1="455" y1="28" x2="455" y2="305" stroke="#f85149" stroke-width="1.5" stroke-dasharray="4,2"/>
+      <line x1="585" y1="28" x2="585" y2="305" stroke="#21262d" stroke-width="1"/>
+      <line x1="715" y1="28" x2="715" y2="305" stroke="#21262d" stroke-width="1"/>
+
+      <!-- Signal labels -->
+      <text x="58" y="50"  fill="#8b949e" font-size="11" text-anchor="end">state_reg</text>
+      <text x="58" y="90"  fill="#8b949e" font-size="11" text-anchor="end">plo_full</text>
+      <text x="58" y="130" fill="#8b949e" font-size="11" text-anchor="end">plo_ready</text>
+      <text x="58" y="170" fill="#8b949e" font-size="11" text-anchor="end">buf_valid_reg</text>
+      <text x="58" y="210" fill="#8b949e" font-size="11" text-anchor="end">do_pop_w</text>
+      <text x="58" y="250" fill="#8b949e" font-size="11" text-anchor="end">produce_w</text>
+      <text x="58" y="290" fill="#8b949e" font-size="11" text-anchor="end">buf_data_reg</text>
+
+      <!-- state_reg: EXEC_PLI, WAIT_PLO, WAIT_PLO, BUG-ADVANCE, IDLE -->
+      <rect x="65"  y="34" width="130" height="22" rx="3" fill="#0d2318"/>
+      <text x="130" y="49" text-anchor="middle" fill="#3fb950" font-size="10" font-family="monospace">EXEC_PLI_VADDU</text>
+      <rect x="195" y="34" width="130" height="22" rx="3" fill="#1c2128"/>
+      <text x="260" y="49" text-anchor="middle" fill="#8b949e" font-size="10" font-family="monospace">WAIT_PLO</text>
+      <rect x="325" y="34" width="130" height="22" rx="3" fill="#3d1515"/>
+      <text x="390" y="49" text-anchor="middle" fill="#f85149" font-size="10" font-family="monospace">WAIT_PLO ⚠</text>
+      <rect x="455" y="34" width="130" height="22" rx="3" fill="#1c2128"/>
+      <text x="520" y="49" text-anchor="middle" fill="#8b949e" font-size="10" font-family="monospace">IDLE</text>
+      <rect x="585" y="34" width="130" height="22" rx="3" fill="#1c2128"/>
+      <text x="650" y="49" text-anchor="middle" fill="#8b949e" font-size="10" font-family="monospace">...</text>
+
+      <!-- plo_full: HIGH, HIGH, LOW, LOW, LOW -->
+      <rect x="65"  y="77" width="130" height="14" rx="2" fill="#d29922" opacity=".7"/>
+      <rect x="195" y="77" width="130" height="14" rx="2" fill="#d29922" opacity=".7"/>
+      <rect x="325" y="84" width="130" height="7"  rx="2" fill="#30363d"/>
+      <rect x="455" y="84" width="260" height="7"  rx="2" fill="#30363d"/>
+      <text x="130" y="89" text-anchor="middle" fill="#0d1117" font-size="10" font-weight="bold">1</text>
+      <text x="260" y="89" text-anchor="middle" fill="#0d1117" font-size="10" font-weight="bold">1</text>
+
+      <!-- plo_ready: LOW, LOW, HIGH, HIGH -->
+      <rect x="65"  y="124" width="260" height="7" rx="2" fill="#30363d"/>
+      <rect x="325" y="117" width="130" height="14" rx="2" fill="#3fb950" opacity=".7"/>
+      <rect x="455" y="117" width="260" height="14" rx="2" fill="#3fb950" opacity=".7"/>
+      <text x="390" y="129" text-anchor="middle" fill="#0d1117" font-size="10" font-weight="bold">1</text>
+      <text x="520" y="129" text-anchor="middle" fill="#0d1117" font-size="10" font-weight="bold">1</text>
+
+      <!-- buf_valid_reg: always HIGH (BUG) -->
+      <rect x="65" y="157" width="650" height="14" rx="2" fill="#58a6ff" opacity=".6"/>
+      <text x="390" y="169" text-anchor="middle" fill="#0d1117" font-size="10" font-weight="bold">1 (BUG: 始終保持高)</text>
+
+      <!-- do_pop_w: only at T2 -->
+      <rect x="65"  y="204" width="260" height="7" rx="2" fill="#30363d"/>
+      <rect x="325" y="197" width="130" height="14" rx="2" fill="#d29922" opacity=".7"/>
+      <rect x="455" y="204" width="260" height="7" rx="2" fill="#30363d"/>
+      <text x="390" y="209" text-anchor="middle" fill="#0d1117" font-size="10" font-weight="bold">1</text>
+
+      <!-- produce_w: only at T2 (simultaneous!) -->
+      <rect x="65"  y="244" width="260" height="7" rx="2" fill="#30363d"/>
+      <rect x="325" y="237" width="130" height="14" rx="2" fill="#f85149" opacity=".8"/>
+      <rect x="455" y="244" width="260" height="7" rx="2" fill="#30363d"/>
+      <text x="390" y="249" text-anchor="middle" fill="#fff" font-size="10" font-weight="bold">1 ⚠ 同拍!</text>
+
+      <!-- buf_data_reg -->
+      <rect x="65"  y="278" width="260" height="18" rx="2" fill="#1c2128" stroke="#30363d"/>
+      <text x="195" y="291" text-anchor="middle" fill="#c9d1d9" font-size="10" font-family="monospace">vpsum_PREV</text>
+      <rect x="325" y="278" width="130" height="18" rx="2" fill="#1c2128" stroke="#30363d"/>
+      <text x="390" y="291" text-anchor="middle" fill="#c9d1d9" font-size="10" font-family="monospace">vpsum_PREV</text>
+      <rect x="455" y="278" width="260" height="18" rx="2" fill="#3d1515" stroke="#f85149"/>
+      <text x="585" y="291" text-anchor="middle" fill="#f85149" font-size="10" font-family="monospace">stale replay !</text>
+
+      <!-- T2 annotation -->
+      <rect x="325" y="28" width="130" height="260" fill="#f85149" opacity=".04"/>
+      <text x="390" y="305" text-anchor="middle" fill="#f85149" font-size="11" font-weight="bold">↑ pop &amp; produce 同拍</text>
+    </svg>
+    <div class="diagram-caption">圖 3-1：修改前時序。T₂ 為 S_WAIT_PLO release cycle，do_pop_w 與 produce_w 同拍成立，buf_data_reg 被 stale value 覆寫。</div>
+  </div>
+
+  <h3>3.2 Fix 時序（修改後）</h3>
+  <div class="diagram-wrap">
+    <svg width="820" height="330" viewBox="0 0 820 330" xmlns="http://www.w3.org/2000/svg"
+         style="display:block;margin:auto;">
+
+      <rect width="820" height="330" fill="#0d1117"/>
+
+      <!-- Cycle headers -->
+      <text x="100" y="20" fill="#8b949e" font-size="11" text-anchor="middle">T₀</text>
+      <text x="200" y="20" fill="#8b949e" font-size="11" text-anchor="middle">T₁</text>
+      <text x="300" y="20" fill="#58a6ff" font-size="11" text-anchor="middle">T₂ (drain)</text>
+      <text x="400" y="20" fill="#3fb950" font-size="11" text-anchor="middle">T₃ (refill)</text>
+      <text x="500" y="20" fill="#8b949e" font-size="11" text-anchor="middle">T₄</text>
+      <text x="630" y="20" fill="#8b949e" font-size="11" text-anchor="middle">T₅</text>
+
+      <!-- Vertical dividers -->
+      <line x1="50"  y1="28" x2="50"  y2="325" stroke="#21262d"/>
+      <line x1="150" y1="28" x2="150" y2="325" stroke="#21262d"/>
+      <line x1="250" y1="28" x2="250" y2="325" stroke="#21262d"/>
+      <line x1="350" y1="28" x2="350" y2="325" stroke="#58a6ff" stroke-dasharray="4,2"/>
+      <line x1="450" y1="28" x2="450" y2="325" stroke="#3fb950" stroke-dasharray="4,2"/>
+      <line x1="550" y1="28" x2="550" y2="325" stroke="#21262d"/>
+      <line x1="700" y1="28" x2="700" y2="325" stroke="#21262d"/>
+
+      <!-- Signal labels -->
+      <text x="42" y="50"  fill="#8b949e" font-size="11" text-anchor="end">state_reg</text>
+      <text x="42" y="90"  fill="#8b949e" font-size="11" text-anchor="end">plo_full</text>
+      <text x="42" y="130" fill="#8b949e" font-size="11" text-anchor="end">plo_ready</text>
+      <text x="42" y="170" fill="#8b949e" font-size="11" text-anchor="end">pending_valid</text>
+      <text x="42" y="210" fill="#8b949e" font-size="11" text-anchor="end">buf_valid_reg</text>
+      <text x="42" y="250" fill="#8b949e" font-size="11" text-anchor="end">do_pop_w</text>
+      <text x="42" y="290" fill="#8b949e" font-size="11" text-anchor="end">produce_w</text>
+      <text x="42" y="322" fill="#8b949e" font-size="11" text-anchor="end">buf_data_reg</text>
+
+      <!-- state_reg -->
+      <rect x="50"  y="34" width="100" height="22" rx="3" fill="#0d2318"/>
+      <text x="100" y="49" text-anchor="middle" fill="#3fb950" font-size="9" font-family="monospace">EXEC_PLI</text>
+      <rect x="150" y="34" width="100" height="22" rx="3" fill="#1c2128"/>
+      <text x="200" y="49" text-anchor="middle" fill="#8b949e" font-size="9" font-family="monospace">WAIT_PLO ph1</text>
+      <rect x="250" y="34" width="100" height="22" rx="3" fill="#0d1f3d"/>
+      <text x="300" y="49" text-anchor="middle" fill="#58a6ff" font-size="9" font-family="monospace">WAIT_PLO drain</text>
+      <rect x="350" y="34" width="100" height="22" rx="3" fill="#0d2318"/>
+      <text x="400" y="49" text-anchor="middle" fill="#3fb950" font-size="9" font-family="monospace">WAIT_PLO refill</text>
+      <rect x="450" y="34" width="100" height="22" rx="3" fill="#1c2128"/>
+      <text x="500" y="49" text-anchor="middle" fill="#8b949e" font-size="9" font-family="monospace">IDLE</text>
+      <rect x="550" y="34" width="150" height="22" rx="3" fill="#1c2128"/>
+      <text x="625" y="49" text-anchor="middle" fill="#8b949e" font-size="9" font-family="monospace">...</text>
+
+      <!-- plo_full -->
+      <rect x="50"  y="77" width="200" height="14" rx="2" fill="#d29922" opacity=".7"/>
+      <rect x="250" y="84" width="500" height="7"  rx="2" fill="#30363d"/>
+      <text x="150" y="89" text-anchor="middle" fill="#0d1117" font-size="10" font-weight="bold">1</text>
+
+      <!-- plo_ready -->
+      <rect x="50"  y="124" width="200" height="7"  rx="2" fill="#30363d"/>
+      <rect x="250" y="117" width="500" height="14" rx="2" fill="#3fb950" opacity=".7"/>
+      <text x="400" y="129" text-anchor="middle" fill="#0d1117" font-size="10" font-weight="bold">1</text>
+
+      <!-- plo_pending_valid_reg: 0→1 at T0 end, stays 1 until T3 end -->
+      <rect x="50"  y="164" width="100" height="7"  rx="2" fill="#30363d"/>
+      <rect x="150" y="157" width="300" height="14" rx="2" fill="#9cdcfe" opacity=".6"/>
+      <rect x="450" y="164" width="300" height="7"  rx="2" fill="#30363d"/>
+      <text x="300" y="169" text-anchor="middle" fill="#0d1117" font-size="10" font-weight="bold">1</text>
+
+      <!-- buf_valid_reg: 1→1→1→0→1 -->
+      <rect x="50"  y="197" width="300" height="14" rx="2" fill="#58a6ff" opacity=".6"/>
+      <rect x="350" y="204" width="100" height="7"  rx="2" fill="#30363d"/>
+      <rect x="450" y="197" width="300" height="14" rx="2" fill="#58a6ff" opacity=".6"/>
+      <text x="200" y="209" text-anchor="middle" fill="#0d1117" font-size="10" font-weight="bold">1</text>
+      <text x="600" y="209" text-anchor="middle" fill="#0d1117" font-size="10" font-weight="bold">1 (new vpsum)</text>
+
+      <!-- do_pop_w: only at T2 (drain) -->
+      <rect x="50"  y="244" width="200" height="7" rx="2" fill="#30363d"/>
+      <rect x="250" y="237" width="100" height="14" rx="2" fill="#58a6ff" opacity=".7"/>
+      <rect x="350" y="244" width="400" height="7" rx="2" fill="#30363d"/>
+      <text x="300" y="249" text-anchor="middle" fill="#0d1117" font-size="10" font-weight="bold">1</text>
+
+      <!-- produce_w: only at T3 (refill, NO overlap) -->
+      <rect x="50"  y="284" width="300" height="7" rx="2" fill="#30363d"/>
+      <rect x="350" y="277" width="100" height="14" rx="2" fill="#3fb950" opacity=".8"/>
+      <rect x="450" y="284" width="300" height="7" rx="2" fill="#30363d"/>
+      <text x="400" y="289" text-anchor="middle" fill="#0d1117" font-size="10" font-weight="bold">1 ✓</text>
+
+      <!-- buf_data_reg -->
+      <rect x="50"  y="310" width="300" height="14" rx="2" fill="#1c2128" stroke="#30363d"/>
+      <text x="200" y="321" text-anchor="middle" fill="#c9d1d9" font-size="10" font-family="monospace">vpsum_PREV</text>
+      <rect x="350" y="310" width="100" height="14" rx="2" fill="#1c2128" stroke="#30363d"/>
+      <text x="400" y="321" text-anchor="middle" fill="#8b949e" font-size="9" font-family="monospace">empty</text>
+      <rect x="450" y="310" width="300" height="14" rx="2" fill="#0d2318" stroke="#3fb950"/>
+      <text x="600" y="321" text-anchor="middle" fill="#3fb950" font-size="10" font-family="monospace">vpsum_NEW ✓</text>
+
+      <!-- Annotation boxes -->
+      <rect x="250" y="28" width="100" height="280" fill="#58a6ff" opacity=".03"/>
+      <rect x="350" y="28" width="100" height="280" fill="#3fb950" opacity=".03"/>
+
+      <text x="300" y="310" text-anchor="middle" fill="#58a6ff" font-size="10">drain 拍</text>
+      <text x="400" y="310" text-anchor="middle" fill="#3fb950" font-size="10">refill 拍</text>
+      <text x="480" y="310" fill="#8b949e" font-size="10" text-anchor="middle">← 不再同拍 →</text>
+    </svg>
+    <div class="diagram-caption">圖 3-2：修改後時序。T₂ 僅執行 drain（pop），T₃ 才執行 refill（produce），兩者不再重疊。buf_data_reg 在 T₄ 後含正確的 vpsum_NEW。</div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ S4 -->
+<section id="s4">
+  <h2>4. FSM 狀態圖比較</h2>
+  <p>以下重點放在 PLO 相關的三個狀態。</p>
+
+  <div class="diagram-wrap">
+    <svg width="820" height="280" viewBox="0 0 820 280" xmlns="http://www.w3.org/2000/svg"
+         style="display:block;margin:auto;">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="#8b949e"/>
+        </marker>
+        <marker id="arrR" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="#f85149"/>
+        </marker>
+        <marker id="arrG" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="#3fb950"/>
+        </marker>
+        <marker id="arrB" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="#58a6ff"/>
+        </marker>
+      </defs>
+
+      <!-- ===== LEFT: BEFORE ===== -->
+      <text x="195" y="18" text-anchor="middle" fill="#f85149" font-size="13" font-weight="bold">修改前 (BEFORE)</text>
+
+      <!-- States circles -->
+      <!-- EXEC_PLI_VADDU -->
+      <circle cx="100" cy="90" r="46" fill="#1c2128" stroke="#3fb950" stroke-width="2"/>
+      <text x="100" y="86" text-anchor="middle" fill="#3fb950" font-size="10" font-family="monospace">S_EXEC_</text>
+      <text x="100" y="99" text-anchor="middle" fill="#3fb950" font-size="10" font-family="monospace">PLI_VADDU</text>
+
+      <!-- WAIT_PLO -->
+      <circle cx="290" cy="90" r="46" fill="#3d1515" stroke="#f85149" stroke-width="2"/>
+      <text x="290" y="86" text-anchor="middle" fill="#f85149" font-size="10" font-family="monospace">S_WAIT_PLO</text>
+      <text x="290" y="99" text-anchor="middle" fill="#f85149" font-size="10" font-family="monospace">(BUG)</text>
+
+      <!-- IDLE -->
+      <circle cx="190" cy="220" r="38" fill="#1c2128" stroke="#8b949e" stroke-width="1.5"/>
+      <text x="190" y="224" text-anchor="middle" fill="#8b949e" font-size="10" font-family="monospace">S_IDLE</text>
+
+      <!-- Arrow: EXEC → WAIT (plo_full) -->
+      <path d="M145 80 Q218 50 244 70" stroke="#f85149" stroke-width="2" fill="none" marker-end="url(#arrR)"/>
+      <text x="200" y="50" text-anchor="middle" fill="#f85149" font-size="10">plo_buf_valid &amp;&amp; !plo_ready</text>
+
+      <!-- Arrow: WAIT → IDLE (plo_ready, simultaneous) -->
+      <path d="M262 130 Q230 165 220 185" stroke="#f85149" stroke-width="2" fill="none" marker-end="url(#arrR)"/>
+      <text x="215" y="158" text-anchor="middle" fill="#f85149" font-size="10">plo_ready</text>
+      <text x="215" y="170" text-anchor="middle" fill="#f85149" font-size="10">+ pop+produce同拍⚠</text>
+
+      <!-- Arrow: EXEC → IDLE (normal) -->
+      <path d="M115 132 L165 186" stroke="#8b949e" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+      <text x="120" y="165" text-anchor="middle" fill="#8b949e" font-size="10">can_push</text>
+
+      <!-- Self-loop on WAIT_PLO -->
+      <path d="M330 52 Q380 20 340 70" stroke="#8b949e" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+      <text x="380" y="40" text-anchor="middle" fill="#8b949e" font-size="10">!plo_ready</text>
+
+      <!-- ready_out_w annotation -->
+      <rect x="240" y="140" width="120" height="30" rx="3" fill="#3d1515" stroke="#f85149"/>
+      <text x="300" y="152" text-anchor="middle" fill="#f85149" font-size="10">ready_out = plo_ready</text>
+      <text x="300" y="164" text-anchor="middle" fill="#f85149" font-size="10">pli_ready = accept⚠</text>
+
+      <!-- ===== RIGHT: AFTER ===== -->
+      <text x="615" y="18" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="bold">修改後 (AFTER)</text>
+
+      <!-- States -->
+      <!-- EXEC_PLI_VADDU -->
+      <circle cx="520" cy="90" r="46" fill="#1c2128" stroke="#3fb950" stroke-width="2"/>
+      <text x="520" y="86" text-anchor="middle" fill="#3fb950" font-size="10" font-family="monospace">S_EXEC_</text>
+      <text x="520" y="99" text-anchor="middle" fill="#3fb950" font-size="10" font-family="monospace">PLI_VADDU</text>
+
+      <!-- WAIT_PLO (two phases, shown as double circle) -->
+      <circle cx="710" cy="90" r="46" fill="#0d1f3d" stroke="#58a6ff" stroke-width="2"/>
+      <circle cx="710" cy="90" r="38" fill="none" stroke="#3fb950" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="710" y="80" text-anchor="middle" fill="#58a6ff" font-size="10" font-family="monospace">S_WAIT_PLO</text>
+      <text x="710" y="93" text-anchor="middle" fill="#58a6ff" font-size="10">Ph1: drain</text>
+      <text x="710" y="106" text-anchor="middle" fill="#3fb950" font-size="10">Ph2: refill</text>
+
+      <!-- IDLE -->
+      <circle cx="610" cy="220" r="38" fill="#1c2128" stroke="#8b949e" stroke-width="1.5"/>
+      <text x="610" y="224" text-anchor="middle" fill="#8b949e" font-size="10" font-family="monospace">S_IDLE</text>
+
+      <!-- Arrow: EXEC → WAIT (plo_full, set pending=1) -->
+      <path d="M565 80 Q638 50 664 70" stroke="#58a6ff" stroke-width="2" fill="none" marker-end="url(#arrB)"/>
+      <text x="618" y="48" text-anchor="middle" fill="#58a6ff" font-size="10">plo_buf_valid &amp;&amp; !plo_ready</text>
+      <text x="618" y="60" text-anchor="middle" fill="#58a6ff" font-size="10">pending_valid ← 1</text>
+
+      <!-- Self-loop Ph1 (buf_valid) -->
+      <path d="M748 52 Q800 20 762 68" stroke="#8b949e" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+      <text x="800" y="38" text-anchor="middle" fill="#8b949e" font-size="10">plo_buf_</text>
+      <text x="800" y="50" text-anchor="middle" fill="#8b949e" font-size="10">valid_reg=1</text>
+
+      <!-- Arrow: WAIT Ph2 → IDLE (after refill) -->
+      <path d="M682 130 Q650 165 635 185" stroke="#3fb950" stroke-width="2" fill="none" marker-end="url(#arrG)"/>
+      <text x="625" y="155" text-anchor="middle" fill="#3fb950" font-size="10">!buf_valid &amp;&amp;</text>
+      <text x="625" y="167" text-anchor="middle" fill="#3fb950" font-size="10">pending_valid</text>
+      <text x="625" y="179" text-anchor="middle" fill="#3fb950" font-size="10">→ refill fires ✓</text>
+
+      <!-- Arrow: EXEC → IDLE (normal) -->
+      <path d="M535 132 L585 186" stroke="#8b949e" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+      <text x="540" y="165" text-anchor="middle" fill="#8b949e" font-size="10">can_push</text>
+
+      <!-- ready_out / pli_ready annotation -->
+      <rect x="660" y="142" width="120" height="30" rx="3" fill="#0d2318" stroke="#3fb950"/>
+      <text x="720" y="154" text-anchor="middle" fill="#3fb950" font-size="10">ready_out = 0</text>
+      <text x="720" y="166" text-anchor="middle" fill="#3fb950" font-size="10">pli_ready = 0 ✓</text>
+    </svg>
+    <div class="diagram-caption">圖 4-1：FSM 對比。左圖 S_WAIT_PLO 在 release cycle 同拍 pop+produce+accept（紅色）；右圖改成兩相控制（藍=drain, 綠=refill），ready_out 與 pli_ready 全程為 0。</div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ S5 -->
+<section id="s5">
+  <h2>5. RTL 修改明細</h2>
+
+  <!-- === Change 1 === -->
+  <h3>① 新增 plo_pending_valid_reg / _next 暫存器</h3>
+  <p>在 pipeline register 宣告區與 next-state signal 區各加一個 1-bit 控制旗號，記錄「有待補回 PLO buffer 的 pending result」。</p>
+
+  <div class="code-compare">
+    <div class="code-panel before">
+      <div class="code-panel-header">✖ BEFORE — EXE_A_Stage.sv (L65–66, L81–82)</div>
+      <pre><span class="cmt">// PLO output buffer</span>
+<span class="kw">logic</span>             <span class="sig">plo_buf_valid_reg</span>;
+<span class="kw">logic</span> [<span class="num">63</span>:<span class="num">0</span>]      <span class="sig">plo_buf_data_reg</span>;
+
+<span class="cmt">// next-state signals</span>
+<span class="kw">logic</span>             <span class="sig">plo_buf_valid_next</span>;
+<span class="kw">logic</span> [<span class="num">63</span>:<span class="num">0</span>]      <span class="sig">plo_buf_data_next</span>;</pre>
+    </div>
+    <div class="code-panel after">
+      <div class="code-panel-header">✔ AFTER — 新增 pending_valid 控制位元</div>
+      <pre><span class="cmt">// PLO output buffer</span>
+<span class="kw">logic</span>             <span class="sig">plo_buf_valid_reg</span>;
+<span class="kw">logic</span> [<span class="num">63</span>:<span class="num">0</span>]      <span class="sig">plo_buf_data_reg</span>;
+<span class="hi"><span class="kw">logic</span>             <span class="sig">plo_pending_valid_reg</span>;  <span class="cmt">// ← NEW</span></span>
+
+<span class="cmt">// next-state signals</span>
+<span class="kw">logic</span>             <span class="sig">plo_buf_valid_next</span>;
+<span class="kw">logic</span> [<span class="num">63</span>:<span class="num">0</span>]      <span class="sig">plo_buf_data_next</span>;
+<span class="hi"><span class="kw">logic</span>             <span class="sig">plo_pending_valid_next</span>; <span class="cmt">// ← NEW</span></span></pre>
+    </div>
+  </div>
+
+  <!-- === Change 2 === -->
+  <h3>② plo_buf_produce_w — 拆成互斥的 execute produce 與 refill produce</h3>
+  <p>原有邏輯把 <code>S_EXEC_PLI_VADDU</code> 與 <code>S_WAIT_PLO</code> 合併在同一個 produce 條件，
+  導致 <code>S_WAIT_PLO</code> 的 release cycle 可以與 pop 同拍觸發 produce。
+  修改後，兩個路徑條件互斥，<code>S_WAIT_PLO</code> 的 produce 只在 buffer 已清空且 pending_valid=1 時才觸發。</p>
+
+  <div class="code-compare">
+    <div class="code-panel before">
+      <div class="code-panel-header">✖ BEFORE — L259–265</div>
+      <pre><span class="kw">always_comb</span> <span class="kw">begin</span>
+    <span class="sig">plo_buf_do_pop_w</span>   = <span class="sig">plo_buf_valid_reg</span> && <span class="sig">plo_ready</span>;
+    <span class="sig">plo_buf_can_push_w</span> = !<span class="sig">plo_buf_valid_reg</span> || <span class="sig">plo_ready</span>;
+    <span class="hi-r"><span class="sig">plo_buf_produce_w</span>  = (<span class="sig">state_reg</span> == <span class="ty">S_EXEC_PLI_VADDU</span>
+                        || <span class="sig">state_reg</span> == <span class="ty">S_WAIT_PLO</span>)
+                       && <span class="sig">plo_buf_can_push_w</span>;</span>
+    <span class="sig">plo_buf_vpsum_data_w</span> = (<span class="sig">state_reg</span> == <span class="ty">S_WAIT_PLO</span>)
+        ? <span class="sig">v_fp16_to_u64</span>(<span class="sig">vaddu_result_reg</span>)
+        : <span class="sig">v_fp16_to_u64</span>(<span class="sig">vaddu_result_sig</span>);
+<span class="kw">end</span></pre>
+    </div>
+    <div class="code-panel after">
+      <div class="code-panel-header">✔ AFTER — produce 條件拆開，pop 與 refill 不再同拍</div>
+      <pre><span class="kw">always_comb</span> <span class="kw">begin</span>
+    <span class="sig">plo_buf_do_pop_w</span>   = <span class="sig">plo_buf_valid_reg</span> && <span class="sig">plo_ready</span>;
+    <span class="sig">plo_buf_can_push_w</span> = !<span class="sig">plo_buf_valid_reg</span> || <span class="sig">plo_ready</span>;
+    <span class="hi"><span class="cmt">// execute produce (S_EXEC_PLI_VADDU): 使用 vaddu_result_sig，行為不變</span>
+    <span class="cmt">// refill produce (S_WAIT_PLO):      只在 buf 已空且 pending=1 時觸發，</span>
+    <span class="cmt">//                                   絕不與 do_pop_w 同拍成立</span>
+    <span class="sig">plo_buf_produce_w</span>  =
+        (<span class="sig">state_reg</span> == <span class="ty">S_EXEC_PLI_VADDU</span> && <span class="sig">plo_buf_can_push_w</span>) ||
+        (<span class="sig">state_reg</span> == <span class="ty">S_WAIT_PLO</span>
+         && !<span class="sig">plo_buf_valid_reg</span>           <span class="cmt">// buffer 已清空</span>
+         && <span class="sig">plo_pending_valid_reg</span>);       <span class="cmt">// 有待補的 result</span></span>
+    <span class="sig">plo_buf_vpsum_data_w</span> = (<span class="sig">state_reg</span> == <span class="ty">S_WAIT_PLO</span>)
+        ? <span class="sig">v_fp16_to_u64</span>(<span class="sig">vaddu_result_reg</span>)
+        : <span class="sig">v_fp16_to_u64</span>(<span class="sig">vaddu_result_sig</span>);
+<span class="kw">end</span></pre>
+    </div>
+  </div>
+
+  <div class="callout info">
+    <strong>為什麼 S_EXEC_PLI_VADDU 的同拍 pop+produce 可以保留？</strong><br>
+    在 S_EXEC_PLI_VADDU，produce 使用的是 <code>vaddu_result_sig</code>（當前計算結果），
+    不是 <code>vaddu_result_reg</code>（舊 cycle 的 stale 值）。
+    這個 rollover 在 RTL 與 gate 都是安全的，因為寫入的是新鮮計算值，不是舊值再覆寫。
+    只有 <code>S_WAIT_PLO</code> 的 refill 是問題所在。
+  </div>
+
+  <!-- === Change 3 === -->
+  <h3>③ PLO Buffer Next-State always_comb — 加入 plo_pending_valid_next 管理</h3>
+
+  <div class="code-compare">
+    <div class="code-panel before">
+      <div class="code-panel-header">✖ BEFORE — L269–287</div>
+      <pre><span class="kw">always_comb</span> <span class="kw">begin</span>
+    <span class="sig">plo_buf_valid_next</span> = <span class="sig">plo_buf_valid_reg</span>;
+    <span class="sig">plo_buf_data_next</span>  = <span class="sig">plo_buf_data_reg</span>;
+
+    <span class="kw">if</span> (<span class="sig">stage_reset</span>) <span class="kw">begin</span>
+        <span class="sig">plo_buf_valid_next</span> = <span class="num">1'b0</span>;
+        <span class="sig">plo_buf_data_next</span>  = <span class="num">64'd0</span>;
+    <span class="kw">end else begin</span>
+        <span class="kw">if</span> (<span class="sig">plo_buf_do_pop_w</span> && !<span class="sig">plo_buf_produce_w</span>) <span class="kw">begin</span>
+            <span class="sig">plo_buf_valid_next</span> = <span class="num">1'b0</span>;
+        <span class="kw">end else if</span> (!<span class="sig">plo_buf_do_pop_w</span> && <span class="sig">plo_buf_produce_w</span>) <span class="kw">begin</span>
+            <span class="sig">plo_buf_valid_next</span> = <span class="num">1'b1</span>;
+            <span class="sig">plo_buf_data_next</span>  = <span class="sig">plo_buf_vpsum_data_w</span>;
+        <span class="kw">end else if</span> (<span class="sig">plo_buf_do_pop_w</span> && <span class="sig">plo_buf_produce_w</span>) <span class="kw">begin</span>
+            <span class="sig">plo_buf_valid_next</span> = <span class="num">1'b1</span>;
+            <span class="sig">plo_buf_data_next</span>  = <span class="sig">plo_buf_vpsum_data_w</span>;
+        <span class="kw">end</span>
+    <span class="kw">end</span>
+<span class="kw">end</span></pre>
+    </div>
+    <div class="code-panel after">
+      <div class="code-panel-header">✔ AFTER — 加入 pending_valid 清除（refill 後歸零）</div>
+      <pre><span class="kw">always_comb</span> <span class="kw">begin</span>
+    <span class="sig">plo_buf_valid_next</span>    = <span class="sig">plo_buf_valid_reg</span>;
+    <span class="sig">plo_buf_data_next</span>     = <span class="sig">plo_buf_data_reg</span>;
+
+    <span class="kw">if</span> (<span class="sig">stage_reset</span>) <span class="kw">begin</span>
+        <span class="sig">plo_buf_valid_next</span> = <span class="num">1'b0</span>;
+        <span class="sig">plo_buf_data_next</span>  = <span class="num">64'd0</span>;
+    <span class="kw">end else begin</span>
+        <span class="kw">if</span> (<span class="sig">plo_buf_do_pop_w</span> && !<span class="sig">plo_buf_produce_w</span>) <span class="kw">begin</span>
+            <span class="sig">plo_buf_valid_next</span> = <span class="num">1'b0</span>;
+        <span class="kw">end else if</span> (!<span class="sig">plo_buf_do_pop_w</span> && <span class="sig">plo_buf_produce_w</span>) <span class="kw">begin</span>
+            <span class="sig">plo_buf_valid_next</span> = <span class="num">1'b1</span>;
+            <span class="sig">plo_buf_data_next</span>  = <span class="sig">plo_buf_vpsum_data_w</span>;
+        <span class="kw">end else if</span> (<span class="sig">plo_buf_do_pop_w</span> && <span class="sig">plo_buf_produce_w</span>) <span class="kw">begin</span>
+            <span class="cmt">// 修改後此 branch 只出現在 S_EXEC_PLI_VADDU</span>
+            <span class="sig">plo_buf_valid_next</span> = <span class="num">1'b1</span>;
+            <span class="sig">plo_buf_data_next</span>  = <span class="sig">plo_buf_vpsum_data_w</span>;
+        <span class="kw">end</span>
+    <span class="kw">end</span>
+<span class="kw">end</span></pre>
+    </div>
+  </div>
+
+  <div class="callout ok">
+    <strong>注意：</strong> <code>plo_pending_valid_next</code> 的主要管理（set / clear）移到 Main FSM always_comb 中，
+    與 state_next 的轉換一起維護，避免跨 always_comb block 多重驅動。
+  </div>
+
+  <!-- === Change 4 === -->
+  <h3>④ ready_out_w — S_WAIT_PLO 改為恆 0</h3>
+  <p>修改前：<code>ready_out_w = plo_ready</code>，導致 upstream 可在 release 同拍接受新指令。
+     修改後：等待期間禁止前推，確保 drain/refill 兩拍不被新指令污染。</p>
+
+  <div class="code-compare">
+    <div class="code-panel before">
+      <div class="code-panel-header">✖ BEFORE — L171–172</div>
+      <pre><span class="ty">S_WAIT_PLO</span>: <span class="kw">begin</span>
+    <span class="hi-r"><span class="sig">ready_out_w</span> = <span class="sig">plo_ready</span>;</span>
+<span class="kw">end</span></pre>
+    </div>
+    <div class="code-panel after">
+      <div class="code-panel-header">✔ AFTER — 等待期間禁止 upstream 前推</div>
+      <pre><span class="ty">S_WAIT_PLO</span>: <span class="kw">begin</span>
+    <span class="hi"><span class="sig">ready_out_w</span> = <span class="num">1'b0</span>;  <span class="cmt">// drain/refill 期間不接受新指令</span></span>
+<span class="kw">end</span></pre>
+    </div>
+  </div>
+
+  <!-- === Change 5 === -->
+  <h3>⑤ pli_ready — 移除 S_WAIT_PLO 的 PLI accept 條件</h3>
+  <p>修改前 <code>S_WAIT_PLO</code> 允許接受新的 PLI，在等待期間可能導致 <code>pli_data_reg</code> 被覆寫。</p>
+
+  <div class="code-compare">
+    <div class="code-panel before">
+      <div class="code-panel-header">✖ BEFORE — L303–307</div>
+      <pre><span class="kw">end else if</span> (<span class="sig">state_reg</span> == <span class="ty">S_IDLE</span>
+          || <span class="sig">state_reg</span> == <span class="ty">S_EXEC_PLI_VADDU</span>
+          <span class="hi-r">|| <span class="sig">state_reg</span> == <span class="ty">S_WAIT_PLO</span></span>) <span class="kw">begin</span>
+    <span class="sig">pli_ready</span> = <span class="sig">accept_vpsum</span>;
+<span class="kw">end</span></pre>
+    </div>
+    <div class="code-panel after">
+      <div class="code-panel-header">✔ AFTER — S_WAIT_PLO 期間拒絕新 PLI</div>
+      <pre><span class="kw">end else if</span> (<span class="sig">state_reg</span> == <span class="ty">S_IDLE</span>
+          || <span class="sig">state_reg</span> == <span class="ty">S_EXEC_PLI_VADDU</span>) <span class="kw">begin</span>
+    <span class="sig">pli_ready</span> = <span class="sig">accept_vpsum</span>;
+<span class="kw">end</span>
+<span class="hi"><span class="cmt">// S_WAIT_PLO: pli_ready 保持預設值 0</span></span></pre>
+    </div>
+  </div>
+
+  <!-- === Change 6 === -->
+  <h3>⑥ Main FSM — S_EXEC_PLI_VADDU：進入 S_WAIT_PLO 時置 pending_valid=1</h3>
+
+  <div class="code-compare">
+    <div class="code-panel before">
+      <div class="code-panel-header">✖ BEFORE — S_EXEC_PLI_VADDU (L472–475)</div>
+      <pre><span class="ty">S_EXEC_PLI_VADDU</span>: <span class="kw">begin</span>
+    <span class="sig">vaddu_result_next</span> = <span class="sig">vaddu_result_sig</span>;
+
+    <span class="kw">if</span> (!(!<span class="sig">plo_buf_valid_reg</span> || <span class="sig">plo_ready</span>)) <span class="kw">begin</span>
+        <span class="cmt">// PLO buffer full → wait</span>
+        <span class="sig">state_next</span> = <span class="ty">S_WAIT_PLO</span>;
+    <span class="kw">end else begin</span>
+        <span class="cmt">// ... normal advance ...</span>
+    <span class="kw">end</span>
+<span class="kw">end</span></pre>
+    </div>
+    <div class="code-panel after">
+      <div class="code-panel-header">✔ AFTER — 同時置 plo_pending_valid_next=1</div>
+      <pre><span class="ty">S_EXEC_PLI_VADDU</span>: <span class="kw">begin</span>
+    <span class="sig">vaddu_result_next</span> = <span class="sig">vaddu_result_sig</span>;
+
+    <span class="kw">if</span> (!(!<span class="sig">plo_buf_valid_reg</span> || <span class="sig">plo_ready</span>)) <span class="kw">begin</span>
+        <span class="cmt">// PLO buffer full → wait，記錄 pending result</span>
+        <span class="sig">state_next</span>             = <span class="ty">S_WAIT_PLO</span>;
+        <span class="hi"><span class="sig">plo_pending_valid_next</span> = <span class="num">1'b1</span>;  <span class="cmt">// ← NEW</span></span>
+    <span class="kw">end else begin</span>
+        <span class="cmt">// ... normal advance ...</span>
+    <span class="kw">end</span>
+<span class="kw">end</span></pre>
+    </div>
+  </div>
+
+  <!-- === Change 7 === -->
+  <h3>⑦ Main FSM — S_WAIT_PLO：改成兩相控制</h3>
+  <p>最關鍵的 FSM 變更：修改前用 <code>plo_ready</code> 決定離開時機；修改後改用 <code>plo_buf_valid_reg</code> 與
+  <code>plo_pending_valid_reg</code> 做兩階段判斷，讓 drain 與 refill 在不同 cycle 完成。</p>
+
+  <div class="code-compare">
+    <div class="code-panel before">
+      <div class="code-panel-header">✖ BEFORE — S_WAIT_PLO (L508–540)</div>
+      <pre><span class="ty">S_WAIT_PLO</span>: <span class="kw">begin</span>
+    <span class="kw">if</span> (!<span class="sig">plo_ready</span>) <span class="kw">begin</span>
+        <span class="sig">state_next</span> = <span class="ty">S_WAIT_PLO</span>;
+    <span class="kw">end else begin</span>
+        <span class="cmt">// plo_ready=1: release → 同拍接受新指令</span>
+        <span class="hi-r"><span class="kw">if</span> (<span class="sig">ready_out_w</span> && <span class="sig">valid_in</span>) <span class="kw">begin</span>
+            <span class="sig">decode_next</span>    = <span class="sig">EXE_M_decode_signals_in</span>;
+            <span class="sig">vmul_data_next</span> = <span class="sig">vmul_out_in</span>;
+            <span class="cmt">// ... halt / pli_plo / vaddu dispatch ...</span>
+        <span class="kw">end else begin</span>
+            <span class="sig">state_next</span> = <span class="ty">S_IDLE</span>;
+        <span class="kw">end</span></span>
+    <span class="kw">end</span>
+<span class="kw">end</span></pre>
+    </div>
+    <div class="code-panel after">
+      <div class="code-panel-header">✔ AFTER — 兩相：drain（buf_valid=1）→ refill（pending=1）→ 離開</div>
+      <pre><span class="ty">S_WAIT_PLO</span>: <span class="kw">begin</span>
+    <span class="hi"><span class="kw">if</span> (<span class="sig">plo_buf_valid_reg</span>) <span class="kw">begin</span>
+        <span class="cmt">// Phase 1 — buffer 仍有舊 beat，等 pop 完成</span>
+        <span class="cmt">// pop 由 always_comb plo_buf_do_pop_w 在背景執行</span>
+        <span class="sig">state_next</span> = <span class="ty">S_WAIT_PLO</span>;
+    <span class="kw">end else if</span> (<span class="sig">plo_pending_valid_reg</span>) <span class="kw">begin</span>
+        <span class="cmt">// Phase 2 — buffer 已空，refill produce 本 cycle 觸發，</span>
+        <span class="cmt">// plo_pending_valid_next = 0 在此清除</span>
+        <span class="sig">plo_pending_valid_next</span> = <span class="num">1'b0</span>;
+        <span class="sig">state_next</span>             = <span class="ty">S_IDLE</span>;
+    <span class="kw">end else begin</span>
+        <span class="sig">state_next</span> = <span class="ty">S_IDLE</span>;
+    <span class="kw">end</span></span>
+<span class="kw">end</span></pre>
+    </div>
+  </div>
+
+  <div class="callout info">
+    <strong>兩相控制的生命週期：</strong>
+    <ul style="padding-left:18px;margin-top:6px;">
+      <li>Phase 1（buf_valid=1）：<code>plo_buf_do_pop_w</code> 由 always_comb 自動觸發，FSM 只需保持 S_WAIT_PLO。</li>
+      <li>Phase 2（buf_valid=0, pending=1）：<code>plo_buf_produce_w</code>（refill produce）由 change② 的條件觸發，FSM 清除 pending 並離開。</li>
+      <li>兩相之間，<code>ready_out_w=0</code> 保證 upstream 不會插入新指令（change④）。</li>
+    </ul>
+  </div>
+
+  <!-- === Change 8 === -->
+  <h3>⑧ Sequential always_ff — 加入 plo_pending_valid_reg 更新</h3>
+
+  <div class="code-compare">
+    <div class="code-panel before">
+      <div class="code-panel-header">✖ BEFORE — always_ff reset 與 update 段落</div>
+      <pre><span class="kw">always_ff</span> @(<span class="kw">posedge</span> <span class="sig">clk</span> <span class="kw">or negedge</span> <span class="sig">reset_n</span>) <span class="kw">begin</span>
+    <span class="kw">if</span> (!<span class="sig">reset_n</span>) <span class="kw">begin</span>
+        <span class="cmt">// ...</span>
+        <span class="sig">plo_buf_valid_reg</span> <= <span class="num">1'b0</span>;
+        <span class="sig">plo_buf_data_reg</span>  <= <span class="num">64'd0</span>;
+        <span class="cmt">// ...</span>
+    <span class="kw">end else begin</span>
+        <span class="cmt">// ...</span>
+        <span class="sig">plo_buf_valid_reg</span> <= <span class="sig">plo_buf_valid_next</span>;
+        <span class="sig">plo_buf_data_reg</span>  <= <span class="sig">plo_buf_data_next</span>;
+        <span class="cmt">// ...</span>
+    <span class="kw">end</span>
+<span class="kw">end</span></pre>
+    </div>
+    <div class="code-panel after">
+      <div class="code-panel-header">✔ AFTER — 新增 plo_pending_valid_reg 的 reset 與 update</div>
+      <pre><span class="kw">always_ff</span> @(<span class="kw">posedge</span> <span class="sig">clk</span> <span class="kw">or negedge</span> <span class="sig">reset_n</span>) <span class="kw">begin</span>
+    <span class="kw">if</span> (!<span class="sig">reset_n</span>) <span class="kw">begin</span>
+        <span class="cmt">// ...</span>
+        <span class="sig">plo_buf_valid_reg</span>     <= <span class="num">1'b0</span>;
+        <span class="sig">plo_buf_data_reg</span>      <= <span class="num">64'd0</span>;
+        <span class="hi"><span class="sig">plo_pending_valid_reg</span> <= <span class="num">1'b0</span>;  <span class="cmt">// ← NEW</span></span>
+        <span class="cmt">// ...</span>
+    <span class="kw">end else begin</span>
+        <span class="cmt">// ...</span>
+        <span class="sig">plo_buf_valid_reg</span>     <= <span class="sig">plo_buf_valid_next</span>;
+        <span class="sig">plo_buf_data_reg</span>      <= <span class="sig">plo_buf_data_next</span>;
+        <span class="hi"><span class="sig">plo_pending_valid_reg</span> <= <span class="sig">plo_pending_valid_next</span>;  <span class="cmt">// ← NEW</span></span>
+        <span class="cmt">// ...</span>
+    <span class="kw">end</span>
+<span class="kw">end</span></pre>
+    </div>
+  </div>
+
+  <!-- Main FSM default also needs the new default -->
+  <h3>補充：Main FSM always_comb default 段落也需加入 pending_valid 預設</h3>
+  <div class="code-single">
+    <div class="code-single-header">Main FSM 預設值（always_comb begin 開頭段落）</div>
+    <pre style="padding:14px 16px;">
+<span class="cmt">// 在原有 default 清單末尾加入：</span>
+<span class="sig">vaddu_result_next</span>  = <span class="sig">vaddu_result_reg</span>;
+<span class="sig">halted_next</span>        = <span class="sig">halted_reg</span>;
+<span class="hi"><span class="sig">plo_pending_valid_next</span> = <span class="sig">plo_pending_valid_reg</span>;  <span class="cmt">// ← NEW default</span></span>
+
+<span class="kw">if</span> (<span class="sig">stage_reset</span>) <span class="kw">begin</span>
+    <span class="sig">state_next</span>     = <span class="ty">S_IDLE</span>;
+    <span class="cmt">// ...</span>
+    <span class="hi"><span class="sig">plo_pending_valid_next</span> = <span class="num">1'b0</span>;  <span class="cmt">// ← stage_reset 清除</span></span>
+<span class="kw">end</span></pre>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ S6 -->
+<section id="s6">
+  <h2>6. 驗證要點</h2>
+
+  <p>修改完成後，建議按下列順序驗證：</p>
+
+  <h3>RTL Invariant（可加入 SVA assertion 或 wave 目視確認）</h3>
+  <div class="code-single">
+    <div class="code-single-header">建議 SVA Assertions</div>
+    <pre style="padding:14px 16px;">
+<span class="cmt">// 1. S_WAIT_PLO 期間不可同拍 pop + produce</span>
+<span class="kw">assert property</span> (@(<span class="kw">posedge</span> clk) <span class="kw">disable iff</span> (!reset_n)
+    (<span class="sig">state_reg</span> == <span class="ty">S_WAIT_PLO</span>) |->
+    !(<span class="sig">plo_buf_do_pop_w</span> && <span class="sig">plo_buf_produce_w</span>))
+<span class="kw">else</span> $error(<span class="str">"WAIT_PLO: pop and produce fired simultaneously!"</span>);
+
+<span class="cmt">// 2. S_WAIT_PLO refill 前 buffer 必須為空</span>
+<span class="kw">assert property</span> (@(<span class="kw">posedge</span> clk) <span class="kw">disable iff</span> (!reset_n)
+    (<span class="sig">state_reg</span> == <span class="ty">S_WAIT_PLO</span> && <span class="sig">plo_buf_produce_w</span>) |->
+    !<span class="sig">plo_buf_valid_reg</span>)
+<span class="kw">else</span> $error(<span class="str">"WAIT_PLO refill: buffer not empty!"</span>);
+
+<span class="cmt">// 3. S_WAIT_PLO 期間 ready_out 恆 0</span>
+<span class="kw">assert property</span> (@(<span class="kw">posedge</span> clk) <span class="kw">disable iff</span> (!reset_n)
+    (<span class="sig">state_reg</span> == <span class="ty">S_WAIT_PLO</span>) |-> (<span class="sig">ready_out</span> == <span class="num">1'b0</span>))
+<span class="kw">else</span> $error(<span class="str">"WAIT_PLO: ready_out should be 0!"</span>);
+
+<span class="cmt">// 4. plo_pending_valid_reg 在離開 S_WAIT_PLO 後必須為 0</span>
+<span class="kw">assert property</span> (@(<span class="kw">posedge</span> clk) <span class="kw">disable iff</span> (!reset_n)
+    (<span class="sig">state_reg</span> == <span class="ty">S_WAIT_PLO</span> &&
+     $<span class="kw">past</span>(<span class="sig">state_reg</span>) != <span class="ty">S_WAIT_PLO</span>) |->
+    (<span class="sig">plo_pending_valid_reg</span> == <span class="num">1'b1</span>))
+<span class="kw">else</span> $error(<span class="str">"Entered WAIT_PLO without pending set!"</span>);</pre>
+  </div>
+
+  <h3>回歸測試順序</h3>
+  <table class="change-table" style="margin-top:10px;">
+    <thead>
+      <tr><th>步驟</th><th>執行指令</th><th>通過條件</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>1. RTL Compile</td>
+        <td><code>make rtl_compile</code></td>
+        <td>無 elaboration error / warning</td>
+      </tr>
+      <tr>
+        <td>2. RTL Regress</td>
+        <td><code>make rtl_regress_gemm_single_wave</code></td>
+        <td>compare PASS，1536 fp16 吻合數 0</td>
+      </tr>
+      <tr>
+        <td>3. Focused RTL Wave</td>
+        <td><code>make rtl_regress_gemm_single_wave WAVE_DUMP=1 WAVE_DEPTH=9</code></td>
+        <td>p2pe0 S_WAIT_PLO waveform 顯示兩相（drain → refill），無同拍 pop+produce</td>
+      </tr>
+      <tr>
+        <td>4. Gate Resynthesis</td>
+        <td><code>make syn_pe</code></td>
+        <td>無 latch / 多重驅動警告</td>
+      </tr>
+      <tr>
+        <td>5. Gate Regress</td>
+        <td><code>make gate_regress_gemm_single_wave CLOCK_PERIOD_NS=2.00</code></td>
+        <td>compare PASS，12-good / 36-repeat pattern 消失</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout ok" style="margin-top:20px;">
+    <strong>效能影響說明：</strong> 這次修改在每次 PLO backpressure 事件中多增加 1 個 cycle（drain 與 refill 各一拍，
+    原先合併為一拍）。GEMM workload 中 backpressure 次數有限，對整體 throughput 影響可忽略。
+    如需恢復 zero-bubble，可在 bug 修正確認後做第二階段優化，不影響本次正確性目標。
+  </div>
+</section>
+
+</div><!-- /content -->
+
+<div style="background:#161b22;border-top:1px solid #30363d;padding:20px 48px;color:#8b949e;font-size:12px;">
+  EXE_A_Stage PLO Stale Replay Fix Analysis &nbsp;|&nbsp;
+  HybridAcc Project &nbsp;|&nbsp;
+  Generated 2026-05-27 &nbsp;|&nbsp;
+  設計檔案：<code>design/hybridacc-RTL/src/PE/EXE_A_Stage.sv</code>
+</div>
+
+</body>
+</html>

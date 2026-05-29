@@ -1,5 +1,9 @@
 # HybridAcc ESL Simulator — User Guide
 
+文件樹： [../../../../doc/index.md](../../../../doc/index.md) -> [../index.md](../index.md) -> [README.md](README.md) -> 本頁。
+
+> Legacy ESL user guide. Repo-wide 操作入口請先看 [../../../../doc/index.md](../../../../doc/index.md) 與 [../../../../doc/user-manual/esl-workflows.md](../../../../doc/user-manual/esl-workflows.md)；本文件保留 ESL 使用細節與背景。
+
 ## 目錄
 
 1. [概述](#1-概述)
@@ -60,10 +64,10 @@ hacc-compile --help
 
 ```bash
 # Release build
-scripts/fast_entry/hybridacc_sim.sh build
+scripts/setup.sh fast hybridacc-sim build
 
 # Debug build (含除錯訊息)
-scripts/fast_entry/hybridacc_sim.sh build_debug
+scripts/setup.sh fast hybridacc-sim build_debug
 ```
 
 ---
@@ -84,7 +88,7 @@ uv run python -m hybridacc_verify.gen.gen_test_dram \
     --output-dir output/test_conv3x3
 
 # 3. ESL 模擬
-scripts/fast_entry/hybridacc_sim.sh run-task output/test_conv3x3
+scripts/setup.sh fast hybridacc-sim run-task output/test_conv3x3
 
 # 4. 驗證結果
 uv run python -m hybridacc_verify.check.compare_golden output/test_conv3x3
@@ -345,7 +349,7 @@ output_dir/
 
 ```bash
 # 方式 A: 使用 fast_entry 腳本 (推薦)
-scripts/fast_entry/hybridacc_sim.sh run-task <output_dir> [options]
+scripts/setup.sh fast hybridacc-sim run-task <output_dir> [options]
 
 # 方式 B: 直接呼叫模擬器
 design/hybridacc-ESL/simulator/build/bin/hybridacc-sim \
@@ -467,7 +471,7 @@ scripts/fast_entry/run_e2e.sh design/hybridacc-cc/example/*.yaml --jobs 8
 ### Q: 模擬器未建置
 
 ```bash
-scripts/fast_entry/hybridacc_sim.sh build
+scripts/setup.sh fast hybridacc-sim build
 ```
 
 ### Q: 產生測資時 hardware_ir.json 不存在

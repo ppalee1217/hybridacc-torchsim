@@ -1,6 +1,8 @@
 
 # PE / SDMA Design Notes (ESL/SystemC)
 
+文件樹： [../../../../doc/index.md](../../../../doc/index.md) -> [../index.md](../index.md) -> [README.md](README.md) -> 本頁。
+
 This document specifies the **hardware-level behavior** of `SDMA` (Store DMA) in the PE ESL (SystemC) model, its **synchronization relationship** with the PE pipeline (specifically the `SWAPDM` instruction), and the corresponding **FSM** and **transition rules**.
 
 > Goal: SDMA STORE runs **in parallel** with the PE control flow; only `SWAPDM` introduces a synchronization/stall point.
@@ -32,7 +34,7 @@ SDMA configuration registers are written by the decoder via the following signal
 
 ### 1.4 DataMemory Bank Roles
 
-The definition of `bank_sel` follows [design/hybridacc-ESL/simulator/include/PE/DataMemory.hpp](design/hybridacc-ESL/simulator/include/PE/DataMemory.hpp):
+The definition of `bank_sel` follows [design/hybridacc-ESL/simulator/include/PE/DataMemory.hpp](../../simulator/include/PE/DataMemory.hpp):
 
 - `bank_sel = 0`: Write -> Bank0, Read -> Bank1
 - `bank_sel = 1`: Write -> Bank1, Read -> Bank0
@@ -177,8 +179,8 @@ Synchronization with `SWAPDM` is implemented in EXE_M:
 ## 6. Related Files
 
 - SDMA implementation:
-	- [design/hybridacc-ESL/simulator/include/PE/SDMA.hpp](design/hybridacc-ESL/simulator/include/PE/SDMA.hpp)
+	- [design/hybridacc-ESL/simulator/include/PE/SDMA.hpp](../../simulator/include/PE/SDMA.hpp)
 - `SWAPDM` stall site (`swap_stall`):
-	- [design/hybridacc-ESL/simulator/include/PE/EXE_M_stage.hpp](design/hybridacc-ESL/simulator/include/PE/EXE_M_stage.hpp)
+	- [design/hybridacc-ESL/simulator/include/PE/EXE_M_stage.hpp](../../simulator/include/PE/EXE_M_stage.hpp)
 - DM bank role mapping (`bank_sel` semantics):
-	- [design/hybridacc-ESL/simulator/include/PE/DataMemory.hpp](design/hybridacc-ESL/simulator/include/PE/DataMemory.hpp)
+	- [design/hybridacc-ESL/simulator/include/PE/DataMemory.hpp](../../simulator/include/PE/DataMemory.hpp)

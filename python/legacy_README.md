@@ -1,18 +1,24 @@
 # HybridAcc Verification Framework
 
+> Legacy Python/subsystem guide. Repo-wide 操作入口請先看 [../doc/index.md](../doc/index.md)；本文件保留 Python 驗證框架的細節與背景說明。
+
 `hybridacc_verify` 是一個統一的驗證框架，旨在支援 HybridAcc 專案中的 ISA、ESL (SystemC) 和 RTL (Verilog/SystemVerilog) 層級的協同設計與驗證。
 
 此套件提供了「單一真理來源 (Single Source of Truth)」的黃金模型 (Golden Models)、測試資料生成器以及結果比對工具。
 
 ## 安裝
 
-在 `python/` 目錄下（即本檔案所在目錄），使用 pip 以編輯模式安裝：
+請在 repo root 執行 `uv` 工作流：
 
 ```bash
-pip install -e .
+uv sync
+
+# 驗證 CLI / 模組入口可用
+uv run hacc-compile --help
+uv run python -m hybridacc_verify.main --help
 ```
 
-安裝後，您可以在任何地方（包括 RTL testbench 或其他 Python 腳本中）透過 `import hybridacc_verify` 來使用此套件。
+安裝後，您可以透過 `uv run ...` 使用 CLI，或在 repo 內的 Python 程式中直接 `import hybridacc_verify`。
 
 ## 專案結構
 
@@ -33,12 +39,12 @@ python/
 │   │   └── io.py           # 檔案 I/O
 │   └── main.py             # 統一 CLI 入口
 ├── pyproject.toml          # 專案定義檔
-└── README.md               # 本文件
+└── legacy_README.md        # 本文件
 ```
 
 ## 使用方法 (CLI)
 
-您可以透過 `python -m hybridacc_verify.main` 來呼叫各種功能。
+您可以透過 `uv run python -m hybridacc_verify.main` 來呼叫各種功能。
 
 ### 1. 生成 PE 測試資料 (`gen-pe`)
 
@@ -48,10 +54,10 @@ python/
 
 ```bash
 # 生成 Conv 測試資料
-python -m hybridacc_verify.main gen-pe --config testbench/pe/conv_k3c4/config.json
+uv run python -m hybridacc_verify.main gen-pe --config testbench/pe/conv_k3c4/config.json
 
 # 生成 GEMM 測試資料
-python -m hybridacc_verify.main gen-pe --config testbench/pe/gemv/config.json
+uv run python -m hybridacc_verify.main gen-pe --config testbench/pe/gemv/config.json
 ```
 
 **PE 配置檔案範例 (`conv`):**
@@ -91,10 +97,10 @@ python -m hybridacc_verify.main gen-pe --config testbench/pe/gemv/config.json
 
 ```bash
 # 生成 Conv2D 系統測試資料
-python -m hybridacc_verify.main gen-noc --config testbench/noc/conv_k3c4/config.json
+uv run python -m hybridacc_verify.main gen-noc --config testbench/noc/conv_k3c4/config.json
 
 # 生成 GEMM 系統測試資料
-python -m hybridacc_verify.main gen-noc --config testbench/noc/gemm/config.json
+uv run python -m hybridacc_verify.main gen-noc --config testbench/noc/gemm/config.json
 ```
 
 **NoC 配置檔案範例 (`conv2d`):**
@@ -134,7 +140,7 @@ python -m hybridacc_verify.main gen-noc --config testbench/noc/gemm/config.json
 比對模擬器輸出的二進位檔案 (`.bin`) 與黃金模型輸出。
 
 ```bash
-python -m hybridacc_verify.main check \
+uv run python -m hybridacc_verify.main check \
   --sim output/sim_output.bin \
   --expected output/golden_output.bin \
   --rtol 0.01 \
@@ -194,17 +200,7 @@ else:
 *   `testbench/pe/`: 存放單一 PE 的測試配置 (`config.json`)。
 *   `testbench/noc/`: 存放 NoC 系統級測試配置 (`config.json`) 與對應的 PE 程式碼 (`pe_program.asm`)。
 
-您可以透過 `scripts/` 目錄下的 shell script 來自動化生成與執行測試：
-
-```bash
-# 生成所有 PE 測試資料
-./scripts/gen_pe_tb.sh -a
-```
-
-```bash
-# 生成所有 NoC 測試資料
-./scripts/gen_noc_tb.sh -a
-```
+目前 repo 不再提供 `./scripts/gen_pe_tb.sh` 與 `./scripts/gen_noc_tb.sh` 這類 wrapper。請直接使用上面的 `uv run python -m hybridacc_verify.main gen-pe ...` 與 `gen-noc ...` 入口，或自行包成 batch script。
 
 ## Synthesis Report Parser
 

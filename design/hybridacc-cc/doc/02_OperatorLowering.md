@@ -1,8 +1,10 @@
 # HybridAcc-CC：算子 Lowering 詳細規格
 
+文件樹： [../../../doc/index.md](../../../doc/index.md) -> [00_Overview.md](00_Overview.md) -> 本頁。
+
 > 前置閱讀：[00_Overview.md](00_Overview.md)、[01_CompilationPipeline.md](01_CompilationPipeline.md)
-> SPM 硬體規格：[SPM.md](../../hybridacc-ESL/doc/SPM.md)
-> 參考圖示：[conv2D_image.png](conv2D_image.png)、[GEMM_image.png](GEMM_image.png)
+> SPM 硬體規格：[SPM.md](../../hybridacc-ESL/doc/component/SPM.md)
+> 參考圖示：[conv2D_tiling.png](../image/conv2D_tiling.png)、[GEMM_image.png](../image/GEMM_image.png)
 
 ---
 
@@ -63,7 +65,7 @@ HybridAcc PE 使用 fp16（16-bit half-precision）資料格式。SPM 的 data p
 
 ### 2.3 SPM 物理架構
 
-> 以 [SPM.md](../../hybridacc-ESL/doc/SPM.md) 為準進行空間規劃。
+> 以 [SPM.md](../../hybridacc-ESL/doc/component/SPM.md) 為準進行空間規劃。
 
 SPM 為每個 cluster 內的多 Bank 分組記憶體，物理結構如下：
 
@@ -560,7 +562,7 @@ def compute_cluster_mask(mapping: ClusterMapping) -> int:
 
 ### 3.4 Tiling 策略
 
-> 參照 [conv2D_image.png](conv2D_image.png)
+> 參照 [conv2D_tiling.png](../image/conv2D_tiling.png)
 
 Conv2D 3×3 使用 **4 維 tiling**（oc, h, w, ic），所有維度都必須切割。SPM 強制 ping-pong，因此 tile 大小以 `half_group_capacity` 為上限反推。
 
@@ -1181,7 +1183,7 @@ Pointwise (1×1) convolution：
 
 ### 4.4 Tiling 策略
 
-> 參照 [conv2D_image.png](conv2D_image.png) Conv2D 1x1 部分
+> 參照 [conv2D_tiling.png](../image/conv2D_tiling.png) Conv2D 1x1 部分
 
 Conv2D 1×1 使用 **4 維 tiling**（oc, h, w, ic），所有維度都必須切割。SPM 強制 ping-pong，tile 大小以 `half_group_capacity` 為上限。
 
@@ -1454,7 +1456,7 @@ def compute_conv2d_1x1_pe_params(
 
 > Conv2D 1×1 的 PS/PLI/PLO 使用 **Parallel 地址空間 + Ultra mode**，PD 維持 **Linear + Normal**。
 > 此 SPM/AGU 模式組合在 conv1x1 normal path 與 ultra path 都成立；path 區分只決定 scan-chain 拓樸與 H tiling，並不切換 SPM/AGU mode（見 §4.6.1）。
-> 詳細的 per-port 迭代拆分與 tag 編碼規則請參考 [AGU.md](../../hybridacc-ESL/doc/AGU.md) §5.1。
+> 詳細的 per-port 迭代拆分與 tag 編碼規則請參考 [AGU.md](../../hybridacc-ESL/doc/component/AGU.md) §5.1。
 
 #### AGU PS（Weight，Group 0 — Parallel / Ultra）
 
@@ -1577,7 +1579,7 @@ General Matrix Multiplication：`C[M, N] = A[M, K] × B[K, N]`
 
 ### 5.3 Tiling 策略
 
-> 參照 [GEMM_image.png](GEMM_image.png)
+> 參照 [GEMM_image.png](../image/GEMM_image.png)
 
 GEMM 需要 3 維 tiling（M, N, K），每個 wave 處理一個 `A_tile[M_tile, K_tile] × B_tile[K_tile, N_tile] → C_tile[M_tile, N_tile]` 子問題。K 維度的多個 tile 需要累加（partial sum）。
 
@@ -1836,7 +1838,7 @@ def compute_gemm_pe_params(
 
 > GEMM 的 PS/PLI/PLO 使用 **Parallel 地址空間 + Ultra mode**，PD 維持 **Linear + Normal**。
 > Plane → matrix 對應：**PS = B `[K, N]`、PD = A `[M, K]`、PLI/PLO = C `[M, N]`**（與 `noc_gen.generate_gemm_test` 的 `gen_dram_image_gemm` 對齊）。`hardware_ir.json.tiling_params` 中 `dram_input_base` 指 A、`dram_weight_base` 指 B、`dram_output_base` 指 C。
-> 詳細的 per-port 迭代拆分與 tag 編碼規則請參考 [AGU.md](../../hybridacc-ESL/doc/AGU.md) §5.2。
+> 詳細的 per-port 迭代拆分與 tag 編碼規則請參考 [AGU.md](../../hybridacc-ESL/doc/component/AGU.md) §5.2。
 
 #### AGU PS（Matrix B，Group 0 — Parallel / Ultra）
 

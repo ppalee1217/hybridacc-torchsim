@@ -1,5 +1,7 @@
 # HybridAcc System Architecture
 
+文件樹： [../../../../doc/index.md](../../../../doc/index.md) -> [../index.md](../index.md) -> [README.md](README.md) -> 本頁。
+
 ## Overview
 
 HybridAcc is a heterogeneous accelerator designed for efficient neural network processing. The system is built upon a scalable Network-on-Chip (NoC) architecture that interconnects multiple Compute Clusters or Process Elements (PEs).

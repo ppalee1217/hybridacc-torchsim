@@ -1,5 +1,7 @@
 # HybridAcc-CC：ELF 佈局與連結規格
 
+文件樹： [../../../doc/index.md](../../../doc/index.md) -> [00_Overview.md](00_Overview.md) -> 本頁。
+
 > 前置閱讀：[00_Overview.md](00_Overview.md)、[03_CodeGeneration.md](03_CodeGeneration.md)
 
 ---

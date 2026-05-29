@@ -1,5 +1,7 @@
 # SRAM 模組設計規格
 
+文件樹： [../../../../doc/index.md](../../../../doc/index.md) -> [../index.md](../index.md) -> [README.md](README.md) -> 本頁。
+
 **檔案**: `design/hybridacc-ESL/simulator/include/Cluster/SRAM.hpp`
 **命名空間**: `hybridacc::cluster`
 **實作風格**: RTL-style ESL（SystemC SC_MODULE）

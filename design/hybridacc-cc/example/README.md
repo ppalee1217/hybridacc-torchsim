@@ -1,6 +1,10 @@
 # HybridAcc-CC Example Workloads
 
+文件樹： [../../../doc/index.md](../../../doc/index.md) -> [../doc/00_Overview.md](../doc/00_Overview.md) -> 本頁。
+
 This directory keeps only hand-authored base workloads and a small set of feature regressions.
+
+Run the commands below from the repo root at `/home/easonyeh/hybridacc`.
 
 ## Base workloads
 
@@ -42,8 +46,8 @@ Each generated suite contains:
 Run a generated suite and produce the HTML report:
 
 ```bash
-./scripts/fast_entry/run_e2e.sh $(cat ./output/hacc-conv3x3-sweeps/lists/conv3x3_all.list) --output-dir ./output/hacc-conv3x3-results --skip-build --jobs "$(nproc)"
-uv run hacc-sweep report --manifest ./output/hacc-conv3x3-sweeps/manifest.json --results-root ./output/hacc-conv3x3-results --output-dir ./output/hacc-conv3x3-report
+scripts/fast_entry/run_e2e.sh $(cat output/hacc-conv3x3-sweeps/lists/conv3x3_all.list) --output-dir output/hacc-conv3x3-results --skip-build --jobs "$(nproc)"
+uv run hacc-sweep report --manifest output/hacc-conv3x3-sweeps/manifest.json --results-root output/hacc-conv3x3-results --output-dir output/hacc-conv3x3-report
 ```
 
 When multiple workloads are passed, `run_e2e.sh` enters batch mode. It uses `nproc` workers by default, shows a live progress dashboard in the terminal, and lets you cap concurrency with `--jobs N`. Each case writes its full pipeline log to `<output-dir>/<case>/e2e_run.log`.

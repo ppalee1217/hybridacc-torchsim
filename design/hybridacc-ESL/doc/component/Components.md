@@ -1,5 +1,7 @@
 # Utility Components Specification
 
+文件樹： [../../../../doc/index.md](../../../../doc/index.md) -> [../index.md](../index.md) -> [README.md](README.md) -> 本頁。
+
 ## Overview
 This document specifies the smaller utility components used within the larger modules (HDDU, PE, Cluster).
 
@@ -58,4 +60,3 @@ Decodes the 16-bit instruction word into control signals for the datapath.
 ### Interface
 - `instr_in`: 16-bit instruction.
 - `ctrl_signals_out`: Struct containing all control lines (ALU op, Reg Write, Mux Selects, etc.).
-

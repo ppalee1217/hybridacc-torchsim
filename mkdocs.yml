@@ -1,0 +1,81 @@
+site_name: HybridAcc Documentation
+site_description: HybridAcc repo manuals, subsystem guides, and curated entry points.
+repo_name: easonyeh/hybridacc
+docs_dir: .docs-site-src
+site_dir: site
+use_directory_urls: false
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home:
+      - Repo Overview: README.md
+      - Documentation Hub: doc/index.md
+  - User Manual:
+      - Index: doc/user-manual/index.md
+      - Quick Start: doc/user-manual/quick-start.md
+      - Environment and Toolchains: doc/user-manual/environment-and-toolchains.md
+      - Command Cheatsheet: doc/user-manual/command-cheatsheet.md
+      - ESL Workflows: doc/user-manual/esl-workflows.md
+      - RTL Simulation: doc/user-manual/rtl-simulation.md
+      - RTL Firmware Regression: doc/user-manual/rtl-firmware-regression.md
+      - Synthesis and Post-Sim: doc/user-manual/synthesis-and-postsim.md
+      - Lint and Formal: doc/user-manual/lint-and-formal.md
+      - Python CLI Reference: doc/user-manual/python-cli-reference.md
+      - FAQ: doc/user-manual/faq.md
+      - Glossary: doc/user-manual/glossary.md
+  - Developer Manual:
+      - Index: doc/developer-manual/index.md
+      - Repo Map: doc/developer-manual/repo-map.md
+      - Artefact and Log Map: doc/developer-manual/artefact-and-log-map.md
+      - Debug Playbook: doc/developer-manual/debug-playbook.md
+      - GEMM Gate Debug Chain: doc/developer-manual/gemm-gate-debug-chain.md
+      - Repo Classification: doc/developer-manual/repo-classification.md
+      - Repo Cleanup Guide: doc/developer-manual/repo-cleanup-guide.md
+      - Repo Cleanup Plan: doc/developer-manual/repo-cleanup-plan.md
+  - Compiler:
+      - Overview: design/hybridacc-cc/doc/00_Overview.md
+      - Compilation Pipeline: design/hybridacc-cc/doc/01_CompilationPipeline.md
+      - Operator Lowering: design/hybridacc-cc/doc/02_OperatorLowering.md
+      - Code Generation: design/hybridacc-cc/doc/03_CodeGeneration.md
+      - ELF Layout: design/hybridacc-cc/doc/04_ELF_Layout.md
+      - User Guide: design/hybridacc-cc/doc/05_UserGuide.md
+      - Examples: design/hybridacc-cc/example/README.md
+  - ESL:
+      - Overview: design/hybridacc-ESL/README.md
+      - Documentation Index: design/hybridacc-ESL/doc/index.md
+      - Component Index: design/hybridacc-ESL/doc/component/README.md
+      - Guide Index: design/hybridacc-ESL/doc/guide/README.md
+      - Report Index: design/hybridacc-ESL/doc/report/README.md
+      - Test Framework: design/hybridacc-ESL/test/README.md
+  - RTL:
+      - Overview: design/hybridacc-RTL/doc/README.md
+      - Simulation Guide: design/hybridacc-RTL/doc/sim_test_guide.md
+      - Firmware Regression: design/hybridacc-RTL/doc/rtl_fw_regression_README.md
+      - Synthesis Guide: design/hybridacc-RTL/doc/hybridacc_synthesis_guide.md
+      - Syn Guide: design/hybridacc-RTL/doc/syn_guide.md
+      - PrimeTime Guide: design/hybridacc-RTL/doc/primetime_guide.md
+      - PrimePower Guide: design/hybridacc-RTL/doc/primepower_guide.md
+      - Superlint Guide: design/hybridacc-RTL/doc/superlint_guide.md
+  - PE ISA:
+      - Overview: design/hybridacc-pe-isa/README.md
+      - Tool Usage: design/hybridacc-pe-isa/doc/ToolUsage.md
+      - ISA: design/hybridacc-pe-isa/doc/ISA.md
+      - HybridAcc PE: design/hybridacc-pe-isa/doc/HybridaccPE.md
+  - Python:
+      - CLI Reference: doc/user-manual/python-cli-reference.md
+      - Trace Parser: python/trace_parser/README.md

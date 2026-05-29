@@ -1,26 +1,30 @@
 hybridacc-trace-parser
 ======================
 
-Install locally (editable):
+文件樹： [../../doc/index.md](../../doc/index.md) -> [../../doc/user-manual/python-cli-reference.md](../../doc/user-manual/python-cli-reference.md) -> 本頁。
+
+Repo 內的 Python workflow 以 `uv` 為主。一般情況下不需要單獨安裝這個 package，只要在 repo root `uv sync` 後直接用 `uv run` 執行即可。
+
+從 repo root 使用：
 
 ```bash
-pip install -e python/trace_parser
+cd /home/easonyeh/hybridacc
+uv sync
+uv run python -m trace_parser.cli /path/to/trace.json --stats all
 ```
 
-Or install from workspace root:
+若你真的需要 editable install，也請透過 `uv`：
 
 ```bash
-cd python
-pip install -e ./trace_parser
+cd /home/easonyeh/hybridacc
+uv run pip install -e python/trace_parser
 ```
 
 Usage examples:
 
 ```bash
 # CLI
-python -m trace_parser.cli /path/to/trace.json --stats all
-# or installed entry-point
-trace-parser /path/to/trace.json --stats all
+uv run python -m trace_parser.cli /path/to/trace.json --stats all
 
 # Python API
 from trace_parser import TraceParser

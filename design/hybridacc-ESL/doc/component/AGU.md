@@ -1,5 +1,7 @@
 # AddressGenerateUnit (AGU) 規格書
 
+文件樹： [../../../../doc/index.md](../../../../doc/index.md) -> [../index.md](../index.md) -> [README.md](README.md) -> 本頁。
+
 ## 1. 目的與範圍
 
 本文件定義 HybridAcc 在 NoC 資料分發路徑使用的 AGU（Address Generate Unit）行為，目標是把 `test/test_noc_sim.cpp` 的軟體 loop/index/tag 規律，轉成可硬體化的可配置規格。

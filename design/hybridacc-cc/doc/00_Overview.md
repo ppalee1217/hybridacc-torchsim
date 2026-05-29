@@ -1,8 +1,12 @@
 # HybridAcc-CC：AI 模型編譯器概覽
 
+文件樹： [../../../doc/index.md](../../../doc/index.md) -> 本頁。
+
 > 版本：v0.1-draft
 > 狀態：設計文件初稿（Implementation-Ready Spec）
 > 適用位置：`design/hybridacc-cc/`
+
+> 延伸入口：[05_UserGuide.md](05_UserGuide.md)、[../example/README.md](../example/README.md)
 
 ---
 
@@ -114,7 +118,7 @@ MCU firmware 於 runtime 透過 MMIO load/store 完成：
 
 ## 3. 硬體基礎（快速參考）
 
-以下為編譯器需要理解的核心硬體抽象。完整規格請參考各 `design/hybridacc-ESL/doc/*.md`。
+以下為編譯器需要理解的核心硬體抽象。完整規格請參考 [../../hybridacc-ESL/doc/component/README.md](../../hybridacc-ESL/doc/component/README.md) 與其中的 component specs。
 
 ### 3.1 Core Address Map
 

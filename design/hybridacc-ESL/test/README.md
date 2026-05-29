@@ -1,23 +1,34 @@
 # HybridAcc ESL Test Framework
 
+文件樹： [../../../doc/index.md](../../../doc/index.md) -> [../README.md](../README.md) -> 本頁。
+
 這個目錄包含了用於測試 HybridAcc ESL 模擬器的測試框架，涵蓋 ProcessElement (PE) 和 NetworkOnChip (NoC) 的單元測試。
 
 ## 目錄結構
 
 ```
 test/
-├── CMakeLists.txt           # CMake 構建配置
-├── README.md                # 本文件
-├── pe_wrapper.hpp           # PE Wrapper Class 頭文件
-├── pe_wrapper.cpp           # PE Wrapper Class 實現
-├── test_pe_unit.cpp         # PE 單元測試
-├── test_pe_sim.cpp          # PE 模擬測試 (Conv3x3)
-├── test_noc_unit.cpp        # NoC 單元測試
-└── build/                   # 構建輸出目錄
-    ├── libpe_simulator.a    # PE 模擬器靜態庫
-    ├── test_pe_unit         # PE 單元測試可執行文件
-    ├── test_pe_sim          # PE 模擬測試可執行文件
-    └── test_noc_unit        # NoC 單元測試可執行文件
+├── CMakeLists.txt                  # 測試專案 CMake 入口
+├── README.md                       # 本文件
+├── tb_utils.hpp                    # 共用 testbench utility
+├── core_tb_utils.hpp               # core test 專用 utility
+├── mvp_compiler.hpp                # 最小 workload/compiler helper
+├── core_unit_tests/                # core unit test support files
+├── firmware/                       # 測試用韌體與素材
+├── test_agu_unit.cpp               # AGU 單元測試
+├── test_cluster_control_unit.cpp   # cluster control 單元測試
+├── test_cluster_sim.cpp            # cluster 模擬
+├── test_cluster_sim_advanced.cpp   # 進階 cluster 模擬
+├── test_cluster_unit.cpp           # cluster 單元測試
+├── test_core_sim.cpp               # core 模擬
+├── test_hddu_unit.cpp              # HDDU 單元測試
+├── test_noc_sim.cpp                # NoC 模擬
+├── test_noc_unit.cpp               # NoC 單元測試
+├── test_pe_sim.cpp                 # PE 模擬測試
+├── test_pe_unit.cpp                # PE 單元測試
+├── test_spm_unit.cpp               # SPM 單元測試
+├── test_sram_unit.cpp              # SRAM 單元測試
+└── build/                          # 本地 build 輸出
 ```
 
 ## 測試類型
@@ -513,9 +524,10 @@ add_test(NAME Memory_Tests COMMAND test_memory)
 ## 相關文件
 
 - [ESL Simulator README](../README.md)
+- [ESL Documentation Index](../doc/index.md)
 - [PE ISA 文檔](../../hybridacc-pe-isa/doc/ISA.md)
 - [PE 架構文檔](../../hybridacc-pe-isa/doc/HybridaccPE.md)
-- [Core ISA 文檔](../../hybridacc-core-isa/core-ISA.md)
+- [Compiler 文件入口](../../hybridacc-cc/doc/00_Overview.md)
 
 ## 貢獻指南
 

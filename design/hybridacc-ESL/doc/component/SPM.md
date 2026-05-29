@@ -1,5 +1,7 @@
 # Scratchpad Memory (SPM) 系統硬體規格書
 
+文件樹： [../../../../doc/index.md](../../../../doc/index.md) -> [../index.md](../index.md) -> [README.md](README.md) -> 本頁。
+
 ## 1. 系統概述
 
 SPM 是一個高效能、低延遲的片上存取記憶體，旨在為多核處理器或加速器提供高頻寬數據交換能力。ESL 實作以 SystemC SC_MODULE 呈現，採 RTL 風格設計：所有狀態元素皆為 `sc_signal<T>`（加 `_reg` 後綴），並以獨立的 `SC_CTHREAD`（`seq_process`）集中更新；各輸出信號由對應的 `SC_METHOD`（`comb_*`）驅動，避免組合邏輯回授。

@@ -1,5 +1,7 @@
 # DMA (Direct Memory Access) Specification
 
+文件樹： [../../../../doc/index.md](../../../../doc/index.md) -> [../index.md](../index.md) -> [README.md](README.md) -> 本頁。
+
 ## Overview
 The `DMA` module handles high-bandwidth data transfers between the external System Memory (DRAM) and the internal Global SRAM (managed by HDDU). It offloads data movement tasks from the CoreController, allowing for overlapped computation and communication.
 

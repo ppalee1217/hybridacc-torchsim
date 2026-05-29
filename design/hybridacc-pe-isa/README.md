@@ -1,5 +1,7 @@
 # HybridAcc PE-ISA 工具套件
 
+文件樹： [../../doc/index.md](../../doc/index.md) -> 本頁。
+
 本目錄提供 HybridAcc PE 16-bit ISA 的完整工具鏈：
 - **C++ 組譯器 (ha-asm)**: 組合語言轉機器碼，支援 Template 模板系統
 - **C++ 反組譯器 (ha-objdump)**: 機器碼還原為組合語言

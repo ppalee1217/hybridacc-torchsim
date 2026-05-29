@@ -1,5 +1,7 @@
 # Network-on-Chip (NoC) Architecture
 
+文件樹： [../../../../doc/index.md](../../../../doc/index.md) -> [../index.md](../index.md) -> [README.md](README.md) -> 本頁。
+
 ## Overview
 
 The Network-on-Chip (NoC) in HybridAcc provides high-bandwidth, low-latency communication between the host/memory and the Processing Elements (PEs). It employs a **4-channel split architecture** (PS / PD / PLI / PLO) to maximise throughput and minimise head-of-line blocking across different traffic types.

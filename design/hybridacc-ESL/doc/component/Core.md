@@ -1,5 +1,7 @@
 # HACC Core Controller 硬體架構規格書
 
+文件樹： [../../../../doc/index.md](../../../../doc/index.md) -> [../index.md](../index.md) -> [README.md](README.md) -> 本頁。
+
 本文件定義 HACC Core Controller 在第二版架構下的正式 micro architecture。本文不是概念提案，而是供 RTL 切模、韌體開發、compiler handoff、驗證規劃與 reviewer 審查使用的工程規格。
 
 本版最重要的設計變更是：runtime control 從舊的 descriptor execution complex 改成由 `cc_core_mcu` 直接掌控，且 `cc_core_mcu` 正式具體化為一個 32-bit 5-stage pipelined RV32I_Zmmul_Zicsr core（machine-mode only）。`cc_section_loader` 只做 local section copy；對 cluster、DMA、NLU、PLIC 的 runtime side effect 都由 core 透過標準 load/store MMIO 顯式觸發。

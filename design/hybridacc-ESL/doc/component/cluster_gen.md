@@ -1,5 +1,7 @@
 # cluster_gen.py 編譯邏輯教學說明
 
+文件樹： [../../../../doc/index.md](../../../../doc/index.md) -> [../index.md](../index.md) -> [README.md](README.md) -> 本頁。
+
 本文是 `python/hybridacc_verify/gen/cluster_gen.py` 的完整教學導覽，目標是讓你從「輸入 config」一路理解到「產出 test data / scan chain / DMA / SPM / cluster plan」。
 
 ---

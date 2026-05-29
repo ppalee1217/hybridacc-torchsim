@@ -1,0 +1,50 @@
+name: Docs
+
+on:
+  pull_request:
+    paths:
+      - "README.md"
+      - "doc/**"
+      - "design/**/README.md"
+      - "design/**/doc/**"
+      - "python/**/README*"
+      - "mkdocs.yml"
+      - "scripts/check/validate_markdown_links.py"
+      - ".github/workflows/docs.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "README.md"
+      - "doc/**"
+      - "design/**/README.md"
+      - "design/**/doc/**"
+      - "python/**/README*"
+      - "mkdocs.yml"
+      - "scripts/check/validate_markdown_links.py"
+      - ".github/workflows/docs.yml"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Validate markdown links
+        run: uv run python scripts/check/validate_markdown_links.py
+
+      - name: Stage docs site source tree
+        run: uv run python scripts/check/sync_docs_site.py
+
+      - name: Build documentation site
+        run: uvx --with mkdocs-material mkdocs build --config-file mkdocs.yml

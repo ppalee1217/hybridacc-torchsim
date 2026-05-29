@@ -1,5 +1,7 @@
 # HybridAcc PE-ISA 工具鏈使用手冊
 
+文件樹： [../../../doc/index.md](../../../doc/index.md) -> [../README.md](../README.md) -> 本頁。
+
 ## 目錄
 1. [概述](#概述)
 2. [工具鏈架構](#工具鏈架構)
