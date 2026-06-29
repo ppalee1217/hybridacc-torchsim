@@ -1643,9 +1643,22 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
     #   PD  [m_wave, k_wave]
     #   PLI [m_wave, n_wave]
     #   PLO [m_wave, n_wave]
-    dram_input_base = tensor_base                           # A
-    dram_weight_base = tensor_base + a_bytes                # B
-    dram_output_base = tensor_base + a_bytes + b_bytes      # C
+    if dram_input_override:
+        # Multi-layer chaining (M14-S4-1): consume the producer layer's output
+        # region in place (mirrors _lower_conv2d_3x3) and allocate only this
+        # layer's B/C from tensor_base. dram_bias_base is left past the original
+        # A|B|C reservation above, so it stays clear of C.
+        # NOTE: this only chains the base *address*. The producer writes its
+        # output in PLO packing while the PD load below reads PD packing, so the
+        # intermediate still needs a PLO->PD relayout for functional correctness
+        # (M14-S4-2); address chaining alone reaches EBREAK but not golden.
+        dram_input_base = dram_input_override               # A (= producer output)
+        dram_weight_base = tensor_base                      # B
+        dram_output_base = tensor_base + b_bytes            # C
+    else:
+        dram_input_base = tensor_base                       # A
+        dram_weight_base = tensor_base + a_bytes            # B
+        dram_output_base = tensor_base + a_bytes + b_bytes  # C
 
     ps_tile_bytes = ps_wave
     pd_tile_bytes = pd_wave
