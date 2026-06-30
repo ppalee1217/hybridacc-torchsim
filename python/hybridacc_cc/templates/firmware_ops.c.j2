@@ -189,6 +189,30 @@ static inline void dma_store_sync(uint32_t spm_offset, uint32_t dram_addr,
     dma_store(spm_offset, dram_addr, 0, beat_count, dma_tag);
     dma_wait_tag(dma_tag);
 }
+{% if relayouts %}
+
+typedef struct RelayoutDesc {
+    uint32_t consumer_layer;
+    uint32_t src_dram;
+    uint32_t dst_dram;
+    uint32_t total_beats;
+    uint32_t block_beats;
+    uint32_t num_blocks;
+    const uint32_t* q;
+} RelayoutDesc;
+
+#define SPM_SCRATCH {{ "0x%08X" | format(spm_scratch) }}u
+
+void run_relayout(const RelayoutDesc* d) {
+    dma_load_sync(d->src_dram, SPM_SCRATCH, d->total_beats);
+    for (uint32_t j = 0; j < d->num_blocks; j++) {
+        dma_store_sync(
+            SPM_SCRATCH + d->q[j] * d->block_beats * BEAT_BYTES,
+            d->dst_dram + j * d->block_beats * BEAT_BYTES,
+            d->block_beats);
+    }
+}
+{% endif %}
 
 static inline void dma_load_2d_sync(uint32_t dram_addr, uint32_t spm_offset,
                                     uint32_t row_beats,

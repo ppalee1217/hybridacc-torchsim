@@ -19,6 +19,7 @@ from .ir import (
     LayerHwConfig,
     OpDesc,
     PeProgramRef,
+    RelayoutDesc,
     ScanChainEntry,
     SpmGroupLayout,
     SpmPerGroupLayout,
@@ -1755,6 +1756,108 @@ _LOWERING_DISPATCH = {
 }
 
 
+def _is_single_wave(layer: LayerHwConfig) -> bool:
+    tp = layer.tiling_params
+    return (
+        tp.num_oc_tiles == 1
+        and tp.num_h_tiles == 1
+        and tp.num_w_tiles == 1
+        and tp.num_ic_tiles == 1
+    )
+
+
+def _gemm_packer_meta(layer: LayerHwConfig) -> Dict[str, int]:
+    """Mirror the GEMM layout metadata used by gen_test_dram packers."""
+    params = layer.pe_program.params
+    tp = layer.tiling_params
+    rows_per_word = 4
+    grid_m = max(1, int(params.get("GRID_M", 1)))
+    grid_n = max(1, int(params.get("GRID_N", 1)))
+    grid_k = max(1, int(params.get("GRID_K", 1)))
+    grid_m_per_wave = max(1, int(params.get("GRID_M_PER_WAVE", grid_m)))
+    grid_n_per_wave = max(1, int(params.get("GRID_N_PER_WAVE", grid_n)))
+    grid_k_per_wave = max(1, int(params.get("GRID_K_PER_WAVE", grid_k)))
+    tile_d_words = max(1, int(layer.agu_pd.iter0))
+    tile_w_words = max(1, int(layer.agu_ps.iter0))
+    pe_n = max(1, int(params.get("OUTPUT_DIM", tile_w_words * rows_per_word)))
+    pe_k = max(1, int(params.get("K_TILE_DIM", params.get("INPUT_DIM", 1))))
+    ps_words_per_k = max(1, tile_w_words * grid_n_per_wave)
+    pd_words_per_k = max(1, tile_d_words * grid_m_per_wave)
+    k_tile_dim = max(
+        1,
+        tp.dma_ps_words // ps_words_per_k,
+        tp.dma_pd_words // pd_words_per_k,
+        pe_k * grid_k_per_wave,
+    )
+    return {
+        "grid_m_per_wave": grid_m_per_wave,
+        "grid_n_per_wave": grid_n_per_wave,
+        "tile_d_words": tile_d_words,
+        "rows_per_word": rows_per_word,
+        "pe_n": pe_n,
+        "k_tile_dim": k_tile_dim,
+    }
+
+
+def _derive_gemm_relayout_q(producer: LayerHwConfig,
+                            consumer: LayerHwConfig) -> List[int]:
+    """Derive the 12-fp16 PLO-to-PD block permutation from packer order."""
+    plo = _gemm_packer_meta(producer)
+    pd = _gemm_packer_meta(consumer)
+
+    # _pack_gemm_c_output flatten order:
+    # [m_tile, n_tile, n_local, row_word, lane].
+    plo_positions = [
+        (
+            m_tile * plo["tile_d_words"] * plo["rows_per_word"]
+            + row_word * plo["rows_per_word"] + lane,
+            n_tile * plo["pe_n"] + n_local,
+        )
+        for m_tile in range(plo["grid_m_per_wave"])
+        for n_tile in range(plo["grid_n_per_wave"])
+        for n_local in range(plo["pe_n"])
+        for row_word in range(plo["tile_d_words"])
+        for lane in range(plo["rows_per_word"])
+    ]
+
+    # _pack_gemm_a_pd flatten order:
+    # [k, m_tile, row_word, lane].
+    pd_positions = [
+        (
+            m_tile * pd["tile_d_words"] * pd["rows_per_word"]
+            + row_word * pd["rows_per_word"] + lane,
+            k,
+        )
+        for k in range(pd["k_tile_dim"])
+        for m_tile in range(pd["grid_m_per_wave"])
+        for row_word in range(pd["tile_d_words"])
+        for lane in range(pd["rows_per_word"])
+    ]
+
+    assert len(plo_positions) == producer.tiling_params.dma_plo_words * 4
+    assert len(pd_positions) == consumer.tiling_params.dma_pd_words * 4
+    assert len(plo_positions) == len(pd_positions)
+    assert len(set(plo_positions)) == len(plo_positions)
+    assert set(plo_positions) == set(pd_positions)
+
+    plo_where = {position: i for i, position in enumerate(plo_positions)}
+    p = [plo_where[position] for position in pd_positions]
+
+    block_elements = 12
+    assert len(p) % block_elements == 0
+    q: List[int] = []
+    for block_start in range(0, len(p), block_elements):
+        source_start = p[block_start]
+        assert source_start % block_elements == 0
+        assert p[block_start:block_start + block_elements] == list(
+            range(source_start, source_start + block_elements)
+        )
+        q.append(source_start // block_elements)
+
+    assert sorted(q) == list(range(len(q)))
+    return q
+
+
 def lower_workload(wir: WorkloadIR) -> HardwareIR:
     """Lower all ops in a WorkloadIR to produce a HardwareIR.
 
@@ -1763,6 +1866,7 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
     layer's output directly for intermediate tensors).
     """
     layers: List[LayerHwConfig] = []
+    relayouts: List[RelayoutDesc] = []
 
     # Build a map of tensor_name → producer_layer_index for chaining
     output_tensor_map: Dict[str, int] = {}  # tensor name → layer index
@@ -1830,6 +1934,41 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
                        input_nhwc_packs=input_nhwc_packs_map.get(i, 0),
                        use_runtime_load_pad=input_pad > 0)
 
+            prev_op = wir.ops[prev_idx]
+            if (prev_op.op_type == "gemm"
+                    and op.op_type == "gemm"
+                    and _is_single_wave(layers[prev_idx])
+                    and _is_single_wave(layer)):
+                total_beats = prev_tp.dma_plo_words
+                assert total_beats == layer.tiling_params.dma_pd_words
+                assert total_beats * PKT_SIZE <= wir.hardware.group_capacity
+
+                scratch_base = (dram_cursor + 15) & ~15
+                scratch_end = scratch_base + total_beats * PKT_SIZE
+                dram_cursor = (scratch_end + 15) & ~15
+
+                # Preserve S4-1's GEMM override contract: tensor_base owns B/C,
+                # while A is explicitly rebased to the relaid scratch region.
+                layer = fn(op, wir.hardware,
+                           tensor_base=dram_cursor,
+                           dram_input_override=scratch_base,
+                           input_nhwc_packs=input_nhwc_packs_map.get(i, 0),
+                           use_runtime_load_pad=input_pad > 0)
+                assert _is_single_wave(layer)
+                assert total_beats == layer.tiling_params.dma_pd_words
+
+                block_beats = 3  # 12 fp16 values per proven atomic block.
+                q = _derive_gemm_relayout_q(layers[prev_idx], layer)
+                assert len(q) * block_beats == total_beats
+                relayouts.append(RelayoutDesc(
+                    consumer_layer=i,
+                    src_dram=prev_tp.dram_output_base,
+                    dst_dram=scratch_base,
+                    total_beats=total_beats,
+                    block_beats=block_beats,
+                    q=q,
+                ))
+
         else:
             input_pad = int(op.attrs.get("padding", 0)) if op.op_type in ("conv2d_3x3", "conv2d_1x1") else 0
             layer = fn(op, wir.hardware,
@@ -1856,6 +1995,7 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
         workload_name=wir.name,
         hardware=wir.hardware,
         layers=layers,
+        relayouts=relayouts,
     )
 
 

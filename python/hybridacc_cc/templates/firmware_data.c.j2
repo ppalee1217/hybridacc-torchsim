@@ -5,6 +5,38 @@
  * ═══════════════════════════════════════════════════════ */
 #include "firmware_hw.h"
 #include "firmware_payload.h"
+{% if relayouts %}
+
+typedef struct RelayoutDesc {
+    uint32_t consumer_layer;
+    uint32_t src_dram;
+    uint32_t dst_dram;
+    uint32_t total_beats;
+    uint32_t block_beats;
+    uint32_t num_blocks;
+    const uint32_t* q;
+} RelayoutDesc;
+
+{% for r in relayouts %}
+static const uint32_t relayout_q_{{ r.index }}[] = {
+    {% for v in r.q %}{{ v }}u{{ ", " if not loop.last }}{% endfor %}
+};
+{% endfor %}
+
+const RelayoutDesc relayouts[] = {
+{% for r in relayouts %}
+    {
+        .consumer_layer = {{ r.consumer_layer }}u,
+        .src_dram = {{ "0x%08X" | format(r.src_dram) }}u,
+        .dst_dram = {{ "0x%08X" | format(r.dst_dram) }}u,
+        .total_beats = {{ r.total_beats }}u,
+        .block_beats = {{ r.block_beats }}u,
+        .num_blocks = {{ r.num_blocks }}u,
+        .q = relayout_q_{{ r.index }},
+    }{{ "," if not loop.last }}
+{% endfor %}
+};
+{% endif %}
 
 /* ═══════════════════════════════════════════════════════
  * Layer Table

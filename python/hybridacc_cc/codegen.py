@@ -55,6 +55,25 @@ def prepare_template_context(hw_ir: HardwareIR,
 
     payload = collect_payload_context(hw_ir.layers, kernel_json_dir)
 
+    relayouts_ctx: List[Dict[str, Any]] = []
+    relayout_by_consumer: Dict[int, int] = {}
+    for i, relayout in enumerate(hw_ir.relayouts):
+        if relayout.consumer_layer in relayout_by_consumer:
+            raise ValueError(
+                f"Multiple relayouts before layer {relayout.consumer_layer}"
+            )
+        relayout_by_consumer[relayout.consumer_layer] = i
+        relayouts_ctx.append({
+            "index": i,
+            "consumer_layer": relayout.consumer_layer,
+            "src_dram": relayout.src_dram,
+            "dst_dram": relayout.dst_dram,
+            "total_beats": relayout.total_beats,
+            "block_beats": relayout.block_beats,
+            "num_blocks": len(relayout.q),
+            "q": relayout.q,
+        })
+
     layers_ctx: List[Dict[str, Any]] = []
     used_runners: List[str] = []
     for i, layer in enumerate(hw_ir.layers):
@@ -69,6 +88,7 @@ def prepare_template_context(hw_ir: HardwareIR,
             "index": i,
             "op_type": layer.op_type,
             "runner": runner,
+            "relayout_before": relayout_by_consumer.get(i),
             "cluster_mask_lo": layer.target_cluster_mask & 0xFFFFFFFF,
             "cluster_mask_hi": (layer.target_cluster_mask >> 32) & 0xFFFFFFFF,
             "num_clusters": layer.cluster_mapping.active_clusters,
@@ -164,6 +184,8 @@ def prepare_template_context(hw_ir: HardwareIR,
         "templates": payload["templates"],
         "scan_chains": payload["scan_chains"],
         "layers": layers_ctx,
+        "relayouts": relayouts_ctx,
+        "spm_scratch": hw_ir.hardware.spm_dma_group_base(0),
         "used_runners": used_runners,
         "hex": _format_hex,
     }

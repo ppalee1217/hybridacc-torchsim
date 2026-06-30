@@ -355,7 +355,18 @@ class LayerHwConfig:
 
 
 @dataclass
+class RelayoutDesc:
+    consumer_layer: int
+    src_dram: int
+    dst_dram: int
+    total_beats: int
+    block_beats: int
+    q: List[int]
+
+
+@dataclass
 class HardwareIR:
     workload_name: str
     hardware: HardwareDesc
     layers: List[LayerHwConfig]
+    relayouts: List[RelayoutDesc] = field(default_factory=list)

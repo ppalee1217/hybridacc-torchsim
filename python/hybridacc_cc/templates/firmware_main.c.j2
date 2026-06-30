@@ -9,12 +9,28 @@
 {% for runner in used_runners %}
 void {{ runner }}(const LayerConfig* cfg);
 {% endfor %}
+{% if relayouts %}
+typedef struct RelayoutDesc {
+    uint32_t consumer_layer;
+    uint32_t src_dram;
+    uint32_t dst_dram;
+    uint32_t total_beats;
+    uint32_t block_beats;
+    uint32_t num_blocks;
+    const uint32_t* q;
+} RelayoutDesc;
+
+void run_relayout(const RelayoutDesc* d);
+{% endif %}
 
 typedef void (*LayerRunner)(const LayerConfig* cfg);
 
 /* Layer config table (defined in firmware_data.c) */
 extern const LayerConfig layer_configs[];
 extern const uint32_t num_layers;
+{% if relayouts %}
+extern const RelayoutDesc relayouts[];
+{% endif %}
 
 /* Linker-defined startup regions */
 extern uint32_t _sbss;
@@ -28,6 +44,15 @@ static const LayerRunner layer_runners[] = {
     {{ layer.runner }}{{ "," if not loop.last }}
 {% endfor %}
 };
+{% if relayouts %}
+
+#define RELAYOUT_NONE 0xFFFFFFFFu
+static const uint32_t relayout_before[] = {
+{% for layer in layers %}
+    {% if layer.relayout_before is not none %}{{ layer.relayout_before }}u{% else %}RELAYOUT_NONE{% endif %}{{ "," if not loop.last }}
+{% endfor %}
+};
+{% endif %}
 
 /* ═══════════════════════════════════════════════════════
  * Trap Handler (timer tick + cluster external IRQ)
@@ -85,6 +110,11 @@ _start(void) {
 void main(void) {
     enable_wfi_timer_interrupts();
     for (uint32_t i = 0; i < num_layers; i++) {
+{% if relayouts %}
+        if (relayout_before[i] != RELAYOUT_NONE) {
+            run_relayout(&relayouts[relayout_before[i]]);
+        }
+{% endif %}
         layer_runners[i](&layer_configs[i]);
     }
 
