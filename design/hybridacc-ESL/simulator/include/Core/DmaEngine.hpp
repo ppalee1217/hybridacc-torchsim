@@ -731,7 +731,24 @@ private:
                     state_reg = DmaState::ERROR;
                     break;
                 }
-                TRACE_EVENT("dma_transfer", "DMA", TRACE_BEGIN, 0, 1, "{}");
+                // M14 ARCH-1 (per-tile ESL-derived TOG, component 1): emit the per-DMA command as the
+                // trace payload (was hardcoded "{}") so `--trace-level 2` yields real per-transaction
+                // records. cmd_tag pairs to a tile via cc's cmd_tag->tile map (ARCH-1 component 2).
+                {
+                    const uint64_t src_addr = (static_cast<uint64_t>(active_cmd_reg.src_addr_hi) << 32) | active_cmd_reg.src_addr_lo;
+                    const uint64_t dst_addr = (static_cast<uint64_t>(active_cmd_reg.dst_addr_hi) << 32) | active_cmd_reg.dst_addr_lo;
+                    const uint32_t beats = active_cmd_reg.total_beats();
+                    std::string dma_args = std::string("{\"cmd_tag\":") + std::to_string(active_cmd_reg.cmd_tag)
+                        + ",\"src_kind\":" + std::to_string(static_cast<int>(active_cmd_reg.src_kind))
+                        + ",\"dst_kind\":" + std::to_string(static_cast<int>(active_cmd_reg.dst_kind))
+                        + ",\"src_addr\":" + std::to_string(src_addr)
+                        + ",\"dst_addr\":" + std::to_string(dst_addr)
+                        + ",\"beats\":" + std::to_string(beats)
+                        + ",\"bytes\":" + std::to_string(static_cast<uint64_t>(beats) * 8)
+                        + ",\"count\":[" + std::to_string(active_cmd_reg.count[0]) + "," + std::to_string(active_cmd_reg.count[1])
+                        + "," + std::to_string(active_cmd_reg.count[2]) + "," + std::to_string(active_cmd_reg.count[3]) + "]}";
+                    TRACE_EVENT("dma_transfer", "DMA", TRACE_BEGIN, 0, 1, dma_args);
+                }
                 reset_execution_state();
                 state_reg = DmaState::RUN;
                 mmio_status_reg = 0x2;
@@ -776,7 +793,9 @@ private:
                 break;
             }
             case DmaState::DONE: {
-                TRACE_EVENT("dma_transfer", "DMA", TRACE_END, 0, 1, "{}");
+                // M14 ARCH-1 component 1: tag the END so BEGIN/END pair per cmd_tag (per-tile DMA latency).
+                TRACE_EVENT("dma_transfer", "DMA", TRACE_END, 0, 1,
+                            std::string("{\"cmd_tag\":") + std::to_string(active_cmd_reg.cmd_tag) + "}");
                 mmio_done_tag_reg = active_cmd_reg.cmd_tag;
                 mmio_status_reg = 0x1;
                 if (mmio_irq_en_reg) dma_irq_o.write(true);
