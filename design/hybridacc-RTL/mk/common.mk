@@ -135,6 +135,10 @@ RTL_REGRESS_CONV2D_1X1_SINGLE_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim
 RTL_REGRESS_CONV2D_3X3_SINGLE_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim_conv2d_3x3_single_wave
 RTL_REGRESS_CONV2D_3X3_FOUR_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim_conv2d_3x3_four_wave
 RTL_REGRESS_GEMM_SINGLE_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim_gemm_single_wave
+# M15: pure multi-K-wave gemm (M=48/N=32/K=192 -> wave_k=2) fidelity reference
+RTL_REGRESS_GEMM_MULTI_WAVE_YAML := $(HACC_CC_EXAMPLE_ROOT)/gemm/gemm_m48_k192_n32.yaml
+RTL_REGRESS_GEMM_MULTI_WAVE_OUT := $(RTL_FW_REGRESS_ROOT)/gemm_multi_wave
+RTL_REGRESS_GEMM_MULTI_WAVE_LOG_PREFIX := $(sim_log_dir)/tb_hybridacc_sim_gemm_multi_wave
 
 TB_ALL := $(shell find tb -type f -name 'tb_*.sv' ! -path 'tb/Cluster/tb_sram.sv')
 TB_PE := $(shell find tb/PE -type f -name 'tb_*.sv' 2>/dev/null)

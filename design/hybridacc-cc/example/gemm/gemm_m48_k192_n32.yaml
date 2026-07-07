@@ -1,0 +1,30 @@
+# HybridAcc-CC Workload: pure multi-K-wave GEMM (M14/M15 fidelity reference).
+# M=48/N=32 stay single spatial wave (grid_m=4, grid_n=4 = 16 = one 16-PE bus);
+# K=192 -> grid_k=6 > num_bus(3) -> wave_k=2 => the minimal PURE multi-K case that
+# isolates the multi-K output-drain deadlock (see agent_run/260707-envelope-multiwave-spike).
+name: gemm_m48_k192_n32
+
+hardware:
+  num_clusters: 1
+  num_pes: 48
+  num_bus: 3
+  spm_banks_per_group: 3
+  spm_bank_depth: 8192
+  dram_base: 0x80000000
+
+tensors:
+  A:
+    shape: [48, 192]
+    dtype: fp16
+  B:
+    shape: [192, 32]
+    dtype: fp16
+  C:
+    shape: [48, 32]
+    dtype: fp16
+
+ops:
+  - name: gemm1
+    type: gemm
+    inputs: [A, B]
+    outputs: [C]
