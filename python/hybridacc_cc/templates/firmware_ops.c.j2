@@ -879,6 +879,24 @@ static inline void build_wave_runtime_gemm(const TilingParams* t,
         return;
     }
 
+    /* Native multi-K carry uses the physical SPM groups as a two-entry
+     * reduction ring.  The odd-wave SPM map swaps logical PLI/PLO ports, so
+     * both AGUs must stay at group-local offset zero:
+     *   even: PLI=g2, PLO=g3
+     *   odd:  PLI=g3, PLO=g2
+     * VPSUMR then evaluates PLO = PLI + the wave-local VP accumulation. */
+    if (t->num_ic_tiles > 1u) {
+        wave->agu_base_pli = 0u;
+        wave->agu_base_plo = 0u;
+        if (coord->ic & 1u) {
+            wave->spm_pli = t->spm_ping[3];
+            wave->spm_plo = t->spm_ping[2];
+        } else {
+            wave->spm_pli = t->spm_ping[2];
+            wave->spm_plo = t->spm_ping[3];
+        }
+    }
+
     ps_buf = gemm_ps_cache_lookup(ps_cache, wave->dram_ps);
     if (ps_buf == 0xFFu) {
         ps_buf = active_ps_buf ^ 1u;
@@ -2607,12 +2625,15 @@ void run_loop_tiling_gemm(const LayerConfig* cfg) {
     WaveRuntime* current_wave = &wave_slots[0];
     WaveRuntime* next_wave = &wave_slots[1];
     GemmPsCache ps_cache;
+    uint8_t per_wave_pe_restart = (t->num_ic_tiles > 1u);
 
     dma_init_linear();
     load_gemm_program_runtime(cfg,
-                              gemm_kernel_prefetch_sets_for_loop(t, t->num_h_tiles),
-                              t->num_h_tiles,
-                              t->num_oc_tiles);
+                              per_wave_pe_restart
+                                  ? 1u
+                                  : gemm_kernel_prefetch_sets_for_loop(t, t->num_h_tiles),
+                              per_wave_pe_restart ? 1u : t->num_h_tiles,
+                              per_wave_pe_restart ? 1u : t->num_oc_tiles);
 
     init_spatial_dma_runtime_generic(t, &spatial);
 
@@ -2636,7 +2657,10 @@ void run_loop_tiling_gemm(const LayerConfig* cfg) {
             hddu_plane_en &= ~0x1u;
         }
 
-        if (layer_needs_early_cluster_start(t)) {
+        if (per_wave_pe_restart) {
+            cluster_start_layer();
+            cluster_started = 1u;
+        } else if (layer_needs_early_cluster_start(t)) {
             ensure_cluster_layer_started(&cluster_started);
         }
         configure_gemm_wave_before_dma(cfg,
@@ -2661,6 +2685,12 @@ void run_loop_tiling_gemm(const LayerConfig* cfg) {
 
         bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_STOP);
         wait_all_clusters_agu_idle(cfg->num_clusters);
+        if (per_wave_pe_restart) {
+            wait_all_clusters_pe_halted(cfg->num_clusters);
+            cluster_stop_layer();
+            wait_all_clusters_cluster_quiesced(cfg->num_clusters);
+            cluster_started = 0u;
+        }
         /* GEMM ultra: PS/PD parallel + PLI/PLO scan-chain leave NoC
          * pending responses after HDDU/AGU report idle. Drain the NoC
          * before writeback / next-wave START to avoid PE PLI/PD stall

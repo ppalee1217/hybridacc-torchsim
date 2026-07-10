@@ -1,49 +1,61 @@
-# ISA v3
-gemv:
+# ISA v3 GEMM PE program.
+#
+# Native multi-K contract:
+# - one PE START executes exactly one firmware wave and reaches HALT;
+# - firmware patches all three wave-local loop counts to one for multi-K;
+# - CLEAR.P clears only the wave-local VP accumulation;
+# - VPSUMR emits PLO = PLI + VP, so firmware can carry the completed partial
+#   sum through alternating PLI/PLO SPM groups before the next PE START.
+
+.template
+gemm_template(KERNEL_DMA_STORE_LEN=64, KERNEL_DMA_LOAD_LEN=256, INPUT_DIM=32, OUTPUT_DIM_MINUS_ONE=7, PSUM_COUNT=24, NUM_OF_KERNEL_PREFETCH_SETS=1, NUM_OF_KERNEL_LOAD_LOOP=1, NUM_OF_KERNEL_REUSE_LOOP=1, K_TILE_DIM=32):
+    SYS.CTRL (CLEAR.P)
 
 setup:
+    SDMA.LOOP $(NUM_OF_KERNEL_PREFETCH_SETS)
     SDMA.ADDR 0
-    SDMA.LEN 48  # STORE 48 steps of kernel data (16 kernels * 3 vector each)
-    SDMA.LOOP 1  # loop for 1 kernel set
-    SDMA.SD 4  # start DMA store operation
+    SDMA.LEN $(KERNEL_DMA_STORE_LEN)
+    SDMA.SD 4
 
     LDMA.ADDR 0
-    LDMA.LEN 256 # LOAD 256 steps of input data (32dim * 8input)
-    LDMA.LHB 1 # start DMA load operation (fp16, broadcasted to 4out)
+    LDMA.LEN $(KERNEL_DMA_LOAD_LEN)
+    LDMA.LHB 1
 
     SYS.CTRL (SDMA.ACT)
 
-compute:
-    LOOPIN 1 # processing pass
-    SYS.SYNC (SWAPDM)  # wait for previous SDMA operation to complete
+load_ab_tile:
+    LOOPIN $(NUM_OF_KERNEL_LOAD_LOOP)
+    SYS.SYNC (SWAPDM)
 
-    SYS.CTRL (RST.PID, RST.TID, LDMA.ACT, CLEAR.P)
+    LOOPIN $(NUM_OF_KERNEL_REUSE_LOOP)
+    SYS.CTRL (CLEAR.P, RST.PID, RST.TID, LDMA.ACT)
 
-loop_in_dim:
-    LOOPIN 32  # Loop for 32 input dimensions
+loop_k_dim:
+    LOOPIN $(K_TILE_DIM)
 
-load_input:
+load_a_b:
     VTSTORE vt0
     VTSTORE vt1
     VTSTORE vt2
 
-    SYS.CTRL (RST.PID, RST.TID)
-compute_gemv:
-    LOOPIN 8 # Loop for 8 output dimensions
+compute_outer:
+    LOOPIN $(OUTPUT_DIM_MINUS_ONE)
     VMULR 1, 1
     VMULR 1, 1
-    VMULRN 1, VTRST # reset vector register id
-    LOOPEND # compute_gemv
+    VMULRN 1, VTRST
+    LOOPEND
 
-    SYS.CTRL (RST.PID)
+    VMULR 1, 1
+    VMULR 1, 1
+    VMULRN PRST, VTRST
+    LOOPEND
 
-    LOOPEND # loop_in_dim
-
-psum:
-    # Calculate the partial sum for each output dimension
-    LOOPIN 24 # Loop for 24 partial sums
+accumulate_c:
+    LOOPIN $(PSUM_COUNT)
     VPSUMR 1
-    LOOPEND # psum
+    LOOPEND
 
     LOOPEND
-    HALT  # End of program
+    LOOPEND
+
+    HALT
