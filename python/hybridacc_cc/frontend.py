@@ -158,6 +158,19 @@ def _parse_op(raw: dict, idx: int,
                for i, t in enumerate(raw_outputs)]
 
     attrs = raw.get("attrs", {})
+    if not isinstance(attrs, dict):
+        raise CompilationError(
+            "schema", f"{path}.attrs",
+            f"must be dict, got {type(attrs).__name__}",
+        )
+    attrs = dict(attrs)
+    if "bias_from" in raw:
+        if "bias_from" in attrs and attrs["bias_from"] != raw["bias_from"]:
+            raise CompilationError(
+                "schema", f"{path}.bias_from",
+                "conflicts with attrs.bias_from",
+            )
+        attrs["bias_from"] = raw["bias_from"]
     return OpDesc(op_type=op_type, name=name, inputs=inputs, outputs=outputs, attrs=attrs)
 
 

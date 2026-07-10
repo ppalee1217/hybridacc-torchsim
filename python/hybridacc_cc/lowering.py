@@ -1272,6 +1272,7 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
 def _lower_gemm(op: OpDesc, hw: HardwareDesc,
                 tensor_base: int = 0,
                 dram_input_override: int = 0,
+                dram_bias_override: int = 0,
                 output_ic_tiled: bool = False,
                 input_nhwc_packs: int = 0,
                 output_pad: int = 0,
@@ -1628,7 +1629,12 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
     # GEMM always needs a PLI source because gemv_template issues VPSUMR.
     # When the workload has no explicit input partial sum tensor, gen_test_dram
     # leaves this region zero-filled so the first reduction starts from zero.
-    dram_bias_base = tensor_base + a_bytes + b_bytes + c_bytes
+    # A bias override points PLI at an earlier GEMM PLO region for K-chunk
+    # accumulation, relying on identical PLI/PLO packing.
+    if dram_bias_override:
+        dram_bias_base = dram_bias_override
+    else:
+        dram_bias_base = tensor_base + a_bytes + b_bytes + c_bytes
     dma_pli_words = pli_wave // PKT_SIZE
 
     g0_dma = hw.spm_dma_group_base(0)
@@ -1902,6 +1908,28 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
         # Check if input comes from a previous layer's output
         input_from_prev = (op.inputs[0].name in output_tensor_map
                            and output_tensor_map[op.inputs[0].name] < i)
+        bias_from = op.attrs.get("bias_from")
+        dram_bias_override = 0
+        if bias_from is not None:
+            if op.op_type != "gemm":
+                raise TilingFailed(f"{op.name}: bias_from is only supported for gemm")
+            if not isinstance(bias_from, str):
+                raise TilingFailed(f"{op.name}: bias_from must be a tensor name")
+            if bias_from not in output_tensor_map:
+                raise TilingFailed(f"{op.name}: bias_from tensor '{bias_from}' is not produced")
+            bias_prev_idx = output_tensor_map[bias_from]
+            if bias_prev_idx >= i:
+                raise TilingFailed(f"{op.name}: bias_from tensor '{bias_from}' is not available yet")
+            bias_prev_layer = layers[bias_prev_idx]
+            if not _is_single_wave(bias_prev_layer):
+                raise TilingFailed(
+                    f"{op.name}: bias_from producer '{bias_from}' must be single-wave"
+                )
+            dram_bias_override = bias_prev_layer.tiling_params.dram_output_base
+        gemm_bias_kwargs = (
+            {"dram_bias_override": dram_bias_override}
+            if op.op_type == "gemm" else {}
+        )
 
         if input_from_prev:
             # Layer N's input = Layer (N-1)'s output.
@@ -1932,7 +1960,8 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
                        tensor_base=weight_base,
                        dram_input_override=dram_input_base,
                        input_nhwc_packs=input_nhwc_packs_map.get(i, 0),
-                       use_runtime_load_pad=input_pad > 0)
+                       use_runtime_load_pad=input_pad > 0,
+                       **gemm_bias_kwargs)
 
             prev_op = wir.ops[prev_idx]
             if (prev_op.op_type == "gemm"
@@ -1953,7 +1982,8 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
                            tensor_base=dram_cursor,
                            dram_input_override=scratch_base,
                            input_nhwc_packs=input_nhwc_packs_map.get(i, 0),
-                           use_runtime_load_pad=input_pad > 0)
+                           use_runtime_load_pad=input_pad > 0,
+                           **gemm_bias_kwargs)
                 assert _is_single_wave(layer)
                 assert total_beats == layer.tiling_params.dma_pd_words
 
@@ -1974,7 +2004,19 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
             layer = fn(op, wir.hardware,
                        tensor_base=dram_cursor,
                        input_nhwc_packs=input_nhwc_packs_map.get(i, 0),
-                       use_runtime_load_pad=input_pad > 0)
+                       use_runtime_load_pad=input_pad > 0,
+                       **gemm_bias_kwargs)
+
+        if dram_bias_override:
+            if not _is_single_wave(layer):
+                raise TilingFailed(f"{op.name}: bias_from consumer must be single-wave")
+            bias_prev_tp = layers[output_tensor_map[bias_from]].tiling_params
+            if bias_prev_tp.dma_plo_words != layer.tiling_params.dma_pli_words:
+                raise TilingFailed(f"{op.name}: bias_from PLO/PLI word count mismatch")
+            if bias_prev_tp.dram_out_oc_stride != layer.tiling_params.dram_bias_oc_stride:
+                raise TilingFailed(f"{op.name}: bias_from OC stride mismatch")
+            if bias_prev_tp.dram_out_h_stride != layer.tiling_params.dram_bias_h_stride:
+                raise TilingFailed(f"{op.name}: bias_from H stride mismatch")
 
         layers.append(layer)
 
