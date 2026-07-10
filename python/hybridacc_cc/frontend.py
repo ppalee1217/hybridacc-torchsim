@@ -33,6 +33,10 @@ class CompilationError(Exception):
 # ---------------------------------------------------------------------------
 
 _SUPPORTED_OP_TYPES = {"conv2d_3x3", "conv2d_1x1", "gemm"}
+_GEMM_AUTO_SPLIT_K = 96
+_OUTPUT_EPILOGUE_ATTRS = (
+    "activation", "epilogue", "relu", "fuse_relu", "output_relu",
+)
 
 
 def _require(d: dict, key: str, path: str, expected_type: type | None = None) -> Any:
@@ -287,6 +291,107 @@ def _validate_spm_capacity(op: OpDesc, hw: HardwareDesc) -> None:
                 f"minimum weight tile ({ps_min} B) > half_group_capacity ({half_cap} B)")
 
 
+def _fresh_generated_name(base: str, used_names: set) -> str:
+    """Return a deterministic synthetic name that cannot shadow workload names."""
+    candidate = base
+    suffix = 1
+    while candidate in used_names:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used_names.add(candidate)
+    return candidate
+
+
+def _auto_split_large_gemms(ops: List[OpDesc], hw: HardwareDesc) -> List[OpDesc]:
+    """Rewrite source-input GEMMs with K>96 into bias-chained K chunks.
+
+    A chunk is at most one three-bus K wave (3 * PE_K=32).  The original
+    output tensor belongs to the last chunk, so downstream users continue to
+    see the workload's public tensor name.
+    """
+    used_op_names = {op.name for op in ops}
+    used_tensor_names = {
+        tensor.name
+        for op in ops
+        for tensor in (*op.inputs, *op.outputs)
+    }
+    workload_output_names = {
+        tensor.name for op in ops for tensor in op.outputs
+    }
+    expanded_ops: List[OpDesc] = []
+
+    for op in ops:
+        if op.op_type != "gemm" or op.inputs[0].shape[1] <= _GEMM_AUTO_SPLIT_K:
+            expanded_ops.append(op)
+            continue
+
+        A, B = op.inputs[:2]
+        C = op.outputs[0]
+        chained_inputs = [
+            tensor.name for tensor in (A, B) if tensor.name in workload_output_names
+        ]
+        if chained_inputs:
+            raise CompilationError(
+                "semantic", op.name,
+                "automatic K-splitting currently requires source A/B tensors; "
+                f"produced input(s) are {', '.join(chained_inputs)}",
+            )
+
+        M, K = A.shape
+        _, N = B.shape
+        previous_output = None
+        num_chunks = math.ceil(K / _GEMM_AUTO_SPLIT_K)
+        for chunk_index in range(num_chunks):
+            k_start = chunk_index * _GEMM_AUTO_SPLIT_K
+            k_end = min(K, k_start + _GEMM_AUTO_SPLIT_K)
+            chunk_k = k_end - k_start
+            is_final = chunk_index == num_chunks - 1
+
+            chunk_name = _fresh_generated_name(
+                f"{op.name}__kchunk{chunk_index}", used_op_names
+            )
+            chunk_a = TensorDesc(
+                name=_fresh_generated_name(
+                    f"{A.name}__{op.name}_a_k{k_start}_{k_end}", used_tensor_names
+                ),
+                shape=[M, chunk_k], dtype=A.dtype, layout=A.layout,
+            )
+            chunk_b = TensorDesc(
+                name=_fresh_generated_name(
+                    f"{B.name}__{op.name}_b_k{k_start}_{k_end}", used_tensor_names
+                ),
+                shape=[chunk_k, N], dtype=B.dtype, layout=B.layout,
+            )
+            if is_final:
+                chunk_output = C
+            else:
+                chunk_output = TensorDesc(
+                    name=_fresh_generated_name(
+                        f"{C.name}__{op.name}_kchunk{chunk_index}", used_tensor_names
+                    ),
+                    shape=list(C.shape), dtype=C.dtype, layout=C.layout,
+                )
+
+            chunk_attrs = dict(op.attrs)
+            if not is_final:
+                for attr_name in _OUTPUT_EPILOGUE_ATTRS:
+                    chunk_attrs.pop(attr_name, None)
+            if previous_output is not None:
+                chunk_attrs["bias_from"] = previous_output.name
+
+            chunk_op = OpDesc(
+                op_type="gemm", name=chunk_name,
+                inputs=[chunk_a, chunk_b], outputs=[chunk_output],
+                attrs=chunk_attrs,
+            )
+            _validate_gemm(chunk_op, hw)
+            _validate_spm_capacity(chunk_op, hw)
+            expanded_ops.append(chunk_op)
+            previous_output = chunk_output
+
+    return expanded_ops
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -344,4 +449,5 @@ def parse_workload(yaml_path: str | Path) -> WorkloadIR:
         _validate_spm_capacity(op, hw)
         ops.append(op)
 
+    ops = _auto_split_large_gemms(ops, hw)
     return WorkloadIR(name=wl_name, hardware=hw, ops=ops)

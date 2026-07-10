@@ -26,6 +26,10 @@ import yaml
 
 
 HARDWARE_PAD_EPS = np.float16(np.nextafter(np.float16(0), np.float16(1)))
+GEMM_AUTO_SPLIT_K = 96
+OUTPUT_EPILOGUE_ATTRS = (
+    "activation", "epilogue", "relu", "fuse_relu", "output_relu",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +147,23 @@ def _apply_output_epilogue(op: dict, output: np.ndarray) -> np.ndarray:
     return output
 
 
+def _bias_from_tensor(op: dict):
+    """Return the normalized bias_from tensor name from workload YAML."""
+    attrs = op.get("attrs", {})
+    attrs_bias_from = attrs.get("bias_from")
+    top_bias_from = op.get("bias_from")
+    if (top_bias_from is not None and attrs_bias_from is not None
+            and top_bias_from != attrs_bias_from):
+        raise ValueError(
+            f"{op['name']}: top-level bias_from {top_bias_from!r} conflicts "
+            f"with attrs.bias_from {attrs_bias_from!r}"
+        )
+    bias_from = top_bias_from if top_bias_from is not None else attrs_bias_from
+    if bias_from is not None and not isinstance(bias_from, str):
+        raise ValueError(f"{op['name']}: bias_from must be a tensor name")
+    return bias_from
+
+
 # ---------------------------------------------------------------------------
 # Layer-level golden computation
 # ---------------------------------------------------------------------------
@@ -189,6 +210,19 @@ def _compute_layer_golden(op, tensors_data, wl_tensors, rng, layer_tp):
         output_shape = tuple(wl_tensors[output_name]["shape"])
 
         golden = fp16_gemm_golden(A, B)
+        bias_from = _bias_from_tensor(op)
+        if bias_from is not None:
+            if bias_from not in tensors_data:
+                raise ValueError(
+                    f"{op['name']}: bias_from tensor '{bias_from}' is not available yet"
+                )
+            bias = tensors_data[bias_from].astype(np.float16, copy=False)
+            if bias.shape != golden.shape:
+                raise ValueError(
+                    f"{op['name']}: bias_from tensor '{bias_from}' shape {bias.shape} "
+                    f"does not match GEMM output shape {golden.shape}"
+                )
+            golden = (golden + bias).astype(np.float16, copy=False)
         golden = _apply_output_epilogue(op, golden)
         assert golden.shape == output_shape, \
             f"Shape mismatch for {output_name}: golden {golden.shape} vs expected {output_shape}"
@@ -196,6 +230,114 @@ def _compute_layer_golden(op, tensors_data, wl_tensors, rng, layer_tp):
 
     else:
         raise ValueError(f"Unsupported op type: {op_type}")
+
+
+def _fresh_generated_name(base: str, used_names: set) -> str:
+    """Mirror frontend synthetic naming without depending on hybridacc_cc."""
+    candidate = base
+    suffix = 1
+    while candidate in used_names:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used_names.add(candidate)
+    return candidate
+
+
+def _normalized_op_attrs(op: dict) -> dict:
+    attrs = op.get("attrs", {})
+    if not isinstance(attrs, dict):
+        raise ValueError(f"{op['name']}: attrs must be a mapping")
+    attrs = dict(attrs)
+    top_bias_from = op.get("bias_from")
+    if top_bias_from is not None:
+        if "bias_from" in attrs and attrs["bias_from"] != top_bias_from:
+            raise ValueError(f"{op['name']}: bias_from conflicts with attrs.bias_from")
+        attrs["bias_from"] = top_bias_from
+    return attrs
+
+
+def _expand_auto_split_gemms(wl_tensors, ops, tensors_data):
+    """Mirror frontend K-splitting and materialize slices of logical A/B."""
+    expanded_tensors = dict(wl_tensors)
+    used_op_names = {op["name"] for op in ops}
+    used_tensor_names = set(wl_tensors)
+    expanded_ops = []
+
+    for op in ops:
+        if op["type"] != "gemm":
+            expanded_ops.append(op)
+            continue
+
+        a_name, b_name = op["inputs"][:2]
+        M, K = wl_tensors[a_name]["shape"]
+        _, N = wl_tensors[b_name]["shape"]
+        if K <= GEMM_AUTO_SPLIT_K:
+            expanded_ops.append(op)
+            continue
+        if a_name not in tensors_data or b_name not in tensors_data:
+            missing = [name for name in (a_name, b_name) if name not in tensors_data]
+            raise ValueError(
+                f"{op['name']}: automatic K-splitting requires source A/B tensors; "
+                f"unavailable input(s) are {', '.join(missing)}"
+            )
+
+        output_name = op["outputs"][0]
+        output_tdef = wl_tensors[output_name]
+        previous_output = None
+        num_chunks = (K + GEMM_AUTO_SPLIT_K - 1) // GEMM_AUTO_SPLIT_K
+        for chunk_index in range(num_chunks):
+            k_start = chunk_index * GEMM_AUTO_SPLIT_K
+            k_end = min(K, k_start + GEMM_AUTO_SPLIT_K)
+            is_final = chunk_index == num_chunks - 1
+
+            chunk_name = _fresh_generated_name(
+                f"{op['name']}__kchunk{chunk_index}", used_op_names
+            )
+            chunk_a_name = _fresh_generated_name(
+                f"{a_name}__{op['name']}_a_k{k_start}_{k_end}", used_tensor_names
+            )
+            chunk_b_name = _fresh_generated_name(
+                f"{b_name}__{op['name']}_b_k{k_start}_{k_end}", used_tensor_names
+            )
+            if is_final:
+                chunk_output_name = output_name
+            else:
+                chunk_output_name = _fresh_generated_name(
+                    f"{output_name}__{op['name']}_kchunk{chunk_index}",
+                    used_tensor_names,
+                )
+                expanded_tensors[chunk_output_name] = dict(output_tdef)
+
+            expanded_tensors[chunk_a_name] = {
+                **wl_tensors[a_name], "shape": [M, k_end - k_start],
+            }
+            expanded_tensors[chunk_b_name] = {
+                **wl_tensors[b_name], "shape": [k_end - k_start, N],
+            }
+            tensors_data[chunk_a_name] = np.ascontiguousarray(
+                tensors_data[a_name][:, k_start:k_end]
+            )
+            tensors_data[chunk_b_name] = np.ascontiguousarray(
+                tensors_data[b_name][k_start:k_end, :]
+            )
+
+            chunk_attrs = _normalized_op_attrs(op)
+            if not is_final:
+                for attr_name in OUTPUT_EPILOGUE_ATTRS:
+                    chunk_attrs.pop(attr_name, None)
+            if previous_output is not None:
+                chunk_attrs["bias_from"] = previous_output
+
+            expanded_ops.append({
+                "name": chunk_name,
+                "type": "gemm",
+                "inputs": [chunk_a_name, chunk_b_name],
+                "outputs": [chunk_output_name],
+                "attrs": chunk_attrs,
+            })
+            previous_output = chunk_output_name
+
+    return expanded_tensors, expanded_ops
 
 
 # ---------------------------------------------------------------------------
@@ -640,8 +782,6 @@ def main():
         ir = json.load(f)
 
     layers = ir["layers"]
-    assert len(layers) == len(ops), \
-        f"Layer count mismatch: IR has {len(layers)} layers, workload has {len(ops)} ops"
 
     # -- Generate random test data --
     rng = np.random.RandomState(args.seed)
@@ -664,6 +804,10 @@ def main():
             tensors_data[name] = rng.uniform(-1.0, 1.0, shape).astype(np.float16)
             print(f"  Generated input tensor '{name}': shape={shape}, "
                   f"range=[{tensors_data[name].min():.4f}, {tensors_data[name].max():.4f}]")
+
+    wl_tensors, ops = _expand_auto_split_gemms(wl_tensors, ops, tensors_data)
+    assert len(layers) == len(ops), \
+        f"Layer count mismatch: IR has {len(layers)} layers, expanded workload has {len(ops)} ops"
 
     # -- Compute golden output layer by layer --
     for i, (op, layer) in enumerate(zip(ops, layers)):
