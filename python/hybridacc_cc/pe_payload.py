@@ -67,6 +67,63 @@ def hash_scan_chain(scan_chain: List[ScanChainEntry]) -> str:
     return "|".join(parts)
 
 
+def build_gemm_tail_scan_chain(layer: LayerHwConfig) -> List[ScanChainEntry]:
+    """Derive the final uneven-K topology from a GEMM full-wave chain.
+
+    The first active bus keeps PLI-from-bus, the final active bus becomes the
+    PLO-to-bus producer, and later buses are disabled.  PS/PD IDs are retained
+    from each active bus of the full chain; PLI/PLO IDs are copied from the
+    original first/final buses so the output-tag geometry remains unchanged.
+    """
+    meta = layer.gemm_k_wave
+    if meta is None or not meta.tail_reconfigure:
+        return []
+    if meta.full_stages <= 0 or meta.tail_stages <= 0:
+        raise ValueError(f"Invalid GEMM K-wave stage metadata for {layer.name}")
+    if meta.tail_stages >= meta.full_stages:
+        raise ValueError(f"GEMM tail is not shorter than full wave for {layer.name}")
+    if len(layer.scan_chain) % meta.full_stages != 0:
+        raise ValueError(f"GEMM scan chain cannot be split by K stages for {layer.name}")
+
+    pes_per_bus = len(layer.scan_chain) // meta.full_stages
+    tail_chain: List[ScanChainEntry] = []
+
+    def route_mode(stage: int) -> int:
+        if meta.tail_stages == 1:
+            return 3  # PLI_FROM_BUS_PLO_TO_BUS
+        if stage == 0:
+            return 1  # PLI_FROM_BUS_PLO_TO_LN
+        if stage + 1 == meta.tail_stages:
+            return 2  # PLI_FROM_LN_PLO_TO_BUS
+        return 0      # PLI_FROM_LN_PLO_TO_LN
+
+    for stage in range(meta.full_stages):
+        for pe_local in range(pes_per_bus):
+            if stage >= meta.tail_stages:
+                tail_chain.append(ScanChainEntry(
+                    ps_id=63, pd_id=63, pli_id=63, plo_id=63,
+                    route_mode=3, enable=False,
+                ))
+                continue
+
+            source = layer.scan_chain[stage * pes_per_bus + pe_local]
+            first = layer.scan_chain[pe_local]
+            final = layer.scan_chain[
+                (meta.full_stages - 1) * pes_per_bus + pe_local
+            ]
+            tail_chain.append(ScanChainEntry(
+                ps_id=source.ps_id,
+                pd_id=source.pd_id,
+                pli_id=first.pli_id if stage == 0 else 63,
+                plo_id=(final.plo_id
+                        if stage + 1 == meta.tail_stages else 63),
+                route_mode=route_mode(stage),
+                enable=source.enable,
+            ))
+
+    return tail_chain
+
+
 # ===================================================================
 # PE patch N-1 encoding
 # ===================================================================
@@ -142,6 +199,8 @@ def collect_payload_context(
                     "template_len": int,
                     "scan_chain_symbol": str,
                     "scan_chain_len": int,
+                    "tail_scan_chain_symbol": str,
+                    "tail_scan_chain_len": int,
                     "patch_symbol": str,
                     "patch_entries": [{"offset": int, "encoded_val": int}],
                     "patch_count": int,
@@ -168,7 +227,7 @@ def collect_payload_context(
                 "len": len(instructions),
             }
 
-        # Scan chain dedup
+        # Full-wave scan chain dedup
         topo_key = hash_scan_chain(layer.scan_chain)
         if topo_key not in scan_chains:
             encoded = encode_scan_chain(layer.scan_chain)
@@ -176,6 +235,22 @@ def collect_payload_context(
             idx = len(scan_chains)
             suffix = "" if idx == 0 else f"_{idx}"
             scan_chains[topo_key] = {
+                "symbol": f"noc_scan_chain_{num_pes}pe{suffix}",
+                "words": encoded,
+                "len": len(encoded),
+            }
+
+        # Uneven final K-wave scan chain.  This is codegen-derived from the
+        # lowering metadata so HardwareIR carries the contract rather than a
+        # firmware-only shape heuristic.
+        tail_scan_chain = build_gemm_tail_scan_chain(layer)
+        tail_topo_key = hash_scan_chain(tail_scan_chain) if tail_scan_chain else ""
+        if tail_scan_chain and tail_topo_key not in scan_chains:
+            encoded = encode_scan_chain(tail_scan_chain)
+            num_pes = len(tail_scan_chain)
+            idx = len(scan_chains)
+            suffix = "" if idx == 0 else f"_{idx}"
+            scan_chains[tail_topo_key] = {
                 "symbol": f"noc_scan_chain_{num_pes}pe{suffix}",
                 "words": encoded,
                 "len": len(encoded),
@@ -195,6 +270,12 @@ def collect_payload_context(
             "template_len": templates[tmpl_name]["len"],
             "scan_chain_symbol": scan_chains[topo_key]["symbol"],
             "scan_chain_len": scan_chains[topo_key]["len"],
+            "tail_scan_chain_symbol": (
+                scan_chains[tail_topo_key]["symbol"] if tail_scan_chain else "0"
+            ),
+            "tail_scan_chain_len": (
+                scan_chains[tail_topo_key]["len"] if tail_scan_chain else 0
+            ),
             "patch_symbol": patch_sym,
             "patch_entries": patch_entries,
             "patch_count": len(patch_entries),

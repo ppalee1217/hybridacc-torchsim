@@ -5,6 +5,15 @@
  * ═══════════════════════════════════════════════════════ */
 #include "firmware_hw.h"
 #include "firmware_payload.h"
+
+/* Native GEMM per-wave active K-stage metadata. */
+{% for l in layers %}
+{% if l.gemm_k_wave.active_stages %}
+static const uint8_t {{ l.gemm_k_wave.active_stages_symbol }}[] = {
+    {% for stages in l.gemm_k_wave.active_stages %}{{ stages }}u{{ ", " if not loop.last }}{% endfor %}
+};
+{% endif %}
+{% endfor %}
 {% if relayouts %}
 
 typedef struct RelayoutDesc {
@@ -55,6 +64,20 @@ const LayerConfig layer_configs[] = {
         .agu_plo = { .regs = { {% for r in l.agu_plo %}{{ "0x%08X" | format(r) }}u{{ ", " if not loop.last }}{% endfor %} } },
         .scan_chain = {{ l.scan_chain_symbol }},
         .scan_chain_len = {{ l.scan_chain_symbol | upper }}_LEN,
+        .gemm_k_wave = {
+            .active_stages = {{ l.gemm_k_wave.active_stages_symbol }},
+            .tail_scan_chain = {{ l.gemm_k_wave.tail_scan_chain_symbol }},
+            .wave_count = {{ l.gemm_k_wave.wave_count }}u,
+            .tail_scan_chain_len = {{ l.gemm_k_wave.tail_scan_chain_len }}u,
+            .full_stages = {{ l.gemm_k_wave.full_stages }}u,
+            .tail_stages = {{ l.gemm_k_wave.tail_stages }}u,
+            .stage_k_elements = {{ l.gemm_k_wave.stage_k_elements }}u,
+            .tail_k_elements = {{ l.gemm_k_wave.tail_k_elements }}u,
+            .tail_dma_ps_words = {{ l.gemm_k_wave.tail_dma_ps_words }}u,
+            .tail_dma_pd_words = {{ l.gemm_k_wave.tail_dma_pd_words }}u,
+            .tail_reconfigure = {{ l.gemm_k_wave.tail_reconfigure }}u,
+            .reserved = { 0u, 0u, 0u },
+        },
         .pe_template = {{ l.pe_template_symbol }},
         .pe_template_len = {{ l.pe_template_symbol | upper }}_LEN,
         .patches = {{ l.patch_symbol }},

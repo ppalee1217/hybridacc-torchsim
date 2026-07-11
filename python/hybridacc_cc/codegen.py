@@ -79,6 +79,7 @@ def prepare_template_context(hw_ir: HardwareIR,
     for i, layer in enumerate(hw_ir.layers):
         lp = payload["layer_payloads"][i]
         tp = layer.tiling_params
+        k_wave = layer.gemm_k_wave
         runner = _layer_runner_name(layer.op_type)
         if runner not in used_runners:
             used_runners.append(runner)
@@ -100,6 +101,36 @@ def prepare_template_context(hw_ir: HardwareIR,
             "agu_plo": _pack_agu_regs(layer.agu_plo),
             "scan_chain_symbol": lp["scan_chain_symbol"],
             "scan_chain_len": lp["scan_chain_len"],
+            "gemm_k_wave": {
+                "active_stages_symbol": (
+                    f"gemm_active_k_stages_{i}" if k_wave is not None else "0"
+                ),
+                "active_stages": (
+                    list(k_wave.active_stages) if k_wave is not None else []
+                ),
+                "wave_count": (
+                    len(k_wave.active_stages) if k_wave is not None else 0
+                ),
+                "full_stages": k_wave.full_stages if k_wave is not None else 0,
+                "tail_stages": k_wave.tail_stages if k_wave is not None else 0,
+                "stage_k_elements": (
+                    k_wave.stage_k_elements if k_wave is not None else 0
+                ),
+                "tail_k_elements": (
+                    k_wave.tail_k_elements if k_wave is not None else 0
+                ),
+                "tail_dma_ps_words": (
+                    k_wave.tail_dma_ps_words if k_wave is not None else 0
+                ),
+                "tail_dma_pd_words": (
+                    k_wave.tail_dma_pd_words if k_wave is not None else 0
+                ),
+                "tail_reconfigure": (
+                    1 if k_wave is not None and k_wave.tail_reconfigure else 0
+                ),
+                "tail_scan_chain_symbol": lp["tail_scan_chain_symbol"],
+                "tail_scan_chain_len": lp["tail_scan_chain_len"],
+            },
             "pe_template_symbol": lp["template_symbol"],
             "pe_template_len": lp["template_len"],
             "patch_symbol": lp["patch_symbol"],

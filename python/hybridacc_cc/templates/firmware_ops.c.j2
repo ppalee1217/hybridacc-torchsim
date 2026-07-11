@@ -647,6 +647,10 @@ typedef struct {
     uint8_t need_ps_dma;
     uint8_t need_bias_dma;
     uint8_t ps_buf;
+    uint8_t active_k_stages;
+
+    uint32_t dma_ps_words;
+    uint32_t dma_pd_words;
 
     uint32_t agu_base_ps;
     uint32_t agu_base_pd;
@@ -785,6 +789,9 @@ static inline void build_wave_runtime(const TilingParams* t,
     uint32_t buf = wave_count & 1u;
 
     wave->ps_buf = (uint8_t)buf;
+    wave->active_k_stages = 0u;
+    wave->dma_ps_words = t->dma_ps_words;
+    wave->dma_pd_words = t->dma_pd_words;
 
     wave->agu_base_ps  = buf ? t->agu_pong[0] : t->agu_ping[0];
     wave->agu_base_pd  = (buf ? t->agu_pong[1] : t->agu_ping[1])
@@ -865,18 +872,31 @@ static inline uint8_t gemm_ps_cache_lookup(const GemmPsCache* cache,
     return 0xFFu;
 }
 
-static inline void build_wave_runtime_gemm(const TilingParams* t,
+static inline void build_wave_runtime_gemm(const LayerConfig* cfg,
                                            const SpatialDmaRuntime* spatial,
                                            const WaveCoord* coord,
                                            uint32_t wave_count,
                                            uint8_t active_ps_buf,
                                            GemmPsCache* ps_cache,
                                            WaveRuntime* wave) {
+    const TilingParams* t = &cfg->tiling;
+    const GemmKWaveConfig* k_wave = &cfg->gemm_k_wave;
     uint8_t ps_buf;
 
     build_wave_runtime(t, spatial, coord, wave_count, wave);
     if (!wave->valid) {
         return;
+    }
+
+    if ((k_wave->active_stages != 0)
+        && (coord->ic < k_wave->wave_count)) {
+        wave->active_k_stages = k_wave->active_stages[coord->ic];
+    }
+    if (k_wave->tail_reconfigure
+        && (wave->active_k_stages == k_wave->tail_stages)
+        && (wave->active_k_stages < k_wave->full_stages)) {
+        wave->dma_ps_words = k_wave->tail_dma_ps_words;
+        wave->dma_pd_words = k_wave->tail_dma_pd_words;
     }
 
     /* Native multi-K carry uses the physical SPM groups as a two-entry
@@ -1159,11 +1179,11 @@ static inline void prefetch_enqueue_ps_generic(const TilingParams* t,
                                         t->dram_ps_oc_stride);
     } else if (plane_is_parallel(t, 0u) && (t->dma_ps_words_per_bank > 0u)) {
         prefetch_enqueue_parallel_words(wave->dram_ps, wave->spm_ps,
-                                        t->dma_ps_words,
+                                        wave->dma_ps_words,
                                         t->dma_ps_words_per_bank,
                                         t->bank_depth_bytes);
     } else {
-        prefetch_enqueue_linear(wave->dram_ps, wave->spm_ps, t->dma_ps_words);
+        prefetch_enqueue_linear(wave->dram_ps, wave->spm_ps, wave->dma_ps_words);
     }
 }
 
@@ -1172,7 +1192,7 @@ static inline void prefetch_enqueue_pd_generic(const TilingParams* t,
                                                const WaveRuntime* wave) {
     if (plane_is_parallel(t, 1u) && (t->dma_pd_words_per_bank > 0u)) {
         prefetch_enqueue_parallel_words(wave->dram_pd, wave->spm_pd,
-                                        t->dma_pd_words,
+                                        wave->dma_pd_words,
                                         t->dma_pd_words_per_bank,
                                         t->bank_depth_bytes);
     } else if (plane_is_parallel(t, 1u) && (spatial->pd_rows_per_bank > 0u)) {
@@ -1198,7 +1218,7 @@ static inline void prefetch_enqueue_pd_generic(const TilingParams* t,
                             spatial->pd_src_row_stride,
                             spatial->pd_dst_row_stride);
     } else {
-        prefetch_enqueue_linear(wave->dram_pd, wave->spm_pd, t->dma_pd_words);
+        prefetch_enqueue_linear(wave->dram_pd, wave->spm_pd, wave->dma_pd_words);
     }
 }
 
@@ -1453,7 +1473,7 @@ static inline void dma_load_pd_wave_sync(const TilingParams* t,
 
     if (plane_is_parallel(t, 1u) && (t->dma_pd_words_per_bank > 0u)) {
         dma_load_parallel_words_sync(wave->dram_pd, wave->spm_pd,
-                                     t->dma_pd_words,
+                                     wave->dma_pd_words,
                                      t->dma_pd_words_per_bank,
                                      t->bank_depth_bytes);
     } else if (plane_is_parallel(t, 1u) && (spatial->pd_rows_per_bank > 0u)) {
@@ -1477,7 +1497,7 @@ static inline void dma_load_pd_wave_sync(const TilingParams* t,
                          wave->pd_row_beats, wave->pd_row_count,
                          spatial->pd_src_row_stride, spatial->pd_dst_row_stride);
     } else {
-        dma_load_sync(wave->dram_pd, wave->spm_pd, t->dma_pd_words);
+        dma_load_sync(wave->dram_pd, wave->spm_pd, wave->dma_pd_words);
     }
 }
 
@@ -1621,11 +1641,11 @@ static inline void ensure_wave_inputs_ready_generic(const TilingParams* t,
                                              t->dram_ps_oc_stride);
             } else if (plane_is_parallel(t, 0u) && (t->dma_ps_words_per_bank > 0u)) {
                 dma_load_parallel_words_sync(wave->dram_ps, wave->spm_ps,
-                                             t->dma_ps_words,
+                                             wave->dma_ps_words,
                                              t->dma_ps_words_per_bank,
                                              t->bank_depth_bytes);
             } else {
-                dma_load_sync(wave->dram_ps, wave->spm_ps, t->dma_ps_words);
+                dma_load_sync(wave->dram_ps, wave->spm_ps, wave->dma_ps_words);
             }
         }
 
@@ -2244,6 +2264,34 @@ static inline void configure_gemm_wave_before_dma(const LayerConfig* cfg,
     bcast_write32(HDDU_BASE + HDDU_PLANE_MODE, cfg->hddu_plane_mode);
 }
 
+static inline void configure_gemm_k_wave_topology(const LayerConfig* cfg,
+                                                  const WaveRuntime* wave,
+                                                  uint8_t* tail_topology_active) {
+    const GemmKWaveConfig* k_wave = &cfg->gemm_k_wave;
+    uint8_t use_tail;
+
+    if (!k_wave->tail_reconfigure) {
+        return;
+    }
+
+    use_tail = (wave->active_k_stages == k_wave->tail_stages)
+            && (wave->active_k_stages < k_wave->full_stages);
+    if (use_tail == *tail_topology_active) {
+        return;
+    }
+
+    /* Caller owns the PE-HALT / cluster-quiesced boundary.  Re-route PLO to
+     * the final active bus before the next cluster START; restoring the full
+     * chain is required when another spatial tile returns to K-wave zero. */
+    if (use_tail) {
+        send_noc_scan_chain(k_wave->tail_scan_chain,
+                            k_wave->tail_scan_chain_len);
+    } else {
+        send_noc_scan_chain(cfg->scan_chain, cfg->scan_chain_len);
+    }
+    *tail_topology_active = use_tail;
+}
+
 static inline void run_loop_tiling_gemm_generic_single_n_chunked(const LayerConfig* cfg) {
     const TilingParams* t = &cfg->tiling;
     uint32_t resident_m_capacity = t->gemm_resident_m_tiles;
@@ -2632,6 +2680,7 @@ void run_loop_tiling_gemm(const LayerConfig* cfg) {
     WaveRuntime* next_wave = &wave_slots[1];
     GemmPsCache ps_cache;
     uint8_t per_wave_pe_restart = (t->num_ic_tiles > 1u);
+    uint8_t tail_topology_active = 0u;
 
     dma_init_linear();
     load_gemm_program_runtime(cfg,
@@ -2650,7 +2699,8 @@ void run_loop_tiling_gemm(const LayerConfig* cfg) {
     next_coord.valid = 0;
 
     ps_cache.valid_mask = 0u;
-    build_wave_runtime_gemm(t, &spatial, &current_coord, wave_count, 1u, &ps_cache, current_wave);
+    build_wave_runtime_gemm(cfg, &spatial, &current_coord, wave_count, 1u,
+                            &ps_cache, current_wave);
 
     while (current_wave->valid) {
         uint32_t hddu_plane_en = cfg->hddu_plane_en;
@@ -2662,6 +2712,9 @@ void run_loop_tiling_gemm(const LayerConfig* cfg) {
         if (!ps_stream_needed) {
             hddu_plane_en &= ~0x1u;
         }
+
+        configure_gemm_k_wave_topology(cfg, current_wave,
+                                       &tail_topology_active);
 
         if (per_wave_pe_restart) {
             cluster_start_layer();
@@ -2680,7 +2733,7 @@ void run_loop_tiling_gemm(const LayerConfig* cfg) {
 
         copy_wave_coord(&next_coord, &current_coord);
         if (advance_wave_coord_gemm(t, &next_coord)) {
-            build_wave_runtime_gemm(t, &spatial, &next_coord, wave_count + 1u,
+            build_wave_runtime_gemm(cfg, &spatial, &next_coord, wave_count + 1u,
                                     current_wave->ps_buf, &ps_cache, next_wave);
             prefetch_wave_inputs_gemm(t, &spatial, next_wave);
         } else {

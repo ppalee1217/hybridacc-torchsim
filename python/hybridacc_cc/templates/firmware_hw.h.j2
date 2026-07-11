@@ -797,6 +797,21 @@ typedef struct {
 } TilingParams;
 
 typedef struct {
+    const uint8_t* active_stages;       /* Per temporal K-wave stage count. */
+    const uint32_t* tail_scan_chain;    /* Encoded shorter-final-wave topology. */
+    uint16_t wave_count;
+    uint16_t tail_scan_chain_len;
+    uint16_t full_stages;
+    uint16_t tail_stages;
+    uint16_t stage_k_elements;
+    uint16_t tail_k_elements;
+    uint32_t tail_dma_ps_words;
+    uint32_t tail_dma_pd_words;
+    uint8_t tail_reconfigure;
+    uint8_t reserved[3];
+} GemmKWaveConfig;
+
+typedef struct {
     uint32_t cluster_mask_lo;
     uint32_t cluster_mask_hi;
     uint32_t num_clusters;
@@ -820,6 +835,7 @@ typedef struct {
     uint16_t gemm_kernel_load_patch_offset;
     uint16_t gemm_kernel_reuse_patch_offset;
 
+    GemmKWaveConfig gemm_k_wave;
     TilingParams tiling;
 } LayerConfig;
 

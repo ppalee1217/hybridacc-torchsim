@@ -15,6 +15,7 @@ from .ir import (
     ClusterMapping,
     HardwareDesc,
     HardwareIR,
+    GemmKWaveMetadata,
     HdduConfig,
     LayerHwConfig,
     OpDesc,
@@ -1739,6 +1740,28 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
         gemm_pd_preload_m_tiles=pd_preload_m_tiles,
     )
 
+    active_k_stages = [
+        min(grid_k_per_wave, grid_k - wave_idx * grid_k_per_wave)
+        for wave_idx in range(num_k_tiles)
+    ]
+    tail_stages = active_k_stages[-1]
+    tail_k_elements = K - (num_k_tiles - 1) * K_tile
+    tail_reconfigure = (
+        num_k_tiles > 1
+        and tail_stages < grid_k_per_wave
+        and (K % PE_K) == 0
+    )
+    gemm_k_wave = GemmKWaveMetadata(
+        active_stages=active_k_stages,
+        full_stages=grid_k_per_wave,
+        tail_stages=tail_stages,
+        stage_k_elements=PE_K,
+        tail_k_elements=tail_k_elements,
+        tail_dma_ps_words=ps_row_words * tail_k_elements,
+        tail_dma_pd_words=grid_m_per_wave * tile_d_words * tail_k_elements,
+        tail_reconfigure=tail_reconfigure,
+    )
+
     return LayerHwConfig(
         name=op.name, op_type=op.op_type,
         target_cluster_mask=cluster_map.cluster_mask,
@@ -1748,6 +1771,7 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
         scan_chain=scan_chain, pe_program=pe_prog,
         spm_layout=spm_layout, tiling=tiling,
         cluster_mapping=cluster_map, tiling_params=tiling_params,
+        gemm_k_wave=gemm_k_wave,
     )
 
 

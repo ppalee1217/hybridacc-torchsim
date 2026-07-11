@@ -322,6 +322,25 @@ class TilingParams:
 
 
 @dataclass
+class GemmKWaveMetadata:
+    """Native GEMM K-wave topology and aligned tail geometry.
+
+    ``active_stages`` records the number of 32-element K stages used by each
+    temporal K wave.  ``tail_reconfigure`` is deliberately false for a
+    non-32-aligned final stage because that case also needs a final-PE masking
+    contract that is outside this metadata path.
+    """
+    active_stages: List[int]
+    full_stages: int
+    tail_stages: int
+    stage_k_elements: int
+    tail_k_elements: int
+    tail_dma_ps_words: int
+    tail_dma_pd_words: int
+    tail_reconfigure: bool
+
+
+@dataclass
 class LayerHwConfig:
     name: str
     op_type: str
@@ -352,6 +371,10 @@ class LayerHwConfig:
 
     # Tiling parameters (compile-time constants)
     tiling_params: TilingParams
+
+    # Native GEMM-only per-wave K-stage contract.  Other operators leave this
+    # unset, so their generated runtime behavior remains unchanged.
+    gemm_k_wave: Optional[GemmKWaveMetadata] = None
 
 
 @dataclass
