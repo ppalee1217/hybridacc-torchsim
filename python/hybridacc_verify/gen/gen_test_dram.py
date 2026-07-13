@@ -755,6 +755,60 @@ def _bias_region_size(tp: dict) -> int:
     return last_offset + int(tp.get("dma_pli_words", 0)) * 8
 
 
+def _output_region_size(tp: dict) -> int:
+    """Return one image's tile-packed PLO region size in bytes."""
+    last_offset = 0
+    if int(tp.get("num_oc_tiles", 0)) > 0:
+        last_offset += (int(tp["num_oc_tiles"]) - 1) * int(tp["dram_out_oc_stride"])
+    if int(tp.get("num_h_tiles", 0)) > 0:
+        last_offset += (int(tp["num_h_tiles"]) - 1) * int(tp["dram_out_h_stride"])
+    if int(tp.get("num_w_tiles", 0)) > 0:
+        last_offset += (int(tp["num_w_tiles"]) - 1) * int(tp["dram_out_w_stride"])
+    return last_offset + int(tp.get("dma_plo_words", 0)) * 8
+
+
+def _match_single_conv_batch_unroll(wl_tensors, ops, layers):
+    """Validate lowering's one-layer-per-image conv batch contract.
+
+    Returns the batch size for the W4 lowering form, otherwise ``None``.
+    Clean-HEAD baseline IR intentionally falls through because it contains
+    only one layer for N>1; this lets the same generator expose that failure.
+    """
+    if len(ops) != 1 or ops[0]["type"] not in ("conv2d_3x3", "conv2d_1x1"):
+        return None
+
+    op = ops[0]
+    input_shape = tuple(wl_tensors[op["inputs"][0]]["shape"])
+    batch, height, width, channels = input_shape
+    if batch <= 1 or len(layers) != batch:
+        return None
+
+    expected_names = [f"{op['name']}__batch{n}" for n in range(batch)]
+    actual_names = [layer.get("name") for layer in layers]
+    if actual_names != expected_names:
+        raise AssertionError(
+            f"Conv batch layer names mismatch: {actual_names} vs {expected_names}"
+        )
+
+    first_tp = layers[0]["tiling_params"]
+    input_image_bytes = height * width * channels * 2
+    output_image_bytes = _output_region_size(first_tp)
+    for n, layer in enumerate(layers):
+        tp = layer["tiling_params"]
+        assert tp["dram_weight_base"] == first_tp["dram_weight_base"], \
+            "Conv batch images must share weights"
+        assert tp["dram_bias_base"] == first_tp["dram_bias_base"], \
+            "Conv batch images must share the zero-bias region"
+        assert tp["dram_input_base"] == first_tp["dram_input_base"] + n * input_image_bytes, \
+            f"Conv batch image {n} input base/stride mismatch"
+        assert tp["dram_output_base"] == first_tp["dram_output_base"] + n * output_image_bytes, \
+            f"Conv batch image {n} output base/stride mismatch"
+    assert first_tp["dram_bias_base"] == (
+        first_tp["dram_output_base"] + batch * output_image_bytes
+    ), "Conv batch shared bias must follow every image output"
+    return batch
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate DRAM mirror + golden output for HybridAcc ESL simulation"
@@ -806,11 +860,18 @@ def main():
                   f"range=[{tensors_data[name].min():.4f}, {tensors_data[name].max():.4f}]")
 
     wl_tensors, ops = _expand_auto_split_gemms(wl_tensors, ops, tensors_data)
-    assert len(layers) == len(ops), \
-        f"Layer count mismatch: IR has {len(layers)} layers, expanded workload has {len(ops)} ops"
+    conv_batch = _match_single_conv_batch_unroll(wl_tensors, ops, layers)
+    if conv_batch is None:
+        assert len(layers) == len(ops), \
+            f"Layer count mismatch: IR has {len(layers)} layers, expanded workload has {len(ops)} ops"
+        op_layer_pairs = list(zip(ops, layers))
+    else:
+        # The logical batched op has one full-N golden, while firmware runs
+        # one rebased copy of the existing single-image layer per image.
+        op_layer_pairs = [(ops[0], layers[0])]
 
     # -- Compute golden output layer by layer --
-    for i, (op, layer) in enumerate(zip(ops, layers)):
+    for i, (op, layer) in enumerate(op_layer_pairs):
         tp = layer["tiling_params"]
         out_name, golden = _compute_layer_golden(op, tensors_data, wl_tensors, rng, tp)
         tensors_data[out_name] = golden
@@ -821,14 +882,15 @@ def main():
     final_op = ops[-1]
     final_output_name = final_op["outputs"][0]
     final_golden = tensors_data[final_output_name]
-    final_tp = layers[-1]["tiling_params"]
+    final_layer = layers[0] if conv_batch is not None else layers[-1]
+    final_tp = final_layer["tiling_params"]
     dram_output_base = final_tp["dram_output_base"]
 
     # -- Build DRAM image --
     # Collect all DRAM regions from all layers
     dram_regions = []  # (offset_from_base, data_bytes)
 
-    for i, (op, layer) in enumerate(zip(ops, layers)):
+    for i, (op, layer) in enumerate(op_layer_pairs):
         tp = layer["tiling_params"]
         num_ic_tiles = tp.get("num_ic_tiles", 1)
         num_oc_tiles = tp.get("num_oc_tiles", 1)
@@ -877,9 +939,9 @@ def main():
     num_h_tiles_final = final_tp.get("num_h_tiles", 1)
     num_w_tiles_final = final_tp.get("num_w_tiles", 1)
     if final_op["type"] == "gemm":
-        output_bytes = _pack_gemm_c_output(final_golden, layers[-1])
+        output_bytes = _pack_gemm_c_output(final_golden, final_layer)
     elif final_golden.ndim == 4 and (num_oc_tiles_final > 1 or num_h_tiles_final > 1 or num_w_tiles_final > 1):
-        output_bytes = _tile_output(final_golden, layers[-1])
+        output_bytes = _tile_output(final_golden, final_layer)
     else:
         output_bytes = _get_tensor_bytes(final_golden)
     dram_end = output_offset + len(output_bytes)

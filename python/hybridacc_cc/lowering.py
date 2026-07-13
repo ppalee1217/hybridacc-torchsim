@@ -7,6 +7,7 @@ cluster mapping, and TilingParams generation for each operator type.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import Dict, List, Optional, Tuple
 
 from .frontend import CompilationError
@@ -1888,6 +1889,51 @@ def _derive_gemm_relayout_q(producer: LayerHwConfig,
     return q
 
 
+def _conv_batch_size(op: OpDesc) -> int:
+    if op.op_type not in ("conv2d_3x3", "conv2d_1x1"):
+        return 1
+    return int(op.inputs[0].shape[0])
+
+
+def _unroll_single_conv_batch(op: OpDesc,
+                              layer: LayerHwConfig) -> List[LayerHwConfig]:
+    """Emit one existing single-image layer execution per batch image.
+
+    The conv PE programs and firmware wave loops have no N coordinate.  Keep
+    that proven single-image execution unchanged and only rebase its PD/PLO
+    DRAM regions for each image.  Weight and zero-bias regions are shared.
+
+    This helper is deliberately used only for a source-input, single-op
+    workload (guarded in ``lower_workload``).  Batched multi-layer chaining
+    needs a separate layout/addressing contract and is not inferred here.
+    """
+    batch = _conv_batch_size(op)
+    if batch <= 1:
+        return [layer]
+
+    _, height, width, channels = op.inputs[0].shape
+    input_image_bytes = height * width * channels * 2
+    output_image_bytes = _output_total_bytes(layer.tiling_params)
+    output_base = layer.tiling_params.dram_output_base
+    shared_bias_base = output_base + batch * output_image_bytes
+
+    unrolled: List[LayerHwConfig] = []
+    for batch_index in range(batch):
+        tp = replace(
+            layer.tiling_params,
+            dram_input_base=(layer.tiling_params.dram_input_base
+                             + batch_index * input_image_bytes),
+            dram_output_base=output_base + batch_index * output_image_bytes,
+            dram_bias_base=shared_bias_base,
+        )
+        unrolled.append(replace(
+            layer,
+            name=f"{op.name}__batch{batch_index}",
+            tiling_params=tp,
+        ))
+    return unrolled
+
+
 def lower_workload(wir: WorkloadIR) -> HardwareIR:
     """Lower all ops in a WorkloadIR to produce a HardwareIR.
 
@@ -1897,6 +1943,16 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
     """
     layers: List[LayerHwConfig] = []
     relayouts: List[RelayoutDesc] = []
+
+    batched_conv_ops = [
+        op for op in wir.ops if _conv_batch_size(op) > 1
+    ]
+    if batched_conv_ops and (len(wir.ops) != 1 or len(batched_conv_ops) != 1):
+        names = ", ".join(op.name for op in batched_conv_ops)
+        raise TilingFailed(
+            "conv batch N>1 lowering currently supports one source-input conv "
+            f"op per workload; batched op(s): {names}"
+        )
 
     # Build a map of tensor_name → producer_layer_index for chaining
     output_tensor_map: Dict[str, int] = {}  # tensor name → layer index
@@ -2042,13 +2098,15 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
             if bias_prev_tp.dram_out_h_stride != layer.tiling_params.dram_bias_h_stride:
                 raise TilingFailed(f"{op.name}: bias_from H stride mismatch")
 
-        layers.append(layer)
+        emitted_layers = _unroll_single_conv_batch(op, layer)
+        layers.extend(emitted_layers)
 
         # E009: SPM/AGU mode consistency.
-        _assert_spm_agu_consistency(layer)
+        for emitted_layer in emitted_layers:
+            _assert_spm_agu_consistency(emitted_layer)
 
         # Advance cursor past this layer's last allocation
-        tp = layer.tiling_params
+        tp = emitted_layers[-1].tiling_params
         end_candidates = [
             tp.dram_output_base + _output_total_bytes(tp),
         ]
