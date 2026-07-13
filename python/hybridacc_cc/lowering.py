@@ -592,13 +592,24 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
     tile_oc = min(OC, 16)
     in_ch_pack = tile_ic // 4  # = 1
     out_ch_pack = tile_oc // 4
+    C_in_pad = math.ceil(C_in / tile_ic) * tile_ic
+
+    # A producer's tile-packed output has no separately allocated channel
+    # tail.  Until inter-layer relayout can materialize one, fail loudly
+    # instead of treating adjacent DRAM bytes as padded channels.
+    if dram_input_override and C_in_pad != C_in:
+        raise TilingFailed(
+            f"{op.name}: non-aligned conv2d_3x3 C_in={C_in} is supported "
+            "only for source activations; an intermediate activation needs "
+            "an explicit channel-pad relayout"
+        )
 
     half_cap = hw.half_group_capacity
     halo = KH - 1  # = 2
     pes_per_bus = _pes_per_bus(hw)
 
     # -- Tiling search --
-    num_ic_tiles = C_in // tile_ic
+    num_ic_tiles = C_in_pad // tile_ic
     num_oc_tiles = math.ceil(OC / tile_oc)
 
     ps_wave = tile_oc * KH * KW * in_ch_pack * PKT_SIZE
@@ -765,8 +776,10 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
         tensor_base = dram_base + DRAM_BOOT_RESERVED
 
     # DRAM stride calculations
-    # DRAM stores IC-tiled layout: weight [num_oc_tiles, num_ic_tiles, tile_oc, KH, KW, tile_ic]
-    #                               input  [N, num_ic_tiles, H_in, W_in, tile_ic]
+    # DRAM stores zero-padded IC-tiled layout:
+    #   weight [num_oc_tiles, num_ic_tiles, tile_oc, KH, KW, tile_ic]
+    #   input  [N, num_ic_tiles, H_in, W_in, tile_ic]
+    # The final tile's channels [C_in:C_in_pad] are explicit zeros.
     dram_ps_oc_stride = num_ic_tiles * tile_oc * KH * KW * tile_ic * 2
     dram_ps_ic_stride = tile_oc * KH * KW * tile_ic * 2
     # NHWC-input mode: DRAM input is [N, H, W, C_in] (not IC-tiled).
@@ -787,8 +800,8 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
     dram_out_row_stride = tile_w_out * tile_oc * 2
 
     # DRAM tensor base addresses
-    W_size = OC * KH * KW * C_in * 2
-    I_size = N * H_in * W_in * C_in * 2
+    W_size = OC * KH * KW * C_in_pad * 2
+    I_size = N * H_in * W_in * C_in_pad * 2
     output_region_size = num_oc_tiles * num_h_tiles * num_w_tiles * plo_tile_bytes
 
     dram_weight_base = tensor_base
@@ -937,6 +950,18 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     tile_oc = min(OC, 16)
     ic_words_per_pe = tile_ic // 4  # 12 fp16 per PE -> 3 word64 packets
     out_ch_pack = tile_oc // 4
+    C_in_pad = math.ceil(C_in / tile_ic) * tile_ic
+
+    # Conv1x1 scan-chain IDs distribute H rows / resident OC tiles; they do
+    # not encode C_in.  Each IC wave still consumes one complete 12-channel
+    # tile.  Source activations can therefore use a zero-filled final tile,
+    # while intermediate activations need a future explicit relayout.
+    if dram_input_override and C_in_pad != C_in:
+        raise TilingFailed(
+            f"{op.name}: non-aligned conv2d_1x1 C_in={C_in} is supported "
+            "only for source activations; an intermediate activation needs "
+            "an explicit channel-pad relayout"
+        )
 
     half_cap = hw.half_group_capacity
     pp = hw.parallel_ping_base
@@ -944,7 +969,7 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     pes_per_bus = _pes_per_bus(hw)
     num_bus = hw.num_bus
 
-    num_ic_tiles = C_in // tile_ic
+    num_ic_tiles = C_in_pad // tile_ic
     num_oc_tiles = math.ceil(OC / tile_oc)
 
     ps_wave = tile_oc * ic_words_per_pe * PKT_SIZE
@@ -1143,8 +1168,10 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     dram_base = hw.dram_base
     if tensor_base == 0:
         tensor_base = dram_base + DRAM_BOOT_RESERVED
-    # DRAM stores IC-tiled layout: weight [num_oc_tiles, num_ic_tiles, tile_oc, tile_ic]
-    #                               input  [N, num_ic_tiles, H_in, W_in, tile_ic]
+    # DRAM stores zero-padded IC-tiled layout:
+    #   weight [num_oc_tiles, num_ic_tiles, tile_oc, tile_ic]
+    #   input  [N, num_ic_tiles, H_in, W_in, tile_ic]
+    # The final tile's channels [C_in:C_in_pad] are explicit zeros.
     dram_ps_oc_stride = num_ic_tiles * tile_oc * tile_ic * 2
     dram_ps_ic_stride = tile_oc * tile_ic * 2
     if input_nhwc_packs > 0 and num_ic_tiles > 1:
@@ -1164,8 +1191,8 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
 
     bdb = hw.bank_depth_bytes
 
-    W_size = OC * C_in * 2
-    I_size = N * H_in * W_in * C_in * 2
+    W_size = OC * C_in_pad * 2
+    I_size = N * H_in * W_in * C_in_pad * 2
     output_region_size = num_oc_tiles * num_h_tiles * num_w_tiles * plo_tile_bytes
 
     dram_weight_base = tensor_base
