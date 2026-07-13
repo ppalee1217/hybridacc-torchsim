@@ -264,8 +264,8 @@ def _validate_gemm(op: OpDesc, hw: HardwareDesc) -> None:
         raise CompilationError("semantic", op.name, f"A cols={K_a} != B rows={K_b}")
     if M_c != M or N_c != N:
         raise CompilationError("semantic", op.name, f"output [{M_c},{N_c}] != expected [{M},{N}]")
-    if K_a % 4 != 0:
-        raise CompilationError("semantic", op.name, f"K={K_a} not divisible by 4")
+    # Any positive logical K is legal.  GEMM lowering and DRAM packing use the
+    # PE_K-padded physical footprint, which is packet aligned independently of K.
 
 
 def _validate_spm_capacity(op: OpDesc, hw: HardwareDesc) -> None:
