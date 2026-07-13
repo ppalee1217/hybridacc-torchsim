@@ -1380,7 +1380,12 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
     K_tile = grid_k_per_wave * PE_K
     M_tile_eff = min(M_tile, M)
     N_tile_eff = min(N_tile, N)
-    K_tile_eff = min(K_tile, K)
+    # A single K wave still executes every PE_K-deep stage in its K chain.
+    # Reserve and DMA the complete chain footprint so gen_test_dram's zeroed
+    # [K, grid_k * PE_K) tail is physically present and cannot overlap the
+    # following DRAM region.  Keep multi-wave sizing unchanged: its partial
+    # final-wave/bias_from boundary is outside this single-wave fix.
+    K_tile_eff = K_tile if wave_k == 1 else min(K_tile, K)
     pe_k_eff = min(PE_K, K_tile_eff)
 
     # SPM wave footprints (bytes).
