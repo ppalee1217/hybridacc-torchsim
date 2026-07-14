@@ -1817,6 +1817,7 @@ _LOWERING_DISPATCH = {
     "conv2d_1x1": _lower_conv2d_1x1,
     "gemm": _lower_gemm,
 }
+_CONV_OP_TYPES = ("conv2d_3x3", "conv2d_1x1")
 
 
 def _is_single_wave(layer: LayerHwConfig) -> bool:
@@ -1966,6 +1967,133 @@ def _unroll_single_conv_batch(op: OpDesc,
     return unrolled
 
 
+def _derive_conv_relayout_q(producer: LayerHwConfig,
+                            producer_op: OpDesc,
+                            consumer_op: OpDesc) -> Tuple[List[int], int, int]:
+    """Map a tile-packed conv PLO tensor to compact NHWC consumer order.
+
+    The producer's physical flatten order is
+    [N][oc_tile][h_tile][w_tile][tile_h][tile_w][tile_oc].  The consumer's
+    chained-input order is compact [N][H][W][C].  ``q`` maps each destination
+    block to its source block in the physical PLO region.  Padding blocks in a
+    spatial or channel tail have no logical coordinate and are deliberately
+    omitted from q; run_relayout loads the full source but stores only q.
+    """
+    output_shape = tuple(int(v) for v in producer_op.outputs[0].shape)
+    input_shape = tuple(int(v) for v in consumer_op.inputs[0].shape)
+    if len(output_shape) != 4 or output_shape != input_shape:
+        raise TilingFailed(
+            f"{consumer_op.name}: conv relayout requires matching rank-4 "
+            f"producer/consumer tensors, got {output_shape} -> {input_shape}"
+        )
+
+    n_batch, height, width, channels = output_shape
+    if n_batch != 1:
+        raise TilingFailed(
+            f"{consumer_op.name}: conv relayout currently requires N=1, got N={n_batch}"
+        )
+    if channels % 4 != 0:
+        raise TilingFailed(
+            f"{consumer_op.name}: conv relayout requires C divisible by 4, got C={channels}"
+        )
+
+    tp = producer.tiling_params
+    tile_oc = int(producer.pe_program.params.get("KERNEL_COUNT", 0))
+    if tile_oc <= 0 or tile_oc % 4 != 0:
+        raise TilingFailed(
+            f"{consumer_op.name}: producer KERNEL_COUNT={tile_oc} cannot form fp16 packs"
+        )
+    expected_oc_tiles = math.ceil(channels / tile_oc)
+    if tp.num_oc_tiles != expected_oc_tiles:
+        raise TilingFailed(
+            f"{consumer_op.name}: producer OC tiling mismatch: IR has "
+            f"{tp.num_oc_tiles}, expected {expected_oc_tiles}"
+        )
+
+    # One beat carries four fp16 channels.  Use the widest block that divides
+    # both a full physical OC tile and the logical channel tail.  Full-tile
+    # shapes such as OC=32/48 therefore use four-beat (16-fp16) blocks; OC=24
+    # uses two-beat blocks and drops the final padded half-tile block.
+    tile_packs = tile_oc // 4
+    logical_packs = channels // 4
+    tail_packs = logical_packs % tile_packs
+    block_beats = tile_packs if tail_packs == 0 else math.gcd(tile_packs, tail_packs)
+    block_channels = block_beats * 4
+    if block_beats <= 0 or tile_oc % block_channels != 0 or channels % block_channels != 0:
+        raise TilingFailed(
+            f"{consumer_op.name}: conv relayout cannot form fixed blocks for "
+            f"tile_oc={tile_oc}, C={channels}"
+        )
+
+    tile_h = int(tp.tile_h_out)
+    tile_w = int(tp.tile_w_out)
+    source_positions: List[Optional[Tuple[int, int, int, int]]] = []
+    for n in range(n_batch):
+        for oc_tile in range(tp.num_oc_tiles):
+            for h_tile in range(tp.num_h_tiles):
+                for w_tile in range(tp.num_w_tiles):
+                    for local_h in range(tile_h):
+                        global_h = h_tile * tile_h + local_h
+                        for local_w in range(tile_w):
+                            global_w = w_tile * tile_w + local_w
+                            for local_c in range(0, tile_oc, block_channels):
+                                global_c = oc_tile * tile_oc + local_c
+                                if (global_h < height and global_w < width
+                                        and global_c + block_channels <= channels):
+                                    source_positions.append(
+                                        (n, global_h, global_w, global_c)
+                                    )
+                                else:
+                                    source_positions.append(None)
+
+    source_bytes = _output_total_bytes(tp)
+    if source_bytes % PKT_SIZE != 0:
+        raise TilingFailed(
+            f"{consumer_op.name}: producer output size {source_bytes}B is not beat-aligned"
+        )
+    total_beats = source_bytes // PKT_SIZE
+    if len(source_positions) * block_beats != total_beats:
+        raise TilingFailed(
+            f"{consumer_op.name}: producer flatten model covers "
+            f"{len(source_positions) * block_beats} beats, IR covers {total_beats}"
+        )
+
+    source_where = {
+        position: index
+        for index, position in enumerate(source_positions)
+        if position is not None
+    }
+    valid_source_count = sum(position is not None for position in source_positions)
+    if len(source_where) != valid_source_count:
+        raise TilingFailed(f"{consumer_op.name}: producer conv coordinates are not unique")
+
+    consumer_positions = [
+        (n, h, w, c)
+        for n in range(n_batch)
+        for h in range(height)
+        for w in range(width)
+        for c in range(0, channels, block_channels)
+    ]
+    if set(source_where) != set(consumer_positions):
+        missing = len(set(consumer_positions) - set(source_where))
+        extra = len(set(source_where) - set(consumer_positions))
+        raise TilingFailed(
+            f"{consumer_op.name}: conv relayout coordinates are not bijective "
+            f"(missing={missing}, extra={extra})"
+        )
+
+    q = [source_where[position] for position in consumer_positions]
+    if len(set(q)) != len(q):
+        raise TilingFailed(f"{consumer_op.name}: conv relayout reuses a source block")
+    destination_beats = len(q) * block_beats
+    expected_destination_beats = n_batch * height * width * channels // 4
+    if destination_beats != expected_destination_beats:
+        raise TilingFailed(
+            f"{consumer_op.name}: compact NHWC size is {destination_beats} beats, "
+            f"expected {expected_destination_beats}"
+        )
+    return q, block_beats, destination_beats
+
 def lower_workload(wir: WorkloadIR) -> HardwareIR:
     """Lower all ops in a WorkloadIR to produce a HardwareIR.
 
@@ -1994,20 +2122,34 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
 
     # Pre-analyze: determine which layers read from a previous layer's NHWC
     # output and need multi-IC-tile processing (PD-stride approach).
-    # input_nhwc_packs_map[i] = number of OC packs in the producer layer's
-    # output (0 if not reading from a previous layer's output or single IC tile).
+    # input_nhwc_packs_map[i] = number of four-fp16 packs in the complete
+    # producer output pixel (0 unless a conv consumer has multiple IC tiles).
+    # A multi-tile producer is relaid to compact NHWC before the consumer, so
+    # this must use the full prev_oc // 4 rather than the old min(prev_oc, 16)
+    # cap that described only one physical OC tile.
     input_nhwc_packs_map: Dict[int, int] = {}
     for i, op in enumerate(wir.ops):
         inp_name = op.inputs[0].name
         if inp_name in output_tensor_map and output_tensor_map[inp_name] < i:
-            consumer_ic = op.inputs[0].shape[-1]  # NHWC last dim = IC
-            tile_ic = 12 if op.op_type == "conv2d_1x1" else 4
-            if consumer_ic // tile_ic > 1:
-                # Compute producer's out_ch_pack = min(OC, 16) // 4
-                prev_idx = output_tensor_map[inp_name]
-                prev_op = wir.ops[prev_idx]
+            prev_idx = output_tensor_map[inp_name]
+            prev_op = wir.ops[prev_idx]
+            if prev_op.op_type in _CONV_OP_TYPES and op.op_type in _CONV_OP_TYPES:
+                consumer_ic = op.inputs[0].shape[-1]  # NHWC last dim = IC
                 prev_oc = prev_op.outputs[0].shape[-1]  # NHWC last dim = OC
-                input_nhwc_packs_map[i] = min(prev_oc, 16) // 4
+                # Empirical composed-support boundary, not a theorem about all
+                # sub-tile shapes: standalone controls at OC=4/8/12 all time
+                # out, while OC=16 (one full KERNEL_COUNT output tile) passes.
+                if prev_oc < 16:
+                    raise TilingFailed(
+                        f"{op.name}: chained conv producer '{prev_op.name}' has OC={prev_oc} < 16; "
+                        "empirical evidence: each tested OC<16 control (OC=4/8/12) "
+                        "fails standalone by timeout, while OC=16 (one full KERNEL_COUNT "
+                        "output tile) passes; this observed support boundary is not a proof "
+                        "for every OC<16 shape"
+                    )
+                tile_ic = 12 if op.op_type == "conv2d_1x1" else 4
+                if consumer_ic // tile_ic > 1:
+                    input_nhwc_packs_map[i] = prev_oc // 4
 
     # Sequential DRAM allocation cursor
     dram_cursor = wir.hardware.dram_base + DRAM_BOOT_RESERVED
@@ -2049,8 +2191,16 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
             # and use previous layer's dram_output_base as this layer's input.
             prev_idx = output_tensor_map[op.inputs[0].name]
             prev_tp = layers[prev_idx].tiling_params
+            prev_op = wir.ops[prev_idx]
+            conv_edge = (prev_op.op_type in _CONV_OP_TYPES
+                         and op.op_type in _CONV_OP_TYPES)
+            conv_needs_relayout = conv_edge and (
+                prev_tp.num_oc_tiles != 1
+                or prev_tp.num_h_tiles != 1
+                or prev_tp.num_w_tiles != 1
+            )
             input_pad = int(op.attrs.get("padding", 0)) if op.op_type in ("conv2d_3x3", "conv2d_1x1") else 0
-            if input_pad > 0 and (
+            if input_pad > 0 and not conv_needs_relayout and (
                 prev_tp.num_oc_tiles != 1
                 or prev_tp.num_h_tiles != 1
                 or prev_tp.num_w_tiles != 1
@@ -2075,8 +2225,37 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
                        use_runtime_load_pad=input_pad > 0,
                        **gemm_bias_kwargs)
 
-            prev_op = wir.ops[prev_idx]
-            if (prev_op.op_type == "gemm"
+            if conv_needs_relayout:
+                total_beats = _output_total_bytes(prev_tp) // PKT_SIZE
+                if total_beats * PKT_SIZE > wir.hardware.group_capacity:
+                    raise TilingFailed(
+                        f"{op.name}: conv relayout source is {total_beats * PKT_SIZE}B, "
+                        f"exceeding SPM group capacity {wir.hardware.group_capacity}B"
+                    )
+                q, block_beats, destination_beats = _derive_conv_relayout_q(
+                    layers[prev_idx], prev_op, op
+                )
+
+                scratch_base = (dram_cursor + 15) & ~15
+                scratch_end = scratch_base + destination_beats * PKT_SIZE
+                dram_cursor = (scratch_end + 15) & ~15
+
+                layer = fn(op, wir.hardware,
+                           tensor_base=dram_cursor,
+                           dram_input_override=scratch_base,
+                           input_nhwc_packs=input_nhwc_packs_map.get(i, 0),
+                           use_runtime_load_pad=input_pad > 0,
+                           **gemm_bias_kwargs)
+                relayouts.append(RelayoutDesc(
+                    consumer_layer=i,
+                    src_dram=prev_tp.dram_output_base,
+                    dst_dram=scratch_base,
+                    total_beats=total_beats,
+                    block_beats=block_beats,
+                    q=q,
+                ))
+
+            elif (prev_op.op_type == "gemm"
                     and op.op_type == "gemm"
                     and _is_single_wave(layers[prev_idx])
                     and _is_single_wave(layer)):
