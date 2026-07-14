@@ -202,7 +202,13 @@ def _validate_conv2d(op: OpDesc, hw: HardwareDesc) -> None:
 
     N, H_in, W_in, C_in = act.shape
     OC, KH, KW, wt_cin = wt.shape
-    _, H_out_y, W_out_y, OC_out = out.shape
+    N_out, H_out_y, W_out_y, OC_out = out.shape
+
+    if N_out != N:
+        raise CompilationError(
+            "shape_mismatch", op.name,
+            f"output batch N={N_out} != input batch N={N}",
+        )
 
     if wt_cin != C_in:
         raise CompilationError("semantic", op.name, f"weight IC={wt_cin} != input C_in={C_in}")
