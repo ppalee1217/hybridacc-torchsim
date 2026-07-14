@@ -1864,8 +1864,16 @@ def _gemm_packer_meta(layer: LayerHwConfig) -> Dict[str, int]:
 
 
 def _derive_gemm_relayout_q(producer: LayerHwConfig,
-                            consumer: LayerHwConfig) -> List[int]:
-    """Derive the 12-fp16 PLO-to-PD block permutation from packer order."""
+                            consumer: LayerHwConfig,
+                            logical_k: int) -> List[int]:
+    """Derive the logical-K PLO-to-PD block permutation from packer order.
+
+    A single-K-wave consumer may reserve a padded PD K footprint.  PD packing
+    keeps K outermost, so the logical values occupy a contiguous destination
+    prefix and the padded K rows form the tail.  Return stores only for that
+    prefix; the caller reserves the full destination footprint and leaves its
+    zero-initialized tail untouched.
+    """
     plo = _gemm_packer_meta(producer)
     pd = _gemm_packer_meta(consumer)
 
@@ -1886,7 +1894,7 @@ def _derive_gemm_relayout_q(producer: LayerHwConfig,
 
     # _pack_gemm_a_pd flatten order:
     # [k, m_tile, row_word, lane].
-    pd_positions = [
+    full_pd_positions = [
         (
             m_tile * pd["tile_d_words"] * pd["rows_per_word"]
             + row_word * pd["rows_per_word"] + lane,
@@ -1898,27 +1906,62 @@ def _derive_gemm_relayout_q(producer: LayerHwConfig,
         for lane in range(pd["rows_per_word"])
     ]
 
-    assert len(plo_positions) == producer.tiling_params.dma_plo_words * 4
-    assert len(pd_positions) == consumer.tiling_params.dma_pd_words * 4
-    assert len(plo_positions) == len(pd_positions)
-    assert len(set(plo_positions)) == len(plo_positions)
-    assert set(plo_positions) == set(pd_positions)
+    source_elements = producer.tiling_params.dma_plo_words * 4
+    destination_elements = consumer.tiling_params.dma_pd_words * 4
+    if len(plo_positions) != source_elements:
+        raise TilingFailed(
+            "GEMM relayout PLO flatten size does not match producer DMA footprint"
+        )
+    if len(full_pd_positions) != destination_elements:
+        raise TilingFailed(
+            "GEMM relayout PD flatten size does not match consumer DMA footprint"
+        )
+    if logical_k <= 0 or logical_k > pd["k_tile_dim"]:
+        raise TilingFailed(
+            f"GEMM relayout logical K={logical_k} exceeds PD K footprint "
+            f"{pd['k_tile_dim']}"
+        )
+    if len(set(plo_positions)) != len(plo_positions):
+        raise TilingFailed("GEMM relayout producer coordinates are not unique")
+
+    # PLO can itself contain an N tail.  Keep physical indices in plo_where so
+    # q still addresses the full loaded source, but compare only coordinates
+    # that belong to the consumer's logical K dimension.
+    logical_plo_positions = [
+        position for position in plo_positions if position[1] < logical_k
+    ]
+    pd_positions = full_pd_positions[
+        :logical_k * pd["grid_m_per_wave"]
+        * pd["tile_d_words"] * pd["rows_per_word"]
+    ]
+    if len(set(pd_positions)) != len(pd_positions):
+        raise TilingFailed("GEMM relayout consumer coordinates are not unique")
+    if set(logical_plo_positions) != set(pd_positions):
+        missing = len(set(pd_positions) - set(logical_plo_positions))
+        extra = len(set(logical_plo_positions) - set(pd_positions))
+        raise TilingFailed(
+            "GEMM relayout logical coordinates are not bijective "
+            f"(logical_k={logical_k}, missing={missing}, extra={extra})"
+        )
 
     plo_where = {position: i for i, position in enumerate(plo_positions)}
     p = [plo_where[position] for position in pd_positions]
 
     block_elements = 12
-    assert len(p) % block_elements == 0
+    if len(p) % block_elements != 0:
+        raise TilingFailed("GEMM relayout logical prefix is not 12-fp16 aligned")
     q: List[int] = []
     for block_start in range(0, len(p), block_elements):
         source_start = p[block_start]
-        assert source_start % block_elements == 0
-        assert p[block_start:block_start + block_elements] == list(
-            range(source_start, source_start + block_elements)
-        )
+        if source_start % block_elements != 0:
+            raise TilingFailed("GEMM relayout source block is not 12-fp16 aligned")
+        if p[block_start:block_start + block_elements] != list(
+                range(source_start, source_start + block_elements)):
+            raise TilingFailed("GEMM relayout cannot form contiguous source blocks")
         q.append(source_start // block_elements)
 
-    assert sorted(q) == list(range(len(q)))
+    if len(set(q)) != len(q):
+        raise TilingFailed("GEMM relayout reuses a source block")
     return q
 
 
@@ -2260,11 +2303,19 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
                     and _is_single_wave(layers[prev_idx])
                     and _is_single_wave(layer)):
                 total_beats = prev_tp.dma_plo_words
-                assert total_beats == layer.tiling_params.dma_pd_words
-                assert total_beats * PKT_SIZE <= wir.hardware.group_capacity
+                if total_beats * PKT_SIZE > wir.hardware.group_capacity:
+                    raise TilingFailed(
+                        f"{op.name}: GEMM relayout source is "
+                        f"{total_beats * PKT_SIZE}B, exceeding SPM group "
+                        f"capacity {wir.hardware.group_capacity}B"
+                    )
+                destination_beats = layer.tiling_params.dma_pd_words
 
                 scratch_base = (dram_cursor + 15) & ~15
-                scratch_end = scratch_base + total_beats * PKT_SIZE
+                # Reserve the consumer's complete padded PD footprint.  The
+                # DRAM image starts zeroed; run_relayout writes only the
+                # logical-K prefix and therefore preserves the padded tail.
+                scratch_end = scratch_base + destination_beats * PKT_SIZE
                 dram_cursor = (scratch_end + 15) & ~15
 
                 # Preserve S4-1's GEMM override contract: tensor_base owns B/C,
@@ -2275,12 +2326,30 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
                            input_nhwc_packs=input_nhwc_packs_map.get(i, 0),
                            use_runtime_load_pad=input_pad > 0,
                            **gemm_bias_kwargs)
-                assert _is_single_wave(layer)
-                assert total_beats == layer.tiling_params.dma_pd_words
+                if not _is_single_wave(layer):
+                    raise TilingFailed(
+                        f"{op.name}: GEMM relayout consumer changed wave count "
+                        "after scratch allocation"
+                    )
+                if destination_beats != layer.tiling_params.dma_pd_words:
+                    raise TilingFailed(
+                        f"{op.name}: GEMM relayout PD footprint changed from "
+                        f"{destination_beats} to "
+                        f"{layer.tiling_params.dma_pd_words} beats after rebase"
+                    )
 
                 block_beats = 3  # 12 fp16 values per proven atomic block.
-                q = _derive_gemm_relayout_q(layers[prev_idx], layer)
-                assert len(q) * block_beats == total_beats
+                logical_k = int(op.inputs[0].shape[1])
+                q = _derive_gemm_relayout_q(
+                    layers[prev_idx], layer, logical_k
+                )
+                logical_beats = len(q) * block_beats
+                if logical_beats > destination_beats:
+                    raise TilingFailed(
+                        f"{op.name}: GEMM relayout logical prefix is "
+                        f"{logical_beats} beats, exceeding destination "
+                        f"footprint {destination_beats} beats"
+                    )
                 relayouts.append(RelayoutDesc(
                     consumer_layer=i,
                     src_dram=prev_tp.dram_output_base,
