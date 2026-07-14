@@ -351,7 +351,7 @@ def _get_tensor_bytes(arr: np.ndarray) -> bytes:
 
 def _tile_weight_ic(weight: np.ndarray, num_ic_tiles: int, tile_ic: int,
                     num_oc_tiles: int) -> bytes:
-    """Rearrange weight [OC, KH, KW, IC] → IC-tiled DRAM layout.
+    """Zero-pad and rearrange weight into the IC-tiled DRAM layout.
 
     Target layout: [num_oc_tiles, num_ic_tiles, tile_oc, KH, KW, tile_ic] contiguous.
     For conv1x1: weight shape is [OC, IC] (KH=KW=1), treated as [OC, 1, 1, IC].
@@ -363,10 +363,15 @@ def _tile_weight_ic(weight: np.ndarray, num_ic_tiles: int, tile_ic: int,
     else:
         OC, KH, KW, IC = weight.shape
     tile_oc = OC // num_oc_tiles
-    assert IC == num_ic_tiles * tile_ic, \
-        f"IC={IC} != num_ic_tiles={num_ic_tiles} * tile_ic={tile_ic}"
+    padded_ic = num_ic_tiles * tile_ic
+    assert IC <= padded_ic, \
+        f"IC={IC} exceeds num_ic_tiles={num_ic_tiles} * tile_ic={tile_ic}"
     assert OC == num_oc_tiles * tile_oc, \
         f"OC={OC} != num_oc_tiles={num_oc_tiles} * tile_oc={tile_oc}"
+    if IC < padded_ic:
+        padded = np.zeros((OC, KH, KW, padded_ic), dtype=np.float16)
+        padded[..., :IC] = weight
+        weight = padded
     # [OC, KH, KW, IC] → [num_oc_tiles, tile_oc, KH, KW, num_ic_tiles, tile_ic]
     w = weight.reshape(num_oc_tiles, tile_oc, KH, KW, num_ic_tiles, tile_ic)
     # Transpose to: [num_oc_tiles, num_ic_tiles, tile_oc, KH, KW, tile_ic]
@@ -375,13 +380,18 @@ def _tile_weight_ic(weight: np.ndarray, num_ic_tiles: int, tile_ic: int,
 
 
 def _tile_input_ic(inp: np.ndarray, num_ic_tiles: int, tile_ic: int) -> bytes:
-    """Rearrange input [N, H, W, IC] → IC-tiled DRAM layout.
+    """Zero-pad and rearrange input into the IC-tiled DRAM layout.
 
     Tiled layout: [N, num_ic_tiles, H, W, tile_ic] contiguous.
     """
     N, H, W, IC = inp.shape
-    assert IC == num_ic_tiles * tile_ic, \
-        f"IC={IC} != num_ic_tiles={num_ic_tiles} * tile_ic={tile_ic}"
+    padded_ic = num_ic_tiles * tile_ic
+    assert IC <= padded_ic, \
+        f"IC={IC} exceeds num_ic_tiles={num_ic_tiles} * tile_ic={tile_ic}"
+    if IC < padded_ic:
+        padded = np.zeros((N, H, W, padded_ic), dtype=np.float16)
+        padded[..., :IC] = inp
+        inp = padded
     x = inp.reshape(N, H, W, num_ic_tiles, tile_ic)
     x = x.transpose(0, 3, 1, 2, 4)  # [N, num_ic_tiles, H, W, tile_ic]
     return x.astype(np.float16).tobytes()
@@ -838,27 +848,18 @@ def main():
             weight_name = op["inputs"][1]
             weight_offset = tp["dram_weight_base"] - dram_base
             weight_arr = tensors_data[weight_name]
-            if num_ic_tiles > 1:
-                IC = weight_arr.shape[-1]
-                tile_ic = IC // num_ic_tiles
-                dram_regions.append((weight_offset,
-                                     _tile_weight_ic(weight_arr, num_ic_tiles, tile_ic,
-                                                     num_oc_tiles)))
-            else:
-                dram_regions.append((weight_offset, _get_tensor_bytes(weight_arr)))
+            tile_ic = 12 if op["type"] == "conv2d_1x1" else 4
+            dram_regions.append((weight_offset,
+                                 _tile_weight_ic(weight_arr, num_ic_tiles, tile_ic,
+                                                 num_oc_tiles)))
 
             input_name = op["inputs"][0]
             # Only write input if it's a source tensor (not produced by previous layer)
             if i == 0 or input_name not in output_tensor_names:
                 input_offset = tp["dram_input_base"] - dram_base
                 inp_arr = tensors_data[input_name]
-                if num_ic_tiles > 1:
-                    IC = inp_arr.shape[-1]
-                    tile_ic = IC // num_ic_tiles
-                    dram_regions.append((input_offset,
-                                         _tile_input_ic(inp_arr, num_ic_tiles, tile_ic)))
-                else:
-                    dram_regions.append((input_offset, _get_tensor_bytes(inp_arr)))
+                dram_regions.append((input_offset,
+                                     _tile_input_ic(inp_arr, num_ic_tiles, tile_ic)))
 
         elif op["type"] == "gemm":
             a_name = op["inputs"][0]

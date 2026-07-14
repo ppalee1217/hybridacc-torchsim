@@ -229,17 +229,15 @@ def _validate_conv2d(op: OpDesc, hw: HardwareDesc) -> None:
             f"computed [{N},{H_out_expected},{W_out_expected},{OC}]",
         )
 
-    # Channel alignment
+    # Kernel shape.  C_in alignment is handled losslessly by the lowering
+    # path: conv3x3 pads to a 4-channel tile and conv1x1 pads to a 12-channel
+    # tile, with zero-filled activation/weight tails in the DRAM generator.
     if op.op_type == "conv2d_3x3":
         if KH != 3 or KW != 3:
             raise CompilationError("semantic", op.name, f"conv2d_3x3 requires KH=KW=3, got {KH}x{KW}")
-        if C_in % 4 != 0:
-            raise CompilationError("semantic", op.name, f"conv2d_3x3: C_in={C_in} not divisible by 4")
     elif op.op_type == "conv2d_1x1":
         if KH != 1 or KW != 1:
             raise CompilationError("semantic", op.name, f"conv2d_1x1 requires KH=KW=1, got {KH}x{KW}")
-        if C_in % 12 != 0:
-            raise CompilationError("semantic", op.name, f"conv2d_1x1: C_in={C_in} not divisible by 12")
 
 
 def _validate_gemm(op: OpDesc, hw: HardwareDesc) -> None:
