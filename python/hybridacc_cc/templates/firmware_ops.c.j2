@@ -2583,6 +2583,7 @@ static inline void run_loop_tiling_gemm_resident_partial_n(const LayerConfig* cf
             uint32_t ps_agu_base = t->agu_ping[0] + n_tile * ps_tile_words;
             uint32_t pli_agu_base = t->agu_ping[2] + n_tile * t->dma_pli_words;
             uint32_t plo_agu_base = t->agu_ping[3] + n_tile * t->dma_plo_words;
+            uint32_t pd_preload_tag = 0u;
 
             if (layer_needs_early_cluster_start(t)) {
                 ensure_cluster_layer_started(&cluster_started);
@@ -2598,21 +2599,26 @@ static inline void run_loop_tiling_gemm_resident_partial_n(const LayerConfig* cf
                 prefetch_tag = 0u;
             }
 
-            bcast_write32(SPM_CONFIG_MAP, t->spm_map_even);
-            bcast_write32(SPM_CONFIG_UPDATE, 0x01u);
-            ensure_cluster_layer_started(&cluster_started);
-            bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);
-
             if (n_tile == 0u) {
                 for (uint32_t local_m = chunk_pd_preload; local_m < resident_m_tiles; ++local_m) {
                     dma_load_gemm_pd_resident_tile_async(
                         t,
                         dram_pd_base + local_m * t->dram_pd_oc_stride,
                         local_m,
-                        &prefetch_tag
+                        &pd_preload_tag
                     );
                 }
+                if (pd_preload_tag != 0u) {
+                    /* This HDDU run consumes every resident M tile in the chunk. */
+                    dma_wait_tag(pd_preload_tag);
+                }
             }
+
+            bcast_write32(SPM_CONFIG_MAP, t->spm_map_even);
+            bcast_write32(SPM_CONFIG_UPDATE, 0x01u);
+            ensure_cluster_layer_started(&cluster_started);
+            bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);
+
             if (n_tile + 1u < resident_n_tiles) {
                 dma_load_gemm_ps_resident_tile_async(t, n_tile + 1u, &prefetch_tag);
                 dma_load_gemm_pli_resident_tile_async(t, dram_bias_base,
@@ -2637,10 +2643,6 @@ static inline void run_loop_tiling_gemm_resident_partial_n(const LayerConfig* cf
                                                resident_m_tiles,
                                                resident_n_tiles - 1u,
                                                &store_tag);
-        if (prefetch_tag != 0u) {
-            dma_wait_tag(prefetch_tag);
-            prefetch_tag = 0u;
-        }
         if (store_tag != 0u) {
             dma_wait_tag(store_tag);
             store_tag = 0u;
