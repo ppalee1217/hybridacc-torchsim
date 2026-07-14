@@ -2325,7 +2325,7 @@ static inline void run_loop_tiling_gemm_generic_single_n_chunked(const LayerConf
     }
 
     for (uint32_t m_chunk_base = 0u; m_chunk_base < t->num_oc_tiles; m_chunk_base += resident_m_capacity) {
-        uint32_t prefetch_tag = 0u;
+        uint32_t pd_preload_tag = 0u;
         uint32_t chunk_load_tag = 0u;
         uint32_t resident_m_tiles = resident_m_capacity;
         uint32_t chunk_pd_preload = pd_preload_m_tiles;
@@ -2374,19 +2374,23 @@ static inline void run_loop_tiling_gemm_generic_single_n_chunked(const LayerConf
                                                 t->agu_ping[2],
                                                 t->agu_ping[3]);
 
-        bcast_write32(SPM_CONFIG_MAP, t->spm_map_even);
-        bcast_write32(SPM_CONFIG_UPDATE, 0x01u);
-        ensure_cluster_layer_started(&cluster_started);
-        bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);
-
         for (uint32_t local_m = chunk_pd_preload; local_m < resident_m_tiles; ++local_m) {
             dma_load_gemm_pd_resident_tile_async(
                 t,
                 dram_pd_base + local_m * t->dram_pd_oc_stride,
                 local_m,
-                &prefetch_tag
+                &pd_preload_tag
             );
         }
+        if (pd_preload_tag != 0u) {
+            /* This HDDU run consumes every resident M tile in the chunk. */
+            dma_wait_tag(pd_preload_tag);
+        }
+
+        bcast_write32(SPM_CONFIG_MAP, t->spm_map_even);
+        bcast_write32(SPM_CONFIG_UPDATE, 0x01u);
+        ensure_cluster_layer_started(&cluster_started);
+        bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);
 
         wait_all_clusters_hddu_done(cfg->num_clusters);
 
@@ -2398,10 +2402,6 @@ static inline void run_loop_tiling_gemm_generic_single_n_chunked(const LayerConf
                                             1u,
                                             0u,
                                             &store_tag);
-        if (prefetch_tag != 0u) {
-            dma_wait_tag(prefetch_tag);
-            prefetch_tag = 0u;
-        }
         if (store_tag != 0u) {
             dma_wait_tag(store_tag);
             store_tag = 0u;
