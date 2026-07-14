@@ -6,8 +6,20 @@ and all supporting data structures as specified in 00_Overview.md §6.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+CONFIG_FINGERPRINT_VERSION = "hac-v1"
+CONFIG_FINGERPRINT_FIELDS = (
+    "num_clusters",
+    "num_pes",
+    "num_bus",
+    "spm_banks_per_group",
+    "spm_bank_depth",
+)
+CONFIG_FINGERPRINT_EXCLUDED_FIELDS = ("dram_base",)
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +103,27 @@ class HardwareDesc:
     def spm_dma_group_base(self, group: int) -> int:
         """DMA byte address base for a specific bank group (0..3)."""
         return group * self.group_span_bytes
+
+    def canonical_config(self) -> Dict[str, int]:
+        """Cycle/topology-bearing hardware fields used for config-indexed cache keys."""
+        return {name: int(getattr(self, name)) for name in CONFIG_FINGERPRINT_FIELDS}
+
+    def config_fingerprint(self) -> str:
+        payload = json.dumps(
+            self.canonical_config(),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+        return f"{CONFIG_FINGERPRINT_VERSION}-{digest}"
+
+    def config_fingerprint_record(self) -> Dict[str, Any]:
+        return {
+            "version": CONFIG_FINGERPRINT_VERSION,
+            "fields": self.canonical_config(),
+            "excluded_fields": list(CONFIG_FINGERPRINT_EXCLUDED_FIELDS),
+            "hash": self.config_fingerprint(),
+        }
 
 
 @dataclass
@@ -393,3 +426,7 @@ class HardwareIR:
     hardware: HardwareDesc
     layers: List[LayerHwConfig]
     relayouts: List[RelayoutDesc] = field(default_factory=list)
+    config_fingerprint: Dict[str, Any] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.config_fingerprint = self.hardware.config_fingerprint_record()
