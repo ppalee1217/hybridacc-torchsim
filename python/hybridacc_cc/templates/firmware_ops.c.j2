@@ -2088,6 +2088,25 @@ static inline void issue_dma_store_2d_async(uint32_t spm_offset,
     *last_tag = dma_tag;
 }
 
+static inline void issue_dma_store_2d_epilogue_async(uint32_t spm_offset,
+                                                     uint32_t dram_addr,
+                                                     uint32_t row_beats,
+                                                     uint32_t row_count,
+                                                     uint32_t src_row_stride,
+                                                     uint32_t dst_row_stride,
+                                                     uint32_t epilogue_mode,
+                                                     uint32_t epilogue_param0,
+                                                     uint32_t* last_tag) {
+    dma_wait_done();
+    dma_tag++;
+    dma_store_2d_epilogue(spm_offset, dram_addr, 0,
+                          row_beats, row_count,
+                          src_row_stride, dst_row_stride,
+                          epilogue_mode, epilogue_param0,
+                          dma_tag);
+    *last_tag = dma_tag;
+}
+
 static inline uint32_t gemm_ps_resident_spm_offset(const TilingParams* t,
                                                    uint32_t n_tile) {
     if (plane_is_parallel(t, 0u) && (t->dma_ps_words_per_bank > 0u)) {
@@ -2203,13 +2222,27 @@ static inline void dma_store_gemm_plo_resident_tile_async(const TilingParams* t,
 
     spm_stride_bytes = gemm_resident_spm_col_stride_bytes(resident_n_tiles,
                                                           t->dma_plo_words);
-    issue_dma_store_2d_async(t->spm_ping[3] + n_tile * t->dma_plo_words * BEAT_BYTES,
-                             dram_output_base + n_tile * t->dram_out_h_stride,
-                             t->dma_plo_words,
-                             resident_m_tiles,
-                             spm_stride_bytes,
-                             t->dram_out_oc_stride,
-                             last_tag);
+    if (t->output_epilogue != DMA_EPILOGUE_NONE) {
+        issue_dma_store_2d_epilogue_async(
+            t->spm_ping[3] + n_tile * t->dma_plo_words * BEAT_BYTES,
+            dram_output_base + n_tile * t->dram_out_h_stride,
+            t->dma_plo_words,
+            resident_m_tiles,
+            spm_stride_bytes,
+            t->dram_out_oc_stride,
+            t->output_epilogue,
+            t->output_epilogue_param0,
+            last_tag);
+    } else {
+        issue_dma_store_2d_async(
+            t->spm_ping[3] + n_tile * t->dma_plo_words * BEAT_BYTES,
+            dram_output_base + n_tile * t->dram_out_h_stride,
+            t->dma_plo_words,
+            resident_m_tiles,
+            spm_stride_bytes,
+            t->dram_out_oc_stride,
+            last_tag);
+    }
 }
 
 static inline void dma_store_gemm_plo_chunk_tile_async(const TilingParams* t,
@@ -2226,13 +2259,27 @@ static inline void dma_store_gemm_plo_chunk_tile_async(const TilingParams* t,
 
     spm_stride_bytes = gemm_resident_spm_col_stride_bytes(resident_n_tiles,
                                                           t->dma_plo_words);
-    issue_dma_store_2d_async(t->spm_ping[3] + n_tile * t->dma_plo_words * BEAT_BYTES,
-                             dram_output_base + n_tile * t->dram_out_h_stride,
-                             t->dma_plo_words,
-                             resident_m_tiles,
-                             spm_stride_bytes,
-                             t->dram_out_oc_stride,
-                             last_tag);
+    if (t->output_epilogue != DMA_EPILOGUE_NONE) {
+        issue_dma_store_2d_epilogue_async(
+            t->spm_ping[3] + n_tile * t->dma_plo_words * BEAT_BYTES,
+            dram_output_base + n_tile * t->dram_out_h_stride,
+            t->dma_plo_words,
+            resident_m_tiles,
+            spm_stride_bytes,
+            t->dram_out_oc_stride,
+            t->output_epilogue,
+            t->output_epilogue_param0,
+            last_tag);
+    } else {
+        issue_dma_store_2d_async(
+            t->spm_ping[3] + n_tile * t->dma_plo_words * BEAT_BYTES,
+            dram_output_base + n_tile * t->dram_out_h_stride,
+            t->dma_plo_words,
+            resident_m_tiles,
+            spm_stride_bytes,
+            t->dram_out_oc_stride,
+            last_tag);
+    }
 }
 
 static inline void configure_gemm_resident_wave_before_dma(const LayerConfig* cfg,
