@@ -65,6 +65,11 @@ module DmaEngine import core_pkg::*; (
     localparam logic [31:0] DMA_DST_KIND_RESET   = DMA_EP_CLUSTER_SPM;
     localparam logic [31:0] DMA_COUNT_D_RESET    = 32'h1;
     localparam logic [31:0] DMA_STRIDE_D0_RESET  = 32'd8;
+    localparam int unsigned MAX_OUTSTANDING      = 16;
+    localparam int unsigned FIFO_DEPTH           = 16;
+    localparam int unsigned FIFO_PTR_WIDTH       = $clog2(FIFO_DEPTH);
+    localparam int unsigned FIFO_COUNT_WIDTH     = $clog2(FIFO_DEPTH + 1);
+    localparam int unsigned OUTSTANDING_WIDTH    = $clog2(MAX_OUTSTANDING + 1);
 
     typedef enum logic [2:0] {
         DMA_ST_IDLE,
@@ -108,14 +113,43 @@ module DmaEngine import core_pkg::*; (
     logic [31:0] current_dst_addr_reg;
     logic [31:0] current_src_row_base_reg;
     logic [31:0] current_dst_row_base_reg;
+    logic [31:0] current_src_plane_base_reg;
+    logic [31:0] current_dst_plane_base_reg;
+    logic [31:0] current_src_volume_base_reg;
+    logic [31:0] current_dst_volume_base_reg;
+    logic [31:0] src_index_d0_reg;
+    logic [31:0] src_index_d1_reg;
+    logic [31:0] src_index_d2_reg;
+    logic [31:0] src_index_d3_reg;
+    logic [31:0] dst_index_d0_reg;
+    logic [31:0] dst_index_d1_reg;
+    logic [31:0] dst_index_d2_reg;
+    logic [31:0] dst_index_d3_reg;
+    logic [31:0] total_beats_reg;
     logic [31:0] remaining_beats_reg;
-    logic [31:0] remaining_rows_reg;
-    logic [63:0] read_data_reg;
+    logic [31:0] read_issued_reg;
+    logic [31:0] write_issued_reg;
+    logic [31:0] write_retired_reg;
 
-    logic mem_aw_sent_reg;
-    logic mem_w_sent_reg;
-    logic cl_aw_sent_reg;
-    logic cl_w_sent_reg;
+    logic [MEM_AXI_DATA_WIDTH-1:0] read_data_fifo_reg [0:FIFO_DEPTH-1];
+    logic [FIFO_PTR_WIDTH-1:0] read_fifo_wr_ptr_reg;
+    logic [FIFO_PTR_WIDTH-1:0] read_fifo_rd_ptr_reg;
+    logic [FIFO_COUNT_WIDTH-1:0] read_fifo_count_reg;
+
+    logic [31:0] read_addr_fifo_reg [0:MAX_OUTSTANDING-1];
+    logic [FIFO_PTR_WIDTH-1:0] read_addr_wr_ptr_reg;
+    logic [FIFO_PTR_WIDTH-1:0] read_addr_rd_ptr_reg;
+    logic [OUTSTANDING_WIDTH-1:0] read_outstanding_reg;
+
+    logic [MEM_AXI_DATA_WIDTH-1:0] write_data_reg;
+    logic [31:0] write_addr_reg;
+    logic [31:0] write_addr_fifo_reg [0:MAX_OUTSTANDING-1];
+    logic [FIFO_PTR_WIDTH-1:0] write_addr_wr_ptr_reg;
+    logic [FIFO_PTR_WIDTH-1:0] write_addr_rd_ptr_reg;
+    logic write_aw_valid_reg;
+    logic write_w_valid_reg;
+    logic [OUTSTANDING_WIDTH-1:0] write_outstanding_reg;
+    logic error_irq_reg;
     logic irq_pulse_reg;
     logic reset_init_done_reg;
     logic [31:0] read_mmio_rdata_w;
@@ -124,9 +158,84 @@ module DmaEngine import core_pkg::*; (
         return {cluster_id, local_addr};
     endfunction
 
+    function automatic logic [31:0] effective_count(input logic [31:0] count);
+        return (count == 32'h0) ? 32'h1 : count;
+    endfunction
+
     wire dma_busy_w = (state_reg != DMA_ST_IDLE) && (state_reg != DMA_ST_DONE) && (state_reg != DMA_ST_ERROR);
     wire dma_start_pulse_w = mmio_req_valid_i && mmio_req_write_i && (mmio_req_addr_i == DMA_CTRL) && mmio_req_wdata_i[0] && !dma_busy_w;
     wire dma_clear_done_w = mmio_req_valid_i && mmio_req_write_i && (mmio_req_addr_i == DMA_CTRL) && mmio_req_wdata_i[1];
+    wire dma_active_w = (state_reg == DMA_ST_READ_REQ);
+    wire dma_error_drain_w = (state_reg == DMA_ST_READ_WAIT);
+    wire [31:0] dma_total_beats_w =
+        count_d0_reg *
+        effective_count(count_d1_reg) *
+        effective_count(count_d2_reg) *
+        effective_count(count_d3_reg);
+
+    wire [FIFO_COUNT_WIDTH:0] read_reserved_slots_w =
+        {1'b0, read_fifo_count_reg} +
+        {1'b0, read_outstanding_reg};
+    wire read_issue_allowed_w =
+        dma_active_w &&
+        (read_issued_reg < total_beats_reg) &&
+        (read_outstanding_reg < MAX_OUTSTANDING) &&
+        (read_reserved_slots_w < FIFO_DEPTH);
+    wire read_issue_fire_w =
+        read_issue_allowed_w &&
+        (((src_kind_reg == DMA_EP_DRAM) && m_mem_axi_ar_ready_i) ||
+         ((src_kind_reg == DMA_EP_CLUSTER_SPM) && m_cl_axi_ar_ready_i));
+
+    wire read_response_ready_w =
+        (read_outstanding_reg != 0) &&
+        (dma_error_drain_w || (dma_active_w && (read_fifo_count_reg < FIFO_DEPTH)));
+    wire read_response_fire_w =
+        read_response_ready_w &&
+        (((src_kind_reg == DMA_EP_DRAM) && m_mem_axi_r_valid_i) ||
+         ((src_kind_reg == DMA_EP_CLUSTER_SPM) && m_cl_axi_r_valid_i));
+    wire read_response_error_w =
+        dma_active_w &&
+        read_response_fire_w &&
+        (((src_kind_reg == DMA_EP_DRAM) &&
+          ((m_mem_axi_r_resp_i != 2'b00) || !m_mem_axi_r_last_i)) ||
+         ((src_kind_reg == DMA_EP_CLUSTER_SPM) &&
+          (m_cl_axi_r_resp_i != 2'b00)));
+    wire [MEM_AXI_DATA_WIDTH-1:0] read_response_data_w =
+        (src_kind_reg == DMA_EP_DRAM) ? m_mem_axi_r_data_i : m_cl_axi_r_data_i;
+
+    wire write_path_enabled_w = dma_active_w || dma_error_drain_w;
+    wire write_aw_ready_w =
+        (dst_kind_reg == DMA_EP_DRAM) ? m_mem_axi_aw_ready_i : m_cl_axi_aw_ready_i;
+    wire write_w_ready_w =
+        (dst_kind_reg == DMA_EP_DRAM) ? m_mem_axi_w_ready_i : m_cl_axi_w_ready_i;
+    wire write_response_valid_w =
+        (dst_kind_reg == DMA_EP_DRAM) ? m_mem_axi_b_valid_i : m_cl_axi_b_valid_i;
+    wire [1:0] write_response_resp_w =
+        (dst_kind_reg == DMA_EP_DRAM) ? m_mem_axi_b_resp_i : m_cl_axi_b_resp_i;
+    wire write_aw_fire_w =
+        write_path_enabled_w && write_aw_valid_reg && write_aw_ready_w;
+    wire write_w_fire_w =
+        write_path_enabled_w && write_w_valid_reg && write_w_ready_w;
+    wire write_response_ready_w =
+        write_path_enabled_w && (write_outstanding_reg != 0);
+    wire write_response_fire_w =
+        write_response_ready_w && write_response_valid_w;
+    wire write_response_error_w =
+        dma_active_w && write_response_fire_w && (write_response_resp_w != 2'b00);
+    wire pipeline_error_w = read_response_error_w || write_response_error_w;
+    wire write_slot_free_next_w =
+        (!write_aw_valid_reg || write_aw_fire_w) &&
+        (!write_w_valid_reg || write_w_fire_w);
+    wire write_load_w =
+        dma_active_w &&
+        !pipeline_error_w &&
+        write_slot_free_next_w &&
+        (read_fifo_count_reg != 0) &&
+        (write_issued_reg < total_beats_reg) &&
+        ((write_outstanding_reg < MAX_OUTSTANDING) || write_response_fire_w);
+    wire read_fifo_push_w =
+        dma_active_w && read_response_fire_w && !read_response_error_w;
+    wire read_fifo_pop_w = write_load_w;
 
     assign mmio_resp_valid_o = mmio_req_valid_i;
     assign mmio_resp_rdata_o = mmio_req_write_i ? 32'h0 : read_mmio_rdata_w;
@@ -174,46 +283,48 @@ module DmaEngine import core_pkg::*; (
     assign m_mem_axi_aw_len_o = 8'h00;
     assign m_mem_axi_ar_len_o = 8'h00;
     assign m_mem_axi_w_last_o = 1'b1;
-    assign m_mem_axi_b_ready_o = 1'b1;
-    assign m_mem_axi_r_ready_o = 1'b1;
-    assign m_cl_axi_b_ready_o = 1'b1;
-    assign m_cl_axi_r_ready_o = 1'b1;
+    assign m_mem_axi_b_ready_o =
+        (dst_kind_reg == DMA_EP_DRAM) && write_response_ready_w;
+    assign m_mem_axi_r_ready_o =
+        (src_kind_reg == DMA_EP_DRAM) && read_response_ready_w;
+    assign m_cl_axi_b_ready_o =
+        (dst_kind_reg == DMA_EP_CLUSTER_SPM) && write_response_ready_w;
+    assign m_cl_axi_r_ready_o =
+        (src_kind_reg == DMA_EP_CLUSTER_SPM) && read_response_ready_w;
 
     always_comb begin
         m_mem_axi_aw_valid_o = 1'b0;
-        m_mem_axi_aw_addr_o  = current_dst_addr_reg;
+        m_mem_axi_aw_addr_o  = write_addr_reg;
         m_mem_axi_w_valid_o  = 1'b0;
-        m_mem_axi_w_data_o   = read_data_reg;
+        m_mem_axi_w_data_o   = write_data_reg;
         m_mem_axi_w_strb_o   = '1;
         m_mem_axi_ar_valid_o = 1'b0;
         m_mem_axi_ar_addr_o  = current_src_addr_reg;
         m_cl_axi_aw_valid_o  = 1'b0;
-        m_cl_axi_aw_addr_o   = encode_cluster_fabric_addr(dst_cluster_id_reg[7:0], current_dst_addr_reg[23:0]);
+        m_cl_axi_aw_addr_o   = encode_cluster_fabric_addr(dst_cluster_id_reg[7:0], write_addr_reg[23:0]);
         m_cl_axi_w_valid_o   = 1'b0;
-        m_cl_axi_w_data_o    = read_data_reg;
+        m_cl_axi_w_data_o    = write_data_reg;
         m_cl_axi_w_strb_o    = '1;
         m_cl_axi_ar_valid_o  = 1'b0;
         m_cl_axi_ar_addr_o   = encode_cluster_fabric_addr(src_cluster_id_reg[7:0], current_src_addr_reg[23:0]);
 
-        unique0 case (state_reg)
-            DMA_ST_READ_REQ: begin
-                if (src_kind_reg == DMA_EP_DRAM) begin
-                    m_mem_axi_ar_valid_o = 1'b1;
-                end else begin
-                    m_cl_axi_ar_valid_o = 1'b1;
-                end
+        if (read_issue_allowed_w) begin
+            if (src_kind_reg == DMA_EP_DRAM) begin
+                m_mem_axi_ar_valid_o = 1'b1;
+            end else begin
+                m_cl_axi_ar_valid_o = 1'b1;
             end
-            DMA_ST_WRITE_REQ: begin
-                if (dst_kind_reg == DMA_EP_DRAM) begin
-                    m_mem_axi_aw_valid_o = !mem_aw_sent_reg;
-                    m_mem_axi_w_valid_o  = !mem_w_sent_reg;
-                end else begin
-                    m_cl_axi_aw_valid_o = !cl_aw_sent_reg;
-                    m_cl_axi_w_valid_o  = !cl_w_sent_reg;
-                end
+        end
+
+        if (write_path_enabled_w) begin
+            if (dst_kind_reg == DMA_EP_DRAM) begin
+                m_mem_axi_aw_valid_o = write_aw_valid_reg;
+                m_mem_axi_w_valid_o  = write_w_valid_reg;
+            end else begin
+                m_cl_axi_aw_valid_o = write_aw_valid_reg;
+                m_cl_axi_w_valid_o  = write_w_valid_reg;
             end
-            default: ;
-        endcase
+        end
     end
 
     always_ff @(posedge clk or negedge reset_n) begin
@@ -247,13 +358,37 @@ module DmaEngine import core_pkg::*; (
             current_dst_addr_reg <= 32'h0;
             current_src_row_base_reg <= 32'h0;
             current_dst_row_base_reg <= 32'h0;
+            current_src_plane_base_reg <= 32'h0;
+            current_dst_plane_base_reg <= 32'h0;
+            current_src_volume_base_reg <= 32'h0;
+            current_dst_volume_base_reg <= 32'h0;
+            src_index_d0_reg <= 32'h0;
+            src_index_d1_reg <= 32'h0;
+            src_index_d2_reg <= 32'h0;
+            src_index_d3_reg <= 32'h0;
+            dst_index_d0_reg <= 32'h0;
+            dst_index_d1_reg <= 32'h0;
+            dst_index_d2_reg <= 32'h0;
+            dst_index_d3_reg <= 32'h0;
+            total_beats_reg <= 32'h0;
             remaining_beats_reg <= 32'h0;
-            remaining_rows_reg <= 32'h0;
-            read_data_reg <= 64'h0;
-            mem_aw_sent_reg <= 1'b0;
-            mem_w_sent_reg <= 1'b0;
-            cl_aw_sent_reg <= 1'b0;
-            cl_w_sent_reg <= 1'b0;
+            read_issued_reg <= 32'h0;
+            write_issued_reg <= 32'h0;
+            write_retired_reg <= 32'h0;
+            read_fifo_wr_ptr_reg <= '0;
+            read_fifo_rd_ptr_reg <= '0;
+            read_fifo_count_reg <= '0;
+            read_addr_wr_ptr_reg <= '0;
+            read_addr_rd_ptr_reg <= '0;
+            read_outstanding_reg <= '0;
+            write_data_reg <= '0;
+            write_addr_reg <= 32'h0;
+            write_addr_wr_ptr_reg <= '0;
+            write_addr_rd_ptr_reg <= '0;
+            write_aw_valid_reg <= 1'b0;
+            write_w_valid_reg <= 1'b0;
+            write_outstanding_reg <= '0;
+            error_irq_reg <= 1'b0;
             irq_pulse_reg <= 1'b0;
             state_reg <= DMA_ST_IDLE;
             reset_init_done_reg <= 1'b0;
@@ -265,6 +400,12 @@ module DmaEngine import core_pkg::*; (
             count_d3_reg <= DMA_COUNT_D_RESET;
             src_stride_d0_reg <= DMA_STRIDE_D0_RESET;
             dst_stride_d0_reg <= DMA_STRIDE_D0_RESET;
+            state_reg <= DMA_ST_IDLE;
+            read_fifo_count_reg <= '0;
+            read_outstanding_reg <= '0;
+            write_aw_valid_reg <= 1'b0;
+            write_w_valid_reg <= 1'b0;
+            write_outstanding_reg <= '0;
             reset_init_done_reg <= 1'b1;
         end else begin
             irq_pulse_reg <= 1'b0;
@@ -337,298 +478,389 @@ module DmaEngine import core_pkg::*; (
                 endcase
             end
 
-            if (dma_clear_done_w && ((state_reg == DMA_ST_DONE) || (state_reg == DMA_ST_ERROR))) begin
+            if (dma_clear_done_w &&
+                ((state_reg == DMA_ST_DONE) || (state_reg == DMA_ST_ERROR))) begin
                 state_reg <= DMA_ST_IDLE;
                 err_code_reg <= DMA_ERR_NONE;
                 err_info_reg <= 32'h0;
-            end
+                read_fifo_count_reg <= '0;
+                read_outstanding_reg <= '0;
+                write_aw_valid_reg <= 1'b0;
+                write_w_valid_reg <= 1'b0;
+                write_outstanding_reg <= '0;
+            end else if (dma_start_pulse_w) begin
+                current_src_addr_reg <= src_addr_lo_reg;
+                current_dst_addr_reg <= dst_addr_lo_reg;
+                current_src_row_base_reg <= src_addr_lo_reg;
+                current_dst_row_base_reg <= dst_addr_lo_reg;
+                current_src_plane_base_reg <= src_addr_lo_reg;
+                current_dst_plane_base_reg <= dst_addr_lo_reg;
+                current_src_volume_base_reg <= src_addr_lo_reg;
+                current_dst_volume_base_reg <= dst_addr_lo_reg;
+                src_index_d0_reg <= 32'h0;
+                src_index_d1_reg <= 32'h0;
+                src_index_d2_reg <= 32'h0;
+                src_index_d3_reg <= 32'h0;
+                dst_index_d0_reg <= 32'h0;
+                dst_index_d1_reg <= 32'h0;
+                dst_index_d2_reg <= 32'h0;
+                dst_index_d3_reg <= 32'h0;
+                total_beats_reg <= dma_total_beats_w;
+                remaining_beats_reg <= dma_total_beats_w;
+                read_issued_reg <= 32'h0;
+                write_issued_reg <= 32'h0;
+                write_retired_reg <= 32'h0;
+                read_fifo_wr_ptr_reg <= '0;
+                read_fifo_rd_ptr_reg <= '0;
+                read_fifo_count_reg <= '0;
+                read_addr_wr_ptr_reg <= '0;
+                read_addr_rd_ptr_reg <= '0;
+                read_outstanding_reg <= '0;
+                write_data_reg <= '0;
+                write_addr_reg <= dst_addr_lo_reg;
+                write_addr_wr_ptr_reg <= '0;
+                write_addr_rd_ptr_reg <= '0;
+                write_aw_valid_reg <= 1'b0;
+                write_w_valid_reg <= 1'b0;
+                write_outstanding_reg <= '0;
+                error_irq_reg <= 1'b0;
+                done_tag_reg <= 32'h0;
+                err_code_reg <= DMA_ERR_NONE;
+                err_info_reg <= 32'h0;
 
-            unique0 case (state_reg)
-                DMA_ST_IDLE: begin
-                    mem_aw_sent_reg <= 1'b0;
-                    mem_w_sent_reg <= 1'b0;
-                    cl_aw_sent_reg <= 1'b0;
-                    cl_w_sent_reg <= 1'b0;
-                    if (dma_start_pulse_w) begin
-                        if ((count_d0_reg == 32'h0) || !((src_kind_reg == DMA_EP_DRAM) || (src_kind_reg == DMA_EP_CLUSTER_SPM)) || !((dst_kind_reg == DMA_EP_DRAM) || (dst_kind_reg == DMA_EP_CLUSTER_SPM))) begin
-                            err_code_reg <= (count_d0_reg == 32'h0) ? DMA_ERR_ZERO_LENGTH : DMA_ERR_BAD_ENDPOINT;
-                            err_info_reg <= 32'h0;
-                            irq_pulse_reg <= mmio_req_wdata_i[3];
-                            state_reg <= DMA_ST_ERROR;
-                        end else begin
-                            current_src_addr_reg <= src_addr_lo_reg;
-                            current_dst_addr_reg <= dst_addr_lo_reg;
-                            current_src_row_base_reg <= src_addr_lo_reg;
-                            current_dst_row_base_reg <= dst_addr_lo_reg;
-                            remaining_beats_reg <= count_d0_reg;
-                            remaining_rows_reg <= count_d1_reg;
-                            done_tag_reg <= 32'h0;
-                            err_code_reg <= DMA_ERR_NONE;
-                            err_info_reg <= 32'h0;
-                            state_reg <= DMA_ST_READ_REQ;
+                if ((count_d0_reg == 32'h0) ||
+                    !((src_kind_reg == DMA_EP_DRAM) ||
+                      (src_kind_reg == DMA_EP_CLUSTER_SPM)) ||
+                    !((dst_kind_reg == DMA_EP_DRAM) ||
+                      (dst_kind_reg == DMA_EP_CLUSTER_SPM))) begin
+                    err_code_reg <= (count_d0_reg == 32'h0) ?
+                        DMA_ERR_ZERO_LENGTH : DMA_ERR_BAD_ENDPOINT;
+                    irq_pulse_reg <= mmio_req_wdata_i[3];
+                    state_reg <= DMA_ST_ERROR;
+                end else begin
+                    state_reg <= DMA_ST_READ_REQ;
+                end
+            end else begin
+                unique0 case (state_reg)
+                    DMA_ST_IDLE: begin
+                        write_aw_valid_reg <= 1'b0;
+                        write_w_valid_reg <= 1'b0;
+                    end
+                    DMA_ST_READ_REQ: begin
+                        // The source issue cursor advances only on AR acceptance.
+                        if (read_issue_fire_w) begin
+                            read_issued_reg <= read_issued_reg + 32'd1;
+                            read_addr_fifo_reg[read_addr_wr_ptr_reg] <= current_src_addr_reg;
+                            read_addr_wr_ptr_reg <= read_addr_wr_ptr_reg + 1'b1;
+
+                            if ((src_index_d0_reg + 32'd1) < count_d0_reg) begin
+                                src_index_d0_reg <= src_index_d0_reg + 32'd1;
+                                current_src_addr_reg <=
+                                    $bits(current_src_addr_reg)'(
+                                        current_src_addr_reg + src_stride_d0_reg);
+                            end else begin
+                                src_index_d0_reg <= 32'h0;
+                                if ((src_index_d1_reg + 32'd1) <
+                                    effective_count(count_d1_reg)) begin
+                                    src_index_d1_reg <= src_index_d1_reg + 32'd1;
+                                    current_src_row_base_reg <=
+                                        $bits(current_src_row_base_reg)'(
+                                            current_src_row_base_reg +
+                                            src_stride_d1_reg);
+                                    current_src_addr_reg <=
+                                        $bits(current_src_addr_reg)'(
+                                            current_src_row_base_reg +
+                                            src_stride_d1_reg);
+                                end else begin
+                                    src_index_d1_reg <= 32'h0;
+                                    if ((src_index_d2_reg + 32'd1) <
+                                        effective_count(count_d2_reg)) begin
+                                        src_index_d2_reg <= src_index_d2_reg + 32'd1;
+                                        current_src_plane_base_reg <=
+                                            $bits(current_src_plane_base_reg)'(
+                                                current_src_plane_base_reg +
+                                                src_stride_d2_reg);
+                                        current_src_row_base_reg <=
+                                            $bits(current_src_row_base_reg)'(
+                                                current_src_plane_base_reg +
+                                                src_stride_d2_reg);
+                                        current_src_addr_reg <=
+                                            $bits(current_src_addr_reg)'(
+                                                current_src_plane_base_reg +
+                                                src_stride_d2_reg);
+                                    end else begin
+                                        src_index_d2_reg <= 32'h0;
+                                        if ((src_index_d3_reg + 32'd1) <
+                                            effective_count(count_d3_reg)) begin
+                                            src_index_d3_reg <= src_index_d3_reg + 32'd1;
+                                            current_src_volume_base_reg <=
+                                                $bits(current_src_volume_base_reg)'(
+                                                    current_src_volume_base_reg +
+                                                    src_stride_d3_reg);
+                                            current_src_plane_base_reg <=
+                                                $bits(current_src_plane_base_reg)'(
+                                                    current_src_volume_base_reg +
+                                                    src_stride_d3_reg);
+                                            current_src_row_base_reg <=
+                                                $bits(current_src_row_base_reg)'(
+                                                    current_src_volume_base_reg +
+                                                    src_stride_d3_reg);
+                                            current_src_addr_reg <=
+                                                $bits(current_src_addr_reg)'(
+                                                    current_src_volume_base_reg +
+                                                    src_stride_d3_reg);
+                                        end else begin
+                                            src_index_d3_reg <= 32'h0;
+                                        end
+                                    end
+                                end
+                            end
                         end
-                    end
-                end
-                DMA_ST_READ_REQ: begin
-                    // synopsys translate_off
-                    if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
-                        && ((src_kind_reg == DMA_EP_DRAM && m_mem_axi_ar_ready_i)
-                            || (src_kind_reg == DMA_EP_CLUSTER_SPM && m_cl_axi_ar_ready_i))) begin
-                        $display("[%0t] [TRACE][DMA] read_req kind=%0d addr=0x%08x",
-                                 $time,
-                                 src_kind_reg,
-                                 current_src_addr_reg);
-                    end
-                    // synopsys translate_on
-                    if ((src_kind_reg == DMA_EP_DRAM) && m_mem_axi_ar_ready_i) begin
-                        state_reg <= DMA_ST_READ_WAIT;
-                    end else if ((src_kind_reg == DMA_EP_CLUSTER_SPM) && m_cl_axi_ar_ready_i) begin
-                        state_reg <= DMA_ST_READ_WAIT;
-                    end
-                end
-                DMA_ST_READ_WAIT: begin
-                    if ((src_kind_reg == DMA_EP_DRAM) && m_mem_axi_r_valid_i) begin
+
+                        if (read_response_fire_w) begin
+                            read_addr_rd_ptr_reg <= read_addr_rd_ptr_reg + 1'b1;
+                        end
+                        if (read_fifo_push_w) begin
+                            read_data_fifo_reg[read_fifo_wr_ptr_reg] <=
+                                read_response_data_w;
+                            read_fifo_wr_ptr_reg <= read_fifo_wr_ptr_reg + 1'b1;
+                        end
+                        if (read_fifo_pop_w) begin
+                            read_fifo_rd_ptr_reg <= read_fifo_rd_ptr_reg + 1'b1;
+                        end
+                        unique0 case ({read_fifo_push_w, read_fifo_pop_w})
+                            2'b10: read_fifo_count_reg <= read_fifo_count_reg + 1'b1;
+                            2'b01: read_fifo_count_reg <= read_fifo_count_reg - 1'b1;
+                            default: ;
+                        endcase
+                        unique0 case ({read_issue_fire_w, read_response_fire_w})
+                            2'b10: read_outstanding_reg <= read_outstanding_reg + 1'b1;
+                            2'b01: read_outstanding_reg <= read_outstanding_reg - 1'b1;
+                            default: ;
+                        endcase
+
+                        if (write_aw_fire_w) begin
+                            write_aw_valid_reg <= 1'b0;
+                        end
+                        if (write_w_fire_w) begin
+                            write_w_valid_reg <= 1'b0;
+                        end
+                        if (write_load_w) begin
+                            write_data_reg <= read_data_fifo_reg[read_fifo_rd_ptr_reg];
+                            write_addr_reg <= current_dst_addr_reg;
+                            write_addr_fifo_reg[write_addr_wr_ptr_reg] <=
+                                current_dst_addr_reg;
+                            write_addr_wr_ptr_reg <= write_addr_wr_ptr_reg + 1'b1;
+                            write_aw_valid_reg <= 1'b1;
+                            write_w_valid_reg <= 1'b1;
+                            write_issued_reg <= write_issued_reg + 32'd1;
+
+                            if ((dst_index_d0_reg + 32'd1) < count_d0_reg) begin
+                                dst_index_d0_reg <= dst_index_d0_reg + 32'd1;
+                                current_dst_addr_reg <=
+                                    $bits(current_dst_addr_reg)'(
+                                        current_dst_addr_reg + dst_stride_d0_reg);
+                            end else begin
+                                dst_index_d0_reg <= 32'h0;
+                                if ((dst_index_d1_reg + 32'd1) <
+                                    effective_count(count_d1_reg)) begin
+                                    dst_index_d1_reg <= dst_index_d1_reg + 32'd1;
+                                    current_dst_row_base_reg <=
+                                        $bits(current_dst_row_base_reg)'(
+                                            current_dst_row_base_reg +
+                                            dst_stride_d1_reg);
+                                    current_dst_addr_reg <=
+                                        $bits(current_dst_addr_reg)'(
+                                            current_dst_row_base_reg +
+                                            dst_stride_d1_reg);
+                                end else begin
+                                    dst_index_d1_reg <= 32'h0;
+                                    if ((dst_index_d2_reg + 32'd1) <
+                                        effective_count(count_d2_reg)) begin
+                                        dst_index_d2_reg <= dst_index_d2_reg + 32'd1;
+                                        current_dst_plane_base_reg <=
+                                            $bits(current_dst_plane_base_reg)'(
+                                                current_dst_plane_base_reg +
+                                                dst_stride_d2_reg);
+                                        current_dst_row_base_reg <=
+                                            $bits(current_dst_row_base_reg)'(
+                                                current_dst_plane_base_reg +
+                                                dst_stride_d2_reg);
+                                        current_dst_addr_reg <=
+                                            $bits(current_dst_addr_reg)'(
+                                                current_dst_plane_base_reg +
+                                                dst_stride_d2_reg);
+                                    end else begin
+                                        dst_index_d2_reg <= 32'h0;
+                                        if ((dst_index_d3_reg + 32'd1) <
+                                            effective_count(count_d3_reg)) begin
+                                            dst_index_d3_reg <= dst_index_d3_reg + 32'd1;
+                                            current_dst_volume_base_reg <=
+                                                $bits(current_dst_volume_base_reg)'(
+                                                    current_dst_volume_base_reg +
+                                                    dst_stride_d3_reg);
+                                            current_dst_plane_base_reg <=
+                                                $bits(current_dst_plane_base_reg)'(
+                                                    current_dst_volume_base_reg +
+                                                    dst_stride_d3_reg);
+                                            current_dst_row_base_reg <=
+                                                $bits(current_dst_row_base_reg)'(
+                                                    current_dst_volume_base_reg +
+                                                    dst_stride_d3_reg);
+                                            current_dst_addr_reg <=
+                                                $bits(current_dst_addr_reg)'(
+                                                    current_dst_volume_base_reg +
+                                                    dst_stride_d3_reg);
+                                        end else begin
+                                            dst_index_d3_reg <= 32'h0;
+                                        end
+                                    end
+                                end
+                            end
+                        end
+
+                        if (write_response_fire_w) begin
+                            write_addr_rd_ptr_reg <= write_addr_rd_ptr_reg + 1'b1;
+                            write_retired_reg <= write_retired_reg + 32'd1;
+                            if (remaining_beats_reg != 32'h0) begin
+                                remaining_beats_reg <= remaining_beats_reg - 32'd1;
+                            end
+                        end
+                        unique0 case ({write_load_w, write_response_fire_w})
+                            2'b10: write_outstanding_reg <= write_outstanding_reg + 1'b1;
+                            2'b01: write_outstanding_reg <= write_outstanding_reg - 1'b1;
+                            default: ;
+                        endcase
+
                         // synopsys translate_off
-                        if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
-                            $display("[%0t] [TRACE][DMA] read_resp kind=dram addr=0x%08x resp=%0d data=0x%016x",
+                        if (($test$plusargs("TRACE_CLUSTER_DEBUG") ||
+                             $test$plusargs("TRACE_CLUSTER_RUNTIME")) &&
+                            read_issue_fire_w) begin
+                            $display("[%0t] [TRACE][DMA] read_req kind=%0d addr=0x%08x outstanding=%0d",
                                      $time,
+                                     src_kind_reg,
                                      current_src_addr_reg,
-                                     m_mem_axi_r_resp_i,
-                                     m_mem_axi_r_data_i);
+                                     read_outstanding_reg);
                         end
-                        // synopsys translate_on
-                        read_data_reg <= m_mem_axi_r_data_i;
-                        if ((m_mem_axi_r_resp_i != 2'b00) || !m_mem_axi_r_last_i) begin
-                            err_code_reg <= DMA_ERR_DRAM_AXI;
-                            state_reg <= DMA_ST_ERROR;
-                        end else begin
-                            mem_aw_sent_reg <= 1'b0;
-                            mem_w_sent_reg <= 1'b0;
-                            cl_aw_sent_reg <= 1'b0;
-                            cl_w_sent_reg <= 1'b0;
-                            state_reg <= DMA_ST_WRITE_REQ;
-                        end
-                    end else if ((src_kind_reg == DMA_EP_CLUSTER_SPM) && m_cl_axi_r_valid_i) begin
-                        // synopsys translate_off
-                        if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
-                            $display("[%0t] [TRACE][DMA] read_resp kind=cluster addr=0x%08x resp=%0d data=0x%016x",
+                        if (($test$plusargs("TRACE_CLUSTER_DEBUG") ||
+                             $test$plusargs("TRACE_CLUSTER_RUNTIME")) &&
+                            read_response_fire_w) begin
+                            $display("[%0t] [TRACE][DMA] read_resp kind=%0d addr=0x%08x resp=%0d data=0x%016x",
                                      $time,
-                                     current_src_addr_reg,
-                                     m_cl_axi_r_resp_i,
-                                     m_cl_axi_r_data_i);
+                                     src_kind_reg,
+                                     read_addr_fifo_reg[read_addr_rd_ptr_reg],
+                                     (src_kind_reg == DMA_EP_DRAM) ?
+                                         m_mem_axi_r_resp_i : m_cl_axi_r_resp_i,
+                                     read_response_data_w);
                         end
-                        // synopsys translate_on
-                        read_data_reg <= m_cl_axi_r_data_i;
-                        if (m_cl_axi_r_resp_i != 2'b00) begin
-                            err_code_reg <= DMA_ERR_CLUSTER_RESP;
-                            state_reg <= DMA_ST_ERROR;
-                        end else begin
-                            mem_aw_sent_reg <= 1'b0;
-                            mem_w_sent_reg <= 1'b0;
-                            cl_aw_sent_reg <= 1'b0;
-                            cl_w_sent_reg <= 1'b0;
-                            state_reg <= DMA_ST_WRITE_REQ;
-                        end
-                    end
-                end
-                DMA_ST_WRITE_REQ: begin
-                    if (dst_kind_reg == DMA_EP_DRAM) begin
-                        // synopsys translate_off
-                        if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
-                            && ((m_mem_axi_aw_ready_i || mem_aw_sent_reg) && (m_mem_axi_w_ready_i || mem_w_sent_reg))) begin
-                            $display("[%0t] [TRACE][DMA] write_req kind=dram addr=0x%08x data=0x%016x",
+                        if (($test$plusargs("TRACE_CLUSTER_DEBUG") ||
+                             $test$plusargs("TRACE_CLUSTER_RUNTIME")) &&
+                            write_load_w) begin
+                            $display("[%0t] [TRACE][DMA] write_req kind=%0d addr=0x%08x data=0x%016x outstanding=%0d",
                                      $time,
+                                     dst_kind_reg,
                                      current_dst_addr_reg,
-                                     read_data_reg);
+                                     read_data_fifo_reg[read_fifo_rd_ptr_reg],
+                                     write_outstanding_reg);
                         end
-                        // synopsys translate_on
-                        if (m_mem_axi_aw_ready_i) begin
-                            mem_aw_sent_reg <= 1'b1;
-                        end
-                        if (m_mem_axi_w_ready_i) begin
-                            mem_w_sent_reg <= 1'b1;
-                        end
-                        if ((m_mem_axi_aw_ready_i || mem_aw_sent_reg) && (m_mem_axi_w_ready_i || mem_w_sent_reg)) begin
-                            state_reg <= DMA_ST_WRITE_WAIT;
-                        end
-                    end else begin
-                        // synopsys translate_off
-                        if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
-                            && ((m_cl_axi_aw_ready_i || cl_aw_sent_reg) && (m_cl_axi_w_ready_i || cl_w_sent_reg))) begin
-                            $display("[%0t] [TRACE][DMA] write_req kind=cluster cluster=%0d addr=0x%08x data=0x%016x",
+                        if (($test$plusargs("TRACE_CLUSTER_DEBUG") ||
+                             $test$plusargs("TRACE_CLUSTER_RUNTIME")) &&
+                            write_response_fire_w) begin
+                            $display("[%0t] [TRACE][DMA] write_resp kind=%0d addr=0x%08x resp=%0d remain=%0d",
                                      $time,
-                                     dst_cluster_id_reg,
-                                     current_dst_addr_reg,
-                                     read_data_reg);
-                        end
-                        // synopsys translate_on
-                        if (m_cl_axi_aw_ready_i) begin
-                            cl_aw_sent_reg <= 1'b1;
-                        end
-                        if (m_cl_axi_w_ready_i) begin
-                            cl_w_sent_reg <= 1'b1;
-                        end
-                        if ((m_cl_axi_aw_ready_i || cl_aw_sent_reg) && (m_cl_axi_w_ready_i || cl_w_sent_reg)) begin
-                            state_reg <= DMA_ST_WRITE_WAIT;
-                        end
-                    end
-                end
-                DMA_ST_WRITE_WAIT: begin
-                    if ((dst_kind_reg == DMA_EP_DRAM) && m_mem_axi_b_valid_i) begin
-                        // synopsys translate_off
-                        if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
-                            $display("[%0t] [TRACE][DMA] write_resp kind=dram addr=0x%08x resp=%0d remain=%0d",
-                                     $time,
-                                     current_dst_addr_reg,
-                                     m_mem_axi_b_resp_i,
+                                     dst_kind_reg,
+                                     write_addr_fifo_reg[write_addr_rd_ptr_reg],
+                                     write_response_resp_w,
                                      remaining_beats_reg);
                         end
                         // synopsys translate_on
-                        if (m_mem_axi_b_resp_i != 2'b00) begin
-                            err_code_reg <= DMA_ERR_DRAM_AXI;
+
+                        if (read_response_error_w) begin
+                            err_code_reg <= (src_kind_reg == DMA_EP_DRAM) ?
+                                DMA_ERR_DRAM_AXI : DMA_ERR_CLUSTER_RESP;
+                            err_info_reg <= 32'h0;
+                            error_irq_reg <= 1'b0;
+                            read_fifo_wr_ptr_reg <= '0;
+                            read_fifo_rd_ptr_reg <= '0;
+                            read_fifo_count_reg <= '0;
+                            state_reg <= DMA_ST_READ_WAIT;
+                        end else if (write_response_error_w) begin
+                            err_code_reg <= (dst_kind_reg == DMA_EP_DRAM) ?
+                                DMA_ERR_DRAM_AXI : DMA_ERR_CLUSTER_RESP;
+                            err_info_reg <= 32'h0;
+                            error_irq_reg <= ctrl_reg[3];
+                            read_fifo_wr_ptr_reg <= '0;
+                            read_fifo_rd_ptr_reg <= '0;
+                            read_fifo_count_reg <= '0;
+                            state_reg <= DMA_ST_READ_WAIT;
+                        end else if (write_response_fire_w &&
+                                     (remaining_beats_reg <= 32'd1)) begin
+                            done_tag_reg <= cmd_tag_reg;
                             irq_pulse_reg <= ctrl_reg[3];
-                            state_reg <= DMA_ST_ERROR;
-                        end else if (remaining_beats_reg <= 32'd1) begin
-                            if (remaining_rows_reg <= 32'd1) begin
-                                done_tag_reg <= cmd_tag_reg;
-                                irq_pulse_reg <= ctrl_reg[3];
-                                state_reg <= DMA_ST_DONE;
-                            end else begin
-                                remaining_rows_reg <= remaining_rows_reg - 32'd1;
-                                current_src_row_base_reg <= $bits(current_src_row_base_reg)'(current_src_row_base_reg + src_stride_d1_reg);
-                                current_dst_row_base_reg <= $bits(current_dst_row_base_reg)'(current_dst_row_base_reg + dst_stride_d1_reg);
-                                current_src_addr_reg <= $bits(current_src_addr_reg)'(current_src_row_base_reg + src_stride_d1_reg);
-                                current_dst_addr_reg <= $bits(current_dst_addr_reg)'(current_dst_row_base_reg + dst_stride_d1_reg);
-                                remaining_beats_reg <= count_d0_reg;
-                                mem_aw_sent_reg <= 1'b0;
-                                mem_w_sent_reg <= 1'b0;
-                                state_reg <= DMA_ST_READ_REQ;
-                            end
-                        end else begin
-                            remaining_beats_reg <= $bits(remaining_beats_reg)'(remaining_beats_reg - 32'd1);
-                            current_src_addr_reg <= $bits(current_src_addr_reg)'(current_src_addr_reg + src_stride_d0_reg);
-                            current_dst_addr_reg <= $bits(current_dst_addr_reg)'(current_dst_addr_reg + dst_stride_d0_reg);
-                            mem_aw_sent_reg <= 1'b0;
-                            mem_w_sent_reg <= 1'b0;
-                            state_reg <= DMA_ST_READ_REQ;
+                            state_reg <= DMA_ST_DONE;
                         end
-                    end else if ((dst_kind_reg == DMA_EP_CLUSTER_SPM) && m_cl_axi_b_valid_i) begin
+                    end
+                    DMA_ST_READ_WAIT: begin
+                        // Error drain: finish already accepted AXI transactions, but
+                        // discard returned read data and issue no new work.
+                        if (read_response_fire_w) begin
+                            read_addr_rd_ptr_reg <= read_addr_rd_ptr_reg + 1'b1;
+                            read_outstanding_reg <= read_outstanding_reg - 1'b1;
+                        end
+                        if (write_aw_fire_w) begin
+                            write_aw_valid_reg <= 1'b0;
+                        end
+                        if (write_w_fire_w) begin
+                            write_w_valid_reg <= 1'b0;
+                        end
+                        if (write_response_fire_w) begin
+                            write_addr_rd_ptr_reg <= write_addr_rd_ptr_reg + 1'b1;
+                            write_outstanding_reg <= write_outstanding_reg - 1'b1;
+                        end
+
+                        if (((read_outstanding_reg == 0) ||
+                             ((read_outstanding_reg == 1) &&
+                              read_response_fire_w)) &&
+                            ((write_outstanding_reg == 0) ||
+                             ((write_outstanding_reg == 1) &&
+                              write_response_fire_w)) &&
+                            (!write_aw_valid_reg || write_aw_fire_w) &&
+                            (!write_w_valid_reg || write_w_fire_w)) begin
+                            irq_pulse_reg <= error_irq_reg;
+                            state_reg <= DMA_ST_ERROR;
+                        end
+                    end
+                    DMA_ST_DONE: begin
                         // synopsys translate_off
-                        if ($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
-                            $display("[%0t] [TRACE][DMA] write_resp kind=cluster cluster=%0d addr=0x%08x resp=%0d remain=%0d",
+                        if ($test$plusargs("TRACE_CLUSTER_DEBUG") ||
+                            $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                            $display("[%0t] [TRACE][DMA] done tag=0x%08x err=0x%08x",
                                      $time,
-                                     dst_cluster_id_reg,
-                                     current_dst_addr_reg,
-                                     m_cl_axi_b_resp_i,
-                                     remaining_beats_reg);
+                                     done_tag_reg,
+                                     err_code_reg);
                         end
                         // synopsys translate_on
-                        if (m_cl_axi_b_resp_i != 2'b00) begin
-                            err_code_reg <= DMA_ERR_CLUSTER_RESP;
-                            irq_pulse_reg <= ctrl_reg[3];
-                            state_reg <= DMA_ST_ERROR;
-                        end else if (remaining_beats_reg <= 32'd1) begin
-                            if (remaining_rows_reg <= 32'd1) begin
-                                done_tag_reg <= cmd_tag_reg;
-                                irq_pulse_reg <= ctrl_reg[3];
-                                state_reg <= DMA_ST_DONE;
-                            end else begin
-                                remaining_rows_reg <= remaining_rows_reg - 32'd1;
-                                current_src_row_base_reg <= $bits(current_src_row_base_reg)'(current_src_row_base_reg + src_stride_d1_reg);
-                                current_dst_row_base_reg <= $bits(current_dst_row_base_reg)'(current_dst_row_base_reg + dst_stride_d1_reg);
-                                current_src_addr_reg <= $bits(current_src_addr_reg)'(current_src_row_base_reg + src_stride_d1_reg);
-                                current_dst_addr_reg <= $bits(current_dst_addr_reg)'(current_dst_row_base_reg + dst_stride_d1_reg);
-                                remaining_beats_reg <= count_d0_reg;
-                                cl_aw_sent_reg <= 1'b0;
-                                cl_w_sent_reg <= 1'b0;
-                                state_reg <= DMA_ST_READ_REQ;
-                            end
-                        end else begin
-                            remaining_beats_reg <= $bits(remaining_beats_reg)'(remaining_beats_reg - 32'd1);
-                            current_src_addr_reg <= $bits(current_src_addr_reg)'(current_src_addr_reg + src_stride_d0_reg);
-                            current_dst_addr_reg <= $bits(current_dst_addr_reg)'(current_dst_addr_reg + dst_stride_d0_reg);
-                            cl_aw_sent_reg <= 1'b0;
-                            cl_w_sent_reg <= 1'b0;
-                            state_reg <= DMA_ST_READ_REQ;
+                    end
+                    DMA_ST_ERROR: begin
+                        // synopsys translate_off
+                        if ($test$plusargs("TRACE_CLUSTER_DEBUG") ||
+                            $test$plusargs("TRACE_CLUSTER_RUNTIME")) begin
+                            $display("[%0t] [TRACE][DMA] error code=0x%08x info=0x%08x src=0x%08x dst=0x%08x",
+                                     $time,
+                                     err_code_reg,
+                                     err_info_reg,
+                                     current_src_addr_reg,
+                                     current_dst_addr_reg);
                         end
+                        // synopsys translate_on
                     end
-                end
-                DMA_ST_DONE: begin
-                    // synopsys translate_off
-                    if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
-                        && !dma_start_pulse_w && !dma_clear_done_w) begin
-                        $display("[%0t] [TRACE][DMA] done tag=0x%08x err=0x%08x",
-                                 $time,
-                                 done_tag_reg,
-                                 err_code_reg);
-                    end
-                    // synopsys translate_on
-                    if (dma_clear_done_w) begin
+                    default: begin
                         state_reg <= DMA_ST_IDLE;
-                    end else if (dma_start_pulse_w) begin
-                        current_src_addr_reg <= src_addr_lo_reg;
-                        current_dst_addr_reg <= dst_addr_lo_reg;
-                        current_src_row_base_reg <= src_addr_lo_reg;
-                        current_dst_row_base_reg <= dst_addr_lo_reg;
-                        remaining_beats_reg <= count_d0_reg;
-                        remaining_rows_reg <= count_d1_reg;
-                        done_tag_reg <= 32'h0;
-                        err_code_reg <= DMA_ERR_NONE;
-                        err_info_reg <= 32'h0;
-                        mem_aw_sent_reg <= 1'b0;
-                        mem_w_sent_reg <= 1'b0;
-                        cl_aw_sent_reg <= 1'b0;
-                        cl_w_sent_reg <= 1'b0;
-                        if ((count_d0_reg == 32'h0) || !((src_kind_reg == DMA_EP_DRAM) || (src_kind_reg == DMA_EP_CLUSTER_SPM)) || !((dst_kind_reg == DMA_EP_DRAM) || (dst_kind_reg == DMA_EP_CLUSTER_SPM))) begin
-                            err_code_reg <= (count_d0_reg == 32'h0) ? DMA_ERR_ZERO_LENGTH : DMA_ERR_BAD_ENDPOINT;
-                            irq_pulse_reg <= mmio_req_wdata_i[3];
-                            state_reg <= DMA_ST_ERROR;
-                        end else begin
-                            state_reg <= DMA_ST_READ_REQ;
-                        end
+                        write_aw_valid_reg <= 1'b0;
+                        write_w_valid_reg <= 1'b0;
                     end
-                end
-                DMA_ST_ERROR: begin
-                    // synopsys translate_off
-                    if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
-                        && !dma_start_pulse_w && !dma_clear_done_w) begin
-                        $display("[%0t] [TRACE][DMA] error code=0x%08x info=0x%08x src=0x%08x dst=0x%08x",
-                                 $time,
-                                 err_code_reg,
-                                 err_info_reg,
-                                 current_src_addr_reg,
-                                 current_dst_addr_reg);
-                    end
-                    // synopsys translate_on
-                    if (dma_clear_done_w) begin
-                        state_reg <= DMA_ST_IDLE;
-                        err_code_reg <= DMA_ERR_NONE;
-                        err_info_reg <= 32'h0;
-                    end else if (dma_start_pulse_w) begin
-                        current_src_addr_reg <= src_addr_lo_reg;
-                        current_dst_addr_reg <= dst_addr_lo_reg;
-                        current_src_row_base_reg <= src_addr_lo_reg;
-                        current_dst_row_base_reg <= dst_addr_lo_reg;
-                        remaining_beats_reg <= count_d0_reg;
-                        remaining_rows_reg <= count_d1_reg;
-                        done_tag_reg <= 32'h0;
-                        err_code_reg <= DMA_ERR_NONE;
-                        err_info_reg <= 32'h0;
-                        mem_aw_sent_reg <= 1'b0;
-                        mem_w_sent_reg <= 1'b0;
-                        cl_aw_sent_reg <= 1'b0;
-                        cl_w_sent_reg <= 1'b0;
-                        if ((count_d0_reg == 32'h0) || !((src_kind_reg == DMA_EP_DRAM) || (src_kind_reg == DMA_EP_CLUSTER_SPM)) || !((dst_kind_reg == DMA_EP_DRAM) || (dst_kind_reg == DMA_EP_CLUSTER_SPM))) begin
-                            err_code_reg <= (count_d0_reg == 32'h0) ? DMA_ERR_ZERO_LENGTH : DMA_ERR_BAD_ENDPOINT;
-                            irq_pulse_reg <= mmio_req_wdata_i[3];
-                            state_reg <= DMA_ST_ERROR;
-                        end else begin
-                            state_reg <= DMA_ST_READ_REQ;
-                        end
-                    end
-                end
-                default: state_reg <= DMA_ST_IDLE;
-            endcase
+                endcase
+            end
         end
     end
 

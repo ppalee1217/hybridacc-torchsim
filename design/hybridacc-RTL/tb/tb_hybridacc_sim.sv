@@ -80,6 +80,9 @@ module tb_hybridacc_sim;
     localparam int unsigned DEFAULT_MAX_CORE_CYCLES   = 500000;
     localparam int unsigned DEFAULT_PROGRESS_CYCLES   = 5000;
     localparam logic [31:0] DEFAULT_DRAM_MIRROR_BASE  = 32'h8000_0000;
+    localparam int unsigned DRAM_READ_QUEUE_DEPTH     = 16;
+    localparam int unsigned DRAM_READ_QUEUE_PTR_WIDTH = $clog2(DRAM_READ_QUEUE_DEPTH);
+    localparam int unsigned DRAM_READ_QUEUE_CNT_WIDTH = $clog2(DRAM_READ_QUEUE_DEPTH + 1);
 
     logic clk, reset_n;
     logic s_ctrl_aw_valid_i;
@@ -126,8 +129,10 @@ module tb_hybridacc_sim;
     logic [63:0] ext_dram_mem[];
     byte unsigned fw_image[0:MAX_FW_BYTES-1];
     byte unsigned golden_output_image[];
-    logic        dram_r_pending_reg;
-    logic [31:0] dram_r_addr_reg;
+    logic [31:0] dram_r_addr_queue [0:DRAM_READ_QUEUE_DEPTH-1];
+    logic [DRAM_READ_QUEUE_PTR_WIDTH-1:0] dram_r_queue_wr_ptr_reg;
+    logic [DRAM_READ_QUEUE_PTR_WIDTH-1:0] dram_r_queue_rd_ptr_reg;
+    logic [DRAM_READ_QUEUE_CNT_WIDTH-1:0] dram_r_queue_count_reg;
     logic        dram_aw_pending_reg;
     logic [31:0] dram_aw_addr_reg;
     logic        dram_w_pending_reg;
@@ -201,7 +206,7 @@ module tb_hybridacc_sim;
                  axi_w_count,
                  axi_ar_count,
                  axi_r_count,
-                 dram_r_pending_reg,
+                 dram_r_queue_count_reg != 0,
                  last_axi_aw_addr,
                  last_axi_ar_addr);
 `else
@@ -214,7 +219,7 @@ module tb_hybridacc_sim;
                  axi_w_count,
                  axi_ar_count,
                  axi_r_count,
-                 dram_r_pending_reg,
+                 dram_r_queue_count_reg != 0,
                  last_axi_aw_addr,
                  last_axi_ar_addr,
                  last_host_read_addr,
@@ -300,6 +305,133 @@ module tb_hybridacc_sim;
         .controller_irq_o(controller_irq_o)
     );
 
+`ifndef GATE_SIM
+    // synopsys translate_off
+    logic [63:0] rtl_run_cycles;
+    logic [63:0] rtl_dma_cycles;
+    logic [63:0] rtl_overlap_cycles;
+    logic [63:0] rtl_pe_busy_cycles;
+    logic [63:0] rtl_pe_busy_sum;
+    logic [63:0] rtl_agu_busy_cycles;
+    logic [63:0] rtl_agu_stall_cycles;
+    logic [63:0] rtl_agu_desc_count;
+    logic [63:0] rtl_agu_wave_count;
+    logic        rtl_pe_busy_active_w;
+    logic [31:0] rtl_pe_busy_count_w;
+    logic        rtl_agu_busy_active_w;
+    logic        rtl_agu_stall_active_w;
+    logic [31:0] rtl_agu_desc_fire_count_w;
+    logic        rtl_agu_wave_start_active_w;
+    logic        rtl_agu_wave_start_prev_reg;
+    wire rtl_run_active_w =
+        dut.gen_clusters[0].cluster.hddu.hddu_busy_w;
+    wire rtl_dma_active_w =
+        dut.core_ctrl.dma_engine.dma_busy_w;
+
+    always_comb begin
+        rtl_pe_busy_count_w       = 32'd0;
+        rtl_agu_busy_active_w     = 1'b0;
+        rtl_agu_stall_active_w    = 1'b0;
+        rtl_agu_desc_fire_count_w = 32'd0;
+        rtl_agu_wave_start_active_w = 1'b0;
+
+        for (int unsigned port_idx = 0;
+             port_idx < $size(dut.gen_clusters[0].cluster.noc.pe_busy_sig, 1);
+             port_idx++) begin
+            for (int unsigned pe_idx = 0;
+                 pe_idx < $size(dut.gen_clusters[0].cluster.noc.pe_busy_sig, 2);
+                 pe_idx++) begin
+                if (dut.gen_clusters[0].cluster.noc.pe_busy_sig[port_idx][pe_idx] === 1'b1) begin
+                    rtl_pe_busy_count_w = rtl_pe_busy_count_w + 32'd1;
+                end
+            end
+        end
+        rtl_pe_busy_active_w = (rtl_pe_busy_count_w != 32'd0);
+
+        for (int unsigned agu_idx = 0;
+             agu_idx < $size(dut.gen_clusters[0].cluster.hddu.agu_busy_sig);
+             agu_idx++) begin
+            rtl_agu_busy_active_w |=
+                (dut.gen_clusters[0].cluster.hddu.agu_busy_sig[agu_idx] === 1'b1);
+            rtl_agu_stall_active_w |=
+                (dut.gen_clusters[0].cluster.hddu.agu_gen_valid_sig[agu_idx] === 1'b1)
+                && (dut.gen_clusters[0].cluster.hddu.agu_gen_ready_sig[agu_idx] === 1'b0);
+            if ((dut.gen_clusters[0].cluster.hddu.agu_gen_valid_sig[agu_idx] === 1'b1)
+                && (dut.gen_clusters[0].cluster.hddu.agu_gen_ready_sig[agu_idx] === 1'b1)) begin
+                rtl_agu_desc_fire_count_w = rtl_agu_desc_fire_count_w + 32'd1;
+            end
+            rtl_agu_wave_start_active_w |=
+                (dut.gen_clusters[0].cluster.hddu.agu_start_sig[agu_idx] === 1'b1);
+        end
+    end
+
+    always_ff @(posedge clk or negedge reset_n) begin
+        if (!reset_n) begin
+            rtl_run_cycles <= 64'd0;
+            rtl_dma_cycles <= 64'd0;
+            rtl_overlap_cycles <= 64'd0;
+        end else begin
+            if (rtl_run_active_w) begin
+                rtl_run_cycles <= rtl_run_cycles + 64'd1;
+            end
+            if (rtl_dma_active_w) begin
+                rtl_dma_cycles <= rtl_dma_cycles + 64'd1;
+            end
+            if (rtl_run_active_w && rtl_dma_active_w) begin
+                rtl_overlap_cycles <= rtl_overlap_cycles + 64'd1;
+            end
+        end
+    end
+
+    always_ff @(posedge clk or negedge reset_n) begin
+        if (!reset_n) begin
+            rtl_pe_busy_cycles   <= 64'd0;
+            rtl_pe_busy_sum      <= 64'd0;
+            rtl_agu_busy_cycles  <= 64'd0;
+            rtl_agu_stall_cycles <= 64'd0;
+            rtl_agu_desc_count   <= 64'd0;
+            rtl_agu_wave_count   <= 64'd0;
+            rtl_agu_wave_start_prev_reg <= 1'b0;
+        end else begin
+            if (rtl_pe_busy_active_w) begin
+                rtl_pe_busy_cycles <= rtl_pe_busy_cycles + 64'd1;
+            end
+            rtl_pe_busy_sum <= rtl_pe_busy_sum + rtl_pe_busy_count_w;
+            if (rtl_agu_busy_active_w) begin
+                rtl_agu_busy_cycles <= rtl_agu_busy_cycles + 64'd1;
+            end
+            if (rtl_agu_stall_active_w) begin
+                rtl_agu_stall_cycles <= rtl_agu_stall_cycles + 64'd1;
+            end
+            rtl_agu_desc_count <= rtl_agu_desc_count + rtl_agu_desc_fire_count_w;
+            if (rtl_agu_wave_start_active_w && !rtl_agu_wave_start_prev_reg) begin
+                rtl_agu_wave_count <= rtl_agu_wave_count + 64'd1;
+            end
+            rtl_agu_wave_start_prev_reg <= rtl_agu_wave_start_active_w;
+        end
+    end
+
+    final begin
+        $display("[TB] rtl_run=%0d rtl_dma=%0d rtl_overlap=%0d",
+                 rtl_run_cycles,
+                 rtl_dma_cycles,
+                 rtl_overlap_cycles);
+        $display("[TB] rtl_pe_busy=%0d rtl_pe_busy_sum=%0d",
+                 rtl_pe_busy_cycles,
+                 rtl_pe_busy_sum);
+        $display("[TB] rtl_agu_busy=%0d rtl_agu_stall=%0d rtl_agu_desc=%0d rtl_agu_wave=%0d",
+                 rtl_agu_busy_cycles,
+                 rtl_agu_stall_cycles,
+                 rtl_agu_desc_count,
+                 rtl_agu_wave_count);
+        $display("[TB] cluster_run_cycles=%0d spm_pmu_cycle=%0d",
+                 dut.gen_clusters[0].cluster.cluster_run_cycles_reg,
+                 dut.gen_clusters[0].cluster.spm_pmu_cycle_cnt_sig);
+    end
+    // synopsys translate_on
+`endif
+
+    // RealDram behavioral memory model
     function automatic int unsigned dram_word_index(input logic [31:0] byte_addr);
         return byte_addr >> 3;
     endfunction
@@ -645,8 +777,9 @@ module tb_hybridacc_sim;
     always @(posedge clk or negedge reset_n) begin
         longint unsigned next_tb_cycle_count;
         if (!reset_n) begin
-            dram_r_pending_reg <= 1'b0;
-            dram_r_addr_reg <= 32'h0;
+            dram_r_queue_wr_ptr_reg <= '0;
+            dram_r_queue_rd_ptr_reg <= '0;
+            dram_r_queue_count_reg <= '0;
             dram_aw_pending_reg <= 1'b0;
             dram_aw_addr_reg <= 32'h0;
             dram_w_pending_reg <= 1'b0;
@@ -676,6 +809,8 @@ module tb_hybridacc_sim;
             logic        aw_fire;
             logic        w_fire;
             logic        ar_fire;
+            logic        r_enqueue;
+            logic        r_dequeue;
             logic        aw_pending_next;
             logic        w_pending_next;
             logic [31:0] aw_addr_sample;
@@ -696,6 +831,11 @@ module tb_hybridacc_sim;
             aw_fire = m_mem_axi_aw_valid_o && m_mem_axi_aw_ready_i;
             w_fire = m_mem_axi_w_valid_o && m_mem_axi_w_ready_i;
             ar_fire = m_mem_axi_ar_valid_o && m_mem_axi_ar_ready_i;
+            r_dequeue = (dram_r_queue_count_reg != 0) &&
+                        m_mem_axi_r_ready_o;
+            r_enqueue = ar_fire &&
+                        ((dram_r_queue_count_reg < DRAM_READ_QUEUE_DEPTH) ||
+                         r_dequeue);
 
             aw_addr_sample = m_mem_axi_aw_addr_o;
             w_data_sample = m_mem_axi_w_data_o;
@@ -748,24 +888,41 @@ module tb_hybridacc_sim;
             if (ar_fire) begin
                 axi_ar_count <= axi_ar_count + 1;
                 last_axi_ar_addr <= ar_addr_sample;
-                dram_r_pending_reg <= 1'b1;
-                dram_r_addr_reg <= ar_addr_sample;
+                if (!r_enqueue) begin
+                    $fatal(1,
+                           "RealDram read queue overflow: depth=%0d addr=0x%08x",
+                           DRAM_READ_QUEUE_DEPTH,
+                           ar_addr_sample);
+                end
+            end
+            if (r_enqueue) begin
+                dram_r_addr_queue[dram_r_queue_wr_ptr_reg] <= ar_addr_sample;
+                dram_r_queue_wr_ptr_reg <= dram_r_queue_wr_ptr_reg + 1'b1;
             end
             dram_aw_pending_reg <= aw_pending_next;
             dram_aw_addr_reg <= aw_addr_next;
             dram_w_pending_reg <= w_pending_next;
             dram_w_data_reg <= w_data_next;
             dram_w_strb_reg <= w_strb_next;
-            if (dram_r_pending_reg && m_mem_axi_r_ready_o) begin
+            if (r_dequeue) begin
                 logic [63:0] read_word;
                 axi_r_count <= axi_r_count + 1;
-                dram_r_pending_reg <= 1'b0;
-                read_word = dram_load_word(dram_r_addr_reg);
+                read_word = dram_load_word(
+                    dram_r_addr_queue[dram_r_queue_rd_ptr_reg]
+                );
+                dram_r_queue_rd_ptr_reg <= dram_r_queue_rd_ptr_reg + 1'b1;
                 m_mem_axi_r_valid_i <= 1'b1;
                 m_mem_axi_r_data_i <= read_word;
                 m_mem_axi_r_resp_i <= 2'b00;
                 m_mem_axi_r_last_i <= 1'b1;
             end
+            unique0 case ({r_enqueue, r_dequeue})
+                2'b10: dram_r_queue_count_reg <=
+                    dram_r_queue_count_reg + 1'b1;
+                2'b01: dram_r_queue_count_reg <=
+                    dram_r_queue_count_reg - 1'b1;
+                default: ;
+            endcase
             if ((progress_cycles > 0) && ((next_tb_cycle_count % progress_cycles) == 0)) begin
                 print_progress(next_tb_cycle_count);
             end

@@ -31,7 +31,8 @@ module ScratchpadMemory import cluster_pkg::*; #(
     parameter int unsigned BANKS_PER_GROUP           = 3,
     parameter int unsigned BANK_DATA_WIDTH           = 64,
     parameter int unsigned BANK_DEPTH                = 8192,
-    parameter int unsigned ADDR_WIDTH                = 32
+    parameter int unsigned ADDR_WIDTH                = 32,
+    parameter int unsigned AXI_QUEUE_DEPTH           = 16
 ) (
     input  logic                        clk,
     input  logic                        reset_n,
@@ -85,9 +86,15 @@ module ScratchpadMemory import cluster_pkg::*; #(
     localparam int unsigned BANK_ROW_W        = (BANK_DEPTH <= 1) ? 1 : $clog2(BANK_DEPTH);
     localparam int unsigned MACRO_DEPTH       = 128;
     localparam int          TOTAL_BANKS_GEN   = int'(TOTAL_BANKS);
+    localparam int unsigned AXI_QUEUE_PTR_W   =
+        (AXI_QUEUE_DEPTH <= 1) ? 1 : $clog2(AXI_QUEUE_DEPTH);
+    localparam int unsigned AXI_QUEUE_CNT_W   =
+        (AXI_QUEUE_DEPTH <= 1) ? 1 : $clog2(AXI_QUEUE_DEPTH + 1);
 
     typedef logic [BANK_DATA_WIDTH-1:0] bank_word_t;
     typedef logic [BANK_ROW_W-1:0]      bank_row_t;
+    typedef logic [AXI_QUEUE_PTR_W-1:0] axi_queue_ptr_t;
+    typedef logic [AXI_QUEUE_CNT_W-1:0] axi_queue_count_t;
 
     logic [GROUP_IDX_W-1:0] active_map_reg [NUM_NOC_PORTS];
     logic                   active_map_init_done_reg;
@@ -99,18 +106,31 @@ module ScratchpadMemory import cluster_pkg::*; #(
     logic [NUM_NOC_PORTS*GROUP_IDX_W-1:0] noc_read_group_reg;
     logic [BANK_IDX_W-1:0]  noc_read_bank_reg     [NUM_NOC_PORTS];
 
-    logic                   aw_pending_valid_reg;
-    logic [ADDR_WIDTH-1:0]  aw_pending_addr_reg;
-    logic                   w_pending_valid_reg;
-    logic [BANK_DATA_WIDTH-1:0]   w_pending_data_reg;
-    logic [BANK_DATA_WIDTH/8-1:0] w_pending_strb_reg;
-    logic                   ar_pending_valid_reg;
-    logic [ADDR_WIDTH-1:0]  ar_pending_addr_reg;
-    logic                   bvalid_reg;
-    logic [1:0]             bresp_reg;
-    logic                   rvalid_reg;
-    logic [BANK_DATA_WIDTH-1:0] rdata_reg;
-    logic [1:0]             rresp_reg;
+    logic [ADDR_WIDTH-1:0]  axi_aw_fifo_reg[0:AXI_QUEUE_DEPTH-1];
+    logic [BANK_DATA_WIDTH-1:0]
+                            axi_w_data_fifo_reg[0:AXI_QUEUE_DEPTH-1];
+    logic [BANK_DATA_WIDTH/8-1:0]
+                            axi_w_strb_fifo_reg[0:AXI_QUEUE_DEPTH-1];
+    logic [ADDR_WIDTH-1:0]  axi_ar_fifo_reg[0:AXI_QUEUE_DEPTH-1];
+    logic [1:0]             axi_b_resp_fifo_reg[0:AXI_QUEUE_DEPTH-1];
+    logic [BANK_DATA_WIDTH-1:0]
+                            axi_r_data_fifo_reg[0:AXI_QUEUE_DEPTH-1];
+    logic [1:0]             axi_r_resp_fifo_reg[0:AXI_QUEUE_DEPTH-1];
+    axi_queue_ptr_t         axi_aw_wr_ptr_reg;
+    axi_queue_ptr_t         axi_aw_rd_ptr_reg;
+    axi_queue_ptr_t         axi_w_wr_ptr_reg;
+    axi_queue_ptr_t         axi_w_rd_ptr_reg;
+    axi_queue_ptr_t         axi_ar_wr_ptr_reg;
+    axi_queue_ptr_t         axi_ar_rd_ptr_reg;
+    axi_queue_ptr_t         axi_b_wr_ptr_reg;
+    axi_queue_ptr_t         axi_b_rd_ptr_reg;
+    axi_queue_ptr_t         axi_r_wr_ptr_reg;
+    axi_queue_ptr_t         axi_r_rd_ptr_reg;
+    axi_queue_count_t       axi_aw_count_reg;
+    axi_queue_count_t       axi_w_count_reg;
+    axi_queue_count_t       axi_ar_count_reg;
+    axi_queue_count_t       axi_b_count_reg;
+    axi_queue_count_t       axi_r_count_reg;
     logic                   dma_read_pending_reg;
     logic [BANK_IDX_W-1:0]  dma_read_bank_reg;
 
@@ -128,10 +148,23 @@ module ScratchpadMemory import cluster_pkg::*; #(
     logic                   s_axi_awready_w;
     logic                   s_axi_wready_w;
     logic                   s_axi_arready_w;
+    logic                   s_axi_aw_push_w;
+    logic                   s_axi_w_push_w;
+    logic                   s_axi_ar_push_w;
+    logic                   s_axi_b_pop_w;
+    logic                   s_axi_r_pop_w;
+    logic                   dma_write_head_valid_w;
+    logic                   dma_write_decode_error_w;
     logic                   dma_write_issue_w;
+    logic                   dma_write_complete_w;
     logic [BANK_IDX_W-1:0]  dma_write_bank_idx_w;
     bank_row_t              dma_write_row_w;
+    logic                   dma_read_head_valid_w;
+    logic                   dma_read_decode_error_w;
     logic                   dma_read_issue_w;
+    logic                   dma_read_complete_error_w;
+    logic                   dma_read_head_pop_w;
+    logic                   dma_r_push_w;
     logic [BANK_IDX_W-1:0]  dma_read_bank_idx_w;
     bank_row_t              dma_read_row_w;
 
@@ -179,6 +212,15 @@ module ScratchpadMemory import cluster_pkg::*; #(
         return mask;
     endfunction
 
+    function automatic axi_queue_ptr_t axi_queue_ptr_inc(
+        input axi_queue_ptr_t ptr
+    );
+        if (ptr == axi_queue_ptr_t'(AXI_QUEUE_DEPTH - 1)) begin
+            return '0;
+        end
+        return ptr + 1'b1;
+    endfunction
+
     function automatic logic [GROUP_IDX_W-1:0] noc_read_group_get(
         input int unsigned port_idx,
         input logic [NUM_NOC_PORTS*GROUP_IDX_W-1:0] group_reg
@@ -221,8 +263,10 @@ module ScratchpadMemory import cluster_pkg::*; #(
         if (s_axi_awvalid_i) begin
             spm_decode_known_w &= (s_axi_awaddr_i === s_axi_awaddr_i);
         end
-        if (aw_pending_valid_reg) begin
-            spm_decode_known_w &= (aw_pending_addr_reg === aw_pending_addr_reg);
+        if (axi_aw_count_reg != 0) begin
+            spm_decode_known_w &=
+                (axi_aw_fifo_reg[axi_aw_rd_ptr_reg] ===
+                 axi_aw_fifo_reg[axi_aw_rd_ptr_reg]);
         end
 
         spm_decode_known_w &= (s_axi_wvalid_i === s_axi_wvalid_i);
@@ -230,17 +274,23 @@ module ScratchpadMemory import cluster_pkg::*; #(
             spm_decode_known_w &= (s_axi_wdata_i === s_axi_wdata_i);
             spm_decode_known_w &= (s_axi_wstrb_i === s_axi_wstrb_i);
         end
-        if (w_pending_valid_reg) begin
-            spm_decode_known_w &= (w_pending_data_reg === w_pending_data_reg);
-            spm_decode_known_w &= (w_pending_strb_reg === w_pending_strb_reg);
+        if (axi_w_count_reg != 0) begin
+            spm_decode_known_w &=
+                (axi_w_data_fifo_reg[axi_w_rd_ptr_reg] ===
+                 axi_w_data_fifo_reg[axi_w_rd_ptr_reg]);
+            spm_decode_known_w &=
+                (axi_w_strb_fifo_reg[axi_w_rd_ptr_reg] ===
+                 axi_w_strb_fifo_reg[axi_w_rd_ptr_reg]);
         end
 
         spm_decode_known_w &= (s_axi_arvalid_i === s_axi_arvalid_i);
         if (s_axi_arvalid_i) begin
             spm_decode_known_w &= (s_axi_araddr_i === s_axi_araddr_i);
         end
-        if (ar_pending_valid_reg) begin
-            spm_decode_known_w &= (ar_pending_addr_reg === ar_pending_addr_reg);
+        if (axi_ar_count_reg != 0) begin
+            spm_decode_known_w &=
+                (axi_ar_fifo_reg[axi_ar_rd_ptr_reg] ===
+                 axi_ar_fifo_reg[axi_ar_rd_ptr_reg]);
         end
     end
 
@@ -262,10 +312,18 @@ module ScratchpadMemory import cluster_pkg::*; #(
             bank_pudelay_unused_reduce_w ^= bank_pudelay_unused_w[b];
         end
 
+        dma_write_head_valid_w = 1'b0;
+        dma_write_decode_error_w = 1'b0;
         dma_write_issue_w    = 1'b0;
+        dma_write_complete_w = 1'b0;
         dma_write_bank_idx_w = '0;
         dma_write_row_w      = '0;
+        dma_read_head_valid_w = 1'b0;
+        dma_read_decode_error_w = 1'b0;
         dma_read_issue_w     = 1'b0;
+        dma_read_complete_error_w = 1'b0;
+        dma_read_head_pop_w  = 1'b0;
+        dma_r_push_w         = 1'b0;
         dma_read_bank_idx_w  = '0;
         dma_read_row_w       = '0;
         dma_write_gwaddr_w   = '0;
@@ -355,37 +413,82 @@ module ScratchpadMemory import cluster_pkg::*; #(
                 noc_accept_w[p]    = arb_can_accept_w && spm_decode_known_w && spm_req_valid_i[p];
         end
 
-        if (aw_pending_valid_reg && w_pending_valid_reg && !bvalid_reg) begin
-            dma_write_gwaddr_w       = aw_pending_addr_reg / BYTES_PER_BANK;
+        s_axi_awready_w = (axi_aw_count_reg < AXI_QUEUE_DEPTH) &&
+            spm_decode_known_w &&
+            (bank_pudelay_unused_reduce_w === bank_pudelay_unused_reduce_w);
+        s_axi_wready_w = (axi_w_count_reg < AXI_QUEUE_DEPTH) &&
+            spm_decode_known_w &&
+            (bank_pudelay_unused_reduce_w === bank_pudelay_unused_reduce_w);
+        s_axi_arready_w = (axi_ar_count_reg < AXI_QUEUE_DEPTH) &&
+            spm_decode_known_w &&
+            (bank_pudelay_unused_reduce_w === bank_pudelay_unused_reduce_w);
+        s_axi_aw_push_w = s_axi_awvalid_i && s_axi_awready_w;
+        s_axi_w_push_w  = s_axi_wvalid_i && s_axi_wready_w;
+        s_axi_ar_push_w = s_axi_arvalid_i && s_axi_arready_w;
+        s_axi_b_pop_w =
+            (axi_b_count_reg != 0) && s_axi_bready_i;
+        s_axi_r_pop_w =
+            (axi_r_count_reg != 0) && s_axi_rready_i;
+
+        dma_write_head_valid_w =
+            (axi_aw_count_reg != 0) &&
+            (axi_w_count_reg != 0) &&
+            ((axi_b_count_reg < AXI_QUEUE_DEPTH) || s_axi_b_pop_w);
+        if (dma_write_head_valid_w) begin
+            dma_write_gwaddr_w       =
+                axi_aw_fifo_reg[axi_aw_rd_ptr_reg] / BYTES_PER_BANK;
             dma_write_grp_w          = dma_write_gwaddr_w / GROUP_SPAN_WORDS;
             dma_write_lidx_w         = dma_write_gwaddr_w % GROUP_SPAN_WORDS;
             dma_write_bank_sel_w     = dma_write_lidx_w / BANK_DEPTH;
             dma_write_row_sel_w      = dma_write_lidx_w % BANK_DEPTH;
             dma_write_bank_idx_int_w = $unsigned(dma_write_grp_w * BANKS_PER_GROUP + dma_write_bank_sel_w);
 
-            if ((dma_write_grp_w < NUM_GROUPS) && (dma_write_lidx_w < GROUP_LINEAR_WORDS) && (dma_write_bank_idx_int_w < TOTAL_BANKS) && !bank_claimed_w[dma_write_bank_idx_int_w]) begin
+            dma_write_decode_error_w =
+                (dma_write_grp_w >= NUM_GROUPS) ||
+                (dma_write_lidx_w >= GROUP_LINEAR_WORDS) ||
+                (dma_write_bank_idx_int_w >= TOTAL_BANKS);
+            if (dma_write_decode_error_w) begin
+                dma_write_complete_w = 1'b1;
+            end else if (!bank_claimed_w[dma_write_bank_idx_int_w]) begin
                 dma_write_issue_w    = 1'b1;
+                dma_write_complete_w = 1'b1;
                 dma_write_bank_idx_w = $bits(dma_write_bank_idx_w)'(dma_write_bank_idx_int_w);
                 dma_write_row_w      = bank_row_t'(dma_write_row_sel_w);
                 bank_claimed_w[dma_write_bank_idx_int_w] = 1'b1;
             end
         end
 
-        if (ar_pending_valid_reg && !rvalid_reg && !dma_read_pending_reg) begin
-            dma_read_gwaddr_w       = ar_pending_addr_reg / BYTES_PER_BANK;
+        dma_read_head_valid_w =
+            (axi_ar_count_reg != 0) &&
+            (({1'b0, axi_r_count_reg} + dma_read_pending_reg) <
+             AXI_QUEUE_DEPTH || s_axi_r_pop_w);
+        if (dma_read_head_valid_w) begin
+            dma_read_gwaddr_w       =
+                axi_ar_fifo_reg[axi_ar_rd_ptr_reg] / BYTES_PER_BANK;
             dma_read_grp_w          = dma_read_gwaddr_w / GROUP_SPAN_WORDS;
             dma_read_lidx_w         = dma_read_gwaddr_w % GROUP_SPAN_WORDS;
             dma_read_bank_sel_w     = dma_read_lidx_w / BANK_DEPTH;
             dma_read_row_sel_w      = dma_read_lidx_w % BANK_DEPTH;
             dma_read_bank_idx_int_w = $unsigned(dma_read_grp_w * BANKS_PER_GROUP + dma_read_bank_sel_w);
 
-            if ((dma_read_grp_w < NUM_GROUPS) && (dma_read_lidx_w < GROUP_LINEAR_WORDS) && (dma_read_bank_idx_int_w < TOTAL_BANKS) && !bank_claimed_w[dma_read_bank_idx_int_w]) begin
+            dma_read_decode_error_w =
+                (dma_read_grp_w >= NUM_GROUPS) ||
+                (dma_read_lidx_w >= GROUP_LINEAR_WORDS) ||
+                (dma_read_bank_idx_int_w >= TOTAL_BANKS);
+            if (dma_read_decode_error_w && !dma_read_pending_reg) begin
+                dma_read_complete_error_w = 1'b1;
+                dma_read_head_pop_w = 1'b1;
+            end else if (!dma_read_decode_error_w &&
+                         !bank_claimed_w[dma_read_bank_idx_int_w]) begin
                 dma_read_issue_w    = 1'b1;
+                dma_read_head_pop_w = 1'b1;
                 dma_read_bank_idx_w = $bits(dma_read_bank_idx_w)'(dma_read_bank_idx_int_w);
                 dma_read_row_w      = bank_row_t'(dma_read_row_sel_w);
                 bank_claimed_w[dma_read_bank_idx_int_w] = 1'b1;
             end
         end
+        dma_r_push_w =
+            dma_read_pending_reg || dma_read_complete_error_w;
 
         for (int unsigned p = 0; p < NUM_NOC_PORTS; p++) begin
             arb_bank_idx_w = '0;
@@ -417,8 +520,10 @@ module ScratchpadMemory import cluster_pkg::*; #(
             bank_ceb_w[dma_write_bank_idx_w]   = 1'b0;
             bank_web_w[dma_write_bank_idx_w]   = 1'b0;
             bank_addr_w[dma_write_bank_idx_w]  = dma_write_row_w;
-            bank_bweb_w[dma_write_bank_idx_w]  = expand_strb_to_bweb(w_pending_strb_reg);
-            bank_d_w[dma_write_bank_idx_w]     = w_pending_data_reg;
+            bank_bweb_w[dma_write_bank_idx_w]  =
+                expand_strb_to_bweb(axi_w_strb_fifo_reg[axi_w_rd_ptr_reg]);
+            bank_d_w[dma_write_bank_idx_w]     =
+                axi_w_data_fifo_reg[axi_w_rd_ptr_reg];
         end
 
         if (dma_read_issue_w) begin
@@ -432,25 +537,29 @@ module ScratchpadMemory import cluster_pkg::*; #(
         end
 
         if (!spm_decode_known_w) begin
-            dma_write_issue_w = 1'b0;
-            dma_read_issue_w  = 1'b0;
+            dma_write_issue_w          = 1'b0;
+            dma_write_complete_w       = 1'b0;
+            dma_read_issue_w           = 1'b0;
+            dma_read_complete_error_w  = 1'b0;
+            dma_read_head_pop_w        = 1'b0;
+            dma_r_push_w               = dma_read_pending_reg;
         end
 
-        s_axi_awready_w = !aw_pending_valid_reg && spm_decode_known_w
-            && (bank_pudelay_unused_reduce_w === bank_pudelay_unused_reduce_w);
-        s_axi_wready_w  = !w_pending_valid_reg && spm_decode_known_w
-            && (bank_pudelay_unused_reduce_w === bank_pudelay_unused_reduce_w);
-        s_axi_arready_w = !ar_pending_valid_reg && !dma_read_pending_reg && !rvalid_reg
-            && spm_decode_known_w && (bank_pudelay_unused_reduce_w === bank_pudelay_unused_reduce_w);
         s_axi_awready_o = s_axi_awready_w;
         s_axi_wready_o  = s_axi_wready_w;
         s_axi_arready_o = s_axi_arready_w;
 
-        s_axi_bvalid_o  = bvalid_reg;
-        s_axi_bresp_o   = bresp_reg;
-        s_axi_rvalid_o  = rvalid_reg;
-        s_axi_rdata_o   = rdata_reg;
-        s_axi_rresp_o   = rresp_reg;
+        s_axi_bvalid_o  = (axi_b_count_reg != 0);
+        s_axi_bresp_o   =
+            (axi_b_count_reg != 0) ?
+            axi_b_resp_fifo_reg[axi_b_rd_ptr_reg] : 2'b00;
+        s_axi_rvalid_o  = (axi_r_count_reg != 0);
+        s_axi_rdata_o   =
+            (axi_r_count_reg != 0) ?
+            axi_r_data_fifo_reg[axi_r_rd_ptr_reg] : '0;
+        s_axi_rresp_o   =
+            (axi_r_count_reg != 0) ?
+            axi_r_resp_fifo_reg[axi_r_rd_ptr_reg] : 2'b00;
 
         for (int unsigned p = 0; p < NUM_NOC_PORTS; p++) begin
             spm_resp_valid_o[p] = resp_valid_reg[p];
@@ -481,18 +590,21 @@ module ScratchpadMemory import cluster_pkg::*; #(
                 noc_read_bank_reg[p]     <= '0;
                 pmu_port_txn_cnt_reg[p]<= 64'd0;
             end
-            aw_pending_valid_reg      <= 1'b0;
-            aw_pending_addr_reg       <= '0;
-            w_pending_valid_reg       <= 1'b0;
-            w_pending_data_reg        <= '0;
-            w_pending_strb_reg        <= '0;
-            ar_pending_valid_reg      <= 1'b0;
-            ar_pending_addr_reg       <= '0;
-            bvalid_reg                <= 1'b0;
-            bresp_reg                 <= 2'b00;
-            rvalid_reg                <= 1'b0;
-            rdata_reg                 <= '0;
-            rresp_reg                 <= 2'b00;
+            axi_aw_wr_ptr_reg         <= '0;
+            axi_aw_rd_ptr_reg         <= '0;
+            axi_w_wr_ptr_reg          <= '0;
+            axi_w_rd_ptr_reg          <= '0;
+            axi_ar_wr_ptr_reg         <= '0;
+            axi_ar_rd_ptr_reg         <= '0;
+            axi_b_wr_ptr_reg          <= '0;
+            axi_b_rd_ptr_reg          <= '0;
+            axi_r_wr_ptr_reg          <= '0;
+            axi_r_rd_ptr_reg          <= '0;
+            axi_aw_count_reg          <= '0;
+            axi_w_count_reg           <= '0;
+            axi_ar_count_reg          <= '0;
+            axi_b_count_reg           <= '0;
+            axi_r_count_reg           <= '0;
             dma_read_pending_reg      <= 1'b0;
             dma_read_bank_reg         <= '0;
             pmu_cycle_cnt_reg         <= 64'd0;
@@ -543,11 +655,21 @@ module ScratchpadMemory import cluster_pkg::*; #(
                     noc_read_group_reg[p*GROUP_IDX_W +: GROUP_IDX_W] <= '0;
                     noc_read_bank_reg[p]     <= '0;
                 end
-                aw_pending_valid_reg <= 1'b0;
-                w_pending_valid_reg  <= 1'b0;
-                ar_pending_valid_reg <= 1'b0;
-                bvalid_reg           <= 1'b0;
-                rvalid_reg           <= 1'b0;
+                axi_aw_wr_ptr_reg    <= '0;
+                axi_aw_rd_ptr_reg    <= '0;
+                axi_w_wr_ptr_reg     <= '0;
+                axi_w_rd_ptr_reg     <= '0;
+                axi_ar_wr_ptr_reg    <= '0;
+                axi_ar_rd_ptr_reg    <= '0;
+                axi_b_wr_ptr_reg     <= '0;
+                axi_b_rd_ptr_reg     <= '0;
+                axi_r_wr_ptr_reg     <= '0;
+                axi_r_rd_ptr_reg     <= '0;
+                axi_aw_count_reg     <= '0;
+                axi_w_count_reg      <= '0;
+                axi_ar_count_reg     <= '0;
+                axi_b_count_reg      <= '0;
+                axi_r_count_reg      <= '0;
                 dma_read_pending_reg <= 1'b0;
             end else begin
                 // synopsys translate_off
@@ -576,8 +698,8 @@ module ScratchpadMemory import cluster_pkg::*; #(
                              $time,
                              dma_write_bank_idx_w,
                              dma_write_row_w,
-                             w_pending_data_reg,
-                             w_pending_strb_reg);
+                             axi_w_data_fifo_reg[axi_w_rd_ptr_reg],
+                             axi_w_strb_fifo_reg[axi_w_rd_ptr_reg]);
                 end
                 if (($test$plusargs("TRACE_CLUSTER_DEBUG") || $test$plusargs("TRACE_CLUSTER_RUNTIME"))
                     && dma_read_issue_w) begin
@@ -597,11 +719,11 @@ module ScratchpadMemory import cluster_pkg::*; #(
                         pmu_credit_stall_cnt_reg <= $bits(pmu_credit_stall_cnt_reg)'(pmu_credit_stall_cnt_reg + 64'd1);
                     end
                 end
-                if (bvalid_reg && s_axi_bready_i) begin
-                    bvalid_reg <= 1'b0;
+                if (s_axi_b_pop_w) begin
+                    axi_b_rd_ptr_reg <= axi_queue_ptr_inc(axi_b_rd_ptr_reg);
                 end
-                if (rvalid_reg && s_axi_rready_i) begin
-                    rvalid_reg <= 1'b0;
+                if (s_axi_r_pop_w) begin
+                    axi_r_rd_ptr_reg <= axi_queue_ptr_inc(axi_r_rd_ptr_reg);
                 end
 
                 // Complete outstanding SRAM reads.
@@ -639,26 +761,31 @@ module ScratchpadMemory import cluster_pkg::*; #(
                     end
                 end
 
+                if (dma_r_push_w) begin
+                    axi_r_data_fifo_reg[axi_r_wr_ptr_reg] <=
+                        dma_read_pending_reg ?
+                        bank_q_w[dma_read_bank_reg] : '0;
+                    axi_r_resp_fifo_reg[axi_r_wr_ptr_reg] <=
+                        dma_read_pending_reg ? 2'b00 : 2'b10;
+                    axi_r_wr_ptr_reg <= axi_queue_ptr_inc(axi_r_wr_ptr_reg);
+                end
                 if (dma_read_pending_reg) begin
-                    rvalid_reg           <= 1'b1;
-                    rresp_reg            <= 2'b00;
-                    rdata_reg            <= bank_q_w[dma_read_bank_reg];
                     dma_read_pending_reg <= 1'b0;
                 end
 
                 // DMA ingress capture
-                if (s_axi_awvalid_i && s_axi_awready_w) begin
-                    aw_pending_valid_reg <= 1'b1;
-                    aw_pending_addr_reg  <= s_axi_awaddr_i;
+                if (s_axi_aw_push_w) begin
+                    axi_aw_fifo_reg[axi_aw_wr_ptr_reg] <= s_axi_awaddr_i;
+                    axi_aw_wr_ptr_reg <= axi_queue_ptr_inc(axi_aw_wr_ptr_reg);
                 end
-                if (s_axi_wvalid_i && s_axi_wready_w) begin
-                    w_pending_valid_reg  <= 1'b1;
-                    w_pending_data_reg   <= s_axi_wdata_i;
-                    w_pending_strb_reg   <= s_axi_wstrb_i;
+                if (s_axi_w_push_w) begin
+                    axi_w_data_fifo_reg[axi_w_wr_ptr_reg] <= s_axi_wdata_i;
+                    axi_w_strb_fifo_reg[axi_w_wr_ptr_reg] <= s_axi_wstrb_i;
+                    axi_w_wr_ptr_reg <= axi_queue_ptr_inc(axi_w_wr_ptr_reg);
                 end
-                if (s_axi_arvalid_i && s_axi_arready_w) begin
-                    ar_pending_valid_reg <= 1'b1;
-                    ar_pending_addr_reg  <= s_axi_araddr_i;
+                if (s_axi_ar_push_w) begin
+                    axi_ar_fifo_reg[axi_ar_wr_ptr_reg] <= s_axi_araddr_i;
+                    axi_ar_wr_ptr_reg <= axi_queue_ptr_inc(axi_ar_wr_ptr_reg);
                 end
 
                 // NoC request execution (higher priority than DMA)
@@ -710,57 +837,48 @@ module ScratchpadMemory import cluster_pkg::*; #(
                 end
 
                 // DMA write issue (after NoC)
-                if (aw_pending_valid_reg && w_pending_valid_reg && !bvalid_reg) begin
-                    logic [31:0] gwaddr;
-                    int unsigned grp;
-                    int unsigned lidx;
-                    int unsigned bank_sel;
-                    int unsigned bank_idx;
-
-                    gwaddr   = aw_pending_addr_reg / BYTES_PER_BANK;
-                    grp      = gwaddr / GROUP_SPAN_WORDS;
-                    lidx     = gwaddr % GROUP_SPAN_WORDS;
-                    bank_sel = lidx / BANK_DEPTH;
-                    bank_idx = $unsigned(grp * BANKS_PER_GROUP + bank_sel);
-
-                    if ((grp >= NUM_GROUPS) || (lidx >= GROUP_LINEAR_WORDS) || (bank_idx >= TOTAL_BANKS)) begin
-                        bvalid_reg           <= 1'b1;
-                        bresp_reg            <= 2'b10;
-                        aw_pending_valid_reg <= 1'b0;
-                        w_pending_valid_reg  <= 1'b0;
-                    end else if (dma_write_issue_w) begin
-                        bvalid_reg            <= 1'b1;
-                        bresp_reg             <= 2'b00;
-                        aw_pending_valid_reg  <= 1'b0;
-                        w_pending_valid_reg   <= 1'b0;
-                    end
+                if (dma_write_complete_w) begin
+                    axi_aw_rd_ptr_reg <= axi_queue_ptr_inc(axi_aw_rd_ptr_reg);
+                    axi_w_rd_ptr_reg <= axi_queue_ptr_inc(axi_w_rd_ptr_reg);
+                    axi_b_resp_fifo_reg[axi_b_wr_ptr_reg] <=
+                        dma_write_decode_error_w ? 2'b10 : 2'b00;
+                    axi_b_wr_ptr_reg <= axi_queue_ptr_inc(axi_b_wr_ptr_reg);
                 end
 
                 // DMA read issue (after NoC and DMA write)
-                if (ar_pending_valid_reg && !rvalid_reg) begin
-                    logic [31:0] gwaddr;
-                    int unsigned grp;
-                    int unsigned lidx;
-                    int unsigned bank_sel;
-                    int unsigned bank_idx;
-
-                    gwaddr   = ar_pending_addr_reg / BYTES_PER_BANK;
-                    grp      = gwaddr / GROUP_SPAN_WORDS;
-                    lidx     = gwaddr % GROUP_SPAN_WORDS;
-                    bank_sel = lidx / BANK_DEPTH;
-                    bank_idx = $unsigned(grp * BANKS_PER_GROUP + bank_sel);
-
-                    if ((grp >= NUM_GROUPS) || (lidx >= GROUP_LINEAR_WORDS) || (bank_idx >= TOTAL_BANKS)) begin
-                        rvalid_reg           <= 1'b1;
-                        rresp_reg            <= 2'b10;
-                        rdata_reg            <= '0;
-                        ar_pending_valid_reg <= 1'b0;
-                    end else if (dma_read_issue_w) begin
-                        dma_read_pending_reg <= 1'b1;
-                        dma_read_bank_reg    <= dma_read_bank_idx_w;
-                        ar_pending_valid_reg <= 1'b0;
-                    end
+                if (dma_read_head_pop_w) begin
+                    axi_ar_rd_ptr_reg <= axi_queue_ptr_inc(axi_ar_rd_ptr_reg);
                 end
+                if (dma_read_issue_w) begin
+                    dma_read_pending_reg <= 1'b1;
+                    dma_read_bank_reg <= dma_read_bank_idx_w;
+                end
+
+                unique case ({s_axi_aw_push_w, dma_write_complete_w})
+                    2'b10: axi_aw_count_reg <= axi_aw_count_reg + 1'b1;
+                    2'b01: axi_aw_count_reg <= axi_aw_count_reg - 1'b1;
+                    default: ;
+                endcase
+                unique case ({s_axi_w_push_w, dma_write_complete_w})
+                    2'b10: axi_w_count_reg <= axi_w_count_reg + 1'b1;
+                    2'b01: axi_w_count_reg <= axi_w_count_reg - 1'b1;
+                    default: ;
+                endcase
+                unique case ({s_axi_ar_push_w, dma_read_head_pop_w})
+                    2'b10: axi_ar_count_reg <= axi_ar_count_reg + 1'b1;
+                    2'b01: axi_ar_count_reg <= axi_ar_count_reg - 1'b1;
+                    default: ;
+                endcase
+                unique case ({dma_write_complete_w, s_axi_b_pop_w})
+                    2'b10: axi_b_count_reg <= axi_b_count_reg + 1'b1;
+                    2'b01: axi_b_count_reg <= axi_b_count_reg - 1'b1;
+                    default: ;
+                endcase
+                unique case ({dma_r_push_w, s_axi_r_pop_w})
+                    2'b10: axi_r_count_reg <= axi_r_count_reg + 1'b1;
+                    2'b01: axi_r_count_reg <= axi_r_count_reg - 1'b1;
+                    default: ;
+                endcase
             end
         end
     end
@@ -799,6 +917,9 @@ module ScratchpadMemory import cluster_pkg::*; #(
         end
         if ((BANK_DEPTH % MACRO_DEPTH) != 0) begin
             $error("ScratchpadMemory requires BANK_DEPTH to be a multiple of %0d", MACRO_DEPTH);
+        end
+        if (AXI_QUEUE_DEPTH < 2) begin
+            $error("ScratchpadMemory requires AXI_QUEUE_DEPTH >= 2");
         end
     end
     // synopsys translate_on
