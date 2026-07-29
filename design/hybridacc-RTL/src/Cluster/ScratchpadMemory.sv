@@ -21,15 +21,15 @@
 // Revision:
 //   2026/04/27 - Initial version (M1 cluster datapath rewrite)
 // Additional Comments:
-//   Current implementation is intentionally fixed to the active Cluster
-//   configuration: ADDR_WIDTH=32, NOC_DATA_WIDTH=192, NUM_NOC_PORTS=4,
-//   BANKS_PER_GROUP=3, BANK_DATA_WIDTH=64.
+//   ADDR_WIDTH=32, NUM_NOC_PORTS=4, and BANK_DATA_WIDTH=64 remain the active
+//   contract. BANKS_PER_GROUP and the aggregate NoC payload follow the coupled
+//   b/s configuration selected in cluster_pkg.
 //-----------------------------------------------------------------------------
 import hybridacc_utils_pkg::*;
 module ScratchpadMemory import cluster_pkg::*; #(
     parameter int unsigned NUM_NOC_PORTS             = 4,
-    parameter int unsigned BANKS_PER_GROUP           = 3,
-    parameter int unsigned BANK_DATA_WIDTH           = 64,
+    parameter int unsigned BANKS_PER_GROUP           = CLUSTER_SPM_BANKS_PER_GROUP,
+    parameter int unsigned BANK_DATA_WIDTH           = CLUSTER_SPM_BANK_DATA_WIDTH,
     parameter int unsigned BANK_DEPTH                = 8192,
     parameter int unsigned ADDR_WIDTH                = 32,
     parameter int unsigned AXI_QUEUE_DEPTH           = 16
@@ -43,11 +43,11 @@ module ScratchpadMemory import cluster_pkg::*; #(
 
     input  logic                        spm_req_valid_i [NUM_NOC_PORTS],
     output logic                        spm_req_ready_o [NUM_NOC_PORTS],
-    input  spm_req_32_192_t             spm_req_i       [NUM_NOC_PORTS],
+    input  spm_req_t                    spm_req_i       [NUM_NOC_PORTS],
 
     output logic                        spm_resp_valid_o[NUM_NOC_PORTS],
     input  logic                        spm_resp_ready_i[NUM_NOC_PORTS],
-    output spm_resp_192_t               spm_resp_o      [NUM_NOC_PORTS],
+    output spm_resp_t                   spm_resp_o      [NUM_NOC_PORTS],
 
     input  logic                        s_axi_awvalid_i,
     output logic                        s_axi_awready_o,
@@ -100,7 +100,7 @@ module ScratchpadMemory import cluster_pkg::*; #(
     logic                   active_map_init_done_reg;
 
     logic                   resp_valid_reg [NUM_NOC_PORTS];
-    spm_resp_192_t          resp_data_reg  [NUM_NOC_PORTS];
+    spm_resp_t              resp_data_reg  [NUM_NOC_PORTS];
     logic                   noc_read_pending_reg  [NUM_NOC_PORTS];
     logic                   noc_read_parallel_reg [NUM_NOC_PORTS];
     logic [NUM_NOC_PORTS*GROUP_IDX_W-1:0] noc_read_group_reg;
@@ -910,10 +910,11 @@ module ScratchpadMemory import cluster_pkg::*; #(
 
     // synopsys translate_off
     initial begin
-        if ((NUM_NOC_PORTS != 4) || (BANKS_PER_GROUP != 3) ||
-            (BANK_DATA_WIDTH != 64) || (ADDR_WIDTH != 32) ||
+        if ((NUM_NOC_PORTS != 4) ||
+            (BANK_DATA_WIDTH != CLUSTER_SPM_BANK_DATA_WIDTH) ||
+            (ADDR_WIDTH != CLUSTER_ADDR_WIDTH) ||
             ((BANKS_PER_GROUP * BANK_DATA_WIDTH) != CLUSTER_DATA_WIDTH)) begin
-            $error("ScratchpadMemory baseline currently supports only NUM_NOC_PORTS=4, BANKS_PER_GROUP=3, BANK_DATA_WIDTH=64, ADDR_WIDTH=32, NOC_DATA_WIDTH=192");
+            $error("ScratchpadMemory requires NUM_NOC_PORTS=4 and package/module SPM payload widths to match");
         end
         if ((BANK_DEPTH % MACRO_DEPTH) != 0) begin
             $error("ScratchpadMemory requires BANK_DEPTH to be a multiple of %0d", MACRO_DEPTH);

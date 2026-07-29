@@ -21,17 +21,17 @@
 import hybridacc_utils_pkg::*;
 module HybridDataDeliverUnit import cluster_pkg::*; #(
     parameter int unsigned SPM_ADDR_BITS = 32,
-    parameter int unsigned DATA_BITS     = 192
+    parameter int unsigned DATA_BITS     = CLUSTER_DATA_WIDTH
 ) (
     input  logic             clk,
     input  logic             reset_n,
 
     output logic             spm_req_valid [4],
     input  logic             spm_req_ready [4],
-    output spm_req_32_192_t  spm_req_payload[4],
+    output spm_req_t         spm_req_payload[4],
     input  logic             spm_resp_valid[4],
     output logic             spm_resp_ready[4],
-    input  spm_resp_192_t    spm_resp_payload[4],
+    input  spm_resp_t        spm_resp_payload[4],
 
     output logic [DATA_BITS-1:0] noc_ps_out_data,
     output logic [15:0]          noc_ps_out_addr,
@@ -536,7 +536,7 @@ module HybridDataDeliverUnit import cluster_pkg::*; #(
     // synopsys translate_off
     initial begin
         if ((SPM_ADDR_BITS != CLUSTER_ADDR_WIDTH) || (DATA_BITS != CLUSTER_DATA_WIDTH)) begin
-            $error("HybridDataDeliverUnit baseline currently supports SPM_ADDR_BITS=32 and DATA_BITS=192 only");
+            $error("HybridDataDeliverUnit requires package/module SPM payload widths to match");
         end
     end
     // synopsys translate_on

@@ -19,6 +19,18 @@
 `ifndef CLUSTER_PKG_SV
 `define CLUSTER_PKG_SV
 
+// Package typedef widths are fixed when this compilation unit is parsed, so
+// coupled bus/SPM configurations select the aggregate width at compile time.
+// Module parameters must use the same values; follower modules check that
+// contract during elaboration. The defaults preserve b3_s3 exactly.
+`ifndef CLUSTER_SPM_BANKS_PER_GROUP
+`define CLUSTER_SPM_BANKS_PER_GROUP 3
+`endif
+
+`ifndef CLUSTER_SPM_BANK_DATA_WIDTH
+`define CLUSTER_SPM_BANK_DATA_WIDTH 64
+`endif
+
 package cluster_pkg;
 
     // ---------------------------------------------------------------------
@@ -110,22 +122,34 @@ package cluster_pkg;
     } plane_id_e;
 
     // ---------------------------------------------------------------------
-    // Fixed-width Cluster datapath payloads used by current ComputeCluster
-    // instantiation (ADDR_WIDTH=32, HDDU/SPM width=192).
+    // Cluster datapath payload width. A parallel SPM request carries one
+    // BANK_DATA_WIDTH word for every bank in the selected group:
+    //   b2_s2: 2 * 64 = 128 bits
+    //   b3_s3: 3 * 64 = 192 bits (legacy/default configuration)
     // ---------------------------------------------------------------------
-    localparam int unsigned CLUSTER_ADDR_WIDTH = 32;
-    localparam int unsigned CLUSTER_DATA_WIDTH = 192;
+    localparam int unsigned CLUSTER_ADDR_WIDTH          = 32;
+    localparam int unsigned CLUSTER_SPM_BANKS_PER_GROUP =
+        `CLUSTER_SPM_BANKS_PER_GROUP;
+    localparam int unsigned CLUSTER_SPM_BANK_DATA_WIDTH =
+        `CLUSTER_SPM_BANK_DATA_WIDTH;
+    localparam int unsigned CLUSTER_DATA_WIDTH =
+        CLUSTER_SPM_BANKS_PER_GROUP * CLUSTER_SPM_BANK_DATA_WIDTH;
 
     typedef struct packed {
         logic [CLUSTER_ADDR_WIDTH-1:0] addr;
         logic [CLUSTER_DATA_WIDTH-1:0] wdata;
         logic                          wen;
-    } spm_req_32_192_t;
+    } spm_req_t;
 
     typedef struct packed {
         logic [CLUSTER_DATA_WIDTH-1:0] rdata;
         logic                          code;
-    } spm_resp_192_t;
+    } spm_resp_t;
+
+    // Compatibility names retained for existing ComputeCluster/testbench
+    // declarations. Their payload width now follows CLUSTER_DATA_WIDTH.
+    typedef spm_req_t  spm_req_32_192_t;
+    typedef spm_resp_t spm_resp_192_t;
 
 endpackage : cluster_pkg
 
