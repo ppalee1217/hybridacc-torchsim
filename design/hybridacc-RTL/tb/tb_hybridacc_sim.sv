@@ -311,6 +311,7 @@ module tb_hybridacc_sim;
     logic [63:0] rtl_dma_cycles;
     logic [63:0] rtl_overlap_cycles;
     logic [63:0] rtl_pe_busy_cycles;
+    logic [63:0] rtl_pe_dma_overlap_cycles;
     logic [63:0] rtl_pe_busy_sum;
     logic [63:0] rtl_agu_busy_cycles;
     logic [63:0] rtl_agu_stall_cycles;
@@ -386,6 +387,7 @@ module tb_hybridacc_sim;
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
             rtl_pe_busy_cycles   <= 64'd0;
+            rtl_pe_dma_overlap_cycles <= 64'd0;
             rtl_pe_busy_sum      <= 64'd0;
             rtl_agu_busy_cycles  <= 64'd0;
             rtl_agu_stall_cycles <= 64'd0;
@@ -395,6 +397,9 @@ module tb_hybridacc_sim;
         end else begin
             if (rtl_pe_busy_active_w) begin
                 rtl_pe_busy_cycles <= rtl_pe_busy_cycles + 64'd1;
+            end
+            if (rtl_pe_busy_active_w && rtl_dma_active_w) begin
+                rtl_pe_dma_overlap_cycles <= rtl_pe_dma_overlap_cycles + 64'd1;
             end
             rtl_pe_busy_sum <= rtl_pe_busy_sum + rtl_pe_busy_count_w;
             if (rtl_agu_busy_active_w) begin
@@ -419,6 +424,7 @@ module tb_hybridacc_sim;
         $display("[TB] rtl_pe_busy=%0d rtl_pe_busy_sum=%0d",
                  rtl_pe_busy_cycles,
                  rtl_pe_busy_sum);
+        $display("[TB] rtl_pe_dma_overlap=%0d", rtl_pe_dma_overlap_cycles);
         $display("[TB] rtl_agu_busy=%0d rtl_agu_stall=%0d rtl_agu_desc=%0d rtl_agu_wave=%0d",
                  rtl_agu_busy_cycles,
                  rtl_agu_stall_cycles,
