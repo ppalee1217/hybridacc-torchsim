@@ -1262,7 +1262,13 @@ static inline void prefetch_wave_inputs_gemm(const TilingParams* t,
     prefetch_enqueue_bias_generic(t, spatial, wave);
     prefetch_enqueue_ps_generic(t, wave);
 
-    prefetch_start();
+    /* Serialize the multi-descriptor prefetch: an unserialized prefetch_start()
+     * issues the next tag while the previous DMA is still busy; the multi-active
+     * DmaEngine drops the duplicate submit but still accepts the descriptor
+     * overwrite, corrupting a live COUNT_D0 and duplicating one destination
+     * (overwrites a correct A word). Honors the single-live-command DMA contract
+     * (same fix already applied on the conv_3x3 path). */
+    prefetch_start_serialized();
 }
 
 static inline void prefetch_wave_inputs_conv_3x3(const TilingParams* t,
