@@ -17,6 +17,7 @@ from .frontend import parse_workload
 from .lowering import lower_workload
 from .codegen import generate_firmware
 from .elf_builder import DEFAULT_MARCH, build_gcc_command, compile_firmware, validate_elf
+from .provenance import write_toolchain_provenance
 from .visualize import dump_hardware_visualization
 
 
@@ -166,9 +167,29 @@ def main(argv: list[str] | None = None) -> int:
 
     # Stage 4: ELF Compilation (default unless --no-compile)
     do_compile = not args.no_compile
+    opt = f"-O{args.opt_level}"
+    mmio_opt = None if args.mmio_opt_level is None else f"O{args.mmio_opt_level}"
+    provenance_path = write_toolchain_provenance(
+        args.output,
+        package_version=__version__,
+        template_dir=args.template_dir,
+        march=args.march,
+        gcc=args.gcc,
+        opt_level=opt,
+        mmio_opt_level=mmio_opt,
+        stack_size=args.stack_size,
+        compilation_requested=do_compile or args.dry_run,
+        gcc_command=build_gcc_command(
+            args.output,
+            gcc=args.gcc,
+            march=args.march,
+            opt_level=opt,
+            mmio_opt_level=mmio_opt,
+        ),
+    )
+    if args.verbose:
+        print(f"  → {provenance_path}")
     if do_compile or args.dry_run:
-        opt = f"-O{args.opt_level}"
-        mmio_opt = None if args.mmio_opt_level is None else f"O{args.mmio_opt_level}"
         if args.dry_run:
             cmd = build_gcc_command(
                 args.output,
