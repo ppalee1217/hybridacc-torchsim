@@ -409,6 +409,49 @@ class LayerHwConfig:
     # unset, so their generated runtime behavior remains unchanged.
     gemm_k_wave: Optional[GemmKWaveMetadata] = None
 
+    # GEMM-only: the tile geometry cc committed to, exported for PyTorchSim's
+    # MLIR codegen.  Left unset by other operators.
+    codegen_tile: Optional[CodegenTile] = None
+
+
+@dataclass
+class CodegenTile:
+    """The tile geometry cc committed to for this layer.
+
+    PyTorchSim's MLIR codegen needs the same tile shape cc lowered to, otherwise
+    it re-tiles the kernel with its own heuristic and the resulting tile graph
+    describes a different schedule than the one cc emitted.  Recording it here
+    -- from the values the lowering actually used, not a re-derivation -- lets
+    cc export the map instead of it being hand-maintained on the consumer side.
+
+    ``logical_key`` is formatted as ``M_N_K`` to match the lookup key
+    ``select_tile`` builds in PyTorchSimFrontend/mlir/mlir_gemm_template.py.
+    """
+    m: int
+    n: int
+    k: int
+    tile_m: int
+    tile_n: int
+    tile_k: int
+    sub_tile_m: int
+    sub_tile_n: int
+    sub_tile_k: int
+
+    @property
+    def logical_key(self) -> str:
+        return f"{self.m}_{self.n}_{self.k}"
+
+    def to_consumer_entry(self) -> Dict[str, int]:
+        """Render in the exact field names PyTorchSim's select_tile unpacks."""
+        return {
+            "SUB_TILE_K": self.sub_tile_k,
+            "SUB_TILE_M": self.sub_tile_m,
+            "SUB_TILE_N": self.sub_tile_n,
+            "TILE_K": self.tile_k,
+            "TILE_M": self.tile_m,
+            "TILE_N": self.tile_n,
+        }
+
 
 @dataclass
 class RelayoutDesc:

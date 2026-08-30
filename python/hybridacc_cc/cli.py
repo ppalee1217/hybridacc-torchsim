@@ -15,7 +15,7 @@ from pathlib import Path
 from . import __version__
 from .frontend import parse_workload
 from .lowering import lower_workload
-from .codegen import generate_firmware
+from .codegen import generate_firmware, write_codegen_tiling_map
 from .elf_builder import DEFAULT_MARCH, build_gcc_command, compile_firmware, validate_elf
 from .provenance import write_toolchain_provenance
 from .visualize import dump_hardware_visualization
@@ -164,6 +164,13 @@ def main(argv: list[str] | None = None) -> int:
     for f in generated:
         if args.verbose:
             print(f"  → {f}")
+
+    # Export the committed GEMM tile geometry for PyTorchSim's MLIR codegen.
+    # Emitted unconditionally (not behind --dump-ir) because a consumer running
+    # without it silently re-tiles with its own heuristic.
+    tiling_map_path = write_codegen_tiling_map(hardware_ir, args.output)
+    if args.verbose:
+        print(f"  → {tiling_map_path}")
 
     # Stage 4: ELF Compilation (default unless --no-compile)
     do_compile = not args.no_compile

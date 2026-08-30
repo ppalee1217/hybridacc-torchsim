@@ -6,6 +6,7 @@ firmware_data.c, firmware_ops.c, firmware_main.c, and linker.ld.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -263,3 +264,58 @@ def generate_firmware(hw_ir: HardwareIR,
         generated.append(out_path)
 
     return generated
+
+
+# ===================================================================
+# Codegen tiling map export
+# ===================================================================
+
+CODEGEN_TILING_SCHEMA = "hybridacc.cc.codegen_tiling.v1"
+
+
+def build_codegen_tiling_map(hw_ir) -> Dict[str, Dict[str, int]]:
+    """Collect every GEMM layer's committed tile geometry, keyed ``M_N_K``.
+
+    This is the map PyTorchSim's ``select_tile`` looks up.  It used to be a
+    hand-maintained JSON file on the consumer side, which meant any shape nobody
+    remembered to add silently fell through to PyTorchSim's own heuristic tiler
+    and produced a tile graph describing a different schedule than cc emitted.
+    Deriving it here makes cc the single source of truth.
+
+    Raises on a genuine conflict: if two layers share a logical shape but
+    lowered to different tiles, one map cannot represent both, and picking
+    either silently would reintroduce exactly the class of bug this replaces.
+    """
+    entries: Dict[str, Dict[str, int]] = {}
+    origin: Dict[str, str] = {}
+    for layer in hw_ir.layers:
+        tile = getattr(layer, "codegen_tile", None)
+        if tile is None:
+            continue  # non-GEMM layers do not drive select_tile
+        key = tile.logical_key
+        rendered = tile.to_consumer_entry()
+        if key in entries and entries[key] != rendered:
+            raise ValueError(
+                f"codegen tiling conflict for logical shape {key}: layer "
+                f"{origin[key]!r} lowered to {entries[key]} but layer "
+                f"{layer.name!r} lowered to {rendered}; a single-valued map "
+                f"cannot represent both"
+            )
+        entries[key] = rendered
+        origin[key] = layer.name
+    return entries
+
+
+def write_codegen_tiling_map(hw_ir, output_dir: Path) -> Path:
+    """Write ``codegen_tiling.json`` next to the other cc artifacts."""
+    payload = {
+        "schema": CODEGEN_TILING_SCHEMA,
+        "workload_name": hw_ir.workload_name,
+        "cc_config_fingerprint": hw_ir.config_fingerprint,
+        "key_format": "M_N_K",
+        "entries": build_codegen_tiling_map(hw_ir),
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / "codegen_tiling.json"
+    out_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return out_path

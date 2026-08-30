@@ -14,6 +14,7 @@ from .frontend import CompilationError
 from .ir import (
     AguBankConfig,
     ClusterMapping,
+    CodegenTile,
     HardwareDesc,
     HardwareIR,
     GemmKWaveMetadata,
@@ -1805,6 +1806,14 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
         spm_layout=spm_layout, tiling=tiling,
         cluster_mapping=cluster_map, tiling_params=tiling_params,
         gemm_k_wave=gemm_k_wave,
+        # Export the tile geometry actually used above (PE_M/PE_N/PE_K bounded
+        # by the K extent) so PyTorchSim's MLIR codegen can be driven from cc
+        # rather than from a hand-maintained map.
+        codegen_tile=CodegenTile(
+            m=M, n=N, k=K,
+            tile_m=PE_M, tile_n=PE_N, tile_k=min(K, PE_K),
+            sub_tile_m=PE_M, sub_tile_n=PE_N, sub_tile_k=min(K, PE_K),
+        ),
     )
 
 
