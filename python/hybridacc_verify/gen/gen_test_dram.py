@@ -869,6 +869,13 @@ def main():
             print(f"  Generated input tensor '{name}': shape={shape}, "
                   f"range=[{tensors_data[name].min():.4f}, {tensors_data[name].max():.4f}]")
 
+    # Snapshot the PRE-SPLIT logical workload so a schedule-independent fp32
+    # reference can be produced below.  After _expand_auto_split_gemms the op
+    # list describes cc's chunked schedule, which is exactly what the fp32
+    # reference must NOT be derived from.
+    _prefp32_ops = [dict(op) for op in ops]
+    _prefp32_inputs = {k: v.copy() for k, v in tensors_data.items()}
+
     wl_tensors, ops = _expand_auto_split_gemms(wl_tensors, ops, tensors_data)
     conv_batch = _match_single_conv_batch_unroll(wl_tensors, ops, layers)
     if conv_batch is None:
@@ -982,6 +989,33 @@ def main():
     with open(golden_path, "wb") as f:
         f.write(output_bytes)
 
+    # -- Schedule-independent fp32 reference (single logical GEMM only) --
+    #
+    # golden_output.bin mirrors whatever schedule cc chose: it accumulates in
+    # fp16 and, for an auto-split chain, rounds again at every chunk boundary.
+    # Comparing a split arm and an unsplit arm each against *its own* golden
+    # therefore cannot show whether the split changed the answer.  This file is
+    # the neutral third point: one fp32 full-K product of the ORIGINAL, pre-split
+    # operands, identical for both arms.
+    #
+    # Scope guard: emitted only for a workload that is one logical GEMM before
+    # auto-splitting.  Anything else is skipped rather than approximated.
+    fp32_ref_path = None
+    if len(_prefp32_ops) == 1 and _prefp32_ops[0].get("type") == "gemm":
+        _a_name, _b_name = _prefp32_ops[0]["inputs"][:2]
+        if _a_name in _prefp32_inputs and _b_name in _prefp32_inputs:
+            _ref32 = (_prefp32_inputs[_a_name].astype(np.float32)
+                      @ _prefp32_inputs[_b_name].astype(np.float32))
+            fp32_ref_path = os.path.join(args.output_dir, "golden_reference_fp32.bin")
+            with open(fp32_ref_path, "wb") as f:
+                f.write(_ref32.astype(np.float32).tobytes())
+            print(f"  fp32 reference: {fp32_ref_path} "
+                  f"(shape={_ref32.shape}, schedule-independent)")
+        else:
+            print("  fp32 reference: SKIPPED (gemm operands are not source tensors)")
+    else:
+        print("  fp32 reference: SKIPPED (not a single logical GEMM)")
+
     # Determine shapes for meta
     final_output_shape = tuple(wl_tensors[final_output_name]["shape"])
 
@@ -998,6 +1032,7 @@ def main():
         f.write(f"output_shape={list(final_output_shape)}\n")
         f.write(f"dram_image_bytes={dram_size}\n")
         f.write(f"golden_output_bytes={len(output_bytes)}\n")
+        f.write(f"fp32_reference={'golden_reference_fp32.bin' if fp32_ref_path else 'none'}\n")
         f.write(f"output_dram_offset={output_offset}\n")
         f.write(f"num_layers={len(layers)}\n")
         f.write(f"op_types={','.join(op['type'] for op in ops)}\n")
