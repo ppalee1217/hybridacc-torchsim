@@ -14,6 +14,7 @@
 #pragma once
 
 #define SC_INCLUDE_DYNAMIC_PROCESSES
+#include <vector>
 #include <systemc>
 #include <cstdint>
 #include <memory>
@@ -440,6 +441,24 @@ SC_MODULE(HybridAcc) {
             return 0;
         }
         return cluster_hddu_busy_cycles_[c];
+    }
+
+    /// Number of DMA command submits rejected because the command FIFO was
+    /// full.  A non-zero value means transfers were silently lost before this
+    /// counter existed, so a run should assert it stayed zero.
+    uint32_t dma_dropped_command_count() const {
+        return core_ctrl.dma_dropped_command_count();
+    }
+
+    /// Per-wave compute records for one cluster (see
+    /// ComputeCluster::WaveComputeRecord).  Empty for an out-of-range index.
+    const std::vector<typename ComputeCluster<>::WaveComputeRecord>&
+    cluster_wave_records(unsigned c = 0) const {
+        static const std::vector<typename ComputeCluster<>::WaveComputeRecord> kEmpty;
+        if (c >= NUM_CLUSTERS || !cluster[c]) {
+            return kEmpty;
+        }
+        return cluster[c]->wave_compute_records();
     }
 
     uint64_t dma_active_cycles() const { return dma_active_cycles_; }

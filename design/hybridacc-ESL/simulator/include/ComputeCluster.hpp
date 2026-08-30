@@ -1,5 +1,6 @@
 #pragma once
 
+#include <vector>
 #include <systemc>
 #include <array>
 #include <cstdint>
@@ -152,6 +153,47 @@ public:
 	cluster::ClusterSubstate substate() const { return cluster_ctrl_.substate(); }
 	bool hddu_busy() const { return hddu.busy(); }
 	uint64_t run_cycles() const { return cluster_run_cycles_; }
+
+	/// One record per compute wave, with every completion boundary recorded.
+	///
+	/// Per-wave compute cost was previously unavailable from the ESL: only an
+	/// aggregate RUN total was reported, so consumers divided that total evenly
+	/// across waves.  An even split is not a measurement -- a short K-tail wave
+	/// gets the same cost as a full one.
+	///
+	/// All three candidate end boundaries are captured because they are not
+	/// equivalent and the choice between them is an open architectural
+	/// decision.  Recording all three means that decision does not require
+	/// re-running anything:
+	///   * ``end_cycle_agu_idle``   -- AGUs done (what ``hddu.busy()`` reports)
+	///   * ``end_cycle_local_drain``-- also HDDU-internal queues empty
+	///   * ``end_cycle_retired``    -- also NoC quiesced and SPM quiesced
+	struct WaveComputeRecord {
+		uint32_t wave_index = 0;
+		uint64_t start_cycle = 0;
+		uint64_t end_cycle_agu_idle = 0;
+		uint64_t end_cycle_local_drain = 0;
+		uint64_t end_cycle_retired = 0;
+		bool local_drain_observed = false;
+		bool retired_observed = false;
+
+		uint64_t cycles_agu_idle() const {
+			return end_cycle_agu_idle >= start_cycle
+				? end_cycle_agu_idle - start_cycle + 1 : 0;
+		}
+		uint64_t cycles_local_drain() const {
+			return local_drain_observed && end_cycle_local_drain >= start_cycle
+				? end_cycle_local_drain - start_cycle + 1 : 0;
+		}
+		uint64_t cycles_retired() const {
+			return retired_observed && end_cycle_retired >= start_cycle
+				? end_cycle_retired - start_cycle + 1 : 0;
+		}
+	};
+
+	const std::vector<WaveComputeRecord>& wave_compute_records() const {
+		return wave_records_;
+	}
 
 	SC_HAS_PROCESS(ComputeCluster);
 
@@ -521,7 +563,61 @@ private:
 	sc_uint<32> noc_last_cmd_reg{};
 	bool hddu_start_pending_ = false;  // AHB pipeline race fix: set on CTRL_START write, cleared when STATUS shows BUSY
 	cluster::ClusterControlUnit cluster_ctrl_;
+	/// Advance the per-wave profile state machine by one cycle.
+	///
+	/// A wave opens when HDDU goes busy and closes in stages: the AGU-idle
+	/// boundary is taken as soon as ``hddu.busy()`` falls, then the later
+	/// boundaries are latched as the datapath actually empties.  Watching
+	/// continues after AGU-idle precisely because real data movement is known
+	/// to continue past that point.
+	void sample_wave_compute_profile() {
+		if (!power_enable_i.read()) return;
+		const uint64_t now = cycle_counter_for_wave_profile_;
+		++cycle_counter_for_wave_profile_;
+
+		const bool busy = hddu.busy();
+
+		if (busy && !wave_open_) {
+			WaveComputeRecord rec;
+			rec.wave_index = wave_next_index_++;
+			rec.start_cycle = now;
+			wave_records_.push_back(rec);
+			wave_open_ = true;
+			wave_awaiting_drain_ = false;
+			return;
+		}
+
+		if (wave_open_ && !busy) {
+			// AGUs just went idle: take boundary A and start watching for the
+			// later ones.
+			wave_records_.back().end_cycle_agu_idle = now;
+			wave_open_ = false;
+			wave_awaiting_drain_ = true;
+		}
+
+		if (wave_awaiting_drain_ && !wave_records_.empty()) {
+			WaveComputeRecord& rec = wave_records_.back();
+			if (!rec.local_drain_observed && hddu.internal_queues_empty()) {
+				rec.end_cycle_local_drain = now;
+				rec.local_drain_observed = true;
+			}
+			if (rec.local_drain_observed && !rec.retired_observed
+					&& noc_is_quiesced() && spm.spm_quiesced()) {
+				rec.end_cycle_retired = now;
+				rec.retired_observed = true;
+				wave_awaiting_drain_ = false;
+			}
+		}
+	}
+
+	uint64_t cycle_counter_for_wave_profile_ = 0;
 	uint64_t cluster_run_cycles_ = 0;
+
+	// Per-wave compute profile (see WaveComputeRecord).
+	std::vector<WaveComputeRecord> wave_records_;
+	bool wave_open_ = false;              // a wave is currently executing
+	bool wave_awaiting_drain_ = false;    // AGUs idle, still watching for drain/retire
+	uint32_t wave_next_index_ = 0;
 
 	static bool in_range(uint32_t addr, uint32_t base, uint32_t size) {
 		return addr >= base && addr < (base + size);
@@ -838,6 +934,10 @@ private:
 		hddu_mmio_write_sig.write(false);
 		cluster_ctrl_.reset();
 		cluster_run_cycles_ = 0;
+		wave_records_.clear();
+		wave_open_ = false;
+		wave_awaiting_drain_ = false;
+		wave_next_index_ = 0;
 
 		wait();
 
@@ -996,6 +1096,8 @@ private:
 			if (power_enable_i.read() && hddu.busy()) {
 				++cluster_run_cycles_;
 			}
+
+			sample_wave_compute_profile();
 
 			wait();
 		}

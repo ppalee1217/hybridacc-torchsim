@@ -865,6 +865,31 @@ int sc_main(int argc, char* argv[]) {
                   << " start_stop_control=" << window.control_instructions
                   << std::endl;
     }
+    // Per-wave compute profile.  Emitted as one line per wave with every
+    // completion boundary, so a consumer can use measured per-wave costs
+    // instead of dividing an aggregate RUN total evenly, and so the choice of
+    // completion boundary stays a decision rather than an assumption.
+    {
+        const auto& waves = dut.cluster_wave_records(0);
+        std::cout << "[SIM] Wave compute records: " << waves.size() << std::endl;
+        for (const auto& w : waves) {
+            std::cout << "[SIM] Wave compute record[" << w.wave_index
+                      << "]: start_cycle=" << w.start_cycle
+                      << " end_agu_idle=" << w.end_cycle_agu_idle
+                      << " cycles_agu_idle=" << w.cycles_agu_idle()
+                      << " end_local_drain="
+                      << (w.local_drain_observed
+                          ? std::to_string(w.end_cycle_local_drain) : std::string("n/a"))
+                      << " cycles_local_drain=" << w.cycles_local_drain()
+                      << " end_retired="
+                      << (w.retired_observed
+                          ? std::to_string(w.end_cycle_retired) : std::string("n/a"))
+                      << " cycles_retired=" << w.cycles_retired()
+                      << std::endl;
+        }
+    }
+    std::cout << "[SIM] DMA commands dropped (submit when full): "
+              << dut.dma_dropped_command_count() << std::endl;
     std::cout << "[SIM] Simulation ended at " << sc_time_stamp() << std::endl;
     dram.print_oob_summary();
 

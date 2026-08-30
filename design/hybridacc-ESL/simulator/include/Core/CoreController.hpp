@@ -744,6 +744,11 @@ SC_MODULE(CoreController) {
 
     uint32_t irq_summary() const { return u_boot_host_if.debug_irq_summary(); }
 
+    /// Count of DMA command submits dropped because the command FIFO was full.
+    uint32_t dma_dropped_command_count() const {
+        return u_dma_engine.dropped_command_count();
+    }
+
     WaveGapInstructionStats wave_gap_instruction_stats() const {
         WaveGapInstructionStats stats = wave_gap_stats_;
         stats.dropped_partial_windows = wave_gap_stop_events_ >= stats.completed_windows

@@ -276,6 +276,21 @@ private:
     uint32_t mmio_cmd_tag_reg = 0;
     uint32_t mmio_status_reg = 0x1;
     uint32_t mmio_error_code_reg = 0;
+    // Supplementary information for the most recent error, exposed at the
+    // spec-defined DMA_ERR_INFO (0x068, Core.md:1012).  For
+    // DMA_ERR_SUBMIT_WHEN_FULL this carries the command-FIFO occupancy at the
+    // moment the submit was rejected.
+    uint32_t mmio_error_info_reg = 0;
+    // Count of command submits rejected because the FIFO was full.  Readable at
+    // MMIO 0x098 so a run can assert it stayed zero.  ESL extension register,
+    // outside the spec's DMA map (which ends at 0x06C).
+    uint32_t dropped_cmd_cnt_reg = 0;
+
+public:
+    /// Command submits rejected because the FIFO was full.
+    uint32_t dropped_command_count() const { return dropped_cmd_cnt_reg; }
+
+private:
     uint32_t mmio_done_tag_reg = 0;
     bool     mmio_irq_en_reg = false;
 
@@ -343,6 +358,8 @@ private:
         mmio_epilogue_param0_reg = 0;
         mmio_status_reg = 0x1;
         mmio_error_code_reg = 0;
+        mmio_error_info_reg = 0;
+        dropped_cmd_cnt_reg = 0;
         mmio_done_tag_reg = 0;
         mmio_irq_en_reg = false;
     }
@@ -593,6 +610,31 @@ private:
                 case 0x008: {
                     mmio_irq_en_reg = (wdata & 0x8) != 0;
                     if (wdata & 0x1) {
+                        // Command FIFO full: the submit is DROPPED.  Previously
+                        // this was a bare guard with no else -- the command
+                        // vanished while the MMIO write still completed, so
+                        // firmware had no way to learn the transfer never
+                        // happened.  DMA_ERR_SUBMIT_WHEN_FULL exists for
+                        // exactly this condition (Types.hpp:183) but was never
+                        // assigned.  Raise it so the drop is observable.
+                        //
+                        // This matters beyond bookkeeping: with a variable
+                        // latency DRAM model, commands sit in this FIFO longer
+                        // and the full condition becomes reachable, at which
+                        // point a silent drop is a wrong-data bug, not a
+                        // timing inaccuracy.
+                        if (cmd_fifo_reg.size() >= kDmaCmdFifoDepth) {
+                            mmio_error_code_reg =
+                                static_cast<uint32_t>(DmaError::DMA_ERR_SUBMIT_WHEN_FULL);
+                            mmio_error_info_reg =
+                                static_cast<uint32_t>(cmd_fifo_reg.size());
+                            ++dropped_cmd_cnt_reg;
+                            std::cerr << "[DmaEngine] ERROR: command submit dropped, "
+                                      << "cmd FIFO full (depth=" << kDmaCmdFifoDepth
+                                      << ", cmd_tag=" << mmio_cmd_tag_reg
+                                      << ", dropped_total=" << dropped_cmd_cnt_reg
+                                      << ")" << std::endl;
+                        }
                         if (cmd_fifo_reg.size() < kDmaCmdFifoDepth) {
                             DmaCommand cmd{};
                             cmd.src_kind = static_cast<DmaEndpoint>(mmio_src_kind_reg);
@@ -684,7 +726,10 @@ private:
                 case 0x05C: mmio_resp_rdata_o.write(mmio_cmd_tag_reg); break;
                 case 0x060: mmio_resp_rdata_o.write(mmio_done_tag_reg); break;
                 case 0x064: mmio_resp_rdata_o.write(mmio_error_code_reg); break;
-                case 0x068: mmio_resp_rdata_o.write(0); break;
+                // DMA_ERR_INFO per Core.md:1012 -- supplementary info for the
+                // last error.  Was hardcoded 0; now carries the FIFO occupancy
+                // recorded when a submit was rejected.
+                case 0x068: mmio_resp_rdata_o.write(mmio_error_info_reg); break;
                 case 0x06C: mmio_resp_rdata_o.write(static_cast<uint32_t>(state_reg)); break;
                 case 0x070: mmio_resp_rdata_o.write(mmio_xform_ctrl_reg); break;
                 case 0x074: mmio_resp_rdata_o.write(static_cast<uint32_t>(mmio_pad_window_h0_reg)); break;
@@ -696,6 +741,11 @@ private:
                 case 0x08C: mmio_resp_rdata_o.write(mmio_fill_value_hi_reg); break;
                 case 0x090: mmio_resp_rdata_o.write(mmio_epilogue_ctrl_reg); break;
                 case 0x094: mmio_resp_rdata_o.write(mmio_epilogue_param0_reg); break;
+                case 0x098: mmio_resp_rdata_o.write(dropped_cmd_cnt_reg); break;
+                // Free command-FIFO slots.  ESL extension (not in the spec map)
+                // so firmware can check for space instead of submitting blind.
+                case 0x09C: mmio_resp_rdata_o.write(
+                    static_cast<uint32_t>(kDmaCmdFifoDepth - cmd_fifo_reg.size())); break;
                 default: mmio_resp_rdata_o.write(0); break;
             }
         }

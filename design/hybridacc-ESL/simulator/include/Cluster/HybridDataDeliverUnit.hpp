@@ -93,6 +93,28 @@ public:
 	using spm_req_payload_t = spm_request_t<SPM_ADDR_BITS, DATA_BITS>;
 	using spm_resp_payload_t = spm_response_t<DATA_BITS>;
 
+	/// True when every internal queue is empty, i.e. no accepted-but-unretired
+	/// data remains inside HDDU.
+	///
+	/// ``busy()`` reports only whether the AGUs still have addresses to
+	/// generate, so it can fall while up to FIFO_DEPTH entries per plane are
+	/// still in flight (SPM reads issued, packets awaiting NoC, PLO responses
+	/// not yet written to SPM).  This accessor exposes the drain condition
+	/// separately so a measurement can record both boundaries and the choice
+	/// between them stays an explicit architectural decision rather than an
+	/// artifact of which signal happened to be available.
+	bool internal_queues_empty() const {
+		for (int i = 0; i < NUM_SEND_PLANES; ++i) {
+			if (!read_noc_addr_wait_fifo_empty_out[i].read()) return false;
+			if (!noc_req_fifo_empty_out[i].read()) return false;
+		}
+		return write_addr_fifo_empty_out.read() && spm_req_fifo_empty_out.read();
+	}
+
+	/// Conjunction of "AGUs idle" and "nothing left inside": the module-local
+	/// completion condition RTL's `hddu_busy_w` encodes.
+	bool drained() const { return !busy() && internal_queues_empty(); }
+
 	bool busy() const {
 		return global_status_reg.read()[(int)HdduStatusBit::BUSY];
 	}
