@@ -1000,17 +1000,29 @@ def main():
     #
     # Scope guard: emitted only for a workload that is one logical GEMM before
     # auto-splitting.  Anything else is skipped rather than approximated.
+    #
+    # LAYOUT: row-major C[M, N] float32, NOT the PLO wave-packed layout that
+    # golden_output.bin and the DRAM output region use.  This is deliberate.
+    # The packed order is derived from the cc schedule (num_oc_tiles /
+    # num_h_tiles / GRID_*_PER_WAVE via _gemm_wave_meta), so writing the
+    # reference packed would make a file whose whole purpose is to be
+    # schedule-independent carry a schedule-dependent layout, and two arms of
+    # the same (K, seed) could then differ byte-wise for layout reasons alone.
+    # The layout is declared in golden_meta.txt; a consumer must de-tile the
+    # packed side before comparing, never read this file as if it were packed.
     fp32_ref_path = None
+    fp32_ref_shape = None
     if len(_prefp32_ops) == 1 and _prefp32_ops[0].get("type") == "gemm":
         _a_name, _b_name = _prefp32_ops[0]["inputs"][:2]
         if _a_name in _prefp32_inputs and _b_name in _prefp32_inputs:
             _ref32 = (_prefp32_inputs[_a_name].astype(np.float32)
                       @ _prefp32_inputs[_b_name].astype(np.float32))
             fp32_ref_path = os.path.join(args.output_dir, "golden_reference_fp32.bin")
+            fp32_ref_shape = tuple(int(dim) for dim in _ref32.shape)
             with open(fp32_ref_path, "wb") as f:
-                f.write(_ref32.astype(np.float32).tobytes())
+                f.write(np.ascontiguousarray(_ref32.astype(np.float32)).tobytes())
             print(f"  fp32 reference: {fp32_ref_path} "
-                  f"(shape={_ref32.shape}, schedule-independent)")
+                  f"(shape={_ref32.shape}, row-major, schedule-independent)")
         else:
             print("  fp32 reference: SKIPPED (gemm operands are not source tensors)")
     else:
@@ -1033,6 +1045,13 @@ def main():
         f.write(f"dram_image_bytes={dram_size}\n")
         f.write(f"golden_output_bytes={len(output_bytes)}\n")
         f.write(f"fp32_reference={'golden_reference_fp32.bin' if fp32_ref_path else 'none'}\n")
+        if fp32_ref_path:
+            # Declared so no consumer has to guess: this file is row-major,
+            # while golden_output.bin and the DRAM output region are packed.
+            f.write("fp32_reference_layout=row_major\n")
+            f.write("fp32_reference_dtype=float32\n")
+            f.write(f"fp32_reference_shape={list(fp32_ref_shape)}\n")
+            f.write("golden_output_layout=plo_wave_packed\n")
         f.write(f"output_dram_offset={output_offset}\n")
         f.write(f"num_layers={len(layers)}\n")
         f.write(f"op_types={','.join(op['type'] for op in ops)}\n")
