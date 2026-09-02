@@ -699,6 +699,13 @@ private:
 			hddu_mmio_wdata_sig.write(static_cast<sc_uint<32>>(wdata));
 			hddu_mmio_write_sig.write(true);
 			if ((addr - kCmdHdduBase) == kHdduCtrlOffset && (wdata & 0x1u) != 0u) {
+				const uint16_t valid_height = hddu.agu_iteration_count(
+					static_cast<unsigned>(cluster::PLANE_PLO), 1u);
+				const uint16_t valid_width = hddu.agu_iteration_count(
+					static_cast<unsigned>(cluster::PLANE_PLO), 2u);
+				const uint16_t full_width = noc.configure_spatial_wave(
+					valid_height, valid_width);
+				hddu.preserve_spatial_row_pitch(valid_width, full_width);
 				hddu_start_pending_ = true;
 			}
 		}

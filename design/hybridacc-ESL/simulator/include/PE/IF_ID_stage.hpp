@@ -56,7 +56,11 @@ public:
           im_write_data("im_write_data"),
           IM("IM"),
           decoder("decoder"),
-          loops("loops")
+          loops("loops"),
+          spatial_window_override_en("spatial_window_override_en"),
+          spatial_window_loop_pc("spatial_window_loop_pc"),
+          spatial_window_loop_end_pc("spatial_window_loop_end_pc"),
+          spatial_window_valid_width("spatial_window_valid_width")
     {
         DEBUG_MSG("[Create] IF_ID_Stage", DEBUG_LEVEL_PE_STAGE);
 
@@ -68,7 +72,9 @@ public:
         SC_METHOD(comb_pc_next);
         sensitive << pc_reg << halted_reg << stage_reset << pe_running << ready_in
               << valid_reg
-                  << decoder_decode_signals_out_sig << loops_jump_sig << loops_pc_out_sig;
+                  << decoder_decode_signals_out_sig << loops_jump_sig << loops_pc_out_sig
+                  << spatial_window_override_en << spatial_window_loop_pc
+                  << spatial_window_loop_end_pc << spatial_window_valid_width;
 
         SC_METHOD(comb_valid_next);
         sensitive << valid_reg << stage_reset << pe_running << ready_in << halted_reg;
@@ -78,7 +84,9 @@ public:
 
         // Loop controls are driven by decoder output (combinational)
         SC_METHOD(comb_loop_controls);
-        sensitive << decoder_decode_signals_out_sig << ready_in << loops_jump_sig << loops_pc_out_sig << pc_reg;
+        sensitive << decoder_decode_signals_out_sig << ready_in << loops_jump_sig << loops_pc_out_sig << pc_reg
+                  << spatial_window_override_en << spatial_window_loop_pc
+                  << spatial_window_loop_end_pc << spatial_window_valid_width;
 
         // Bind submodules
         bind();
@@ -88,6 +96,19 @@ public:
     InstructionMemory IM;
     Decoder decoder;
     LoopController loops;
+
+    void configure_spatial_window_loop(uint16_t loop_pc,
+                                       uint16_t loop_end_pc,
+                                       uint16_t valid_width) {
+        spatial_window_loop_pc.write(loop_pc);
+        spatial_window_loop_end_pc.write(loop_end_pc);
+        spatial_window_valid_width.write(valid_width);
+        spatial_window_override_en.write(true);
+    }
+
+    void clear_spatial_window_loop() {
+        spatial_window_override_en.write(false);
+    }
 
     // === Sequential Elements (Registers) ===
     // Program Counter
@@ -116,6 +137,11 @@ public:
     sc_signal<bool> loops_empty_sig;
     sc_signal<uint16_t> loops_pc_out_sig;
     sc_signal<bool> loops_jump_sig;
+
+    sc_signal<bool> spatial_window_override_en;
+    sc_signal<uint16_t> spatial_window_loop_pc;
+    sc_signal<uint16_t> spatial_window_loop_end_pc;
+    sc_signal<uint16_t> spatial_window_valid_width;
 
     void bind() {
         // Clock and reset for all modules
@@ -163,9 +189,14 @@ public:
         uint16_t next_pc_candidate = incremented_pc;
 
         const bool can_advance = ready_in.read() && valid_reg.read();
+        const bool skip_spatial_window = spatial_window_override_en.read()
+            && spatial_window_valid_width.read() == 1u
+            && pc_current == spatial_window_loop_pc.read();
 
         // Handle Branch/Loop Logic (only when issuing a valid instruction)
-        if (can_advance && decode_from_decoder.loop_end) {
+        if (can_advance && skip_spatial_window) {
+            next_pc_candidate = spatial_window_loop_end_pc.read() + sizeof(uint16_t);
+        } else if (can_advance && decode_from_decoder.loop_end) {
             if (loops_jump_sig.read()) {
                 next_pc_candidate = loops_pc_out_sig.read();
             }
@@ -250,12 +281,24 @@ public:
         pe_decode_signals_t decode = decoder_decode_signals_out_sig.read();
 
         const bool can_advance = ready_in.read() && valid_reg.read();
+        const bool is_spatial_window_loop = spatial_window_override_en.read()
+            && pc_reg.read() == spatial_window_loop_pc.read();
+        const bool single_spatial_window_end = spatial_window_override_en.read()
+            && spatial_window_valid_width.read() == 2u
+            && pc_reg.read() == spatial_window_loop_end_pc.read();
 
         // Loop In
         if (decode.loop_in && can_advance) {
             loops_pc_in_sig.write(pc_reg.read() + sizeof(uint16_t)); // Push next instruction address
-            loops_count_in_sig.write(decode.imm);
-            loops_loop_in_en_sig.write(true);
+            if (is_spatial_window_loop && spatial_window_valid_width.read() == 1u) {
+                loops_count_in_sig.write(0u);
+                loops_loop_in_en_sig.write(false);
+            } else {
+                loops_count_in_sig.write(is_spatial_window_loop
+                    ? static_cast<uint16_t>(spatial_window_valid_width.read() - 2u)
+                    : decode.imm);
+                loops_loop_in_en_sig.write(true);
+            }
         } else {
             loops_loop_in_en_sig.write(false);
         }
@@ -264,7 +307,7 @@ public:
         // If stalled, we re-execute the same loop_end instruction, checking condition again
         // But the LoopController state should only update once.
         // Actually, since loop controller is sequential, we should only enable it when we are advancing (ready_in=1)
-        loops_loop_end_en_sig.write(decode.loop_end && can_advance);
+        loops_loop_end_en_sig.write(decode.loop_end && can_advance && !single_spatial_window_end);
     }
 
     // === Sequential Logic (Register Updates) ===

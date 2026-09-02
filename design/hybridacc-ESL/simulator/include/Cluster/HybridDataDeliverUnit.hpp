@@ -119,6 +119,40 @@ public:
 		return global_status_reg.read()[(int)HdduStatusBit::BUSY];
 	}
 
+	uint16_t agu_iteration_count(unsigned plane, unsigned dimension) const {
+		return plane < static_cast<unsigned>(NUM_AGU)
+			? agus[plane].iteration_count(dimension)
+			: 0u;
+	}
+
+	void preserve_spatial_row_pitch(uint16_t valid_width, uint16_t full_width) {
+		if (valid_width == 0u || full_width == 0u || valid_width > full_width) {
+			clear_spatial_row_pitch();
+			return;
+		}
+
+		if (valid_width == full_width) {
+			for (unsigned plane = static_cast<unsigned>(PLANE_PD);
+				 plane <= static_cast<unsigned>(PLANE_PLO); ++plane) {
+				agus[plane].configure_runtime_stride(1u, false);
+				spatial_full_stride1_[plane] = agus[plane].stride(1u);
+			}
+			spatial_full_width_ = full_width;
+			spatial_row_pitch_bound_ = true;
+			return;
+		}
+
+		if (!spatial_row_pitch_bound_ || spatial_full_width_ != full_width) {
+			clear_spatial_row_pitch();
+			return;
+		}
+		for (unsigned plane = static_cast<unsigned>(PLANE_PD);
+			 plane <= static_cast<unsigned>(PLANE_PLO); ++plane) {
+			agus[plane].configure_runtime_stride(
+				1u, true, spatial_full_stride1_[plane]);
+		}
+	}
+
 	// --- Clock / Reset ---
 	sc_in<bool> clk;
 	sc_in<bool> reset_n;
@@ -137,6 +171,19 @@ public:
 	VRDOF<noc_req_payload_t> noc_pli_out;
 	VRDOF<noc_addr_payload_t> noc_plo_out;
 	VRDIF<noc_resp_payload_t> noc_plo_in;
+
+	bool spatial_row_pitch_bound_ = false;
+	uint16_t spatial_full_width_ = 0u;
+	std::array<uint32_t, NUM_AGU> spatial_full_stride1_{};
+
+	void clear_spatial_row_pitch() {
+		for (unsigned plane = static_cast<unsigned>(PLANE_PD);
+			 plane <= static_cast<unsigned>(PLANE_PLO); ++plane) {
+			agus[plane].configure_runtime_stride(1u, false);
+		}
+		spatial_row_pitch_bound_ = false;
+		spatial_full_width_ = 0u;
+	}
 
 	// --- MMIO ---
 	sc_in<sc_uint<32>> mmio_addr;

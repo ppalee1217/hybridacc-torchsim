@@ -17,6 +17,7 @@ public:
     // Ports
     sc_in<bool> clk;
     sc_in<bool> reset_n;
+    sc_in<sc_uint<16>> active_pe_count;
 
     // === Process Element (PE) interface ports ===
     // Router config port
@@ -54,6 +55,7 @@ public:
         : sc_module(name),
           clk("clk"),
           reset_n("reset_n"),
+          active_pe_count("active_pe_count"),
           num_pes(num_pes),
           bus_to_pe_ps_req("bus_to_pe_ps_req", num_pes),
           bus_to_pe_pd_req("bus_to_pe_pd_req", num_pes),
@@ -97,22 +99,22 @@ public:
 
         // PS Channel Routing
         SC_METHOD(comb_ps_routing);
-        sensitive << noc_ps_to_bus_req.valid_in << noc_ps_to_bus_req.data_in << scan_chain_enable;
+        sensitive << noc_ps_to_bus_req.valid_in << noc_ps_to_bus_req.data_in << scan_chain_enable << active_pe_count;
         for (size_t i = 0; i < num_pes; ++i) sensitive << pe_scan_chain_signals_reg[i] << bus_to_pe_ps_req[i].ready_in;
 
         // PD Channel Routing
         SC_METHOD(comb_pd_routing);
-        sensitive << noc_pd_to_bus_req.valid_in << noc_pd_to_bus_req.data_in << scan_chain_enable;
+        sensitive << noc_pd_to_bus_req.valid_in << noc_pd_to_bus_req.data_in << scan_chain_enable << active_pe_count;
         for (size_t i = 0; i < num_pes; ++i) sensitive << pe_scan_chain_signals_reg[i] << bus_to_pe_pd_req[i].ready_in;
 
         // PLI Channel Routing
         SC_METHOD(comb_pli_routing);
-        sensitive << noc_pli_to_bus_req.valid_in << noc_pli_to_bus_req.data_in << scan_chain_enable;
+        sensitive << noc_pli_to_bus_req.valid_in << noc_pli_to_bus_req.data_in << scan_chain_enable << active_pe_count;
         for (size_t i = 0; i < num_pes; ++i) sensitive << pe_scan_chain_signals_reg[i] << bus_to_pe_pli_req[i].ready_in;
 
         // PLO Channel Routing (Read Request)
         SC_METHOD(comb_plo_routing);
-        sensitive << noc_plo_to_bus_req.valid_in << noc_plo_to_bus_req.data_in << scan_chain_enable;
+        sensitive << noc_plo_to_bus_req.valid_in << noc_plo_to_bus_req.data_in << scan_chain_enable << active_pe_count;
         for (size_t i = 0; i < num_pes; ++i) sensitive << pe_scan_chain_signals_reg[i] << bus_to_pe_plo_req[i].ready_in;
 
         // PLO Response Handling
@@ -122,7 +124,7 @@ public:
 
         // Response Ready Handling
         SC_METHOD(comb_pe_response_ready);
-        sensitive << bus_to_noc_plo_resp.ready_in << rx_mask_reg;
+        sensitive << bus_to_noc_plo_resp.ready_in << rx_mask_reg << active_pe_count;
 
         SC_METHOD(trace_process);
         sensitive << clk.pos();
@@ -137,6 +139,12 @@ public:
             std::cout << "PE[" << i << "] Config - " << config << std::endl;
         }
         std::cout << "=======================" << std::endl;
+    }
+
+    ScanChainFormat scan_config(size_t index) const {
+        return index < num_pes
+            ? pe_scan_chain_signals_reg[index].read()
+            : ScanChainFormat{};
     }
 
 private:
@@ -207,6 +215,9 @@ private:
                 mask |= (1ULL << i);
                 continue; // Command goes to all enabled PEs, ignore tag
             }
+            if (i >= static_cast<size_t>(active_pe_count.read().to_uint())) {
+                continue;
+            }
 
             uint8_t pe_channel_id = 0;
             switch (expected_channel) {
@@ -230,11 +241,29 @@ private:
         return mask;
     }
 
+    // Tail rows shadow row 0 so the statically loaded PE program remains
+    // lock-stepped.  Only the active rows remain real NoC destinations.
+    uint64_t expand_shadow_row_mask(uint64_t active_mask) const {
+        const size_t active_count = static_cast<size_t>(active_pe_count.read().to_uint());
+        if (active_count >= num_pes || (active_mask & 0x1ULL) == 0u) {
+            return active_mask;
+        }
+        uint64_t delivery_mask = active_mask;
+        for (size_t i = active_count; i < num_pes; ++i) {
+            if (pe_scan_chain_signals_reg[i].read().enable) {
+                delivery_mask |= (1ULL << i);
+            }
+        }
+        return delivery_mask;
+    }
+
     void comb_ps_routing() {
         bool scan = scan_chain_enable.read();
         bool valid = noc_ps_to_bus_req.valid_in.read();
         noc_request_t req = noc_ps_to_bus_req.data_in.read();
-        uint64_t mask = (!scan) ? calculate_target_pe_mask(req.addr, NOC_CHANNEL_PS) : 0;
+        uint64_t mask = (!scan)
+            ? expand_shadow_row_mask(calculate_target_pe_mask(req.addr, NOC_CHANNEL_PS))
+            : 0;
 
         bool all_ready = true;
         for(size_t i=0; i<num_pes; ++i) if(mask & (1ULL<<i)) if(!bus_to_pe_ps_req[i].ready_in.read()) all_ready=false;
@@ -252,7 +281,9 @@ private:
         bool scan = scan_chain_enable.read();
         bool valid = noc_pd_to_bus_req.valid_in.read();
         noc_request_t req = noc_pd_to_bus_req.data_in.read();
-        uint64_t mask = (!scan) ? calculate_target_pe_mask(req.addr, NOC_CHANNEL_PD) : 0;
+        uint64_t mask = (!scan)
+            ? expand_shadow_row_mask(calculate_target_pe_mask(req.addr, NOC_CHANNEL_PD))
+            : 0;
 
         bool all_ready = true;
         for(size_t i=0; i<num_pes; ++i) if(mask & (1ULL<<i)) if(!bus_to_pe_pd_req[i].ready_in.read()) all_ready=false;
@@ -270,7 +301,9 @@ private:
         bool scan = scan_chain_enable.read();
         bool valid = noc_pli_to_bus_req.valid_in.read();
         noc_request_t req = noc_pli_to_bus_req.data_in.read();
-        uint64_t mask = (!scan) ? calculate_target_pe_mask(req.addr, NOC_CHANNEL_PLI) : 0;
+        uint64_t mask = (!scan)
+            ? expand_shadow_row_mask(calculate_target_pe_mask(req.addr, NOC_CHANNEL_PLI))
+            : 0;
 
         bool all_ready = true;
         for(size_t i=0; i<num_pes; ++i) if(mask & (1ULL<<i)) if(!bus_to_pe_pli_req[i].ready_in.read()) all_ready=false;
@@ -288,12 +321,15 @@ private:
         bool scan = scan_chain_enable.read();
         bool valid = noc_plo_to_bus_req.valid_in.read();
         noc_addr_req_t req = noc_plo_to_bus_req.data_in.read();
-        uint64_t mask = (!scan) ? calculate_target_pe_mask(req.addr, NOC_CHANNEL_PLO) : 0;
+        const uint64_t response_mask = (!scan)
+            ? calculate_target_pe_mask(req.addr, NOC_CHANNEL_PLO)
+            : 0;
+        const uint64_t mask = expand_shadow_row_mask(response_mask);
 
         // Update RX Mask for response cycle
         // Note: Logic simplified; implies atomic read-req then response wait?
         // Original logic updated rx_mask.
-        if(!scan && valid) rx_mask_next.write(mask);
+        if(!scan && valid) rx_mask_next.write(response_mask);
         else rx_mask_next.write(0);
 
         bool all_ready = true;
@@ -332,8 +368,10 @@ private:
     void comb_pe_response_ready() {
         bool ready = bus_to_noc_plo_resp.ready_in.read();
         uint64_t mask = rx_mask_reg.read();
+        const size_t active_count = static_cast<size_t>(active_pe_count.read().to_uint());
         for(size_t i=0; i<num_pes; ++i) {
-            pe_to_bus_plo_resp[i].ready_out.write(ready && (mask & (1ULL<<i)));
+            pe_to_bus_plo_resp[i].ready_out.write(
+                i >= active_count || (ready && (mask & (1ULL<<i))));
         }
     }
 
