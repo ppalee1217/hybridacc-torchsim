@@ -796,7 +796,21 @@ private:
                         + ",\"beats\":" + std::to_string(beats)
                         + ",\"bytes\":" + std::to_string(static_cast<uint64_t>(beats) * 8)
                         + ",\"count\":[" + std::to_string(active_cmd_reg.count[0]) + "," + std::to_string(active_cmd_reg.count[1])
-                        + "," + std::to_string(active_cmd_reg.count[2]) + "," + std::to_string(active_cmd_reg.count[3]) + "]}";
+                        + "," + std::to_string(active_cmd_reg.count[2]) + "," + std::to_string(active_cmd_reg.count[3]) + "]";
+                    // A padded conv load synthesises fill beats for out-of-window
+                    // pixels, so beats/bytes alone do not identify which spatial
+                    // tile the command serves.  The window origin does, and it is
+                    // already in the command - it was simply never emitted.  Only
+                    // present when load padding is on, so unpadded traces keep the
+                    // exact payload shape they had before.
+                    if (load_pad_enabled(active_cmd_reg)) {
+                        dma_args += ",\"pad_window_h0\":" + std::to_string(active_cmd_reg.transform.pad_window_h0)
+                                 +  ",\"pad_window_w0\":" + std::to_string(active_cmd_reg.transform.pad_window_w0)
+                                 +  ",\"pad_src_h\":" + std::to_string(active_cmd_reg.transform.pad_src_h)
+                                 +  ",\"pad_src_w\":" + std::to_string(active_cmd_reg.transform.pad_src_w)
+                                 +  ",\"beats_per_pixel\":" + std::to_string(active_cmd_reg.transform.beats_per_pixel);
+                    }
+                    dma_args += "}";
                     TRACE_EVENT("dma_transfer", "DMA", TRACE_BEGIN, 0, 1, dma_args);
                 }
                 reset_execution_state();
