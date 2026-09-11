@@ -1240,7 +1240,11 @@ static inline void prefetch_wave_inputs_generic(const TilingParams* t,
     prefetch_enqueue_ps_generic(t, wave);
     prefetch_enqueue_pd_generic(t, spatial, wave);
 
-    prefetch_start();
+    /* Serialize the multi-descriptor prefetch: the DMA engine accepts only
+     * one live submit, so an unserialized prefetch_start() lets a later
+     * descriptor overwrite the active command's MMIO shadow/tag state.
+     * Same defect and same fix as the gemm path. */
+    prefetch_start_serialized();
 }
 
 static inline void prefetch_wave_inputs_gemm(const TilingParams* t,
@@ -1363,7 +1367,11 @@ static inline void prefetch_wave_inputs_conv_1x1(const TilingParams* t,
         }
     }
 
-    prefetch_start();
+    /* Serialize the multi-descriptor prefetch: the DMA engine accepts only
+     * one live submit, so an unserialized prefetch_start() lets a later
+     * descriptor overwrite the active command's MMIO shadow/tag state.
+     * Same defect and same fix as the gemm path. */
+    prefetch_start_serialized();
 }
 
 static inline void reset_spatial_dma_runtime(SpatialDmaRuntime* spatial) {
