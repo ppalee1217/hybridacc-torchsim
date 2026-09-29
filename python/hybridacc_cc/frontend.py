@@ -86,6 +86,20 @@ def _parse_hardware(raw: dict) -> HardwareDesc:
     if not (1 <= spm_banks_per_group <= 8):
         raise CompilationError("schema", path, "spm_banks_per_group must be in [1, 8]")
 
+    # The compiler uses 64-bit NoC ports and 64-bit SRAM bank words.
+    # Match ComputeCluster's payload-width invariant using banks per group,
+    # not the four SPM groups (PS, PD, PLI, PLO).
+    noc_payload_bits = num_bus * 64
+    spm_group_bits = spm_banks_per_group * 64
+    if noc_payload_bits != spm_group_bits:
+        raise CompilationError(
+            "schema", path,
+            f"NoC payload width num_bus ({num_bus}) * port width (64 bits) "
+            f"= {noc_payload_bits} bits must equal SPM group width "
+            f"spm_banks_per_group ({spm_banks_per_group}) * bank width (64 bits) "
+            f"= {spm_group_bits} bits; num_bus and spm_banks_per_group must match",
+        )
+
     spm_bank_depth = _get(raw, "spm_bank_depth", 8192, int)
     if spm_bank_depth < 1024 or (spm_bank_depth & (spm_bank_depth - 1)):
         raise CompilationError("schema", path, "spm_bank_depth must be power of 2, >= 1024")
