@@ -206,8 +206,26 @@ install(TARGETS test_pe_unit test_pe_sim test_noc_unit
 
 # Add test discovery for CTest
 enable_testing()
+
+# Data-driven simulation tests generate their inputs first (CTest fixtures),
+# the same way scripts/gen/*.sh do: from the repository root into output/
+# (fixture configs use root-relative paths).
+set(HYBRIDACC_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
+set(HACC_PYTHON python3 CACHE STRING "Python interpreter with hybridacc_verify dependencies")
+set(HACC_ASM ${HYBRIDACC_ROOT}/design/hybridacc-pe-isa/tools/bin/ha-asm)
+set(HACC_GEN ${CMAKE_COMMAND} -E env PYTHONPATH=${HYBRIDACC_ROOT}/python
+    ${HACC_PYTHON} -m hybridacc_verify.main)
+# Space-joined form for the `sh -c` commands below (a list would expand with ';').
+string(JOIN " " HACC_GEN_SH ${HACC_GEN})
+
+add_test(NAME Gen_PE_conv_k3c4
+    COMMAND sh -c "${HACC_GEN_SH} gen-pe --config ${HYBRIDACC_ROOT}/testbench/pe/conv_k3c4/config.json && ${HACC_ASM} ${HYBRIDACC_ROOT}/testbench/pe/conv_k3c4/pe_program.asm -o output/pe-sim/conv_k3c4/pe_program.bin --json output/pe-sim/conv_k3c4/pe_program.json"
+    WORKING_DIRECTORY ${HYBRIDACC_ROOT})
+set_tests_properties(Gen_PE_conv_k3c4 PROPERTIES FIXTURES_SETUP pe_conv_k3c4_data)
+
 add_test(NAME PE_Unit_Tests COMMAND test_pe_unit)
-add_test(NAME PE_Simulation_Conv3x3 COMMAND test_pe_sim)
+add_test(NAME PE_Simulation_Conv3x3 COMMAND test_pe_sim ${HYBRIDACC_ROOT}/output/pe-sim/conv_k3c4)
+set_tests_properties(PE_Simulation_Conv3x3 PROPERTIES FIXTURES_REQUIRED pe_conv_k3c4_data)
 add_test(NAME NoC_Unit_Tests COMMAND test_noc_unit)
 # NoC Simulation Test
 add_executable(test_noc_sim
@@ -236,7 +254,12 @@ add_custom_target(run_noc_sim
     COMMENT "Running NoC simulation test"
 )
 
-add_test(NAME NoC_Simulation COMMAND test_noc_sim)
+add_test(NAME Gen_NoC_conv_k3c4
+    COMMAND sh -c "${HACC_GEN_SH} gen-noc --config ${HYBRIDACC_ROOT}/testbench/noc/conv_k3c4/config.json && ${HACC_ASM} ${HYBRIDACC_ROOT}/testbench/noc/conv_k3c4/pe_program.asm -o output/noc-sim/conv_k3c4/pe_program.bin --json output/noc-sim/conv_k3c4/pe_asm.json"
+    WORKING_DIRECTORY ${HYBRIDACC_ROOT})
+set_tests_properties(Gen_NoC_conv_k3c4 PROPERTIES FIXTURES_SETUP noc_conv_k3c4_data)
+add_test(NAME NoC_Simulation COMMAND test_noc_sim ${HYBRIDACC_ROOT}/output/noc-sim/conv_k3c4)
+set_tests_properties(NoC_Simulation PROPERTIES FIXTURES_REQUIRED noc_conv_k3c4_data)
 
 # AGU Unit Tests
 add_executable(test_agu_unit
@@ -421,8 +444,16 @@ add_custom_target(run_core_controller_integration
     COMMENT "Running HACC core controller integration test"
 )
 
-add_test(NAME ComputeCluster_Simulation COMMAND test_cluster_sim)
-add_test(NAME ComputeCluster_Simulation_Advanced COMMAND test_cluster_sim_advanced)
+add_test(NAME Gen_Cluster_conv_k3c4ich16och16
+    COMMAND ${HACC_GEN} gen-cluster --config ${HYBRIDACC_ROOT}/testbench/cluster/conv_k3c4ich16och16/config.json --assembler ${HACC_ASM}
+    WORKING_DIRECTORY ${HYBRIDACC_ROOT})
+set_tests_properties(Gen_Cluster_conv_k3c4ich16och16 PROPERTIES FIXTURES_SETUP cluster_conv_k3c4_data)
+add_test(NAME ComputeCluster_Simulation
+    COMMAND test_cluster_sim -d ${HYBRIDACC_ROOT}/output/cluster-sim/conv_k3c4ich16och16)
+add_test(NAME ComputeCluster_Simulation_Advanced
+    COMMAND test_cluster_sim_advanced -d ${HYBRIDACC_ROOT}/output/cluster-sim/conv_k3c4ich16och16)
+set_tests_properties(ComputeCluster_Simulation ComputeCluster_Simulation_Advanced
+    PROPERTIES FIXTURES_REQUIRED cluster_conv_k3c4_data)
 add_test(NAME HACC_Core_Unit_Tests COMMAND test_core_unit)
 add_test(NAME HACC_Core_Controller_Integration COMMAND test_core_controller_integration)
 
@@ -452,4 +483,9 @@ add_custom_target(run_core_sim
     COMMENT "Running Core DMA simulation"
 )
 
-add_test(NAME HACC_Core_DMA_Simulation COMMAND test_core_sim)
+add_test(NAME Build_Firmware_test_dma
+    COMMAND make -B -C ${CMAKE_CURRENT_SOURCE_DIR}/firmware/test_dma)
+set_tests_properties(Build_Firmware_test_dma PROPERTIES FIXTURES_SETUP firmware_test_dma)
+add_test(NAME HACC_Core_DMA_Simulation
+    COMMAND test_core_sim ${CMAKE_CURRENT_SOURCE_DIR}/firmware/test_dma/test_dma.elf 2000000 --dma-check)
+set_tests_properties(HACC_Core_DMA_Simulation PROPERTIES FIXTURES_REQUIRED firmware_test_dma)
