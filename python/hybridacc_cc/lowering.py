@@ -240,6 +240,36 @@ def _assert_spm_agu_consistency(layer: LayerHwConfig) -> None:
         )
 
 
+def _assert_ultra_plo_all_ports(layer: LayerHwConfig, num_bus: int) -> None:
+    """E010: an ultra PLO read needs an answer from every NoC port.
+
+    In SIMD (ultra) mode the NoC router waits for a valid PLO response on
+    each port and concatenates them (NetworkOnChip.md, "PLO read flow";
+    NoCRouter process_responses_plo). Every bus must therefore have enabled
+    PEs that drive PLO onto the bus for the same set of tags, otherwise the
+    read never completes.
+
+    Raises CompilationError with code E010 on violation.
+    """
+    if not (layer.hddu.plane_en >> 3) & 0x1 or not layer.agu_plo.ctrl & 0x8:
+        return
+    pes_per_bus = len(layer.scan_chain) // num_bus
+    plo_to_bus = (2, 3)  # PLI_FROM_LN_PLO_TO_BUS, PLI_FROM_BUS_PLO_TO_BUS
+    tags = [
+        {e.plo_id for e in layer.scan_chain[b * pes_per_bus:(b + 1) * pes_per_bus]
+         if e.enable and e.route_mode in plo_to_bus}
+        for b in range(num_bus)
+    ]
+    if not tags[0] or any(t != tags[0] for t in tags[1:]):
+        raise CompilationError(
+            "validation",
+            layer.name,
+            "E010: ultra PLO needs every port to answer each tag; "
+            + "PLO-to-bus tags per bus = "
+            + ", ".join(f"bus{b}:{sorted(t)}" for b, t in enumerate(tags)),
+        )
+
+
 # ===================================================================
 # SPM Constants
 # ===================================================================
@@ -1002,6 +1032,17 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
     resident_oc_tiles = _choose_conv1x1_resident_oc_tiles(num_oc_tiles, num_bus)
     oc_parallel = resident_oc_tiles > 1
     use_ultra = (not oc_parallel) and (H_out > pes_per_bus)
+
+    # An ultra (SIMD) PLO read completes only when every NoC port responds
+    # (NetworkOnChip.md, "PLO read flow"). If the OC-resident or H-stripe
+    # mapping would leave a bus without output PEs, use the single-bus
+    # normal path; the H/W/OC wave tiling below still covers every output.
+    partial_oc_ports = oc_parallel and resident_oc_tiles < num_bus
+    partial_h_ports = use_ultra and math.ceil(H_out / pes_per_bus) < num_bus
+    if partial_oc_ports or partial_h_ports:
+        resident_oc_tiles = 1
+        oc_parallel = False
+        use_ultra = False
 
     if padding > 0 and use_ultra:
         raise TilingFailed(
@@ -2400,9 +2441,10 @@ def lower_workload(wir: WorkloadIR) -> HardwareIR:
         emitted_layers = _unroll_single_conv_batch(op, layer)
         layers.extend(emitted_layers)
 
-        # E009: SPM/AGU mode consistency.
+        # E009: SPM/AGU mode consistency. E010: ultra PLO port coverage.
         for emitted_layer in emitted_layers:
             _assert_spm_agu_consistency(emitted_layer)
+            _assert_ultra_plo_all_ports(emitted_layer, wir.hardware.num_bus)
 
         # Advance cursor past this layer's last allocation
         tp = emitted_layers[-1].tiling_params
