@@ -188,9 +188,10 @@ private:
         std::cout << "Running PE Unit Tests" << std::endl;
         std::cout << "=====================" << std::endl;
 
-        const uint16_t HALT_INST = 0x001E;
-        const uint16_t NOP_INST = 0x0004;
-        const uint16_t VPSUM_INST = 0x800C;
+        // ISA v3 encodings, as produced by tools/bin/ha-asm.
+        const uint16_t HALT_INST = 0x001C;
+        const uint16_t NOP_INST = 0x0014;
+        const uint16_t VPSUM_INST = 0x0012;  // VPSUM vp0
 
         std::cout << "\n=== Test 1: Basic PE Operations ===" << std::endl;
         reset_dut();

@@ -253,7 +253,7 @@ public:
         // Test 5: Program Loading
         std::cout << "=== Test 5: Program Loading ===" << std::endl;
         std::vector<uint16_t> test_program = {
-            0x0004, 0x0004, 0x0004, 0x001E
+            0x0014, 0x0014, 0x0014, 0x001C  // NOP x3, HALT (ISA v3, ha-asm)
         };
         load_program_to_all_pes(test_program);
         std::cout << "✓ Test 5 passed\n" << std::endl;
