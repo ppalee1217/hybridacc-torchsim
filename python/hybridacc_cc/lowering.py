@@ -88,6 +88,23 @@ def _choose_conv1x1_resident_oc_tiles(num_oc_tiles: int, num_bus: int) -> int:
     return 1
 
 
+def _conv_pe_template(base: str, tile_oc: int, op_name: str) -> str:
+    """Pick the conv PE template whose output stream matches tile_oc.
+
+    tile_oc = min(OC, 16) (02_OperatorLowering.md) gives one VPSUM per four
+    channels in each window; the 16-channel template issues four, and the
+    _oc4/_oc8/_oc12 variants issue one to three.
+    """
+    if tile_oc == 16:
+        return f"{base}_template"
+    if tile_oc in (4, 8, 12):
+        return f"{base}_oc{tile_oc}_template"
+    raise TilingFailed(
+        f"{op_name}: no conv PE template for tile_oc={tile_oc} "
+        f"(output channels per tile must be 4, 8, 12 or 16)"
+    )
+
+
 def _coerce_bool_attr(value: object, op_name: str, attr_name: str) -> bool:
     if isinstance(value, bool):
         return value
@@ -794,7 +811,9 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
         "KERNEL_LOOP_INNER": num_ic_tiles,
         "KERNEL_LOOP_OUTER": num_oc_tiles * num_h_tiles * num_w_tiles,
     }
-    pe_prog = PeProgramRef(template_name="conv1d_k3c4s1_template", params=pe_params)
+    pe_prog = PeProgramRef(
+        template_name=_conv_pe_template("conv1d_k3c4s1", tile_oc, op.name),
+        params=pe_params)
 
     # -- HDDU --
     hddu = HdduConfig(plane_en=0xF, plane_mode=0x1)
@@ -1205,7 +1224,9 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
         "KERNEL_LOOP_INNER": num_ic_tiles,
         "KERNEL_LOOP_OUTER": num_oc_wave_groups * num_h_tiles * num_w_tiles,
     }
-    pe_prog = PeProgramRef(template_name="conv1d_k1c12s1_template", params=pe_params)
+    pe_prog = PeProgramRef(
+        template_name=_conv_pe_template("conv1d_k1c12s1", tile_oc, op.name),
+        params=pe_params)
     hddu = HdduConfig(plane_en=0xF, plane_mode=0x1)
     # Conv1x1 scan-chain always maps one active PE to one H row.
     # Och-resident waves simply duplicate the same H rows across multiple buses.

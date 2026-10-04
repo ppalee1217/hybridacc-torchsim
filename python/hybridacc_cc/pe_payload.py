@@ -179,6 +179,92 @@ def find_patch_offset(json_data: Dict[str, Any], param_name: str) -> int | None:
 
 
 # ===================================================================
+# Conv PE output-stream contract
+# ===================================================================
+
+def _is_loop_in(word: int) -> bool:
+    return (word >> 1) & 0x3 == 0b10 and (word >> 3) & 0x3 == 0 and (word >> 5) & 0x1 == 0
+
+
+def _is_vmacrn(word: int) -> bool:
+    return ((word >> 1) & 0x3 == 0b01 and (word >> 3) & 0x3 == 0
+            and (word >> 5) & 0x1 == 1 and (word >> 6) & 0x7 == 1)
+
+
+def _is_vpsum_family(word: int) -> bool:
+    # VPSUM / VPSUMR (func2=10) and the fused VPSUM_* forms (func2=11).
+    return (word >> 1) & 0x3 == 0b01 and (word >> 3) & 0x3 in (0b10, 0b11)
+
+
+def conv_window_output_packs(words: List[int]) -> Tuple[int, int] | None:
+    """Return (ordinary-window, last-window) VPSUM counts of a conv PE program.
+
+    A conv program has an input-window loop whose body is one kernel-MAC
+    (VMACRN-only) loop plus an output epilogue, followed by the last window's
+    kernel-MAC loop and its epilogue (the same structure the ESL spatial tail
+    binding recognizes). Each VPSUM emits one PLO pack and consumes one PLI
+    pack. Returns None if the program does not have this structure.
+    """
+    ends: Dict[int, int] = {}
+    for i, w in enumerate(words):
+        if not _is_loop_in(w):
+            continue
+        depth = 1
+        for j in range(i + 1, len(words)):
+            if _is_loop_in(words[j]):
+                depth += 1
+            if words[j] & 0x1:
+                depth -= 1
+                if depth == 0:
+                    ends[i] = j
+                    break
+
+    def is_mac_loop(i: int) -> bool:
+        return i in ends and all(_is_vmacrn(w) for w in words[i + 1:ends[i] + 1])
+
+    found = []
+    for w_idx, w_end in ends.items():
+        nested = [i for i in range(w_idx + 1, w_end) if _is_loop_in(words[i])]
+        if len(nested) != 1 or not is_mac_loop(nested[0]):
+            continue
+        nxt = w_end + 1
+        while nxt < len(words) and not _is_loop_in(words[nxt]) and not words[nxt] & 0x1:
+            nxt += 1
+        if nxt >= len(words) or not is_mac_loop(nxt):
+            continue
+        last_end = ends[nxt] + 1
+        while last_end < len(words) and not words[last_end] & 0x1:
+            last_end += 1
+        ordinary = sum(_is_vpsum_family(w) for w in words[ends[nested[0]] + 1:w_end + 1])
+        last = sum(_is_vpsum_family(w) for w in words[ends[nxt] + 1:last_end + 1])
+        found.append((ordinary, last))
+    return found[0] if len(found) == 1 else None
+
+
+def check_conv_output_stream(layer: LayerHwConfig, words: List[int]) -> None:
+    """E_PE_STREAM: the PE template must emit what the AGUs deliver.
+
+    Every window, the PLI AGU delivers and the PLO AGU collects iter0 packs
+    (tile_oc / 4, 02_OperatorLowering.md). The template must issue exactly
+    that many VPSUMs in both the ordinary and the last window, and the kernel
+    count must fill exactly that many packs; otherwise the stream stalls.
+    """
+    if layer.op_type not in ("conv2d_1x1", "conv2d_3x3"):
+        return
+    packs = conv_window_output_packs(words)
+    plo = layer.agu_plo.iter0
+    pli = layer.agu_pli.iter0 if (layer.hddu.plane_en >> 2) & 0x1 else plo
+    kernels = int(layer.pe_program.params.get("KERNEL_COUNT", 0))
+    if (packs is None or packs[0] != plo or packs[1] != plo or pli != plo
+            or (kernels + 3) // 4 != plo):
+        raise ValueError(
+            f"E_PE_STREAM: layer={layer.name}, template={layer.pe_program.template_name}: "
+            f"VPSUM per window (ordinary, last)={packs}, PLI/PLO packs per window="
+            f"{pli}/{plo}, KERNEL_COUNT={kernels}"
+        )
+
+
+# ===================================================================
 # Template context assembly for Jinja2
 # ===================================================================
 
@@ -226,6 +312,7 @@ def collect_payload_context(
                 "instructions": instructions,
                 "len": len(instructions),
             }
+        check_conv_output_stream(layer, templates[tmpl_name]["instructions"])
 
         # Full-wave scan chain dedup
         topo_key = hash_scan_chain(layer.scan_chain)
