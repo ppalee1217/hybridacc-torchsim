@@ -197,11 +197,6 @@ public:
     }
 
 private:
-    bool spatial_window_bound_ = false;
-    uint16_t spatial_full_rows_ = 0u;
-    uint16_t spatial_full_width_ = 0u;
-    uint16_t spatial_window_loop_pc_ = 0u;
-    uint16_t spatial_window_loop_end_pc_ = 0u;
 
     static bool is_loop_in(pe_inst_t instruction) {
         return pe::getOpcode(instruction) == 2
@@ -225,17 +220,91 @@ private:
         return false;
     }
 
-    bool has_conv_spatial_program_signature() const {
+    // A conv PE program (conv1d_k1c12s1 / conv1d_k3c4s1 templates and their
+    // compact output-pack variants) has an input-window loop whose body is
+    // reset + one kernel-MAC loop + an output epilogue, followed by the last
+    // window: another kernel-MAC loop. A kernel-MAC loop contains only VMACRN.
+    // The window loop is located by this structure, not by instruction
+    // positions or by its count, so it survives template changes and other
+    // loops that happen to share its count.
+    enum class ConvWindowMatch { NotConv, Unique, Ambiguous };
+
+    static bool is_vmacrn(pe_inst_t instruction) {
+        return pe::getOpcode(instruction) == 1
+            && pe::getFunct2(instruction) == 0
+            && pe::getFunc1(instruction) == 1
+            && pe::getFunc3(instruction) == 1;
+    }
+
+    static bool is_kernel_mac_loop(const std::vector<pe_inst_t>& program,
+                                   size_t loop_index, size_t loop_end_index) {
+        if (loop_end_index <= loop_index) {
+            return false;
+        }
+        for (size_t i = loop_index + 1u; i <= loop_end_index; ++i) {
+            if (!is_vmacrn(program[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    ConvWindowMatch locate_conv_window_loop(uint16_t& loop_pc,
+                                            uint16_t& loop_end_pc,
+                                            uint16_t& full_width) const {
         const std::vector<pe_inst_t>& program = pes[0][0].if_id_stage.IM.mem;
-        return program.size() > 35u
-            && program[0] == 0x004Cu
-            && is_loop_in(program[1])
-            && is_loop_in(program[10])
-            && is_loop_in(program[15])
-            && is_loop_in(program[17])
-            && is_loop_in(program[26])
-            && program[34] == 0x0015u
-            && program[35] == 0x001Cu;
+        std::vector<size_t> loop_end(program.size(), 0u);
+        std::vector<bool> has_end(program.size(), false);
+        for (size_t i = 0u; i < program.size(); ++i) {
+            uint16_t end_pc = 0u;
+            if (is_loop_in(program[i]) && find_matching_loop_end(program, i, end_pc)) {
+                loop_end[i] = end_pc / sizeof(pe_inst_t);
+                has_end[i] = true;
+            }
+        }
+
+        size_t matches = 0u;
+        for (size_t w = 0u; w < program.size(); ++w) {
+            if (!has_end[w]) {
+                continue;
+            }
+            // Exactly one nested loop inside the window, and it is kernel-MAC.
+            size_t nested = 0u;
+            bool nested_is_mac = false;
+            for (size_t i = w + 1u; i < loop_end[w]; ++i) {
+                if (!is_loop_in(program[i])) {
+                    continue;
+                }
+                ++nested;
+                nested_is_mac = has_end[i] && is_kernel_mac_loop(program, i, loop_end[i]);
+                if (has_end[i]) {
+                    i = loop_end[i];
+                }
+            }
+            if (nested != 1u || !nested_is_mac) {
+                continue;
+            }
+            // The next loop after the window is the last window's kernel-MAC loop.
+            size_t next = loop_end[w] + 1u;
+            while (next < program.size() && !is_loop_in(program[next])
+                   && (program[next] & 0x1u) == 0u) {
+                ++next;
+            }
+            if (next >= program.size() || !is_loop_in(program[next]) || !has_end[next]
+                || !is_kernel_mac_loop(program, next, loop_end[next])) {
+                continue;
+            }
+            ++matches;
+            loop_pc = static_cast<uint16_t>(w * sizeof(pe_inst_t));
+            loop_end_pc = static_cast<uint16_t>(loop_end[w] * sizeof(pe_inst_t));
+            // LOOPIN payload is count-1 and the count is the number of
+            // ordinary windows (full width - 1).
+            full_width = static_cast<uint16_t>(pe::getPayload(program[w]) + 2u);
+        }
+        if (matches == 0u) {
+            return ConvWindowMatch::NotConv;
+        }
+        return matches == 1u ? ConvWindowMatch::Unique : ConvWindowMatch::Ambiguous;
     }
 
     bool detect_chained_conv_topology(uint16_t& full_rows) const {
@@ -351,55 +420,7 @@ private:
         return true;
     }
 
-    bool detect_spatial_conv_topology(uint16_t& full_rows) const {
-        return has_conv_spatial_program_signature()
-            && (detect_chained_conv_topology(full_rows)
-                || detect_bus_attached_conv_topology(full_rows));
-    }
-
-    bool locate_spatial_window_loop(uint16_t full_width,
-                                    uint16_t& loop_pc,
-                                    uint16_t& loop_end_pc) const {
-        if (full_width < 2u) {
-            return false;
-        }
-        const std::vector<pe_inst_t>& program = pes[0][0].if_id_stage.IM.mem;
-        const unsigned encoded_count = full_width - 2u;
-        bool found = false;
-        for (size_t i = 0u; i < program.size(); ++i) {
-            if (!is_loop_in(program[i])
-                || static_cast<unsigned>(pe::getPayload(program[i])) != encoded_count) {
-                continue;
-            }
-            uint16_t candidate_end_pc = 0u;
-            if (found || !find_matching_loop_end(program, i, candidate_end_pc)) {
-                return false;
-            }
-            found = true;
-            loop_pc = static_cast<uint16_t>(i * sizeof(pe_inst_t));
-            loop_end_pc = candidate_end_pc;
-        }
-        return found;
-    }
-
-    bool cached_spatial_window_is_valid(uint16_t full_rows) const {
-        if (!spatial_window_bound_ || spatial_full_rows_ != full_rows) {
-            return false;
-        }
-        const std::vector<pe_inst_t>& program = pes[0][0].if_id_stage.IM.mem;
-        const size_t loop_index = spatial_window_loop_pc_ / sizeof(pe_inst_t);
-        uint16_t loop_end_pc = 0u;
-        return spatial_full_width_ >= 2u
-            && loop_index < program.size()
-            && is_loop_in(program[loop_index])
-            && static_cast<uint16_t>(pe::getPayload(program[loop_index]))
-                == static_cast<uint16_t>(spatial_full_width_ - 2u)
-            && find_matching_loop_end(program, loop_index, loop_end_pc)
-            && loop_end_pc == spatial_window_loop_end_pc_;
-    }
-
     void clear_spatial_wave() {
-        spatial_window_bound_ = false;
         spatial_active_rows.write(NUM_PES_PER_PORT);
         for (size_t bus = 0u; bus < NUM_PORTS; ++bus) {
             for (size_t row = 0u; row < NUM_PES_PER_PORT; ++row) {
@@ -505,38 +526,48 @@ private:
 
 public:
     uint16_t configure_spatial_wave(uint16_t valid_height, uint16_t valid_width) {
-        uint16_t full_rows = 0u;
-        if (valid_height == 0u || valid_width == 0u
-            || !detect_spatial_conv_topology(full_rows)) {
+        uint16_t loop_pc = 0u;
+        uint16_t loop_end_pc = 0u;
+        uint16_t full_width = 0u;
+        const ConvWindowMatch match = locate_conv_window_loop(loop_pc, loop_end_pc, full_width);
+        if (match == ConvWindowMatch::NotConv || valid_height == 0u || valid_width == 0u) {
             clear_spatial_wave();
             return 0u;
+        }
+        if (match == ConvWindowMatch::Ambiguous) {
+            SC_REPORT_FATAL("NetworkOnChip",
+                "conv PE program has more than one input-window loop; "
+                "cannot bind the spatial tail override");
+        }
+
+        uint16_t full_rows = 0u;
+        if (!detect_chained_conv_topology(full_rows)
+            && !detect_bus_attached_conv_topology(full_rows)) {
+            // Without a known topology the tail cannot be applied. A full
+            // wave needs no override; a narrower one would silently run the
+            // full program against a shorter input stream.
+            if (valid_width < full_width) {
+                SC_REPORT_FATAL("NetworkOnChip",
+                    "conv tail wave on a scan-chain topology the spatial "
+                    "override does not recognize");
+            }
+            clear_spatial_wave();
+            return 0u;
+        }
+        if (valid_width > full_width) {
+            SC_REPORT_FATAL("NetworkOnChip",
+                "conv wave is wider than the PE program's input-window loop");
         }
 
         const uint16_t active_rows = valid_height < full_rows ? valid_height : full_rows;
         spatial_active_rows.write(active_rows);
-
-        if (!cached_spatial_window_is_valid(full_rows)) {
-            spatial_window_bound_ = locate_spatial_window_loop(
-                valid_width, spatial_window_loop_pc_, spatial_window_loop_end_pc_);
-            if (spatial_window_bound_) {
-                spatial_full_rows_ = full_rows;
-                spatial_full_width_ = valid_width;
-            }
-        }
-
-        const bool width_is_valid = spatial_window_bound_
-            && valid_width <= spatial_full_width_;
         for (size_t bus = 0u; bus < NUM_PORTS; ++bus) {
             for (size_t row = 0u; row < NUM_PES_PER_PORT; ++row) {
-                if (width_is_valid) {
-                    pes[bus][row].if_id_stage.configure_spatial_window_loop(
-                        spatial_window_loop_pc_, spatial_window_loop_end_pc_, valid_width);
-                } else {
-                    pes[bus][row].if_id_stage.clear_spatial_window_loop();
-                }
+                pes[bus][row].if_id_stage.configure_spatial_window_loop(
+                    loop_pc, loop_end_pc, valid_width);
             }
         }
-        return width_is_valid ? spatial_full_width_ : 0u;
+        return full_width;
     }
 
     bool any_pe_busy() const {
