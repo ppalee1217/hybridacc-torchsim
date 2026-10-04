@@ -588,6 +588,14 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
         raise TilingFailed(
             f"{op.name}: padded output canvas path is no longer supported"
         )
+    # The scan chain maps one kernel row per bus and only bus KH-1 drives
+    # PLO, so fewer buses than kernel rows produce no output and hang.
+    # Splitting KH across passes is not implemented in the compiler.
+    if hw.num_bus < KH:
+        raise TilingFailed(
+            f"{op.name}: conv2d_3x3 needs num_bus >= KH (one kernel row per "
+            f"bus); got num_bus={hw.num_bus}, KH={KH}"
+        )
 
     # Fixed tile dims
     tile_ic = 4
