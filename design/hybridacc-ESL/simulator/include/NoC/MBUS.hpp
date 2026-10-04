@@ -17,7 +17,7 @@ public:
     // Ports
     sc_in<bool> clk;
     sc_in<bool> reset_n;
-    sc_in<sc_uint<16>> active_pe_count;
+    sc_in<sc_dt::sc_uint<16>> active_pe_count;
 
     // === Process Element (PE) interface ports ===
     // Router config port
