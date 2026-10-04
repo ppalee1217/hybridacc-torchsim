@@ -131,8 +131,11 @@ struct request_t {
     size_t mask = 0; // for async FIFO
 
     // 相等運算符，SystemC 需要
+    // sc_signal only notifies when the new value differs, so every field that
+    // carries meaning must take part. The mask says which lanes are valid
+    // (async FIFO); an all-zero request with valid lanes is not the idle value.
     bool operator==(const request_t& other) const {
-        return data == other.data && addr == other.addr;
+        return data == other.data && addr == other.addr && mask == other.mask;
     }
 
     // 輸出運算符，SystemC 訊號需要
@@ -147,6 +150,7 @@ struct request_t {
     friend void sc_trace(sc_core::sc_trace_file* tf, const request_t& req, const std::string& name) {
         sc_core::sc_trace(tf, req.data, name + ".data");
         sc_core::sc_trace(tf, req.addr, name + ".addr");
+        sc_core::sc_trace(tf, req.mask, name + ".mask");
     }
 };
 

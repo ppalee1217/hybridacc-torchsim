@@ -298,6 +298,16 @@ foreach(loop_case RANGE 0 4)
     add_test(NAME LoopController_Unit_${loop_case} COMMAND test_loop_controller ${loop_case})
 endforeach()
 
+# request_t on sc_signal: a mask-only change must be observable
+add_executable(test_request_signal
+    test_request_signal.cpp
+)
+target_link_libraries(test_request_signal
+    systemc
+    pthread
+)
+add_test(NAME Request_Signal_Unit COMMAND test_request_signal)
+
 # HDDU Unit Tests
 add_executable(test_hddu_unit
     test_hddu_unit.cpp
