@@ -286,6 +286,18 @@ add_custom_target(run_agu_test
 
 add_test(NAME AGU_Unit_Tests COMMAND test_agu_unit)
 
+# LoopController: ISA loop push/pop, including one-iteration loops
+add_executable(test_loop_controller
+    test_loop_controller.cpp
+)
+target_link_libraries(test_loop_controller
+    systemc
+    pthread
+)
+foreach(loop_case RANGE 0 4)
+    add_test(NAME LoopController_Unit_${loop_case} COMMAND test_loop_controller ${loop_case})
+endforeach()
+
 # HDDU Unit Tests
 add_executable(test_hddu_unit
     test_hddu_unit.cpp

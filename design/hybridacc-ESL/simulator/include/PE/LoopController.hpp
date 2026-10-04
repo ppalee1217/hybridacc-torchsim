@@ -54,8 +54,10 @@ public:
 
     void reset() { loopstack.clear(); }
     void loopIn(uint16_t start_pc, uint16_t count){
-        if(count <= 0) return; // trivial loop 不建立
-        LoopFrame fr{start_pc, (uint16_t)(count+1)}; // N-1 encoding
+        // N-1 encoding: payload 0 is a one-iteration loop. The ISA pushes a
+        // frame for every LOOPIN (count 1..1024) so that its own LOOPEND pops
+        // it; skipping the push made that LOOPEND consume the parent frame.
+        LoopFrame fr{start_pc, (uint16_t)(count+1)};
         loopstack.push_back(fr);
     }
     bool empty() const { return loopstack.empty(); }

@@ -283,9 +283,6 @@ public:
         const bool can_advance = ready_in.read() && valid_reg.read();
         const bool is_spatial_window_loop = spatial_window_override_en.read()
             && pc_reg.read() == spatial_window_loop_pc.read();
-        const bool single_spatial_window_end = spatial_window_override_en.read()
-            && spatial_window_valid_width.read() == 2u
-            && pc_reg.read() == spatial_window_loop_end_pc.read();
 
         // Loop In
         if (decode.loop_in && can_advance) {
@@ -307,7 +304,7 @@ public:
         // If stalled, we re-execute the same loop_end instruction, checking condition again
         // But the LoopController state should only update once.
         // Actually, since loop controller is sequential, we should only enable it when we are advancing (ready_in=1)
-        loops_loop_end_en_sig.write(decode.loop_end && can_advance && !single_spatial_window_end);
+        loops_loop_end_en_sig.write(decode.loop_end && can_advance);
     }
 
     // === Sequential Logic (Register Updates) ===
