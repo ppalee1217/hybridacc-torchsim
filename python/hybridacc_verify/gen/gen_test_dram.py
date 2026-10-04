@@ -350,7 +350,7 @@ def _get_tensor_bytes(arr: np.ndarray) -> bytes:
 
 
 def _tile_weight_ic(weight: np.ndarray, num_ic_tiles: int, tile_ic: int,
-                    num_oc_tiles: int) -> bytes:
+                    num_oc_tiles: int, tile_oc: int) -> bytes:
     """Zero-pad and rearrange weight into the IC-tiled DRAM layout.
 
     Target layout: [num_oc_tiles, num_ic_tiles, tile_oc, KH, KW, tile_ic] contiguous.
@@ -362,21 +362,38 @@ def _tile_weight_ic(weight: np.ndarray, num_ic_tiles: int, tile_ic: int,
         weight = weight.reshape(OC, KH, KW, IC)
     else:
         OC, KH, KW, IC = weight.shape
-    tile_oc = OC // num_oc_tiles
     padded_ic = num_ic_tiles * tile_ic
-    assert IC <= padded_ic, \
-        f"IC={IC} exceeds num_ic_tiles={num_ic_tiles} * tile_ic={tile_ic}"
-    assert OC == num_oc_tiles * tile_oc, \
-        f"OC={OC} != num_oc_tiles={num_oc_tiles} * tile_oc={tile_oc}"
-    if IC < padded_ic:
-        padded = np.zeros((OC, KH, KW, padded_ic), dtype=np.float16)
-        padded[..., :IC] = weight
+    padded_oc = num_oc_tiles * tile_oc
+    if min(num_ic_tiles, tile_ic, num_oc_tiles, tile_oc) <= 0:
+        raise ValueError("Weight tile counts and extents must be positive")
+    if IC > padded_ic or OC > padded_oc:
+        raise ValueError(
+            f"Weight OC={OC}, IC={IC} exceeds IR tile extent "
+            f"OC={num_oc_tiles}*{tile_oc}, IC={num_ic_tiles}*{tile_ic}"
+        )
+    if IC < padded_ic or OC < padded_oc:
+        padded = np.zeros((padded_oc, KH, KW, padded_ic), dtype=np.float16)
+        padded[:OC, :, :, :IC] = weight
         weight = padded
     # [OC, KH, KW, IC] → [num_oc_tiles, tile_oc, KH, KW, num_ic_tiles, tile_ic]
     w = weight.reshape(num_oc_tiles, tile_oc, KH, KW, num_ic_tiles, tile_ic)
     # Transpose to: [num_oc_tiles, num_ic_tiles, tile_oc, KH, KW, tile_ic]
     w = w.transpose(0, 4, 1, 2, 3, 5)
     return w.astype(np.float16).tobytes()
+
+
+def _conv_weight_tile_shape(layer: dict, weight_shape) -> tuple[int, int]:
+    """Read OC extent and the IC footprint from the IR's PS layout."""
+    tp = layer["tiling_params"]
+    tile_oc = int(layer["pe_program"]["params"]["KERNEL_COUNT"])
+    kh, kw = (1, 1) if len(weight_shape) == 2 else weight_shape[1:3]
+    oc_kernel_bytes = tile_oc * kh * kw * 2
+    ic_stride = int(tp["dram_ps_ic_stride"])
+    if (oc_kernel_bytes <= 0 or ic_stride <= 0
+            or ic_stride % oc_kernel_bytes
+            or tp["dram_ps_oc_stride"] != tp["num_ic_tiles"] * ic_stride):
+        raise ValueError(f"Invalid conv PS tile layout: {layer['name']}: {tp}")
+    return ic_stride // oc_kernel_bytes, tile_oc
 
 
 def _tile_input_ic(inp: np.ndarray, num_ic_tiles: int, tile_ic: int) -> bytes:
@@ -777,6 +794,65 @@ def _output_region_size(tp: dict) -> int:
     return last_offset + int(tp.get("dma_plo_words", 0)) * 8
 
 
+def _dram_layout_regions(op_layer_pairs, wl_tensors, conv_batch=None):
+    """Describe physical allocations, including unwritten output and PLI."""
+    regions = []
+    for i, (op, layer) in enumerate(op_layer_pairs):
+        tp = layer["tiling_params"]
+        input_name, weight_name = op["inputs"][:2]
+        if op["type"] in ("conv2d_3x3", "conv2d_1x1"):
+            tile_ic, _ = _conv_weight_tile_shape(layer, wl_tensors[weight_name]["shape"])
+            weight_size = tp["num_oc_tiles"] * tp["dram_ps_oc_stride"]
+            n, h, w, ic = wl_tensors[input_name]["shape"]
+            # Chained NHWC inputs have no per-IC-tile padding in DRAM.
+            channels = ic if tp.get("pd_ic_agu_offset", 0) else tp["num_ic_tiles"] * tile_ic
+            input_size = n * h * w * channels * 2
+        else:
+            weight_size = _gemm_region_size(
+                tp["num_h_tiles"], tp["dram_ps_h_stride"],
+                tp["num_ic_tiles"], tp["dram_ps_ic_stride"], tp["dma_ps_words"] * 8)
+            input_size = _gemm_region_size(
+                tp["num_oc_tiles"], tp["dram_pd_oc_stride"],
+                tp["num_ic_tiles"], tp["dram_pd_ic_stride"], tp["dma_pd_words"] * 8)
+        output_size = _output_region_size(tp) * (conv_batch or 1)
+        bias_from = _normalized_op_attrs(op).get("bias_from")
+        for role, base_key, size, tensor in (
+            ("weight", "dram_weight_base", weight_size, weight_name),
+            ("input", "dram_input_base", input_size, input_name),
+            ("output", "dram_output_base", output_size, op["outputs"][0]),
+            ("PLI", "dram_bias_base", _bias_region_size(tp), bias_from),
+        ):
+            if role == "PLI" and tp.get("dma_pli_words", 0) == 0:
+                continue
+            regions.append((f"layer{i}.{role}", tp[base_key], tp[base_key] + size, tensor))
+    return regions
+
+
+def _validate_dram_regions(regions, dram_base):
+    """Reject overlaps; allow a producer output to serve its named consumer."""
+    errors = []
+    for i, (name, start, end, tensor) in enumerate(regions):
+        if start < dram_base or end <= start:
+            errors.append(f"invalid range: {name}")
+        for other_name, other_start, other_end, other_tensor in regions[:i]:
+            if start >= other_end or other_start >= end:
+                continue
+            # This is an intentional read of an earlier output, not a new
+            # allocation. Require the whole consumer range to fit the producer.
+            if (tensor is not None and tensor == other_tensor
+                    and name.rsplit('.', 1)[-1] in ("input", "PLI")
+                    and other_name.endswith(".output")
+                    and other_start <= start and end <= other_end):
+                continue
+            errors.append(f"overlap: {other_name} / {name}")
+    if errors:
+        ranges = "; ".join(
+            f"{name}=[0x{start:X}, 0x{end:X}) ({end - start} bytes)"
+            for name, start, end, _ in regions
+        )
+        raise ValueError(f"Invalid DRAM layout ({'; '.join(errors)}): {ranges}")
+
+
 def _match_single_conv_batch_unroll(wl_tensors, ops, layers):
     """Validate lowering's one-layer-per-image conv batch contract.
 
@@ -887,6 +963,9 @@ def main():
         # one rebased copy of the existing single-image layer per image.
         op_layer_pairs = [(ops[0], layers[0])]
 
+    _validate_dram_regions(
+        _dram_layout_regions(op_layer_pairs, wl_tensors, conv_batch), dram_base)
+
     # -- Compute golden output layer by layer --
     for i, (op, layer) in enumerate(op_layer_pairs):
         tp = layer["tiling_params"]
@@ -917,10 +996,10 @@ def main():
             weight_name = op["inputs"][1]
             weight_offset = tp["dram_weight_base"] - dram_base
             weight_arr = tensors_data[weight_name]
-            tile_ic = 12 if op["type"] == "conv2d_1x1" else 4
+            tile_ic, tile_oc = _conv_weight_tile_shape(layer, weight_arr.shape)
             dram_regions.append((weight_offset,
                                  _tile_weight_ic(weight_arr, num_ic_tiles, tile_ic,
-                                                 num_oc_tiles)))
+                                                 num_oc_tiles, tile_oc)))
 
             input_name = op["inputs"][0]
             # Only write input if it's a source tensor (not produced by previous layer)

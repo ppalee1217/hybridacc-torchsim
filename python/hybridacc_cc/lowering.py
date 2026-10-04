@@ -802,7 +802,8 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
     dram_out_row_stride = tile_w_out * tile_oc * 2
 
     # DRAM tensor base addresses
-    W_size = OC * KH * KW * C_in_pad * 2
+    # PS DMA visits complete OC tiles, including the final padded channels.
+    W_size = num_oc_tiles * dram_ps_oc_stride
     I_size = N * H_in * W_in * C_in_pad * 2
     output_region_size = num_oc_tiles * num_h_tiles * num_w_tiles * plo_tile_bytes
 
@@ -1193,7 +1194,8 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
 
     bdb = hw.bank_depth_bytes
 
-    W_size = OC * C_in_pad * 2
+    # PS DMA visits complete OC tiles, including the final padded channels.
+    W_size = num_oc_tiles * dram_ps_oc_stride
     I_size = N * H_in * W_in * C_in_pad * 2
     output_region_size = num_oc_tiles * num_h_tiles * num_w_tiles * plo_tile_bytes
 
