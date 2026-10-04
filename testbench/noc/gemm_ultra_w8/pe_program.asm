@@ -1,7 +1,7 @@
 gemm_tiled:
 
     # 1) C tile store prefetch
-    SDMA.LOOP 1
+    SDMA.LOOP 2
     SDMA.ADDR 0
     SDMA.LEN 64  # STORE C-tile (example: 4out * 2vector * 32dim)
     SDMA.SD 4 # start DMA store operation
@@ -14,10 +14,10 @@ gemm_tiled:
     SYS.CTRL (SDMA.ACT)
 load_ab_tile:
     # Global tile loop: iterate over M tiles for a fixed (N,K) tile
-    LOOPIN 1  # N-tiles (example: 2)
+    LOOPIN 2  # N-tiles (example: 2)
     SYS.SYNC (SWAPDM) # Wait for A/B tile to be ready
 
-    LOOPIN 8  # M-tiles (example: 2)
+    LOOPIN 4  # M-tiles (example: 2)
     SYS.CTRL (CLEAR.P, RST.PID, RST.TID, LDMA.ACT) # Start loading next A/B slice
 
     loop_k_dim:

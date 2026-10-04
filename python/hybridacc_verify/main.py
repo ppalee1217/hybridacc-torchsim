@@ -103,7 +103,10 @@ def main():
                     test.save(save_dir)
             elif mode == 'gemm':
                 config = NocGemmConfig(**config_dict)
-                gemm_test = gen_noc_gemm(config)
+                # The fixture's PE program sits next to its config (scripts/gen/gen_noc_tb.sh
+                # assembles it from there); its wave loops must follow this plan.
+                gemm_test = gen_noc_gemm(
+                    config, pe_program=Path(args.config).parent / "pe_program.asm")
                 save_dir = Path(config.out_dir)
                 if not save_dir.exists():
                     save_dir.mkdir(parents=True, exist_ok=True)
