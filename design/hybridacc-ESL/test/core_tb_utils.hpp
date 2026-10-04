@@ -333,8 +333,11 @@ public:
     sc_in<bool>          cmd_req_write;
     sc_in<sc_uint<32>>   cmd_req_addr;
     sc_in<sc_uint<32>>   cmd_req_wdata;
+    sc_in<sc_uint<4>>    cmd_req_wstrb;
+    sc_out<bool>         cmd_req_ready;
     sc_out<bool>         cmd_resp_valid;
     sc_out<sc_uint<32>>  cmd_resp_rdata;
+    sc_out<bool>         cmd_resp_err;
 
     // --- DATA AXI interface (64-bit, from ClusterDataFabric) ---
     sc_in<bool>          data_aw_valid;
@@ -369,7 +372,9 @@ public:
           clk("clk"), reset_n("reset_n"),
           cmd_req_valid("cmd_req_valid"), cmd_req_write("cmd_req_write"),
           cmd_req_addr("cmd_req_addr"), cmd_req_wdata("cmd_req_wdata"),
+          cmd_req_wstrb("cmd_req_wstrb"), cmd_req_ready("cmd_req_ready"),
           cmd_resp_valid("cmd_resp_valid"), cmd_resp_rdata("cmd_resp_rdata"),
+          cmd_resp_err("cmd_resp_err"),
           data_aw_valid("data_aw_valid"), data_aw_ready("data_aw_ready"),
           data_aw_addr("data_aw_addr"),
           data_w_valid("data_w_valid"), data_w_ready("data_w_ready"),
@@ -435,7 +440,17 @@ private:
         }
     }
 
-    void cmd_write_word(uint32_t addr, uint32_t val) {
+    // Byte-strobed write, as the native cluster command interface (ComputeCluster
+    // service_cluster_mmio_write) applies cmd_req_wstrb.
+    static uint32_t merge_strobed(uint32_t old_val, uint32_t val, uint32_t wstrb) {
+        uint32_t mask = 0u;
+        for (int b = 0; b < 4; ++b)
+            if (wstrb & (1u << b)) mask |= 0xFFu << (b * 8);
+        return (old_val & ~mask) | (val & mask);
+    }
+
+    void cmd_write_word(uint32_t addr, uint32_t wdata, uint32_t wstrb) {
+        const uint32_t val = merge_strobed(cmd_read_word(addr), wdata, wstrb);
         if (addr == kClusterModeOffset) {
             cluster_mode_reg_ = val;
             return;
@@ -464,7 +479,8 @@ private:
             return;
         }
         for (int b = 0; b < 4; ++b)
-            mem_[addr + b] = (val >> (b * 8)) & 0xFF;
+            if (wstrb & (1u << b))
+                mem_[addr + b] = (wdata >> (b * 8)) & 0xFF;
     }
 
     uint32_t cmd_read_word(uint32_t addr) const {
@@ -498,6 +514,9 @@ private:
 
     // 32-bit cmd interface: 1-cycle latency response
     void cmd_proc() {
+        // The fake accepts every command and has no invalid MMIO addresses.
+        cmd_req_ready.write(true);
+        cmd_resp_err.write(false);
         cmd_resp_valid.write(false);
         cmd_resp_rdata.write(0);
         cluster_irq.write(false);
@@ -513,7 +532,7 @@ private:
                 bool wr = cmd_req_write.read();
                 if (wr) {
                     uint32_t wdata = cmd_req_wdata.read().to_uint();
-                    cmd_write_word(addr, wdata);
+                    cmd_write_word(addr, wdata, cmd_req_wstrb.read().to_uint());
                     cmd_resp_valid.write(true);
                     cmd_resp_rdata.write(0);
                 } else {

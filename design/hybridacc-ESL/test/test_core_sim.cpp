@@ -124,6 +124,9 @@ int sc_main(int argc, char* argv[]) {
     sc_signal<sc_uint<32>>  cl_cmd_req_wdata[NUM_CLUSTERS];
     sc_signal<bool>         cl_cmd_resp_valid[NUM_CLUSTERS];
     sc_signal<sc_uint<32>>  cl_cmd_resp_rdata[NUM_CLUSTERS];
+    sc_signal<sc_uint<4>>   cl_cmd_req_wstrb[NUM_CLUSTERS];
+    sc_signal<bool>         cl_cmd_req_ready[NUM_CLUSTERS];
+    sc_signal<bool>         cl_cmd_resp_err[NUM_CLUSTERS];
 
     // Cluster[0] data AXI signals
     sc_signal<bool>         cl_data_aw_valid[NUM_CLUSTERS];
@@ -234,6 +237,9 @@ int sc_main(int argc, char* argv[]) {
         dut.cl_cmd_req_wdata_o[c](cl_cmd_req_wdata[c]);
         dut.cl_cmd_resp_valid_i[c](cl_cmd_resp_valid[c]);
         dut.cl_cmd_resp_rdata_i[c](cl_cmd_resp_rdata[c]);
+        dut.cl_cmd_req_wstrb_o[c](cl_cmd_req_wstrb[c]);
+        dut.cl_cmd_req_ready_i[c](cl_cmd_req_ready[c]);
+        dut.cl_cmd_resp_err_i[c](cl_cmd_resp_err[c]);
 
         dut.m_cl_data_aw_valid_o[c](cl_data_aw_valid[c]);
         dut.m_cl_data_aw_ready_i[c](cl_data_aw_ready[c]);
@@ -334,6 +340,9 @@ int sc_main(int argc, char* argv[]) {
     cluster_spm.cmd_req_wdata(cl_cmd_req_wdata[0]);
     cluster_spm.cmd_resp_valid(cl_cmd_resp_valid[0]);
     cluster_spm.cmd_resp_rdata(cl_cmd_resp_rdata[0]);
+    cluster_spm.cmd_req_wstrb(cl_cmd_req_wstrb[0]);
+    cluster_spm.cmd_req_ready(cl_cmd_req_ready[0]);
+    cluster_spm.cmd_resp_err(cl_cmd_resp_err[0]);
 
     // Data AXI interface
     cluster_spm.data_aw_valid(cl_data_aw_valid[0]);
