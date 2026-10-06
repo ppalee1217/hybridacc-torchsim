@@ -1084,7 +1084,8 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
 
     pd_bytes_per_w = tile_h_per_bus * ic_words_per_pe * PKT_SIZE
     pli_bytes_per_w = tile_h_per_bus * out_ch_pack * PKT_SIZE
-    pd_cap = half_cap
+    # Parallel PD addresses one bank; ping/pong each own half of that bank.
+    pd_cap = hw.half_parallel if use_ultra else half_cap
     pli_cap = hw.half_parallel if (use_ultra or oc_parallel) else half_cap
     max_tile_w_pd = pd_cap // pd_bytes_per_w if pd_bytes_per_w > 0 else 0
     max_tile_w_pli = pli_cap // pli_bytes_per_w if pli_bytes_per_w > 0 else 0
