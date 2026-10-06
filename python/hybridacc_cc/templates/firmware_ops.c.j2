@@ -5,6 +5,15 @@
  * ═══════════════════════════════════════════════════════ */
 #include "firmware_hw.h"
 #include "firmware_payload.h"
+{# Native multi-K GEMM layers carry partial sums through the SPM reduction ring
+    (see build_wave_runtime_gemm). The ring-specific bias deferral below is emitted
+    only for workloads that contain such a layer. #}
+{% set gemm_ring = namespace(used=false) %}
+{% for l in layers %}
+{% if l.op_type == "gemm" and l.tiling.num_ic_tiles > 1 %}
+{% set gemm_ring.used = true %}
+{% endif %}
+{% endfor %}
 {% if not has_hw_mul %}
 
 /* ═══════════════════════════════════════════════════════
@@ -648,6 +657,10 @@ typedef struct {
     uint8_t need_bias_dma;
     uint8_t ps_buf;
     uint8_t active_k_stages;
+{% if gemm_ring.used %}
+    uint8_t pli_holds_carry;  /* ring: PLI is the previous K-wave's PLO */
+    uint8_t defer_bias_dma;   /* ring: load bias after the previous writeback */
+{% endif %}
 
     uint32_t dma_ps_words;
     uint32_t dma_pd_words;
@@ -888,6 +901,10 @@ static inline void build_wave_runtime_gemm(const LayerConfig* cfg,
         return;
     }
 
+{% if gemm_ring.used %}
+    wave->pli_holds_carry = 0u;
+    wave->defer_bias_dma = 0u;
+{% endif %}
     if ((k_wave->active_stages != 0)
         && (coord->ic < k_wave->wave_count)) {
         wave->active_k_stages = k_wave->active_stages[coord->ic];
@@ -915,6 +932,9 @@ static inline void build_wave_runtime_gemm(const LayerConfig* cfg,
             wave->spm_pli = t->spm_ping[2];
             wave->spm_plo = t->spm_ping[3];
         }
+{% if gemm_ring.used %}
+        wave->pli_holds_carry = (coord->ic != 0u);
+{% endif %}
     }
 
     ps_buf = gemm_ps_cache_lookup(ps_cache, wave->dram_ps);
@@ -931,6 +951,28 @@ static inline void build_wave_runtime_gemm(const LayerConfig* cfg,
     wave->agu_base_ps = ps_buf ? t->agu_pong[0] : t->agu_ping[0];
     wave->spm_ps = ps_buf ? t->spm_pong[0] : t->spm_ping[0];
 }
+{% if gemm_ring.used %}
+
+/* The bias that initialises the next tile's first K-wave lands in a ring
+ * group. If that group still holds the current tile's partial sums -- the
+ * current wave's PLO (written back or carried after the wave) or a PLI carried
+ * in from the previous K-wave -- prefetching the bias during the current wave
+ * overwrites them. Such a bias is loaded only after the current wave has been
+ * written back: PLI shares the reduction groups with the current PLO (the
+ * contract conv1x1 already follows). Ring PLI/PLO bases are whole half-group
+ * bases, so base equality is the aliasing test. */
+static inline uint8_t gemm_bias_clobbers_ring(const WaveRuntime* current,
+                                              const WaveRuntime* next) {
+    if (!next->valid || !next->need_bias_dma) {
+        return 0u;
+    }
+    if (next->spm_pli == current->spm_plo) {
+        return 1u;
+    }
+    return (uint8_t)(current->pli_holds_carry
+                     && (next->spm_pli == current->spm_pli));
+}
+{% endif %}
 
 /* ── Prefetch State Machine ── */
 #define MAX_PREFETCH_OPS 8
@@ -1263,7 +1305,13 @@ static inline void prefetch_wave_inputs_gemm(const TilingParams* t,
     /* GEMM generic: PD is the long pole once PS reuse suppresses many PS DMAs.
      * Queue PD first so it gets the longest overlap window before bias / PS. */
     prefetch_enqueue_pd_generic(t, spatial, wave);
+{% if gemm_ring.used %}
+    if (!wave->defer_bias_dma) {
+        prefetch_enqueue_bias_generic(t, spatial, wave);
+    }
+{% else %}
     prefetch_enqueue_bias_generic(t, spatial, wave);
+{% endif %}
     prefetch_enqueue_ps_generic(t, wave);
 
     /* Serialize the multi-descriptor prefetch: an unserialized prefetch_start()
@@ -2794,6 +2842,12 @@ void run_loop_tiling_gemm(const LayerConfig* cfg) {
                                        hddu_plane_en,
                                        ps_agu_update_needed);
         ensure_wave_inputs_ready_generic(t, &spatial, current_wave, wave_count);
+{% if gemm_ring.used %}
+        if (current_wave->defer_bias_dma && !t->input_pad_enable) {
+            /* Deferred ring bias: the previous wave has been written back. */
+            dma_load_bias_generic(t, &spatial, current_wave);
+        }
+{% endif %}
         configure_spm_map_for_wave(current_wave);
         ensure_cluster_layer_started(&cluster_started);
         bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);
@@ -2802,6 +2856,9 @@ void run_loop_tiling_gemm(const LayerConfig* cfg) {
         if (advance_wave_coord_gemm(t, &next_coord)) {
             build_wave_runtime_gemm(cfg, &spatial, &next_coord, wave_count + 1u,
                                     current_wave->ps_buf, &ps_cache, next_wave);
+{% if gemm_ring.used %}
+            next_wave->defer_bias_dma = gemm_bias_clobbers_ring(current_wave, next_wave);
+{% endif %}
             prefetch_wave_inputs_gemm(t, &spatial, next_wave);
         } else {
             next_wave->valid = 0;
