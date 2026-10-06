@@ -233,14 +233,23 @@ public:
 		}
 	}
 
-	void start_all() {
+	// The PE lifecycle is layer-scoped: CMD_START_PE (re)starts the PEs and flushes the NoC FIFOs,
+	// so it is sent once, before any wave's HDDU start; the PE program then spans all waves and
+	// CMD_STOP_PE is sent once after the last wave. Each wave only starts/stops the HDDU.
+	void start_pe() {
 		noc_cmd_write(pack_noc_cmd(CMD_START_PE, 0));
+	}
+
+	void stop_pe() {
+		noc_cmd_write(pack_noc_cmd(CMD_STOP_PE, 0));
+	}
+
+	void start_hddu() {
 		hooks_.mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrlBit::START));
 	}
 
-	void stop_all() {
+	void stop_hddu() {
 		hooks_.mmio_write(CLUSTER_HDDU_BASE + HDDU_CTRL, (1u << (int)hybridacc::cluster::HdduCtrlBit::STOP));
-		noc_cmd_write(pack_noc_cmd(CMD_STOP_PE, 0));
 	}
 
 	void print_hddu_error_info() {
@@ -1172,6 +1181,9 @@ private:
 
 		std::cout << "[runner] Generated " << plans.size() << " plans." << std::endl;
 
+		// Start the PEs once for the layer, before any HDDU start (see ClusterSimDriver::start_pe).
+		driver_.start_pe();
+
 		bool all_ok = true;
 		for (size_t i = 0; i < plans.size(); ++i) {
 			auto plan = plans[i];
@@ -1218,14 +1230,14 @@ private:
 			// Use default suitable for tests
 			driver_.cfg_hddu_global(plan.global_mask, is_ultra ? 0x2 : 0x1);
 
-			driver_.start_all();
+			driver_.start_hddu();
 			bool done = driver_.wait_hddu_done(WAVE_TIMEOUT_CYCLES, POLL_INTERVAL_CYCLES);
 			if (!done) {
 				std::cerr << "[runner] Plan " << i << " TIMEOUT" << std::endl;
 				all_ok = false;
 				break;
 			}
-			driver_.stop_all();
+			driver_.stop_hddu();
 
 			if (i < dma_waves.size()) {
 				if (!run_dma_wave(dma_waves[i], DmaTransferCfg::Direction::SpmToDram)) {
@@ -1235,6 +1247,7 @@ private:
 				}
 			}
 		}
+		driver_.stop_pe();
 
 		// ---------------------------------------
 		// step 4: read back results and verify
