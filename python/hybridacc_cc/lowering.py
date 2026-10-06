@@ -1690,7 +1690,9 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
         "KERNEL_DMA_STORE_LEN": pe_ps_words,
         "KERNEL_DMA_LOAD_LEN": pe_ps_words * ep,
         "INPUT_DIM": pe_k_eff,
-        "OUTPUT_DIM_MINUS_ONE": min(PE_N, N_tile_eff) - 1,
+        # PS rows and PLI/PLO are padded to PE_N even on an N tail.
+        # Consume the padded columns to keep LDMA aligned at every K step.
+        "OUTPUT_DIM_MINUS_ONE": PE_N - 1,
         "PSUM_COUNT": (PE_M * PE_N) // ep,
         "NUM_OF_KERNEL_PREFETCH_SETS": num_k_tiles * num_n_tiles,
         "NUM_OF_KERNEL_LOAD_LOOP": num_n_tiles,
