@@ -14,6 +14,18 @@
 {% set gemm_ring.used = true %}
 {% endif %}
 {% endfor %}
+{# Single-K generic alone needs this PLI override; other dispatch paths are unchanged. #}
+{% set single_k_generic = namespace(used=false) %}
+{% for l in layers %}
+{% set t = l.tiling %}
+{% if l.op_type == "gemm" and t.num_ic_tiles == 1 %}
+{% set resident = t.gemm_resident_m_tiles > 0 and t.gemm_resident_n_tiles == t.num_h_tiles %}
+{% set chunked = t.num_h_tiles == 1 and t.gemm_resident_n_tiles == 0 and t.gemm_resident_m_tiles > 1 and t.gemm_resident_m_tiles < t.num_oc_tiles %}
+{% if not resident and not chunked %}
+{% set single_k_generic.used = true %}
+{% endif %}
+{% endif %}
+{% endfor %}
 {% if not has_hw_mul %}
 
 /* ═══════════════════════════════════════════════════════
@@ -900,6 +912,11 @@ static inline void build_wave_runtime_gemm(const LayerConfig* cfg,
     if (!wave->valid) {
         return;
     }
+{% if single_k_generic.used %}
+    if (t->num_ic_tiles == 1u) {
+        wave->spm_pli = (wave_count & 1u) ? t->spm_pong[2] : t->spm_ping[2];
+    }
+{% endif %}
 
 {% if gemm_ring.used %}
     wave->pli_holds_carry = 0u;
