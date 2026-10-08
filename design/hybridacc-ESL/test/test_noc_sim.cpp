@@ -1133,10 +1133,11 @@ public:
                                 continue;
                             }
 
-                            int n_idx = static_cast<int>(n_base / PE_N);
-                            int k_idx = static_cast<int>(k / PE_K);
+                            // Scan-chain IDs are local to the current wave in both modes.
+                            int n_idx = static_cast<int>((n_base - n_start) / PE_N);
+                            int k_idx = static_cast<int>(k / PE_K - k_tile_range.start);
 
-                            uint16_t tag = static_cast<int>(k_idx * grid_n + n_idx);
+                            uint16_t tag = static_cast<uint16_t>(k_idx * (n_range.end - n_range.start) + n_idx);
                             send_data_ps(tag, data_packet, false, mask);
                             VERBOSE_LOG("[TB-NoC-PS] Sent Weight Packet - n_idx:" << n_idx << ", k_idx:" << k_idx
                                     << ", Tag: " << tag  << ", n_base:" << n_base << ", k:" << k << ")");
@@ -1252,10 +1253,10 @@ public:
                                         data_packet.range((m_offset * 16) + 15, m_offset * 16) = a;
                                     }
 
-                                    int m_idx = static_cast<int>(m_base / PE_M);
-                                    int k_idx = k_tile;
+                                    int m_idx = static_cast<int>((m_base - m_start) / PE_M);
+                                    int k_idx = static_cast<int>(k_tile - k_tile_range.start);
 
-                                    uint16_t tag = static_cast<uint16_t>(k_idx * grid_m + m_idx);
+                                    uint16_t tag = static_cast<uint16_t>(k_idx * (m_range.end - m_range.start) + m_idx);
                                     send_data_pd(tag, data_packet, false, 0xF);
                                     VERBOSE_LOG("[TB-NoC-PD] Sent Activation Packet - m_idx:" << m_idx << ", k_idx:" << k_idx << ", Tag: " << tag  << ", m_base:" << m_base << ", k:" << k_offset << ")");
                                 }
@@ -1311,10 +1312,9 @@ public:
                     continue;
                 }
 
-                size_t n_tiles = 0;
+                size_t n_tiles = n_range.end - n_range.start;
                 int max_m_tiles = 0;
                 if (ultra_mode) {
-                    n_tiles = n_range.end - n_range.start;
                     if (n_tiles > 0) {
                         max_m_tiles = static_cast<int>(NUM_PES_PER_PORT / n_tiles);
                     }
@@ -1400,10 +1400,10 @@ public:
                                 data_packet.range((m_offset * 16) + 15, m_offset * 16) = ps;
                             }
 
-                            int m_idx = m / PE_M;
-                            int n_idx = n / PE_N;
+                            int m_idx = static_cast<int>((m - m_start) / PE_M);
+                            int n_idx = static_cast<int>((n - n_start) / PE_N);
 
-                            uint16_t tag = m_idx * grid_n + n_idx;
+                            uint16_t tag = static_cast<uint16_t>(m_idx * n_tiles + n_idx);
 
                             send_data_pli(tag, data_packet);
                             VERBOSE_LOG("[TB-NoC-PLI] Sent Partial Sum Input Packet - m_idx: " << m_idx << ", n_idx: " << n_idx << ", m: " << m << ", n: " << n
@@ -1453,9 +1453,8 @@ public:
                 }
 
                 int max_m_tiles = 0;
-                size_t n_tiles = 0;
+                size_t n_tiles = n_range.end - n_range.start;
                 if (ultra_mode) {
-                    n_tiles = n_range.end - n_range.start;
                     if (n_tiles > 0) {
                         max_m_tiles = static_cast<int>(NUM_PES_PER_PORT / n_tiles);
                     }

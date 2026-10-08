@@ -302,12 +302,6 @@ def gemm_wave_grid(plan: Dict[str, Any], ultra_mode: bool) -> Tuple[int, int]:
         raise ValueError(
             "GEMM wave plan is ragged (per-wave tiles M=%s, N=%s); a static scan "
             "chain cannot express per-wave tile counts" % (m_per_wave, n_per_wave))
-    if not ultra_mode and plan["wave_m"] * plan["wave_n"] > 1:
-        # test_noc_sim's non-ultra GEMM path tags PS/PD/PLI with global tile
-        # indices, which no single wave-local scan chain can match.
-        raise ValueError(
-            "non-ultra GEMM NoC test supports a single M/N wave only "
-            "(plan has %d M waves x %d N waves)" % (plan["wave_m"], plan["wave_n"]))
     return m_per_wave[0], n_per_wave[0]
 
 

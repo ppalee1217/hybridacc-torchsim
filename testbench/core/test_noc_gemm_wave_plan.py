@@ -62,9 +62,9 @@ def _fields(entry):
     return (entry.ps_id, entry.pd_id, entry.pli_id, entry.plo_id, bool(entry.enable))
 
 
-def test_fixture_set_is_the_known_nine():
+def test_fixture_set_includes_normal_multi_wave():
     assert GEMM_FIXTURES == [
-        "gemm", "gemm_ultra", "gemm_ultra_w1", "gemm_ultra_w16", "gemm_ultra_w2",
+        "gemm", "gemm_normal_w16", "gemm_ultra", "gemm_ultra_w1", "gemm_ultra_w16", "gemm_ultra_w2",
         "gemm_ultra_w32", "gemm_ultra_w4", "gemm_ultra_w64", "gemm_ultra_w8",
     ]
 
@@ -115,10 +115,15 @@ def test_ragged_plan_raises():
         noc_gen.plan_gemm_test(config)
 
 
-def test_non_ultra_multi_wave_raises():
-    config = NocGemmConfig(num_pes=48, num_bus=3, M=192, N=128, K=96, ultra_mode=False)
-    with pytest.raises(ValueError, match="non-ultra"):
-        noc_gen.plan_gemm_test(config)
+def test_non_ultra_multi_wave_uses_normal_wave_local_tags():
+    config = _config("gemm_normal_w16")
+    plan, chain = noc_gen.plan_gemm_test(config)
+    assert not config.ultra_mode
+    assert (plan["wave_m"], plan["wave_n"]) == (8, 2)
+    assert plan["grid_m_per_wave"] == [2] * 8
+    assert plan["grid_n_per_wave"] == [8] * 2
+    expected = compute_scan_chain_gemm(48, 3, 2, 8, 3, use_ultra=False)
+    assert [_fields(x) for x in chain] == [_fields(x) for x in expected]
 
 
 @pytest.mark.parametrize("name", GEMM_FIXTURES)

@@ -511,3 +511,15 @@ set_tests_properties(Build_Firmware_test_dma PROPERTIES FIXTURES_SETUP firmware_
 add_test(NAME HACC_Core_DMA_Simulation
     COMMAND test_core_sim ${CMAKE_CURRENT_SOURCE_DIR}/firmware/test_dma/test_dma.elf 2000000 --dma-check)
 set_tests_properties(HACC_Core_DMA_Simulation PROPERTIES FIXTURES_REQUIRED firmware_test_dma)
+
+# D-35: exercise both temporal M and N waves in normal mode, including
+# multiple spatial M tiles so PLO needs a nonzero M tag stride.
+add_test(NAME Gen_NoC_gemm_normal_w16
+    COMMAND sh -c "${HACC_GEN_SH} gen-noc --config ${HYBRIDACC_ROOT}/testbench/noc/gemm_normal_w16/config.json && ${HACC_ASM} ${HYBRIDACC_ROOT}/testbench/noc/gemm_normal_w16/pe_program.asm -o output/noc-sim/gemm_normal_w16/pe_program.bin --json output/noc-sim/gemm_normal_w16/pe_program.json"
+    WORKING_DIRECTORY ${HYBRIDACC_ROOT})
+set_tests_properties(Gen_NoC_gemm_normal_w16 PROPERTIES FIXTURES_SETUP noc_gemm_normal_w16_data)
+add_test(NAME NoC_GEMM_Normal_MultiWave
+    COMMAND test_noc_sim ${HYBRIDACC_ROOT}/output/noc-sim/gemm_normal_w16)
+set_tests_properties(NoC_GEMM_Normal_MultiWave PROPERTIES
+    FIXTURES_REQUIRED noc_gemm_normal_w16_data TIMEOUT 180
+    PASS_REGULAR_EXPRESSION "Test PASSED" FAIL_REGULAR_EXPRESSION "Test FAILED")
