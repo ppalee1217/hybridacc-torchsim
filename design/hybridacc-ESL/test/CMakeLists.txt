@@ -476,6 +476,23 @@ add_test(NAME ComputeCluster_Simulation_Advanced
     COMMAND test_cluster_sim_advanced -d ${HYBRIDACC_ROOT}/output/cluster-sim/conv_k3c4ich16och16)
 set_tests_properties(ComputeCluster_Simulation ComputeCluster_Simulation_Advanced
     PROPERTIES FIXTURES_REQUIRED cluster_conv_k3c4_data)
+
+# D-34: cluster-level GEMM on the ultra K-chain. gemm_ultra_w1 is one wave of
+# 4 x 4 tiles; gemm_ultra_w16 is 2 N waves x 8 M waves of 2 x 8 tiles, so it
+# also covers the per-N-wave weight load and the SPM ping/pong halves.
+foreach(gemm_case gemm_ultra_w1 gemm_ultra_w16)
+    add_test(NAME Gen_Cluster_${gemm_case}
+        COMMAND ${HACC_GEN} gen-cluster --config ${HYBRIDACC_ROOT}/testbench/cluster/${gemm_case}/config.json --assembler ${HACC_ASM}
+        WORKING_DIRECTORY ${HYBRIDACC_ROOT})
+    set_tests_properties(Gen_Cluster_${gemm_case} PROPERTIES FIXTURES_SETUP cluster_${gemm_case}_data)
+    add_test(NAME ComputeCluster_GEMM_${gemm_case}
+        COMMAND test_cluster_sim -d ${HYBRIDACC_ROOT}/output/cluster-sim/${gemm_case})
+    add_test(NAME ComputeCluster_GEMM_${gemm_case}_Advanced
+        COMMAND test_cluster_sim_advanced -d ${HYBRIDACC_ROOT}/output/cluster-sim/${gemm_case})
+    # A stalled wave never finishes; bound it well above the expected run time.
+    set_tests_properties(ComputeCluster_GEMM_${gemm_case} ComputeCluster_GEMM_${gemm_case}_Advanced
+        PROPERTIES FIXTURES_REQUIRED cluster_${gemm_case}_data TIMEOUT 600)
+endforeach()
 add_test(NAME HACC_Core_Unit_Tests COMMAND test_core_unit)
 add_test(NAME HACC_Core_Controller_Integration COMMAND test_core_controller_integration)
 

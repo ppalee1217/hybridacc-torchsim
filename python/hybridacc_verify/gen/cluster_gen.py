@@ -8,6 +8,7 @@ from ..utils.io import compile_pe_program
 from ..model.conv import golden_conv2d
 from ..model.gemm import golden_gemm
 from .pe_gen import DataGenerator
+from . import noc_gen
 from pathlib import Path
 
 
@@ -37,19 +38,6 @@ def _get_wave_range(total: int, waves: int, wave_idx: int) -> Tuple[int, int]:
     return start, end
 
 
-def _get_wave_tile_range(tiles_per_wave: List[int], wave_idx: int, total_tiles: int, fallback_waves: int) -> Tuple[int, int]:
-    if tiles_per_wave:
-        start = 0
-        for i in range(min(wave_idx, len(tiles_per_wave))):
-            start += int(tiles_per_wave[i])
-        count = int(tiles_per_wave[wave_idx]) if wave_idx < len(tiles_per_wave) else 0
-        if start >= total_tiles:
-            start = total_tiles
-        end = min(start + count, total_tiles)
-        return start, end
-    return _get_wave_range(total_tiles, fallback_waves, wave_idx)
-
-
 def _new_agu_cfg(enable: bool = False, ultra: bool = False) -> Dict[str, Any]:
     return {
         "base_addr": 0,
@@ -73,155 +61,379 @@ def _new_agu_cfg(enable: bool = False, ultra: bool = False) -> Dict[str, Any]:
     }
 
 
-def _compile_cluster_plans_gemm(
-    meta: Dict[str, Any],
-    runtime_addr: Dict[str, int],
-    runtime_addr_per_wave: Optional[List[Dict[str, int]]] = None,
-) -> List[Dict[str, Any]]:
-    plans: List[Dict[str, Any]] = []
+# ---------------------------------------------------------------------------
+# Cluster GEMM test (ultra K-chain)
+# ---------------------------------------------------------------------------
+# The test runs one layer: test_cluster_sim / test_cluster_sim_advanced send
+# START_PE once, then run cluster plan i after DMA wave i (plans[i] is paired
+# with dma.waves[i]). The generated test therefore follows this contract, which
+# is also the cc GEMM contract (hybridacc_cc.lowering._lower_gemm and the
+# generic GEMM loop of templates/firmware_ops.c.j2):
+# - one cluster plan and one DMA wave per temporal wave, N waves outer and M
+#   waves inner, as the PE program loops (SWAPDM once per N wave, LDMA.ACT
+#   once per M wave);
+# - each plan feeds every (m, n) PE tile of its wave with the wave-local tags
+#   the scan chain assigns: PS tag n, PD tag m, PLI/PLO tag m * grid_n + n;
+# - PS (B) is streamed only on the first M wave of each N wave, because the
+#   PE keeps one weight set per N wave (the PS plane is masked off otherwise);
+# - bus b is K stage b: SPM bank b of the PS and PD groups holds K stage b and
+#   the AGU reads the parallel region, so port b feeds bus b;
+# - DRAM holds the packed wave tiles that the AGUs walk (A^T and C/D with four
+#   rows per 64-bit word, B with four columns per word), so every DMA transfer
+#   is a plain copy and the gold output is C in the same packing.
 
-    M = int(meta["M"])
-    N = int(meta["N"])
-    grid_m = int(meta["grid_m"])
-    grid_n = int(meta["grid_n"])
-    grid_k = int(meta["grid_k"])
-    wave_m = int(meta["wave_m"])
-    wave_n = int(meta["wave_n"])
-    wave_k = int(meta["wave_k"])
-    ultra_mode = bool(meta.get("ultra_mode", False))
+_GEMM_PE_M, _GEMM_PE_N, _GEMM_PE_K = 12, 8, 32
+_FP16_PER_WORD = 4
+_GEMM_TILE_D = _GEMM_PE_M // _FP16_PER_WORD   # 64-bit words per PE-tile column of A/C
+_GEMM_TILE_W = _GEMM_PE_N // _FP16_PER_WORD   # 64-bit words per PE-tile row of B
+_GEMM_C_TILE_WORDS = _GEMM_PE_N * _GEMM_TILE_D  # one PE tile of C/D
 
-    pe_m = int(meta.get("pe_m", 12))
-    pe_n = int(meta.get("pe_n", 8))
-    pe_k = int(meta.get("pe_k", 32))
+# SPM topology, as in _build_spm_dma_plan.
+_SPM_WORD_BYTES = 8
+_SPM_NUM_GROUPS = 4
+_SPM_BANKS_PER_GROUP = 3
+_SPM_BANK_DEPTH_WORDS = 8192
+_SPM_GROUP_LINEAR_WORDS = _SPM_BANK_DEPTH_WORDS * _SPM_BANKS_PER_GROUP  # parallel region starts here
+_SPM_GROUP_SPAN_WORDS = _SPM_BANK_DEPTH_WORDS * (_SPM_BANKS_PER_GROUP + 1)
+_SPM_CHANNEL_BY_GROUP = {0: "PS", 1: "PD", 2: "PLI", 3: "PLO"}
+_GEMM_BANK_GROUPS = (0, 1)  # PS (weight) and PD (activation) use per-bank sections
 
-    grid_m_per_wave = [int(v) for v in meta.get("grid_m_per_wave", [])]
-    grid_n_per_wave = [int(v) for v in meta.get("grid_n_per_wave", [])]
-    grid_k_per_wave = [int(v) for v in meta.get("grid_k_per_wave", [])]
-    agu_ultra_overrides: Dict[str, bool] = {
-        str(k): bool(v) for k, v in dict(meta.get("agu_ultra_overrides", {})).items()
+
+def _gemm_spm_sections() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """Ping/pong SPM sections of the cluster GEMM test.
+
+    Groups 0 (PS) and 1 (PD) get one ping and one pong half per bank, groups 2
+    (PLI) and 3 (PLO) one ping and one pong half of the linear region; names
+    and addresses match _build_spm_dma_plan with bank sections for weight and
+    activation.
+    """
+    half_bank = _SPM_BANK_DEPTH_WORDS // 2
+    half_group = _SPM_GROUP_LINEAR_WORDS // 2
+    groups: List[Dict[str, Any]] = []
+    lookup: Dict[str, Dict[str, Any]] = {}
+
+    def add(sections, name, tag, linear_words, parallel_words, size_linear, bank_id=None):
+        group_base = int(name[1]) * _SPM_GROUP_SPAN_WORDS
+        sec = {"name": name, "tag": tag}
+        if bank_id is not None:
+            sec["bank_id"] = bank_id
+        sec.update({
+            "local_linear_base": linear_words * _SPM_WORD_BYTES,
+            "local_parallel_base": parallel_words * _SPM_WORD_BYTES,
+            "global_linear_addr": (group_base + linear_words) * _SPM_WORD_BYTES,
+            "global_parallel_addr": (group_base + parallel_words) * _SPM_WORD_BYTES,
+            "size_words64_linear": size_linear,
+            "size_words64_parallel": half_bank,
+        })
+        sections.append(sec)
+        lookup[name] = sec
+
+    for g in range(_SPM_NUM_GROUPS):
+        sections: List[Dict[str, Any]] = []
+        if g in _GEMM_BANK_GROUPS:
+            for b in range(_SPM_BANKS_PER_GROUP):
+                for tag, half in (("ping", 0), ("pong", half_bank)):
+                    add(sections, f"g{g}_b{b}_{tag}", tag, b * _SPM_BANK_DEPTH_WORDS + half,
+                        _SPM_GROUP_LINEAR_WORDS + half, half_bank, bank_id=b)
+        else:
+            for tag, half, par in (("ping", 0, 0), ("pong", half_group, half_bank)):
+                add(sections, f"g{g}_{tag}", tag, half, _SPM_GROUP_LINEAR_WORDS + par, half_group)
+        groups.append({"group_id": g, "noc_channel": _SPM_CHANNEL_BY_GROUP[g], "sections": sections})
+    return groups, lookup
+
+
+def _linear_addr_gen(base_addr: int, words: int) -> Dict[str, Any]:
+    """Contiguous 4D DMA address generator (same form as _build_spm_dma_plan's)."""
+    return {
+        "base_addr": int(base_addr),
+        "iter": [1, 1, int(words), 1],
+        "stride": [int(words) * _SPM_WORD_BYTES, int(words) * _SPM_WORD_BYTES,
+                   _SPM_WORD_BYTES, _SPM_WORD_BYTES],
+        "unit": "byte",
     }
 
-    waves_k = len(grid_k_per_wave) if grid_k_per_wave else wave_k
-    waves_n = len(grid_n_per_wave) if grid_n_per_wave else wave_n
-    waves_m = len(grid_m_per_wave) if grid_m_per_wave else wave_m
-    waves_k = max(1, int(waves_k))
-    waves_n = max(1, int(waves_n))
-    waves_m = max(1, int(waves_m))
 
-    row_w = _ceil_div_int(N, 4)
-    col_d = _ceil_div_int(M, 4)
-    tile_w = max(1, _ceil_div_int(pe_n, 4))
-    tile_d = max(1, _ceil_div_int(pe_m, 4))
+def _gemm_layout(config: ClusterGemmConfig, plan: Dict[str, Any]) -> Dict[str, int]:
+    """Tile counts and packed word counts of the cluster GEMM test.
 
-    wave_idx = 0
-    for wk in range(waves_k):
-        for wn in range(waves_n):
-            for wm in range(waves_m):
-                k_r = _get_wave_tile_range(grid_k_per_wave, wk, grid_k, waves_k)
-                n_r = _get_wave_tile_range(grid_n_per_wave, wn, grid_n, waves_n)
-                m_r = _get_wave_tile_range(grid_m_per_wave, wm, grid_m, waves_m)
-                wave_runtime_addr = runtime_addr_per_wave[wave_idx] if (runtime_addr_per_wave and wave_idx < len(runtime_addr_per_wave)) else runtime_addr
-                wave_idx += 1
-                if k_r[0] >= k_r[1] or n_r[0] >= n_r[1] or m_r[0] >= m_r[1]:
-                    continue
+    Only the ultra K-chain with one K wave is generated: each bus carries one
+    32-deep K stage (1 < grid_k <= num_bus). Other modes would need a
+    different dataflow (normal-mode tags, M split across ports when
+    grid_k == 1, partial-sum hand-off between K waves) and are rejected rather
+    than generated inconsistently.
+    """
+    grid_k = int(plan["grid_k"])
+    if not bool(config.ultra_mode) or not (1 < grid_k <= int(config.num_bus)):
+        raise ValueError(
+            "cluster GEMM test supports only the ultra K-chain with one K wave "
+            f"(ultra_mode and 1 < grid_k <= num_bus); got ultra_mode={bool(config.ultra_mode)}, "
+            f"grid_k={grid_k}, num_bus={config.num_bus}")
+    grid_m_wave, grid_n_wave = noc_gen.gemm_wave_grid(plan, True)
+    layout = {
+        "grid_m": int(plan["grid_m"]),
+        "grid_n": int(plan["grid_n"]),
+        "grid_k": grid_k,
+        "grid_m_wave": int(grid_m_wave),
+        "grid_n_wave": int(grid_n_wave),
+        "wave_m": int(plan["wave_m"]),
+        "wave_n": int(plan["wave_n"]),
+        "m_pad": int(plan["grid_m"]) * _GEMM_PE_M,
+        "n_pad": int(plan["grid_n"]) * _GEMM_PE_N,
+        "k_pad": grid_k * _GEMM_PE_K,
+    }
+    # Per K stage (one SPM bank) and per wave tile, in 64-bit words.
+    layout["pd_bank_words"] = _GEMM_PE_K * grid_m_wave * _GEMM_TILE_D
+    layout["ps_bank_words"] = _GEMM_PE_K * grid_n_wave * _GEMM_TILE_W
+    layout["pd_tile_words"] = grid_k * layout["pd_bank_words"]
+    layout["ps_tile_words"] = grid_k * layout["ps_bank_words"]
+    layout["c_tile_words"] = grid_m_wave * grid_n_wave * _GEMM_C_TILE_WORDS
+    half_bank = _SPM_BANK_DEPTH_WORDS // 2
+    if max(layout["pd_bank_words"], layout["ps_bank_words"]) > half_bank \
+            or layout["c_tile_words"] > _SPM_GROUP_LINEAR_WORDS // 2:
+        raise ValueError(f"cluster GEMM wave tile does not fit one SPM section: {layout}")
+    return layout
 
-                ps_local_base = _to_group_local_word_addr(wave_runtime_addr["weight"])
-                pd_local_base = _to_group_local_word_addr(wave_runtime_addr["activation"])
-                pli_local_base = _to_group_local_word_addr(wave_runtime_addr["partial_sum"])
-                plo_local_base = _to_group_local_word_addr(wave_runtime_addr["output"])
 
-                n_tiles = n_r[1] - n_r[0]
-                for kt in range(k_r[0], k_r[1]):
-                    for mt in range(m_r[0], m_r[1]):
-                        plan = {
-                            "name": f"GEMM_K{wk}_N{wn}_M{wm}_KT{kt}_MT{mt}",
-                            "global_mask": 0xF,
-                            "ultra_mode": ultra_mode,
-                            "agu_ps": _new_agu_cfg(True, ultra_mode),
-                            "agu_pd": _new_agu_cfg(True, ultra_mode),
-                            "agu_pli": _new_agu_cfg(False, ultra_mode),
-                            "agu_plo": _new_agu_cfg(False, ultra_mode),
-                        }
+def pack_cluster_gemm_tensors(A: np.ndarray, B: np.ndarray, D: np.ndarray, C: np.ndarray,
+                              layout: Dict[str, int]) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
+    """Pack A[M, K], B[K, N], D/C[M, N] into the DRAM images of the test.
 
-                        for agu_key, ultra_val in agu_ultra_overrides.items():
-                            if agu_key in plan and isinstance(plan[agu_key], dict):
-                                plan[agu_key]["ultra"] = bool(ultra_val)
+    Returns ({"activation", "weight", "partial_sum"}, output) as flat element
+    arrays (four consecutive elements form one 64-bit word):
+    - activation: per M wave, A[m_wave, :k_pad]^T (k-major, four rows per word);
+    - weight: per N wave, B[:k_pad, n_wave] (k-major, four columns per word);
+    - partial_sum / output: per wave in plan order (N outer, M inner), for each
+      PE tile (m, n) of the wave, for each of its 8 columns, its 12 rows.
+    Padding rows/columns are zero.
+    """
+    gm, gn = layout["grid_m_wave"], layout["grid_n_wave"]
+    rows_m, cols_n = gm * _GEMM_PE_M, gn * _GEMM_PE_N
 
-                        k_off = kt * pe_k
-                        n_off = n_r[0] * pe_n
-                        m_off = mt * pe_m
+    def padded(x, rows, cols):
+        out = np.zeros((rows, cols), dtype=np.float32)
+        out[:x.shape[0], :x.shape[1]] = x
+        return out
 
-                        ps_base_words = (k_off * row_w) + (n_off // 4)
-                        agu_ps = plan["agu_ps"]
-                        agu_ps["base_addr"] = int(ps_local_base + ps_base_words)
-                        agu_ps["iter0"] = int(tile_w)
-                        agu_ps["iter1"] = int(pe_k)
-                        agu_ps["iter2"] = int(n_tiles)
-                        agu_ps["iter3"] = 1
-                        agu_ps["stride0"] = 1
-                        agu_ps["stride1"] = int(row_w)
-                        agu_ps["stride2"] = int(tile_w)
-                        agu_ps["stride3"] = int(pe_k * row_w)
-                        agu_ps["tag_base"] = 0 if ultra_mode else int(kt * grid_n + n_r[0])
-                        agu_ps["tag_stride0"] = 1
-                        agu_ps["tag_stride1"] = 1
-                        agu_ps["tag_ctrl"] = 2
+    Ap = padded(A, layout["m_pad"], layout["k_pad"])
+    Bp = padded(B, layout["k_pad"], layout["n_pad"])
+    activation = np.concatenate([
+        Ap[wm * rows_m:(wm + 1) * rows_m, :].T.reshape(-1) for wm in range(layout["wave_m"])])
+    weight = np.concatenate([
+        Bp[:, wn * cols_n:(wn + 1) * cols_n].reshape(-1) for wn in range(layout["wave_n"])])
 
-                        pd_base_words = (k_off * col_d) + (m_off // 4)
-                        agu_pd = plan["agu_pd"]
-                        agu_pd["base_addr"] = int(pd_local_base + pd_base_words)
-                        agu_pd["iter0"] = int(tile_d)
-                        agu_pd["iter1"] = int(pe_k)
-                        agu_pd["iter2"] = 1
-                        agu_pd["iter3"] = 1
-                        agu_pd["stride0"] = 1
-                        agu_pd["stride1"] = int(col_d)
-                        agu_pd["stride2"] = int(pe_k * col_d)
-                        agu_pd["stride3"] = int(tile_d)
-                        agu_pd["tag_base"] = 0 if ultra_mode else int(kt * grid_m + mt)
-                        agu_pd["tag_stride0"] = 0
-                        agu_pd["tag_stride1"] = 1
-                        agu_pd["tag_ctrl"] = 0
+    def c_tiles(x):
+        xp = padded(x, layout["m_pad"], layout["n_pad"])
+        tiles = []
+        for wn in range(layout["wave_n"]):
+            for wm in range(layout["wave_m"]):
+                wave = xp[wm * rows_m:(wm + 1) * rows_m, wn * cols_n:(wn + 1) * cols_n]
+                tiles.append(wave.reshape(gm, _GEMM_PE_M, gn, _GEMM_PE_N)
+                             .transpose(0, 2, 3, 1).reshape(-1))
+        return np.concatenate(tiles)
 
-                        if wk == 0:
-                            pli_base_words = (n_off * col_d) + (m_off // 4)
-                            agu_pli = plan["agu_pli"]
-                            agu_pli["enable"] = True
-                            agu_pli["base_addr"] = int(pli_local_base + pli_base_words)
-                            agu_pli["iter0"] = int(tile_d)
-                            agu_pli["iter1"] = int(pe_n)
-                            agu_pli["iter2"] = int(n_tiles)
-                            agu_pli["iter3"] = 1
-                            agu_pli["stride0"] = 1
-                            agu_pli["stride1"] = int(col_d)
-                            agu_pli["stride2"] = int(pe_n * col_d)
-                            agu_pli["stride3"] = int(tile_d)
-                            agu_pli["tag_base"] = 0 if ultra_mode else int(mt * grid_n + n_r[0])
-                            agu_pli["tag_stride0"] = 1
-                            agu_pli["tag_stride1"] = 1
-                            agu_pli["tag_ctrl"] = 2
+    return ({"activation": activation, "weight": weight, "partial_sum": c_tiles(D)},
+            c_tiles(C))
 
-                        if wk == waves_k - 1:
-                            plo_base_words = (n_off * col_d) + (m_off // 4)
-                            agu_plo = plan["agu_plo"]
-                            agu_plo["enable"] = True
-                            agu_plo["base_addr"] = int(plo_local_base + plo_base_words)
-                            agu_plo["iter0"] = int(tile_d)
-                            agu_plo["iter1"] = int(pe_n)
-                            agu_plo["iter2"] = int(n_tiles)
-                            agu_plo["iter3"] = 1
-                            agu_plo["stride0"] = 1
-                            agu_plo["stride1"] = int(col_d)
-                            agu_plo["stride2"] = int(pe_n * col_d)
-                            agu_plo["stride3"] = int(tile_d)
-                            agu_plo["tag_base"] = 0 if ultra_mode else int(mt * grid_n + n_r[0])
-                            agu_plo["tag_stride0"] = 1
-                            agu_plo["tag_stride1"] = 1
-                            agu_plo["tag_ctrl"] = 2
 
-                        plans.append(plan)
+def _compile_cluster_plans_gemm(layout: Dict[str, int], dram_mapping: Dict[str, int]) -> Dict[str, Any]:
+    """Cluster plans, DMA waves and SPM map of the cluster GEMM test (one per wave)."""
+    groups, sec = _gemm_spm_sections()
+    gm, gn, grid_k = layout["grid_m_wave"], layout["grid_n_wave"], layout["grid_k"]
+    wave_m, wave_n = layout["wave_m"], layout["wave_n"]
+    wave_count = wave_m * wave_n
+    port_to_group = {"PS": 0, "PD": 1, "PLI": 2, "PLO": 3}
+    spm_map_val = sum(g << (2 * p) for p, g in enumerate(port_to_group.values()))
 
-    return plans
+    def local_word(section, key):
+        return _to_group_local_word_addr(section[key])
+
+    def d2s(tensor, group, section, src, words, part=None):
+        transfer = {
+            "tensor": tensor,
+            "group_id": group,
+            "section": section["name"],
+            "direction": "dram_to_spm",
+            "src_dram_addr": int(src),
+            "dst_spm_addr": int(section["global_linear_addr"]),
+            "dst_parallel_spm_addr": int(section["global_parallel_addr"]),
+            "size_words64": int(words),
+        }
+        if part is not None:
+            transfer.update({"partition_idx": part, "partition_count": grid_k,
+                             "partition_mode": "ultra_bank"})
+        transfer["src_addr_gen"] = _linear_addr_gen(src, words)
+        transfer["dst_addr_gen"] = _linear_addr_gen(section["global_linear_addr"], words)
+        return transfer
+
+    plans: List[Dict[str, Any]] = []
+    waves: List[Dict[str, Any]] = []
+    for wn in range(wave_n):
+        for wm in range(wave_m):
+            wave_id = wn * wave_m + wm
+            phase = ("ping", "pong")[wave_id % 2]
+            ps_phase = ("ping", "pong")[wn % 2]
+            load_ps = (wm == 0)
+
+            transfers = []
+            if load_ps:
+                for b in range(grid_k):
+                    src = dram_mapping["weight"] + (wn * layout["ps_tile_words"]
+                                                    + b * layout["ps_bank_words"]) * _SPM_WORD_BYTES
+                    transfers.append(d2s("weight", 0, sec[f"g0_b{b}_{ps_phase}"], src,
+                                         layout["ps_bank_words"], part=b))
+            for b in range(grid_k):
+                src = dram_mapping["activation"] + (wm * layout["pd_tile_words"]
+                                                    + b * layout["pd_bank_words"]) * _SPM_WORD_BYTES
+                transfers.append(d2s("activation", 1, sec[f"g1_b{b}_{phase}"], src,
+                                     layout["pd_bank_words"], part=b))
+            c_words = layout["c_tile_words"]
+            c_offset = wave_id * c_words * _SPM_WORD_BYTES
+            transfers.append(d2s("partial_sum", 2, sec[f"g2_{phase}"],
+                                 dram_mapping["partial_sum"] + c_offset, c_words))
+            out_sec = sec[f"g3_{phase}"]
+            out_dst = dram_mapping["output"] + c_offset
+            transfers.append({
+                "tensor": "output",
+                "group_id": 3,
+                "section": out_sec["name"],
+                "direction": "spm_to_dram",
+                "src_spm_addr": int(out_sec["global_linear_addr"]),
+                "src_parallel_spm_addr": int(out_sec["global_parallel_addr"]),
+                "dst_dram_addr": int(out_dst),
+                "size_words64": int(c_words),
+                "src_addr_gen": _linear_addr_gen(out_sec["global_linear_addr"], c_words),
+                "dst_addr_gen": _linear_addr_gen(out_dst, c_words),
+            })
+            waves.append({
+                "wave_id": wave_id,
+                "sync": {"compute_plan_idx": wave_id, "signal": "dma_wave_done"},
+                "spm_map": {"map_val": int(spm_map_val), "port_to_group": dict(port_to_group),
+                            "reason": "default"},
+                "runtime_sections": {
+                    "activation": [f"g1_b{b}_{phase}" for b in range(_SPM_BANKS_PER_GROUP)],
+                    "weight": [f"g0_b{b}_{ps_phase}" for b in range(_SPM_BANKS_PER_GROUP)],
+                    "partial_sum": f"g2_{phase}",
+                    "output": f"g3_{phase}",
+                },
+                "transfers": transfers,
+            })
+
+            plan = {
+                "name": f"GEMM_K0_N{wn}_M{wm}",
+                "global_mask": 0xF if load_ps else 0xE,  # plane bit 0 = PS
+                "ultra_mode": True,
+                "agu_ps": _new_agu_cfg(load_ps, True),
+                "agu_pd": _new_agu_cfg(True, True),
+                "agu_pli": _new_agu_cfg(True, False),
+                "agu_plo": _new_agu_cfg(True, False),
+            }
+            # PS: per K row, the wave's N tiles side by side; tag = N tile (idx2).
+            plan["agu_ps"].update({
+                "base_addr": local_word(sec[f"g0_b0_{ps_phase}"], "local_parallel_base"),
+                "iter0": _GEMM_TILE_W, "iter1": _GEMM_PE_K, "iter2": gn, "iter3": 1,
+                "stride0": 1, "stride1": gn * _GEMM_TILE_W, "stride2": _GEMM_TILE_W, "stride3": 0,
+                "tag_base": 0, "tag_stride0": 1, "tag_stride1": 1, "tag_ctrl": 2,
+            })
+            # PD: per K row, the wave's M tiles side by side; tag = M tile (idx1).
+            plan["agu_pd"].update({
+                "base_addr": local_word(sec[f"g1_b0_{phase}"], "local_parallel_base"),
+                "iter0": _GEMM_TILE_D, "iter1": gm, "iter2": _GEMM_PE_K, "iter3": 1,
+                "stride0": 1, "stride1": _GEMM_TILE_D, "stride2": gm * _GEMM_TILE_D, "stride3": 0,
+                "tag_base": 0, "tag_stride0": 0, "tag_stride1": 1, "tag_ctrl": 1,
+            })
+            # PLI/PLO: one C tile per PE (8 columns x 12 rows); tag = PE tile m * gn + n (idx2).
+            for key, group in (("agu_pli", 2), ("agu_plo", 3)):
+                plan[key].update({
+                    "base_addr": local_word(sec[f"g{group}_{phase}"], "local_linear_base"),
+                    "iter0": _GEMM_TILE_D, "iter1": _GEMM_PE_N, "iter2": gm * gn, "iter3": 1,
+                    "stride0": 1, "stride1": _GEMM_TILE_D, "stride2": _GEMM_C_TILE_WORDS,
+                    "stride3": 0,
+                    "tag_base": 0, "tag_stride0": 1, "tag_stride1": 1, "tag_ctrl": 2,
+                })
+            plans.append(plan)
+
+    def mapping(tensor, group, section_mode, spm_mode, per_wave):
+        if section_mode == "bank":
+            ping = [f"g{group}_b{b}_ping" for b in range(_SPM_BANKS_PER_GROUP)]
+            pong = [f"g{group}_b{b}_pong" for b in range(_SPM_BANKS_PER_GROUP)]
+            primary = ping[0]
+        else:
+            ping, pong = f"g{group}_ping", f"g{group}_pong"
+            primary = ping
+        ping_sec = sec[primary]
+        base_key = "local_parallel_base" if spm_mode == "parallel" else "local_linear_base"
+        return {
+            "group_id": group,
+            "noc_channel": _SPM_CHANNEL_BY_GROUP[group],
+            "ping_section": ping,
+            "pong_section": pong,
+            "section": primary,
+            "section_mode": section_mode,
+            "spm_addr": int(ping_sec[base_key]),
+            "parallel_spm_addr": int(ping_sec["local_parallel_base"]),
+            "linear_spm_addr": int(ping_sec["local_linear_base"]),
+            "spm_mode": spm_mode,
+            "double_buffer": wave_count > 1,
+            "size_words64": int(sum(per_wave)),
+            "per_wave_words64": [int(v) for v in per_wave],
+        }
+
+    ps_per_wave = [layout["ps_tile_words"] if p["agu_ps"]["enable"] else 0 for p in plans]
+    tensor_mapping = {
+        "weight": mapping("weight", 0, "bank", "parallel", ps_per_wave),
+        "activation": mapping("activation", 1, "bank", "parallel", [layout["pd_tile_words"]] * wave_count),
+        "partial_sum": mapping("partial_sum", 2, "group", "linear", [layout["c_tile_words"]] * wave_count),
+        "output": mapping("output", 3, "group", "linear", [layout["c_tile_words"]] * wave_count),
+    }
+    topology = {
+        "num_groups": _SPM_NUM_GROUPS,
+        "banks_per_group": _SPM_BANKS_PER_GROUP,
+        "bank_depth_words": _SPM_BANK_DEPTH_WORDS,
+        "group_linear_words": _SPM_GROUP_LINEAR_WORDS,
+        "group_parallel_base": _SPM_GROUP_LINEAR_WORDS,
+        "group_span_words": _SPM_GROUP_SPAN_WORDS,
+        "group_linear_bytes": _SPM_GROUP_LINEAR_WORDS * _SPM_WORD_BYTES,
+        "group_parallel_base_bytes": _SPM_GROUP_LINEAR_WORDS * _SPM_WORD_BYTES,
+        "group_span_bytes": _SPM_GROUP_SPAN_WORDS * _SPM_WORD_BYTES,
+    }
+    return {
+        "spm": {"base_addr": 0, "addr_unit": "byte", "topology": topology,
+                "groups": groups, "tensor_mapping": tensor_mapping},
+        "dma": {"engine": "tb_single_sc_process", "waves": waves},
+        "cluster_plans": plans,
+    }
+
+
+_GEMM_DRAM_MAPPING = {
+    "activation": 0x00000000,
+    "weight": 0x10000000,
+    "partial_sum": 0x20000000,
+    "output": 0x30000000,
+    "pe_program": 0x40000000,
+}
+
+
+def plan_cluster_gemm(config: ClusterGemmConfig, pe_program=None) -> Dict[str, Any]:
+    """Tensor-free part of the cluster GEMM test.
+
+    Uses the NoC GEMM wave planner, its wave-local scan chain and, when
+    pe_program is given, its PE-program wave-loop check (the cluster fixtures
+    run the same PE program shape). Returns the wave plan, packed layout, scan
+    chain and the software sections (SPM, DMA waves, cluster plans).
+    """
+    plan, scan_chain = noc_gen.plan_gemm_test(config, pe_program)
+    layout = _gemm_layout(config, plan)
+    software = {
+        "dram_mapping": dict(_GEMM_DRAM_MAPPING),
+        "wave_schedule": {
+            "temporal_wave_count": layout["wave_m"] * layout["wave_n"],
+            "temporal_wave_out_h": 1,
+            "temporal_wave_out_ch": layout["wave_n"],
+            "temporal_wave_in_ch": int(plan["wave_k"]),
+        },
+    }
+    software.update(_compile_cluster_plans_gemm(layout, _GEMM_DRAM_MAPPING))
+    return {"plan": plan, "layout": layout, "scan_chain": scan_chain, "software": software}
 
 
 def _compile_cluster_plans_conv2d(
@@ -1705,6 +1917,9 @@ def generate_gemm_test(config: ClusterGemmConfig, assembler_exe: str = "ha-asm")
     Mapping strategy:
     - Tile the M, N dimensions onto a grid of PEs.
     - Split K dimension across Buses for spatial accumulation (NoC vertical accumulation).
+    The wave plan, scan chain and PE-program check are those of the NoC GEMM
+    test; plans, DMA waves and the packed tensor layout follow the contract
+    described above _gemm_spm_sections.
     """
     print("Generating GEMM test data with K-axis NoC accumulation...")
     config.validate()
@@ -1713,77 +1928,11 @@ def generate_gemm_test(config: ClusterGemmConfig, assembler_exe: str = "ha-asm")
     num_pes = config.num_pes # Hardware Total PEs (e.g., 64)
     num_bus = config.num_bus # Hardware Buses (e.g., 3)
 
-    # PE Capability
-    PE_M, PE_N = 12, 8
-    PE_K = 32 # PE processes 32 K-dim per step/pass
-
-    # Calculate Grid Size
-    grid_m = (M + PE_M - 1) // PE_M
-    grid_n = (N + PE_N - 1) // PE_N
-    grid_k = (K + PE_K - 1) // PE_K  # K-splits
-
-    print(f"Grid Layout: M={grid_m}, N={grid_n}, K_split={grid_k}")
-
-    # Total PEs needed: M_grid * N_grid * K_grid
-    active_pes_count = grid_m * grid_n * grid_k
-
-    # Calculate Temporal Waves if hardware resources are insufficient
-    pes_per_bus = num_pes // num_bus
-    pes_per_layer = grid_m * grid_n # PEs needed for one K-slice (one bus)
-
-    # Choose M/N tile shape per wave to fit PE budget
-    def choose_mn_tiles(grid_m: int, grid_n: int, pe_budget: int):
-        best = None
-        prefer_n_cap = max(1, pe_budget // 2)
-        single_k_wave = grid_k <= num_bus
-        for m_tiles in range(min(grid_m, pe_budget), 0, -1):
-            max_n = min(grid_n, pe_budget // m_tiles)
-            for n_tiles in range(max_n, 0, -1):
-                waves_m = math.ceil(grid_m / m_tiles)
-                waves_n = math.ceil(grid_n / n_tiles)
-                waves = waves_m * waves_n
-                area = m_tiles * n_tiles
-                aspect = abs((grid_m / max(grid_n, 1)) - (m_tiles / max(n_tiles, 1)))
-                balance = abs(waves_m - waves_n)
-                if single_k_wave:
-                    n_bias = min(n_tiles, prefer_n_cap)
-                    score = (waves, -n_bias, -m_tiles, balance, aspect, -area)
-                else:
-                    score = (waves, -n_tiles, -m_tiles, -area, aspect)
-                if best is None or score < best[0]:
-                    best = (score, m_tiles, n_tiles, waves_m, waves_n)
-        if best is None:
-            return 1, 1, grid_m, grid_n
-        _, m_tiles, n_tiles, waves_m, waves_n = best
-        return m_tiles, n_tiles, waves_m, waves_n
-
-    m_tiles_per_wave, n_tiles_per_wave, wave_m, wave_n = choose_mn_tiles(grid_m, grid_n, pes_per_bus)
-
-    def split_tiles(total_tiles: int, waves: int) -> List[int]:
-        if waves <= 0:
-            return []
-        base = total_tiles // waves
-        rem = total_tiles % waves
-        tiles = [base + 1 if i < rem else base for i in range(waves)]
-        return tiles
-
-    # Number of waves needed for K-dimension (if K-splits > Buses)
-    k_tiles_per_wave = num_bus if num_bus > 0 else 1
-    wave_k = math.ceil(grid_k / k_tiles_per_wave)
-
-    grid_m_per_wave = split_tiles(grid_m, wave_m)
-    grid_n_per_wave = split_tiles(grid_n, wave_n)
-    grid_k_per_wave = split_tiles(grid_k, wave_k)
-
+    planned = plan_cluster_gemm(config, config.pe_program)
+    plan, layout, scan_chain = planned["plan"], planned["layout"], planned["scan_chain"]
+    grid_m, grid_n, grid_k = plan["grid_m"], plan["grid_n"], plan["grid_k"]
+    wave_m, wave_n, wave_k = plan["wave_m"], plan["wave_n"], plan["wave_k"]
     temporal_wave_count = wave_m * wave_n * wave_k
-
-    # We map K-splits to Buses.
-    # Requirement: We need at least grid_k buses to chain them vertically efficiently.
-    # (Or complex folding, but assuming 1-to-1 mapping for this test)
-    if grid_k > num_bus:
-        print(f"Warning: K-split ({grid_k}) > Num Buses ({num_bus}). Accumulation chain might not fit simply.")
-        # We proceed but data might be truncated or wrap-around logic is needed.
-        # For this specific user request (K=96/32=3, Bus=3), it fits perfectly.
 
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
@@ -1796,106 +1945,17 @@ def generate_gemm_test(config: ClusterGemmConfig, assembler_exe: str = "ha-asm")
     # Calculate GEMM
     C = golden_gemm(A, B, D)
 
-    # Rename keys to match Conv2D filenames (activation, weight, partial_sum)
-    # This ensures test_noc_sim.cpp loads them correctly.
-    inputs = {
-        "activation": A,
-        "weight": B,
-        "partial_sum": D
-    }
+    # Packed DRAM images (see pack_cluster_gemm_tensors); file names match Conv2D.
+    inputs, packed_output = pack_cluster_gemm_tensors(A, B, D, C, layout)
     outputs = {
-        "partial_sum": C
+        "partial_sum": packed_output
     }
-
-    # --- Scan Chain Construction ---
-    scan_chain = []
-
-    # Calculate physical layout
-    # We assign Bus `b` to handle `K-split = b`.
-    # Inside Bus, we place the (M, N) grid.
-
-    pes_per_bus = num_pes // num_bus
-
-    def get_route_mode(k_idx: int, k_total: int) -> int:
-        # Chain flow: Bus 0 (Start) -> ... -> Bus N (End)
-        if k_idx == 0:
-            # First stage: Read from BUS (or zero), output to Neighbor (Next Stage)
-            return PERouterMode.PLI_FROM_BUS_PLO_TO_LN
-        elif k_idx == k_total - 1:
-            # Last stage: Read from Neighbor, Accumulate, output to BUS (Final Memory)
-            return PERouterMode.PLI_FROM_LN_PLO_TO_BUS
-        else:
-            # Middle stage: Read from Neighbor, Accumulate, output to Neighbor
-            return PERouterMode.PLI_FROM_LN_PLO_TO_LN
-
-    for b in range(num_bus):
-        # Current K-slice index
-        k_idx = b
-
-        # Check if this bus is part of the active K-chain
-        is_active_k_layer = (k_idx < grid_k)
-
-        # Determine Routing Mode for this layer
-        r_mode = get_route_mode(k_idx, grid_k) if is_active_k_layer else PERouterMode.PLI_FROM_BUS_PLO_TO_BUS
-
-        for j in range(pes_per_bus):
-            # Map j to (m, n) within this layer
-            # Simple Row-Major mapping of the MxN grid
-            # Capability per Bus: pes_per_bus
-            # Required: grid_m * grid_n
-
-            m_idx = j // grid_n
-            n_idx = j % grid_n
-
-            is_active_pe = is_active_k_layer and (m_idx < grid_m)
-
-            if is_active_pe:
-                # Active PE
-                # ps_id: Tiled Weight (B_kn) -> Shared by PEs with same (k, n)
-                # pd_id: Tiled Input Act (A_mk) -> Shared by PEs with same (k, m)
-                # pli_id: PS Input (D_mn) -> Only for first bus (k=0), Shared by (m, n)
-                # plo_id: PS Output (C_mn) -> Only for last bus (k=last), Shared by (m, n)
-
-                if config.ultra_mode:
-                    # Ultra Mode: Reuse tags across buses
-                    ps_id = n_idx
-                    pd_id = m_idx
-                else:
-                    # Normal Mode
-                    # ps_id (Weight B)
-                    ps_id = k_idx * grid_n + n_idx
-                    # pd_id (Input A)
-                    pd_id = k_idx * grid_m + m_idx
-
-                # pli_id (PS Input) - used only if route_mode reads from BUS
-                pli_id = (m_idx * grid_n + n_idx) if k_idx == 0 else 63
-
-                # plo_id (PS Output) - used only if route_mode writes to BUS
-                plo_id = (m_idx * grid_n + n_idx) if k_idx == grid_k - 1 else 63
-
-                enable = True
-                route_mode = r_mode
-            else:
-                # Inactive PE
-                ps_id, pd_id, pli_id, plo_id = 63, 63, 63, 63
-                enable = False
-                route_mode = PERouterMode.PLI_FROM_BUS_PLO_TO_BUS # Default/Passthrough
-
-            cfg = ScanChainConfig(
-                ps_id=ps_id,
-                pd_id=pd_id,
-                pli_id=pli_id,
-                plo_id=plo_id,
-                route_mode=route_mode,
-                enable=enable
-            )
-            scan_chain.append(cfg)
 
     print(f"GEMM K-Split Scan-Chain Generated.")
     print(f"  Mapping: K-split {grid_k} layers mapped to first {grid_k} buses.")
     print(f"  Temporal Waves: {temporal_wave_count} (M waves: {wave_m}, N waves: {wave_n}, K waves: {wave_k})")
-    print(f"  Wave Tile Size: M={m_tiles_per_wave}, N={n_tiles_per_wave}, K={k_tiles_per_wave}")
-    print(f"  Per-wave tiles: M={grid_m_per_wave}, N={grid_n_per_wave}, K={grid_k_per_wave}")
+    print(f"  Wave Tile Size: M={plan['m_tiles_per_wave']}, N={plan['n_tiles_per_wave']}, K={plan['k_tiles_per_wave']}")
+    print(f"  Per-wave tiles: M={plan['grid_m_per_wave']}, N={plan['grid_n_per_wave']}, K={plan['grid_k_per_wave']}")
 
     Path(config.out_dir).mkdir(parents=True, exist_ok=True)
     compile_pe_program(
@@ -1912,14 +1972,6 @@ def generate_gemm_test(config: ClusterGemmConfig, assembler_exe: str = "ha-asm")
         "spm_groups": 4,
     }
 
-    dram_mapping = {
-        "activation": 0x00000000,
-        "weight": 0x10000000,
-        "partial_sum": 0x20000000,
-        "output": 0x30000000,
-        "pe_program": 0x40000000,
-    }
-
     software_config = {
         "files": {
             "activation": "input_activation.bin",
@@ -1928,91 +1980,8 @@ def generate_gemm_test(config: ClusterGemmConfig, assembler_exe: str = "ha-asm")
             "output": "output_partial_sum.bin",
             "pe_program": "pe_program.bin",
         },
-        "dram_mapping": dram_mapping,
-        "wave_schedule": {
-            "temporal_wave_count": temporal_wave_count,
-            "temporal_wave_out_h": 1,
-            "temporal_wave_out_ch": wave_n,
-            "temporal_wave_in_ch": wave_k,
-        },
     }
-
-    # GEMM addressing policy aligned with test_noc_sim dataflow:
-    # 1) non-ultra: all tensors use linear/group sections.
-    # 2) ultra + single K wave (no K-split): all tensors use parallel/bank sections.
-    # 3) ultra + K-split (>1): weight/activation use parallel/bank, partial_sum/output use linear/group.
-    if not bool(config.ultra_mode):
-        gemm_tensor_section_mode = {
-            "weight": "group",
-            "activation": "group",
-            "partial_sum": "group",
-            "output": "group",
-        }
-        gemm_tensor_spm_mode = {
-            "weight": "linear",
-            "activation": "linear",
-            "partial_sum": "linear",
-            "output": "linear",
-        }
-    elif grid_k > 1:
-        gemm_tensor_section_mode = {
-            "weight": "bank",
-            "activation": "bank",
-            "partial_sum": "group",
-            "output": "group",
-        }
-        gemm_tensor_spm_mode = {
-            "weight": "parallel",
-            "activation": "parallel",
-            "partial_sum": "linear",
-            "output": "linear",
-        }
-    else:
-        gemm_tensor_section_mode = {
-            "weight": "bank",
-            "activation": "bank",
-            "partial_sum": "bank",
-            "output": "bank",
-        }
-        gemm_tensor_spm_mode = {
-            "weight": "parallel",
-            "activation": "parallel",
-            "partial_sum": "parallel",
-            "output": "parallel",
-        }
-
-    tensor_words64 = {
-        "activation": _num_words64_from_shape(list(A.shape)),
-        "weight": _num_words64_from_shape(list(B.shape)),
-        "partial_sum": _num_words64_from_shape(list(D.shape)),
-        "output": _num_words64_from_shape(list(C.shape)),
-    }
-    spm_dma_config = _build_spm_dma_plan(
-        dram_mapping,
-        tensor_words64,
-        temporal_wave_count,
-        tensor_shapes={
-            # GEMM tensors are represented in packed 4D for DMA slicing, where
-            # dim3 is fp16 elements and dim3_words = ceil(dim3/4) is the 64-bit word axis.
-            "activation": [1, M, 1, K * 4],
-            "weight": [1, K, 1, N * 4],
-            "partial_sum": [1, M, 1, N * 4],
-            "output": [1, M, 1, N * 4],
-        },
-        wave_schedule=software_config["wave_schedule"],
-        use_parallel_for_noc=bool(config.ultra_mode),
-        tensor_section_mode=gemm_tensor_section_mode,
-        tensor_spm_mode=gemm_tensor_spm_mode,
-    )
-    software_config["spm"] = spm_dma_config["spm"]
-    software_config["dma"] = spm_dma_config["dma"]
-    runtime_addr_per_wave = _build_runtime_addr_per_wave(software_config["spm"], software_config["dma"])
-
-    spm_tensor_mapping = software_config["spm"]["tensor_mapping"]
-    addr_weight_run = int(spm_tensor_mapping["weight"]["spm_addr"])
-    addr_act_run = int(spm_tensor_mapping["activation"]["spm_addr"])
-    addr_psum_run = int(spm_tensor_mapping["partial_sum"]["spm_addr"])
-    addr_out_run = int(spm_tensor_mapping["output"]["spm_addr"])
+    software_config.update(planned["software"])
 
     meta_config = {
         "name": f"gemm_{M}x{N}x{K}",
@@ -2027,35 +1996,30 @@ def generate_gemm_test(config: ClusterGemmConfig, assembler_exe: str = "ha-asm")
         "wave_m": wave_m,
         "wave_n": wave_n,
         "wave_k": wave_k,
-        "grid_m_per_wave": grid_m_per_wave,
-        "grid_n_per_wave": grid_n_per_wave,
-        "grid_k_per_wave": grid_k_per_wave,
+        "grid_m_per_wave": plan["grid_m_per_wave"],
+        "grid_n_per_wave": plan["grid_n_per_wave"],
+        "grid_k_per_wave": plan["grid_k_per_wave"],
         "ultra_mode": bool(config.ultra_mode),
-        # AGU ultra-mode behavior can differ from global ultra_mode for GEMM K-split.
-        # In ultra K-split mode, PLO requests are standard (non-ultra) in test_noc_sim.
-        "agu_ultra_overrides": (
-            {"agu_plo": False}
-            if bool(config.ultra_mode) and grid_k > 1
-            else {}
-        ),
+        # PS/PD stream K stages to the buses through ultra (parallel) reads;
+        # PLI enters bus 0 and PLO leaves the last bus as ordinary requests.
+        "agu_ultra_overrides": {"agu_pli": False, "agu_plo": False},
         "tensor_shapes": {
             "activation": [M, K],
             "weight": [K, N],
             "partial_sum": [M, N],
             "output": [M, N],
         },
-    }
-
-    software_config["cluster_plans"] = _compile_cluster_plans_gemm(
-        meta_config,
-        {
-            "weight": addr_weight_run,
-            "activation": addr_act_run,
-            "partial_sum": addr_psum_run,
-            "output": addr_out_run,
+        # The .bin files hold packed wave tiles, not row-major tensors.
+        "dram_layout": {
+            "format": "cluster_gemm_packed_wave",
+            "pe_tile_mnk": [_GEMM_PE_M, _GEMM_PE_N, _GEMM_PE_K],
+            "padded_mnk": [layout["m_pad"], layout["n_pad"], layout["k_pad"]],
+            "activation": "per M wave: A[m_wave, :K]^T, k-major, 4 rows per word",
+            "weight": "per N wave: B[:K, n_wave], k-major, 4 columns per word",
+            "partial_sum": "per wave (N outer, M inner): per PE tile (m, n): per column: 12 rows, 4 per word",
+            "output": "same as partial_sum",
         },
-        runtime_addr_per_wave=runtime_addr_per_wave,
-    )
+    }
 
     test_config = {
         "meta": meta_config,

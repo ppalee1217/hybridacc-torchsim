@@ -44,17 +44,9 @@ SPM 位址有兩組概念：
 
 ## 3. 波次切分工具
 
-### 3.1 連續切分
-
 - `_get_wave_range(total, waves, wave_idx)`：平均切塊。
 
-### 3.2 tile-aware 切分
-
-- `_get_wave_tile_range(tiles_per_wave, wave_idx, total_tiles, fallback_waves)`：
-  - 若有明確 `grid_*_per_wave`，照指定 tile 數切。
-  - 否則回退到平均切分。
-
-這兩個函式是 Conv2D/GEMM 共同的時域 wave 排程基礎。
+`_get_wave_range` 是 Conv2D 的時域 wave 排程基礎；GEMM 的 wave 排程沿用 NoC GEMM 測試的規劃（見 §7）。
 
 ---
 
@@ -76,27 +68,22 @@ SPM 位址有兩組概念：
 
 這個 API 主要服務 conv path，也提供 GEMM 可借用的結構範式。
 
-### 4.3 GEMM 計畫：`_compile_cluster_plans_gemm(...)`
+### 4.3 GEMM 計畫：`_compile_cluster_plans_gemm(layout, dram_mapping)`
 
-流程摘要：
+契約（與 cc 的 GEMM lowering / firmware 相同；testbench 整層只送一次 START_PE，並以 `plans[i]` 配 `dma.waves[i]`）：
 
-1. 以 `waves_k * waves_n * waves_m` 遍歷 wave。
-2. 每個 wave 再遍歷 `kt`（K tile）與 `mt`（M tile）。
-3. 依矩陣打包模型計算：
-	- `row_w = ceil(N/4)`
-	- `col_d = ceil(M/4)`
-	- `tile_w = ceil(pe_n/4)`
-	- `tile_d = ceil(pe_m/4)`
-4. 為 `agu_ps/pd/pli/plo` 產生 base/iter/stride/tag。
-5. `wk == 0` 才啟用 `agu_pli`；`wk == last` 才啟用 `agu_plo`。
+1. 每個時域 wave 產生**一個** cluster plan 與**一個** DMA wave，順序為 N wave 在外、M wave 在內，與 PE 程式的迴圈一致（每個 N wave 一次 `SWAPDM`，每個 M wave 一次 `LDMA.ACT`）。
+2. 每個 plan 以 wave 內編號餵該 wave 的全部 `(m, n)` PE tile，與 scan chain 一致：
+	- PS：`iter=[2, 32, grid_n_per_wave, 1]`，tag = N tile（`tag_ctrl=2`）。
+	- PD：`iter=[3, grid_m_per_wave, 32, 1]`，tag = M tile（`tag_ctrl=1`）。
+	- PLI/PLO：`iter=[3, 8, grid_m_per_wave*grid_n_per_wave, 1]`，tag = `m*grid_n_per_wave+n`（`tag_ctrl=2`）。
+3. PS 只在每個 N wave 的第一個 M wave 送出（其餘 plan 的 `global_mask=0xE`，PS AGU `enable=false`），因為 PE 每個 N wave 只收一組 weight。
+4. bus b 是 K stage b：PS/PD 群組的 bank b 放 K stage b，AGU 讀 parallel 區（ultra），port b 餵 bus b；PLI/PLO 讀寫 linear 區（non-ultra）。
+5. PD/PLI/PLO 依 wave 交替 ping/pong，PS 依 N wave 交替。
 
-### 4.4 GEMM 新增：AGU ultra 覆寫
+### 4.4 GEMM 的 AGU ultra 設定
 
-目前 `_compile_cluster_plans_gemm` 支援 `meta["agu_ultra_overrides"]`，可針對個別 AGU 覆寫 ultra bit，例如：
-
-- `{"agu_plo": False}`
-
-用途：對齊 `test_noc_sim` 在 **ultra + K-split** 時，PLO 使用標準（non-ultra）read request 的行為。
+PS/PD 為 ultra（一次讀三個 bank、各 port 一個 K stage）；PLI/PLO 為 non-ultra：PLI 只進第一個 K stage（bus 0），PLO 只從最後一個 K stage 讀回，與 `test_noc_sim` 在 ultra + K-split 時的行為一致。`meta["agu_ultra_overrides"]` 記錄為 `{"agu_pli": False, "agu_plo": False}`。
 
 ---
 
@@ -176,36 +163,19 @@ SPM 位址有兩組概念：
 
 流程順序：
 
-1. 計算 `grid_m/grid_n/grid_k`（以 `PE_M=12, PE_N=8, PE_K=32`）。
-2. 推導 `wave_m/wave_n/wave_k` 與 `grid_*_per_wave`。
-3. 產生 A/B/D 與 golden C。
-4. 依 K-split 拓樸生成 scan chain：
-	- ultra: `ps_id=n_idx`, `pd_id=m_idx`
-	- normal: `ps_id=k_idx*grid_n+n_idx`, `pd_id=k_idx*grid_m+m_idx`
-5. 建立 `software_config` 與 `tensor_words64`。
-6. 呼叫 `_build_spm_dma_plan(...)`。
-7. 呼叫 `_compile_cluster_plans_gemm(...)`。
-8. 回傳 `ClusterTestData`。
+1. `plan_cluster_gemm(config, config.pe_program)`（不需 torch）：
+	- 以 `noc_gen.plan_gemm_test` 取得 wave 規劃（`PE_M=12, PE_N=8, PE_K=32`）、wave 內編號的 scan chain，並檢查 fixture PE 程式的 N/M wave 迴圈與 `SDMA.LOOP` 是否符合規劃（不符即 `ValueError`）。
+	- 只支援 ultra K-chain 且只有一個 K wave（`1 < grid_k <= num_bus`）；wave 大小不一、non-ultra、`grid_k == 1` 或需要多個 K wave 時直接 `ValueError`，不產生不一致的測試。
+	- 產生 SPM sections、DMA waves 與 cluster plans（§4.3）。
+2. 產生 A/B/D 與 golden C（seed 與 NoC GEMM 測試相同）。
+3. `pack_cluster_gemm_tensors(...)` 轉成 §8.1 的 packed DRAM 影像（golden C 也同樣打包）。
+4. 回傳 `ClusterTestData`。
 
 ---
 
-## 8. GEMM addressing policy（本次更新重點）
+## 8. GEMM addressing policy
 
-為對齊 `test_noc_sim` 的實際傳輸行為，`generate_gemm_test(...)` 已加入明確 policy：
-
-### 8.1 non-ultra
-
-- `weight/activation/partial_sum/output`
-  - `section_mode = group`
-  - `spm_mode = linear`
-
-### 8.2 ultra 且 `grid_k == 1`
-
-- `weight/activation/partial_sum/output`
-  - `section_mode = bank`
-  - `spm_mode = parallel`
-
-### 8.3 ultra 且 `grid_k > 1`（K-split）
+只產生 ultra K-split（`grid_k > 1`）：
 
 - `weight/activation`
   - `section_mode = bank`
@@ -219,33 +189,21 @@ SPM 位址有兩組概念：
 - PS/PD 在 ultra 為多 port 並行資料打包，適合 parallel。
 - K-split 時 PLI/PLO 走單路累加/讀回語意（尤其 PLO 為 standard read），適合 linear。
 
-### 8.4 GEMM DMA slicing 改為 packed 4D + K 軸切分
+### 8.1 packed DRAM 影像
 
-為了避免 activation 在 ultra bank partition 時因 shape words 檢查失敗而 fallback，GEMM 傳入 `_build_spm_dma_plan(...)` 的 `tensor_shapes` 已改成 packed-friendly 4D 形式：
+DMA 只做連續複製，所以 `input_*.bin` 與 `output_partial_sum.bin` 直接存成 AGU 讀取的 packed wave tile（不是 row-major 矩陣；`meta["dram_layout"]` 記錄格式）：
 
-- `activation`: `[1, M, 1, K*4]`
-- `weight`: `[1, K, 1, N*4]`
-- `partial_sum`: `[1, M, 1, N*4]`
-- `output`: `[1, M, 1, N*4]`
+- `activation`：每個 M wave 一塊 `A[m_wave, :K]^T`，K 為外層、每個 64-bit word 放 4 列（PE 的 PD 封包是 4 個 M 值）。每塊依 K stage 切成 bank 大小的三段，各自 DMA 到 `g1_b{0,1,2}`；`M=48, K=96` 時每 bank 384 words。
+- `weight`：每個 N wave 一塊 `B[:K, n_wave]`，K 為外層、每 word 4 行；同樣依 K stage 分到 `g0_b{0,1,2}`。
+- `partial_sum` / `output`：每個 wave（N 外、M 內）一塊；塊內依 PE tile `(m, n)`，每個 tile 8 行、每行 12 列（3 words）。
 
-此表示法下，`dim3_words = ceil(dim3_elems/4)` 正好等於 packed word 維度，因此可與 `tensor_words64` 對齊。
-
-另外，bank-mode 的 activation 在 GEMM layout（`[1, M, 1, K*4]`）下，partition 不再沿 height 分，而是沿 packed channel（K 軸）分。以 `M=48, K=96`、3 banks 為例：
-
-- activation 總 words = `48*96/4 = 1152`
-- 每 bank words = `48*32/4 = 384`
-
-這樣 DMA 會生成 3 筆 activation transfer，與 K-split 的資料語意一致。
+M、N、K 不是 tile 倍數時以 0 補齊，golden 也一樣補 0。
 
 ---
 
-## 9. GEMM AGU ultra policy（本次更新重點）
+## 9. GEMM AGU ultra policy
 
-在 `meta_config` 中新增 `agu_ultra_overrides`：
-
-- 當 `ultra_mode=True` 且 `grid_k>1` 時，設定 `{"agu_plo": False}`。
-
-用途：讓 PLO AGU 與 testbench 的 non-ultra read path 一致。
+見 §4.4：PS/PD ultra，PLI/PLO non-ultra。
 
 ---
 
@@ -295,4 +253,4 @@ SPM 位址有兩組概念：
 2. SPM 區域與 DMA 搬運策略
 3. Cluster AGU 的 base/iter/stride/tag 規格
 
-本次 GEMM 更新的核心價值是把 addressing policy 與 AGU ultra 行為做成顯式規則，讓 non-ultra、ultra 單 K、ultra K-split 三種模式的語意一致且可維護。
+GEMM 只產生 ultra K-split 一種模式，plan、DMA wave、scan chain、PE 程式迴圈與 packed 資料由同一份 wave 規劃決定；其他模式會直接報錯。
