@@ -14,7 +14,7 @@ Usage:
         --ir output/build/hardware_ir.json \\
         --workload design/hybridacc-cc/example/conv2d_3x3_example_test.yaml \\
         --output-dir output/build \\
-        [--seed 42]
+        [--seed 42] [--bias-mode zero|random]
 """
 import argparse
 import json
@@ -104,6 +104,100 @@ def fp16_gemm_golden(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     return out
 
 
+def _gemm_pli_golden(a, b, bias, pe_k):
+    """PLI is added by VPSUMR after each PE-local K reduction, not per MAC.
+
+    The first stage consumes the supplied bias; later buses/K waves consume
+    the preceding fp16 PLO. Auto-split consumers supply bias_from here.
+    """
+    out = bias.astype(np.float16, copy=True)
+    for start in range(0, a.shape[1], pe_k):
+        partial = fp16_gemm_golden(a[:, start:start + pe_k], b[start:start + pe_k])
+        out = (partial + out).astype(np.float16)
+    return out
+
+
+def _conv_pli_golden(inp, weight, bias, tile_ic, stride=1, padding=0):
+    """VMAC reduces four rounded products as a pairwise tree; VPSUM adds PLI.
+
+    Each IC tile visits KH bus stages in order. A stage accumulates KW and
+    four-channel groups from zero, then adds the incoming partial sum once.
+    """
+    if weight.ndim == 2:
+        weight = weight[:, None, None, :]
+    oc, kh_size, kw_size, ic_size = weight.shape
+    if tile_ic % 4:
+        raise ValueError("conv PLI reference requires four-channel VMAC groups")
+    x = np.pad(inp, ((0, 0), (padding, padding), (padding, padding), (0, 0)))
+    out = bias.astype(np.float16, copy=True)
+    _, oh, ow, _ = out.shape
+    for start in range(0, ic_size, tile_ic):
+        for kh in range(kh_size):
+            partial = np.zeros_like(out)
+            for kw in range(kw_size):
+                patch = x[:, kh:kh + oh * stride:stride, kw:kw + ow * stride:stride]
+                for group in range(start, start + tile_ic, 4):
+                    products = []
+                    for channel in range(group, group + 4):
+                        if channel < ic_size:
+                            products.append((patch[..., channel:channel + 1]
+                                * weight[:, kh, kw, channel].reshape(1, 1, 1, oc)).astype(np.float16))
+                        else:
+                            products.append(np.zeros_like(out))
+                    pair0 = (products[0] + products[1]).astype(np.float16)
+                    pair1 = (products[2] + products[3]).astype(np.float16)
+                    total = (pair0 + pair1).astype(np.float16)
+                    partial = (partial + total).astype(np.float16)
+            out = (partial + out).astype(np.float16)
+    return out
+
+
+def _make_test_bias(op, wl_tensors, rng):
+    """Full GEMM PLI matrix; conv channel bias broadcast across space/batch.
+
+    Nonzero dyadic fp16 values avoid underflow and make tile changes visible.
+    A separate RNG keeps source operands identical to the legacy zero mode.
+    """
+    shape = tuple(wl_tensors[op["outputs"][0]]["shape"])
+    sample_shape = shape if op["type"] == "gemm" else (shape[-1],)
+    codes = rng.randint(1, 257, size=sample_shape)
+    signs = rng.randint(0, 2, size=sample_shape) * 2 - 1
+    values = (codes * signs / 256.0).astype(np.float16)
+    return np.broadcast_to(values, shape).copy()
+
+
+def _pack_test_bias(bias, layer):
+    tp = layer["tiling_params"]
+    if layer["op_type"] == "gemm":
+        # cc uses exactly the same padded wave layout for PLI and PLO.
+        if (tp["dma_pli_words"] != tp["dma_plo_words"]
+                or tp["dram_bias_oc_stride"] != tp["dram_out_oc_stride"]
+                or tp["dram_bias_h_stride"] != tp["dram_out_h_stride"]):
+            raise ValueError("GEMM PLI/PLO packing mismatch")
+        return _pack_gemm_c_output(bias, layer)
+    # Conv reuses one spatial bias tile per OC tile (H stride is zero, no W
+    # stride). Channel bias therefore has the same meaning on every wave.
+    if tp["dram_bias_h_stride"] != 0:
+        raise ValueError("Unexpected conv bias H stride")
+    tile_oc = layer["pe_program"]["params"]["KERNEL_COUNT"]
+    # dma_pli_words can be per row-bank, while DRAM contains the complete
+    # spatial tile. The parallel-row DMA advances its source by row_start.
+    tile_elements = tp["tile_h_out"] * tp["tile_w_out"] * tile_oc
+    tile_bytes = tile_elements * 2
+    if tp["num_oc_tiles"] > 1 and tp["dram_bias_oc_stride"] < tile_bytes:
+        raise ValueError("Conv bias OC stride overlaps full spatial PLI tiles")
+    packed = bytearray((tp["num_oc_tiles"] - 1) * tp["dram_bias_oc_stride"] + tile_bytes)
+    channels = bias[0, 0, 0]
+    for oc_tile in range(tp["num_oc_tiles"]):
+        vector = np.zeros(tile_oc, dtype=np.float16)
+        part = channels[oc_tile * tile_oc:(oc_tile + 1) * tile_oc]
+        vector[:len(part)] = part
+        blob = np.tile(vector, tile_elements // tile_oc).tobytes()
+        offset = oc_tile * tp["dram_bias_oc_stride"]
+        packed[offset:offset + len(blob)] = blob
+    return bytes(packed)
+
+
 def _coerce_bool_attr(value, attr_name: str) -> bool:
     if isinstance(value, bool):
         return value
@@ -168,7 +262,8 @@ def _bias_from_tensor(op: dict):
 # Layer-level golden computation
 # ---------------------------------------------------------------------------
 
-def _compute_layer_golden(op, tensors_data, wl_tensors, rng, layer_tp):
+def _compute_layer_golden(op, tensors_data, wl_tensors, rng, layer_tp,
+                          initial_bias=None, layer=None):
     """Compute golden output for a single layer.
 
     Args:
@@ -194,7 +289,11 @@ def _compute_layer_golden(op, tensors_data, wl_tensors, rng, layer_tp):
         weight = tensors_data[weight_name]
         output_shape = tuple(wl_tensors[output_name]["shape"])
 
-        golden = fp16_conv2d_golden(inp, weight, stride=stride, padding=padding)
+        if initial_bias is None:
+            golden = fp16_conv2d_golden(inp, weight, stride=stride, padding=padding)
+        else:
+            tile_ic, _ = _conv_weight_tile_shape(layer, weight.shape)
+            golden = _conv_pli_golden(inp, weight, initial_bias, tile_ic, stride, padding)
         golden = _apply_output_epilogue(op, golden)
         assert golden.shape == output_shape, \
             f"Shape mismatch for {output_name}: golden {golden.shape} vs expected {output_shape}"
@@ -222,7 +321,14 @@ def _compute_layer_golden(op, tensors_data, wl_tensors, rng, layer_tp):
                     f"{op['name']}: bias_from tensor '{bias_from}' shape {bias.shape} "
                     f"does not match GEMM output shape {golden.shape}"
                 )
-            golden = (golden + bias).astype(np.float16, copy=False)
+            if initial_bias is not None:
+                raise ValueError("bias_from must not receive an additional generated bias")
+            if layer is not None:
+                golden = _gemm_pli_golden(A, B, bias, layer["pe_program"]["params"]["K_TILE_DIM"])
+            else:
+                golden = (golden + bias).astype(np.float16, copy=False)
+        elif initial_bias is not None:
+            golden = _gemm_pli_golden(A, B, initial_bias, layer["pe_program"]["params"]["K_TILE_DIM"])
         golden = _apply_output_epilogue(op, golden)
         assert golden.shape == output_shape, \
             f"Shape mismatch for {output_name}: golden {golden.shape} vs expected {output_shape}"
@@ -907,6 +1013,9 @@ def main():
                         help="Output directory")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed (default: 42)")
+    parser.add_argument("--bias-mode", choices=("zero", "random"), default="zero",
+                        help="PLI stimulus: legacy zeros (default) or seeded nonzero bias; "
+                             "GEMM uses a full matrix, conv broadcasts per-channel bias")
     args = parser.parse_args()
 
     # -- Load workload YAML --
@@ -966,10 +1075,20 @@ def main():
     _validate_dram_regions(
         _dram_layout_regions(op_layer_pairs, wl_tensors, conv_batch), dram_base)
 
+    # A dedicated stream leaves source A/B/input/weight bytes unchanged.
+    bias_rng = np.random.RandomState(args.seed)
+    initial_biases = {}
+    if args.bias_mode == "random":
+        for i, (op, layer) in enumerate(op_layer_pairs):
+            if _bias_from_tensor(op) is None:
+                initial_biases[i] = _make_test_bias(op, wl_tensors, bias_rng)
+
     # -- Compute golden output layer by layer --
     for i, (op, layer) in enumerate(op_layer_pairs):
         tp = layer["tiling_params"]
-        out_name, golden = _compute_layer_golden(op, tensors_data, wl_tensors, rng, tp)
+        out_name, golden = _compute_layer_golden(
+            op, tensors_data, wl_tensors, rng, tp, initial_biases.get(i),
+            layer if args.bias_mode == "random" else None)
         tensors_data[out_name] = golden
         print(f"  Layer {i} ({op['type']}): output '{out_name}' shape={golden.shape}, "
               f"range=[{golden.min():.4f}, {golden.max():.4f}]")
@@ -1019,6 +1138,20 @@ def main():
             if i == 0 or b_name not in output_tensor_names:
                 dram_regions.append((b_offset, _pack_gemm_b_ps(tensors_data[b_name], layer)))
 
+        if i in initial_biases:
+            dram_regions.append((tp["dram_bias_base"] - dram_base,
+                                 _pack_test_bias(initial_biases[i], layer)))
+
+    if initial_biases:
+        # Check the populated extent, including every parallel row-bank,
+        # against later allocations. Never silently write over another layer.
+        regions = _dram_layout_regions(op_layer_pairs, wl_tensors, conv_batch)
+        for i, bias in initial_biases.items():
+            size = len(_pack_test_bias(bias, op_layer_pairs[i][1]))
+            regions = [(name, start, start + size if name == f"layer{i}.PLI" else end, tensor)
+                       for name, start, end, tensor in regions]
+        _validate_dram_regions(regions, dram_base)
+
     # Compute total DRAM size
     # Golden output in tile-packed layout matching firmware DMA writeback order
     output_offset = dram_output_base - dram_base
@@ -1060,6 +1193,13 @@ def main():
     # -- Write files --
     os.makedirs(args.output_dir, exist_ok=True)
 
+    if args.bias_mode == "random":
+        for i, (op, layer) in enumerate(op_layer_pairs):
+            np.save(os.path.join(args.output_dir, f"layer{i}_golden.npy"),
+                    tensors_data[op["outputs"][0]])
+            if i in initial_biases:
+                np.save(os.path.join(args.output_dir, f"layer{i}_bias.npy"), initial_biases[i])
+
     dram_path = os.path.join(args.output_dir, "dram_init.bin")
     with open(dram_path, "wb") as f:
         f.write(dram)
@@ -1096,6 +1236,8 @@ def main():
         if _a_name in _prefp32_inputs and _b_name in _prefp32_inputs:
             _ref32 = (_prefp32_inputs[_a_name].astype(np.float32)
                       @ _prefp32_inputs[_b_name].astype(np.float32))
+            if 0 in initial_biases:
+                _ref32 = _ref32 + initial_biases[0].astype(np.float32)
             fp32_ref_path = os.path.join(args.output_dir, "golden_reference_fp32.bin")
             fp32_ref_shape = tuple(int(dim) for dim in _ref32.shape)
             with open(fp32_ref_path, "wb") as f:
@@ -1135,6 +1277,10 @@ def main():
         f.write(f"num_layers={len(layers)}\n")
         f.write(f"op_types={','.join(op['type'] for op in ops)}\n")
         f.write(f"seed={args.seed}\n")
+        if args.bias_mode != "zero":
+            f.write(f"bias_mode={args.bias_mode}\n")
+            f.write("bias_semantics=gemm_matrix_conv_channel_pli\n")
+            f.write("golden_arithmetic=fp16_pe_stage_reduction\n")
 
     print(f"\nGenerated:")
     print(f"  DRAM mirror:    {dram_path} ({dram_size} bytes)")
