@@ -237,18 +237,52 @@ typedef struct {
 #define HACC_MMIO_OPT_ATTR
 #endif
 
+/* Host schedule extraction (M20): with HACC_HOST_TRACE defined, the firmware is
+ * built for the host, every MMIO access goes to a recorder, and each wait helper
+ * reports what it waits for instead of polling.  The RV32 build never defines it,
+ * so its preprocessed source is unchanged. */
+#ifdef HACC_HOST_TRACE
+enum {
+    HACC_HOST_WAIT_DMA_IDLE = 1,
+    HACC_HOST_WAIT_DMA_TAG,
+    HACC_HOST_WAIT_HDDU_DONE,
+    HACC_HOST_WAIT_AGU_IDLE,
+    HACC_HOST_WAIT_PE_HALTED,
+    HACC_HOST_WAIT_NOC_QUIESCED,
+    HACC_HOST_WAIT_CLUSTER_IDLE,
+    HACC_HOST_WAIT_CLUSTER_QUIESCED
+};
+void hacc_host_write(uint32_t addr, uint32_t val);
+uint32_t hacc_host_read(uint32_t addr);
+void hacc_host_wait(uint32_t kind, uint32_t arg);
+#endif
+
 static inline void HACC_MMIO_OPT_ATTR mmio_write32(uint32_t addr, uint32_t val) {
+#ifdef HACC_HOST_TRACE
+    hacc_host_write(addr, val);
+#else
     *(volatile uint32_t*)addr = val;
+#endif
 }
 
 static inline uint32_t HACC_MMIO_OPT_ATTR mmio_read32(uint32_t addr) {
+#ifdef HACC_HOST_TRACE
+    return hacc_host_read(addr);
+#else
     return *(volatile uint32_t*)addr;
+#endif
 }
 
 static inline void HACC_MMIO_OPT_ATTR bcast_write32(uint32_t cluster_offset, uint32_t val) {
     mmio_write32(CLUSTER_BCAST_BASE + cluster_offset, val);
 }
 
+#ifdef HACC_HOST_TRACE
+#define HACC_WFI() ((void)0)
+#define csr_read(csr) (0u)
+#define csr_set_bits(csr, mask) ((void)(mask))
+#else
+#define HACC_WFI() __asm__ volatile("wfi")
 #define csr_read(csr)                           \
     ({                                          \
         uint32_t val__;                         \
@@ -261,6 +295,7 @@ static inline void HACC_MMIO_OPT_ATTR bcast_write32(uint32_t cluster_offset, uin
 #define csr_set_bits(csr, mask)                 \
     __asm__ volatile("csrs %0, %1"             \
                      :: "i"(csr), "r"(mask))
+#endif
 
 static inline void HACC_MMIO_OPT_ATTR unicast_write32(uint32_t cluster_id,
                                                       uint32_t cluster_offset,
@@ -571,11 +606,19 @@ static inline void HACC_MMIO_OPT_ATTR dma_store_2d_epilogue(uint32_t spm_offset,
 }
 
 static inline void HACC_MMIO_OPT_ATTR dma_wait_done(void) {
+#ifdef HACC_HOST_TRACE
+    hacc_host_wait(HACC_HOST_WAIT_DMA_IDLE, 0u);
+    return;
+#endif
     while (!(mmio_read32(DMA_STATUS) & DMA_STATUS_IDLE)) {
     }
 }
 
 static inline void HACC_MMIO_OPT_ATTR dma_wait_tag(uint32_t tag) {
+#ifdef HACC_HOST_TRACE
+    hacc_host_wait(HACC_HOST_WAIT_DMA_TAG, tag);
+    return;
+#endif
     /* Use signed subtraction to handle "already past" tags and wrap-around */
     while ((int32_t)(mmio_read32(DMA_DONE_TAG) - tag) < 0) {
     }
@@ -613,6 +656,10 @@ static inline void HACC_MMIO_OPT_ATTR hddu_wait_debug_probe(uint32_t cluster_bas
 }
 
 static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_hddu_done(uint32_t num_clusters) {
+#ifdef HACC_HOST_TRACE
+    hacc_host_wait(HACC_HOST_WAIT_HDDU_DONE, num_clusters);
+    return;
+#endif
     for (uint32_t c = 0; c < num_clusters; c++) {
         uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
         uint32_t spin_count = 0;
@@ -625,7 +672,7 @@ static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_hddu_done(uint32_t num_c
             if (st & HDDU_STATUS_DONE) break;
             spin_count++;
             arm_wfi_timer_tick(32u);
-            __asm__ volatile("wfi");
+            HACC_WFI();
         }
     }
 }
@@ -636,6 +683,10 @@ static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_done(uint32_t num_cluste
 }
 
 static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_agu_idle(uint32_t num_clusters) {
+#ifdef HACC_HOST_TRACE
+    hacc_host_wait(HACC_HOST_WAIT_AGU_IDLE, num_clusters);
+    return;
+#endif
     for (uint32_t c = 0; c < num_clusters; c++) {
         uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
         while (1) {
@@ -647,12 +698,16 @@ static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_agu_idle(uint32_t num_cl
                 break;
             }
             arm_wfi_timer_tick(32u);
-            __asm__ volatile("wfi");
+            HACC_WFI();
         }
     }
 }
 
 static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_pe_halted(uint32_t num_clusters) {
+#ifdef HACC_HOST_TRACE
+    hacc_host_wait(HACC_HOST_WAIT_PE_HALTED, num_clusters);
+    return;
+#endif
     for (uint32_t c = 0; c < num_clusters; c++) {
         uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
         while (1) {
@@ -661,12 +716,16 @@ static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_pe_halted(uint32_t num_c
                 break;
             }
             arm_wfi_timer_tick(32u);
-            __asm__ volatile("wfi");
+            HACC_WFI();
         }
     }
 }
 
 static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_noc_quiesced(uint32_t num_clusters) {
+#ifdef HACC_HOST_TRACE
+    hacc_host_wait(HACC_HOST_WAIT_NOC_QUIESCED, num_clusters);
+    return;
+#endif
     for (uint32_t c = 0; c < num_clusters; c++) {
         uint32_t base = CLUSTER_UNICAST_BASE + c * CLUSTER_STRIDE;
         while (1) {
@@ -678,12 +737,16 @@ static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_noc_quiesced(uint32_t nu
                 break;
             }
             arm_wfi_timer_tick(32u);
-            __asm__ volatile("wfi");
+            HACC_WFI();
         }
     }
 }
 
 static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_cluster_idle(uint32_t num_clusters) {
+#ifdef HACC_HOST_TRACE
+    hacc_host_wait(HACC_HOST_WAIT_CLUSTER_IDLE, num_clusters);
+    return;
+#endif
     for (uint32_t c = 0; c < num_clusters; c++) {
         while (1) {
             uint32_t st = cluster_unicast_read32(c, CLUSTER_STATUS);
@@ -692,12 +755,16 @@ static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_cluster_idle(uint32_t nu
                 break;
             }
             arm_wfi_timer_tick(32u);
-            __asm__ volatile("wfi");
+            HACC_WFI();
         }
     }
 }
 
 static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_cluster_quiesced(uint32_t num_clusters) {
+#ifdef HACC_HOST_TRACE
+    hacc_host_wait(HACC_HOST_WAIT_CLUSTER_QUIESCED, num_clusters);
+    return;
+#endif
     for (uint32_t c = 0; c < num_clusters; c++) {
         while (1) {
             uint32_t st = cluster_unicast_read32(c, CLUSTER_STATUS);
@@ -706,7 +773,7 @@ static inline void HACC_MMIO_OPT_ATTR wait_all_clusters_cluster_quiesced(uint32_
                 break;
             }
             arm_wfi_timer_tick(32u);
-            __asm__ volatile("wfi");
+            HACC_WFI();
         }
     }
 }
