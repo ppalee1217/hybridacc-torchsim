@@ -255,6 +255,10 @@ enum {
 void hacc_host_write(uint32_t addr, uint32_t val);
 uint32_t hacc_host_read(uint32_t addr);
 void hacc_host_wait(uint32_t kind, uint32_t arg);
+/* Logical waves covered by the HDDU run about to start: output tiles
+ * [oc_begin, oc_begin + oc_count) at (h, w), K tiles [ic_begin, ic_begin + ic_count). */
+void hacc_host_wave(uint32_t oc_begin, uint32_t oc_count, uint32_t h, uint32_t w,
+                    uint32_t ic_begin, uint32_t ic_count);
 #endif
 
 static inline void HACC_MMIO_OPT_ATTR mmio_write32(uint32_t addr, uint32_t val) {

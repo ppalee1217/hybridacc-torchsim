@@ -1914,6 +1914,9 @@ void run_loop_tiling_conv_1x1(const LayerConfig* cfg) {
 
         configure_spm_map_for_wave(current_wave);
         ensure_cluster_layer_started(&cluster_started);
+#ifdef HACC_HOST_TRACE
+        hacc_host_wave(conv1x1_wave_oc_base(t, current_coord.oc), conv1x1_resident_oc_tiles(t), current_coord.h, current_coord.w, current_coord.ic, 1u);
+#endif
         bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);
 
         if (!next_wave->valid) {
@@ -1991,6 +1994,9 @@ void run_loop_tiling_conv_3x3(const LayerConfig* cfg) {
         ensure_wave_inputs_ready_conv_3x3(t, &spatial, current_wave, wave_count);
         configure_spm_map_for_wave(current_wave);
         ensure_cluster_layer_started(&cluster_started);
+#ifdef HACC_HOST_TRACE
+        hacc_host_wave(conv1x1_wave_oc_base(t, current_coord.oc), conv1x1_resident_oc_tiles(t), current_coord.h, current_coord.w, current_coord.ic, 1u);
+#endif
         bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);
 
         copy_wave_coord(&next_coord, &current_coord);
@@ -2520,6 +2526,9 @@ static inline void run_loop_tiling_gemm_generic_single_n_chunked(const LayerConf
         bcast_write32(SPM_CONFIG_MAP, t->spm_map_even);
         bcast_write32(SPM_CONFIG_UPDATE, 0x01u);
         ensure_cluster_layer_started(&cluster_started);
+#ifdef HACC_HOST_TRACE
+        hacc_host_wave(m_chunk_base, resident_m_tiles, 0u, 0u, 0u, t->num_ic_tiles);
+#endif
         bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);
 
         wait_all_clusters_hddu_done(cfg->num_clusters);
@@ -2616,6 +2625,9 @@ static inline void run_loop_tiling_gemm_resident_full_n(const LayerConfig* cfg) 
         bcast_write32(SPM_CONFIG_MAP, t->spm_map_even);
         bcast_write32(SPM_CONFIG_UPDATE, 0x01u);
         ensure_cluster_layer_started(&cluster_started);
+#ifdef HACC_HOST_TRACE
+        hacc_host_wave(0u, resident_m_tiles, n_tile, 0u, 0u, t->num_ic_tiles);
+#endif
         bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);
 
         if (n_tile + 1u < resident_n_tiles) {
@@ -2747,6 +2759,9 @@ static inline void run_loop_tiling_gemm_resident_partial_n(const LayerConfig* cf
             bcast_write32(SPM_CONFIG_MAP, t->spm_map_even);
             bcast_write32(SPM_CONFIG_UPDATE, 0x01u);
             ensure_cluster_layer_started(&cluster_started);
+#ifdef HACC_HOST_TRACE
+            hacc_host_wave(m_chunk_base, resident_m_tiles, n_tile, 0u, 0u, t->num_ic_tiles);
+#endif
             bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);
 
             if (n_tile + 1u < resident_n_tiles) {
@@ -2867,6 +2882,9 @@ void run_loop_tiling_gemm(const LayerConfig* cfg) {
 {% endif %}
         configure_spm_map_for_wave(current_wave);
         ensure_cluster_layer_started(&cluster_started);
+#ifdef HACC_HOST_TRACE
+        hacc_host_wave(conv1x1_wave_oc_base(t, current_coord.oc), conv1x1_resident_oc_tiles(t), current_coord.h, current_coord.w, current_coord.ic, 1u);
+#endif
         bcast_write32(HDDU_BASE + HDDU_CTRL, HDDU_CTRL_START);
 
         copy_wave_coord(&next_coord, &current_coord);
