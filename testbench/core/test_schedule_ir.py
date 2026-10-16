@@ -90,12 +90,22 @@ def test_extracts_a_closed_schedule(tmp_path, name):
         assert all(c["bytes"] == c["beats"] * PLATFORM["dma_beat_bytes"] for c in layer["dma"])
         assert not layer["dma_fifo_hazard"]
     assert ir["provenance"]["files_sha256"]["hardware_ir.json"] == si.sha256_file(d / "hardware_ir.json")
+    # Structural overlap read off the issue order: every listed DMA sits between its wave's start and done-wait.
+    for layer in ir["layers"]:
+        done = {w["target_wave"]: w["id"] for w in layer["waits"] if w["kind"] == "hddu_done"}
+        for w in layer["execution_waves"]:
+            for i in w["dma_during_run"]:
+                assert w["event"] < layer["dma"][i]["event"] < done[w["id"]]
+        assert layer["overlap_windows"] == sum(len(w["overlap_directions"]) for w in layer["execution_waves"])
     t0 = hw["layers"][0]["tiling_params"]
     waves0 = len(ir["layers"][0]["execution_waves"])
     if name == "gemm_generic_multik_2bus":
         assert t0["num_ic_tiles"] > 1 and t0["gemm_resident_m_tiles"] == 0
     if name == "gemm_resident_3bus":
         assert t0["gemm_resident_m_tiles"] > 0 and waves0 < t0["num_oc_tiles"] * t0["num_h_tiles"]
+        # Fully resident: one HDDU run per n-tile; inside each run the next PS tile is prefetched and the
+        # previous PLO stored, so S = 2 * (n_tiles - 1) (the X0 criterion).
+        assert ir["layers"][0]["overlap_windows"] == 2 * (t0["gemm_resident_n_tiles"] - 1)
 
 
 @pytest.fixture(scope="module")

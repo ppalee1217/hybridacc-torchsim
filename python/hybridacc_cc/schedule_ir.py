@@ -29,7 +29,7 @@ import tempfile
 from pathlib import Path
 
 SCHEMA = "common-schedule-ir/v1"
-DECODER_VERSION = "1"
+DECODER_VERSION = "2"
 BEAT_BYTES_FIELD = "dma_beat_bytes"
 PLATFORM_FIELDS = ("clock_mhz", BEAT_BYTES_FIELD, "dma_cmd_fifo_depth")
 FIRMWARE_FILES = ("firmware_ops.c", "firmware_data.c", "firmware_hw.h", "firmware_payload.h", "firmware_main.c")
@@ -148,7 +148,8 @@ class RegisterMap:
         need = ("DMA_MMIO_BASE", "LOCAL_CTRL_BASE", "LOCAL_TIMER_BASE", "CLUSTER_UNICAST_BASE",
                 "CLUSTER_BCAST_BASE", "CLUSTER_STRIDE", "HDDU_BASE", "AGU_BANK_STRIDE", "PLIC_BASE",
                 "DMA_CTRL_SUBMIT", "HDDU_CTRL_START", "HDDU_CTRL_STOP", "HDDU_CTRL_SOFT_RESET",
-                "CLUSTER_CTRL_START", "CLUSTER_CTRL_STOP", "CLUSTER_CTRL_SOFT_RESET")
+                "CLUSTER_CTRL_START", "CLUSTER_CTRL_STOP", "CLUSTER_CTRL_SOFT_RESET",
+                "DMA_ENDPOINT_DRAM", "DMA_ENDPOINT_CLUSTER_SPM")
         missing = [n for n in need if n not in d]
         _require(not missing, f"firmware_hw.h lacks register defines: {missing}")
         self.dma = {d[f"DMA_{r}"]: r for r in self.DMA_REGS}
@@ -385,7 +386,31 @@ def decode(lines: list, regmap: RegisterMap, platform: dict) -> dict:
     _require(pending_wave is None, "trailing wave marker without an HDDU start")
     for layer in layers:
         layer["dma_fifo_hazard"] = layer["max_unwaited_dma"] > fifo_depth
+        _overlap(layer, d["DMA_ENDPOINT_CLUSTER_SPM"])
     return {"layers": layers}
+
+
+def _overlap(layer: dict, spm_kind: int):
+    """Structural compute/DMA overlap, read off the issue order (ODR R-5).
+
+    For each execution wave: the DMA submitted after its HDDU start and before the wait for it to finish
+    (``dma_during_run``) and their directions (load into SPM, store from SPM). ``overlap_windows`` counts one
+    window per direction per wave, the count the X0 criterion S defines; here it comes from the firmware's
+    own issue order instead of a re-implementation of the template's branches.
+    """
+    done = {w["target_wave"]: w["id"] for w in layer["waits"] if w["kind"] == "hddu_done"}
+    windows = 0
+    for wave in layer["execution_waves"]:
+        end = done.get(wave["id"], len(layer["events"]))
+        ids = [e["dma"] for e in layer["events"][wave["event"] + 1:end] if e["type"] == "dma_submit"]
+        dirs = set()
+        for i in ids:
+            c = layer["dma"][i]
+            dirs.add("load" if c["dst_kind"] == spm_kind else "store" if c["src_kind"] == spm_kind else "other")
+        wave["dma_during_run"] = ids
+        wave["overlap_directions"] = sorted(dirs)
+        windows += len(dirs)
+    layer["overlap_windows"] = windows
 
 
 # ── IR assembly ─────────────────────────────────────────────────────────────
