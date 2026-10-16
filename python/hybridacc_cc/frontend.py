@@ -414,8 +414,12 @@ def _auto_split_large_gemms(ops: List[OpDesc], hw: HardwareDesc) -> List[OpDesc]
 # Public API
 # ---------------------------------------------------------------------------
 
-def parse_workload(yaml_path: str | Path) -> WorkloadIR:
-    """Parse a Workload YAML file and return a validated WorkloadIR."""
+def parse_workload(yaml_path: str | Path, *, gemm_auto_split: bool = True) -> WorkloadIR:
+    """Parse a Workload YAML file and return a validated WorkloadIR.
+
+    ``gemm_auto_split=False`` keeps a GEMM with K>96 as one layer (native multi-K K-waves) instead of
+    rewriting it into bias-chained K chunks (ODR D-16). The default keeps the existing behavior.
+    """
     with open(yaml_path, "r") as f:
         raw = yaml.safe_load(f)
 
@@ -467,5 +471,6 @@ def parse_workload(yaml_path: str | Path) -> WorkloadIR:
         _validate_spm_capacity(op, hw)
         ops.append(op)
 
-    ops = _auto_split_large_gemms(ops, hw)
+    if gemm_auto_split:
+        ops = _auto_split_large_gemms(ops, hw)
     return WorkloadIR(name=wl_name, hardware=hw, ops=ops)

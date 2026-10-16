@@ -362,8 +362,14 @@ def _normalized_op_attrs(op: dict) -> dict:
     return attrs
 
 
-def _expand_auto_split_gemms(wl_tensors, ops, tensors_data):
-    """Mirror frontend K-splitting and materialize slices of logical A/B."""
+def _expand_auto_split_gemms(wl_tensors, ops, tensors_data, layer_names=None):
+    """Mirror frontend K-splitting and materialize slices of logical A/B.
+
+    Whether a GEMM was split is read off the hardware IR, not re-decided here: cc splits K>96 only with
+    ``--gemm-auto-split on`` (ODR D-16). A GEMM with K>96 is expanded when the IR has its ``__kchunk``
+    layers (and the chunk count must match); it stays one native multi-K layer when the IR has a layer of
+    its own name. ``layer_names=None`` keeps the old behaviour (always split K>96) for callers without an IR.
+    """
     expanded_tensors = dict(wl_tensors)
     used_op_names = {op["name"] for op in ops}
     used_tensor_names = set(wl_tensors)
@@ -380,6 +386,22 @@ def _expand_auto_split_gemms(wl_tensors, ops, tensors_data):
         if K <= GEMM_AUTO_SPLIT_K:
             expanded_ops.append(op)
             continue
+        if layer_names is not None:
+            chunk_layers = [n for n in layer_names if n.startswith(f"{op['name']}__kchunk")]
+            if not chunk_layers:
+                if op["name"] not in layer_names:
+                    raise ValueError(
+                        f"{op['name']}: K={K} > {GEMM_AUTO_SPLIT_K}, but the IR has neither its K-chunk "
+                        "layers nor a native layer of that name"
+                    )
+                expanded_ops.append(op)
+                continue
+            expected_chunks = (K + GEMM_AUTO_SPLIT_K - 1) // GEMM_AUTO_SPLIT_K
+            if len(chunk_layers) != expected_chunks:
+                raise ValueError(
+                    f"{op['name']}: the IR has {len(chunk_layers)} K-chunk layers, "
+                    f"the split of K={K} gives {expected_chunks}"
+                )
         if a_name not in tensors_data or b_name not in tensors_data:
             missing = [name for name in (a_name, b_name) if name not in tensors_data]
             raise ValueError(
@@ -1061,7 +1083,8 @@ def main():
     _prefp32_ops = [dict(op) for op in ops]
     _prefp32_inputs = {k: v.copy() for k, v in tensors_data.items()}
 
-    wl_tensors, ops = _expand_auto_split_gemms(wl_tensors, ops, tensors_data)
+    wl_tensors, ops = _expand_auto_split_gemms(wl_tensors, ops, tensors_data,
+                                               layer_names=[l["name"] for l in layers])
     conv_batch = _match_single_conv_batch_unroll(wl_tensors, ops, layers)
     if conv_batch is None:
         assert len(layers) == len(ops), \

@@ -118,6 +118,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Verbose output",
     )
     parser.add_argument(
+        "--gemm-auto-split",
+        choices=("on", "off"),
+        default="on",
+        help="on: rewrite GEMMs with K>96 into bias-chained K chunks (default); "
+             "off: keep one layer with native multi-K waves (ODR D-16)",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -128,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     # Stage 0: Parse YAML
     if args.verbose:
         print(f"[Stage 0] Parsing {args.workload}")
-    workload_ir = parse_workload(args.workload)
+    workload_ir = parse_workload(args.workload, gemm_auto_split=args.gemm_auto_split == "on")
 
     if args.dump_ir:
         ir_path = args.output / "workload_ir.json"
