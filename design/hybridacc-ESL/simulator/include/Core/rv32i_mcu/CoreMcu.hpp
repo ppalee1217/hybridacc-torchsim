@@ -187,6 +187,7 @@ SC_MODULE(CoreMcu) {
 
 	// Halted / retire tracking
 	sc_core::sc_signal<bool>           halted_reg_{"halted_reg"};
+	bool mmio_log_prev_active_ = false;  // --mmio-log edge detection only
 	sc_core::sc_signal<bool>           retire_valid_reg_{"retire_valid_reg"};
 	sc_core::sc_signal<sc_uint<32>>    retire_pc_reg_{"retire_pc_reg"};
 
@@ -559,14 +560,18 @@ SC_MODULE(CoreMcu) {
 				}
 			}
 
-			// Optional MMIO access log (--mmio-log): one line per completed access.
-			if (hacc::mmio_log() && dm_active && !dm_is_dsram && !dm_is_isram && mmio_resp_valid_i.read()) {
+			// Optional MMIO access log (--mmio-log): one line per request, at the first rising
+			// edge it is seen. The MCU drops a request in the time step its response arrives and
+			// the next one appears only after the following edge, so an idle edge separates any
+			// two requests; a request still waiting for a not-ready target is not logged again.
+			const bool mmio_active = dm_active && !dm_is_dsram && !dm_is_isram;
+			if (hacc::mmio_log() && mmio_active && !mmio_log_prev_active_) {
 				const bool wr = !dm_WEB_int_.read();
 				std::fprintf(hacc::mmio_log(), "%c %u %u %u %llu\n", wr ? 'W' : 'R', dm_addr,
-				             wr ? dm_DI_int_.read().to_uint() : mmio_resp_rdata_i.read().to_uint(),
-				             dm_STRB_int_.read().to_uint(),
+				             wr ? dm_DI_int_.read().to_uint() : 0u, dm_STRB_int_.read().to_uint(),
 				             static_cast<unsigned long long>(sc_core::sc_time_stamp().value()));
 			}
+			mmio_log_prev_active_ = mmio_active;
 
 			// Detect EBREAK (instruction encoding 0x00100073)
 			if (!halted_reg_.read()) {
