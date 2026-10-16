@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <functional>
 #include "Core/Types.hpp"
+#include "Core/MmioLog.hpp"
 #include "Core/rv32i_mcu/PipelineTypes.hpp"
 #include "Core/rv32i_mcu/FetchStage.hpp"
 #include "Core/rv32i_mcu/DecodeStage.hpp"
@@ -556,6 +557,15 @@ SC_MODULE(CoreMcu) {
 				if (isram_read_cb_) {
 					dm_rdata_reg_.write(isram_read_cb_(rd_addr));
 				}
+			}
+
+			// Optional MMIO access log (--mmio-log): one line per completed access.
+			if (hacc::mmio_log() && dm_active && !dm_is_dsram && !dm_is_isram && mmio_resp_valid_i.read()) {
+				const bool wr = !dm_WEB_int_.read();
+				std::fprintf(hacc::mmio_log(), "%c %u %u %u %llu\n", wr ? 'W' : 'R', dm_addr,
+				             wr ? dm_DI_int_.read().to_uint() : mmio_resp_rdata_i.read().to_uint(),
+				             dm_STRB_int_.read().to_uint(),
+				             static_cast<unsigned long long>(sc_core::sc_time_stamp().value()));
 			}
 
 			// Detect EBREAK (instruction encoding 0x00100073)
