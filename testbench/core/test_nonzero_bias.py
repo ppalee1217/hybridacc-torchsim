@@ -36,7 +36,8 @@ def run_gen(tmp_path, monkeypatch, op, mode=None, seed=42):
     tmp_path.mkdir(exist_ok=True)
     wl = workload(op)
     y = tmp_path/'workload.yaml'; y.write_text(yaml.safe_dump(wl, sort_keys=False))
-    ir = dataclasses.asdict(lower_workload(parse_workload(y)))
+    # 'split' tests the bias chain between K chunks, so it asks for the split explicitly (ODR D-16).
+    ir = dataclasses.asdict(lower_workload(parse_workload(y, gemm_auto_split=(op == 'split'))))
     j = tmp_path/'hardware_ir.json'; j.write_text(json.dumps(ir))
     argv = ['gen', '--ir', str(j), '--workload', str(y), '--output-dir', str(tmp_path), '--seed', str(seed)]
     if mode is not None: argv += ['--bias-mode', mode]

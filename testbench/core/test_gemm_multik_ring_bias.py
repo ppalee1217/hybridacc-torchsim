@@ -219,8 +219,7 @@ def test_odd_k_wave_count_protects_the_carried_pli(tmp_path, monkeypatch):
     so the split is bypassed here, as agent_run/260711-a5-pe-program/compile_native.py does.
     """
     _require_gcc()
-    monkeypatch.setattr(frontend, "_auto_split_large_gemms", lambda ops, hw: ops)
-    ir = lower_workload(parse_workload(_gemm_yaml(tmp_path, 72, 192, 16, 12, 2)))
+    ir = lower_workload(parse_workload(_gemm_yaml(tmp_path, 72, 192, 16, 12, 2), gemm_auto_split=False))
     assert ir.layers[0].tiling_params.num_ic_tiles == 3
     tiles, hazards, missing_bias = _check_ring_contract(ir, _host_firmware_events(tmp_path, ir))
     assert tiles > 1

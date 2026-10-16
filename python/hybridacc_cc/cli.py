@@ -120,9 +120,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--gemm-auto-split",
         choices=("on", "off"),
-        default="on",
-        help="on: rewrite GEMMs with K>96 into bias-chained K chunks (default); "
-             "off: keep one layer with native multi-K waves (ODR D-16)",
+        default="off",
+        help="off: keep a GEMM with K>96 as one layer with native multi-K waves (default, ODR D-16); "
+             "on: rewrite it into bias-chained K chunks (replay of earlier artifacts)",
     )
     parser.add_argument(
         "--version",

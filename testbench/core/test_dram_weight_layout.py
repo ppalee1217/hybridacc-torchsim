@@ -27,10 +27,10 @@ def conv_workload(kh, ic, oc):
     }
 
 
-def lower(tmp_path, workload):
+def lower(tmp_path, workload, **parse_kw):
     path = tmp_path / "workload.yaml"
     path.write_text(yaml.safe_dump(workload, sort_keys=False))
-    return dataclasses.asdict(lower_workload(parse_workload(path)))
+    return dataclasses.asdict(lower_workload(parse_workload(path, **parse_kw)))
 
 
 @pytest.mark.parametrize("kh,ic,oc", [(1, 8, 125), (1, 15, 91), (3, 73, 87),
@@ -132,7 +132,8 @@ def test_region_guard_preserves_shared_batch_and_split_k(tmp_path, monkeypatch, 
             name: {"shape": shape, "dtype": "fp16"} for name, shape in
             (("A", [12, 128]), ("B", [128, 24]), ("C", [12, 24]))},
             "ops": [{"name": "gemm", "type": "gemm", "inputs": ["A", "B"], "outputs": ["C"]}]}
-    ir = lower(tmp_path, wl)
+    # gemm_split_k is about the K-chunk split, so it asks for it explicitly (ODR D-16).
+    ir = lower(tmp_path, wl, gemm_auto_split=(kind == "gemm_split_k"))
     assert len(ir["layers"]) > 1
     ir_path = tmp_path / "hardware_ir.json"
     ir_path.write_text(json.dumps(ir))

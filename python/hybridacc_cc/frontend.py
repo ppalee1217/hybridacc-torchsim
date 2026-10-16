@@ -414,11 +414,12 @@ def _auto_split_large_gemms(ops: List[OpDesc], hw: HardwareDesc) -> List[OpDesc]
 # Public API
 # ---------------------------------------------------------------------------
 
-def parse_workload(yaml_path: str | Path, *, gemm_auto_split: bool = True) -> WorkloadIR:
+def parse_workload(yaml_path: str | Path, *, gemm_auto_split: bool = False) -> WorkloadIR:
     """Parse a Workload YAML file and return a validated WorkloadIR.
 
-    ``gemm_auto_split=False`` keeps a GEMM with K>96 as one layer (native multi-K K-waves) instead of
-    rewriting it into bias-chained K chunks (ODR D-16). The default keeps the existing behavior.
+    By default a GEMM with K>96 stays one layer with native multi-K K-waves (ODR D-16, 2026-10-17: all
+    536 A1 cells with K>96 pass ESL golden this way, against 22 legal under the split).
+    ``gemm_auto_split=True`` rewrites it into bias-chained K chunks, for replaying earlier artifacts.
     """
     with open(yaml_path, "r") as f:
         raw = yaml.safe_load(f)

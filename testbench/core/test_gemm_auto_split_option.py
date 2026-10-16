@@ -1,7 +1,7 @@
 """GEMM K auto-split as an explicit cc option (ODR D-16).
 
-``--gemm-auto-split on`` (default) rewrites a GEMM with K>96 into bias-chained K chunks;
-``off`` keeps one layer with native multi-K waves. The data generator must follow what the
+``--gemm-auto-split off`` (default since 2026-10-17) keeps a GEMM with K>96 as one layer with
+native multi-K waves; ``on`` rewrites it into bias-chained K chunks (replay of earlier artifacts). The data generator must follow what the
 hardware IR actually contains instead of re-deciding the split.
 """
 import dataclasses
@@ -34,10 +34,10 @@ def _ir(y, **kw):
     return dataclasses.asdict(lower_workload(parse_workload(y, **kw)))
 
 
-def test_default_splits_and_off_keeps_one_native_layer(tmp_path):
+def test_default_keeps_one_native_layer_and_on_splits(tmp_path):
     y = _workload(tmp_path)
-    split = _ir(y)
-    native = _ir(y, gemm_auto_split=False)
+    split = _ir(y, gemm_auto_split=True)
+    native = _ir(y)
     assert [l['name'] for l in split['layers']] == ['g__kchunk0', 'g__kchunk1']
     assert [l['name'] for l in native['layers']] == ['g']
     assert native['layers'][0]['tiling_params']['num_ic_tiles'] > 1
@@ -61,7 +61,7 @@ def _gen(tmp_path, monkeypatch, y, ir):
 
 def test_generator_follows_the_ir(tmp_path, monkeypatch):
     y = _workload(tmp_path)
-    for name, kw in (('split', {}), ('native', {'gemm_auto_split': False})):
+    for name, kw in (('split', {'gemm_auto_split': True}), ('native', {})):
         d = tmp_path / name
         d.mkdir()
         _gen(d, monkeypatch, y, _ir(y, **kw))
@@ -75,11 +75,11 @@ def test_generator_follows_the_ir(tmp_path, monkeypatch):
 
 def test_generator_refuses_an_ir_it_cannot_match(tmp_path, monkeypatch):
     y = _workload(tmp_path)
-    native = _ir(y, gemm_auto_split=False)
+    native = _ir(y)
     native['layers'][0]['name'] = 'other'
     with pytest.raises(ValueError, match='neither its K-chunk layers nor a native layer'):
         _gen(tmp_path, monkeypatch, y, native)
-    split = _ir(y)
+    split = _ir(y, gemm_auto_split=True)
     split['layers'] = split['layers'][:1]
     with pytest.raises(ValueError, match='K-chunk layers'):
         _gen(tmp_path, monkeypatch, y, split)
