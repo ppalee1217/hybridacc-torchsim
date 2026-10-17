@@ -13,7 +13,7 @@
  *                 [--max-cycles N] [--core-debug] [--dma-check]
  *                 [--fast-boot]
  *                 [--trace file.json] [--trace-level N]
- *                 [--mmio-log file.txt] [--dram-log file.txt]
+ *                 [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]
  *                 <firmware.elf>
  */
 
@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "Core/DramLog.hpp"
+#include "Cluster/SpmLog.hpp"
 #include "Core/MmioLog.hpp"
 #include "HybridAcc.hpp"
 #include "SimUtils.hpp"
@@ -82,7 +83,7 @@ static void print_usage(const char* prog) {
               << " [--clock-period ns]"
               << " [--core-debug] [--dma-check] [--fast-boot]"
               << " [--trace file.json] [--trace-level N]"
-              << " [--mmio-log file.txt] [--dram-log file.txt]"
+              << " [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]"
               << " <firmware.elf>\n";
 }
 
@@ -337,6 +338,7 @@ int sc_main(int argc, char* argv[]) {
     std::string trace_path;
     std::string mmio_log_path;
     std::string dram_log_path;
+    std::string spm_log_path;
     uint32_t trace_level = 2;
 
     for (int i = 1; i < argc; ++i) {
@@ -367,6 +369,8 @@ int sc_main(int argc, char* argv[]) {
             mmio_log_path = argv[++i];
         } else if (arg == "--dram-log" && i + 1 < argc) {
             dram_log_path = argv[++i];
+        } else if (arg == "--spm-log" && i + 1 < argc) {
+            spm_log_path = argv[++i];
         } else if (arg == "--trace-level" && i + 1 < argc) {
             if (!parse_trace_level(argv[++i], trace_level)) {
                 std::cerr << "[SIM] Invalid trace level: expected 1..4\n";
@@ -702,6 +706,13 @@ int sc_main(int argc, char* argv[]) {
             return 1;
         }
     }
+    if (!spm_log_path.empty()) {
+        hacc::spm_log() = std::fopen(spm_log_path.c_str(), "w");
+        if (!hacc::spm_log()) {
+            std::cerr << "[SIM] Cannot open SPM log: " << spm_log_path << std::endl;
+            return 1;
+        }
+    }
 
     // Trace setup
     // ========================================================================
@@ -928,6 +939,10 @@ int sc_main(int argc, char* argv[]) {
     if (hacc::dram_log()) {
         std::fclose(hacc::dram_log());
         hacc::dram_log() = nullptr;
+    }
+    if (hacc::spm_log()) {
+        std::fclose(hacc::spm_log());
+        hacc::spm_log() = nullptr;
     }
     if (!trace_path.empty()) {
         PerfettoTrace::getInstance().close();

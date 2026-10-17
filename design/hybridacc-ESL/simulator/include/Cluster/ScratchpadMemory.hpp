@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Cluster/SpmLog.hpp"
 #include <iostream>
 #include <systemc>
 #include <array>
@@ -350,6 +351,7 @@ SC_MODULE(ScratchpadMemory) {
     // Trace context
     uint32_t    trace_pid  = 0;
     int         trace_id   = -1;
+    const unsigned spm_log_id = hacc::next_spm_log_id();  // --spm-log instance number
     bool        trace_init = false;
     std::string last_state_spm = "IDLE";
     std::array<std::string, NUM_NOC_PORTS> last_state_noc_req{};
@@ -1430,6 +1432,24 @@ private:
                 if ( rd_issue && !rd_merge) inf = inf + 1;
                 if (!rd_issue &&  rd_merge && inf > 0) inf = inf - 1;
                 dma_rd_inflight_cnt_reg.write(inf);
+            }
+
+            // --spm-log: the requests accepted this cycle. Signals read here still hold the
+            // values comb_bank_req_arb decided on, so the request is the one that fired.
+            if (std::FILE* f = hacc::spm_log()) {
+                const unsigned long long t = sc_core::sc_time_stamp().value();
+                for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) {
+                    if (!port_req_fire_sig[p].read()) continue;
+                    const spm_req_t req = skid_valid_reg[p].read() ? skid_data_reg[p].read() : spm_req_i[p].read();
+                    std::fprintf(f, "P %u %u %u %u %u %llu\n", spm_log_id, p, active_map_reg[p].read().to_uint(),
+                                 req.wen ? 1u : 0u, req.addr.to_uint(), t);
+                }
+                if (dma_write_fire_sig.read()) {
+                    const DmaWriteReq wr = dma_write_req_fifo_dout.read();
+                    std::fprintf(f, "D %u 1 %u %u %llu\n", spm_log_id, wr.addr.to_uint(), wr.strb.to_uint(), t);
+                }
+                if (dma_read_fire_sig.read())
+                    std::fprintf(f, "D %u 0 %u 0 %llu\n", spm_log_id, dma_read_req_fifo_dout.read().to_uint(), t);
             }
 
             // DMA issue debug print
