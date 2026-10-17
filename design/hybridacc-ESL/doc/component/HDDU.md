@@ -171,8 +171,8 @@ VRDIF<response_t<sc_biguint<DATA_BITS>>> noc_plo_in;
 
 | Offset | Name | RW | 說明 |
 |---:|---|---|---|
-| `0x800` | `HDDU_CTRL` | R/W | bit0: soft-reset（清 FIFO/錯誤）；bit1: start_all；bit2: stop_all |
-| `0x804` | `HDDU_STATUS` | R | bit1: any_busy；bit2: done（W6，見 §6.5）；bit3: 本 cycle stall；bit4: err |
+| `0x800` | `HDDU_CTRL` | R/W | bit0: start_all；bit1: stop_all；bit2: soft-reset（清 FIFO/錯誤）。同一次寫入含多個命令位元時的優先順序未定義（cc 的 firmware 只做單一位元的寫入） |
+| `0x804` | `HDDU_STATUS` | R | bit0: idle；bit1: any_busy；bit2: done（W6，見 §6.5）；bit3: quiesced（任一 AGU stall 後設起，reset 才清除）；bit4: err |
 | `0x808` | `PLANE_EN` | R/W | bit0~3: PS/PD/PLI/PLO enable（預設全開 0xF） |
 | `0x80C` | `PLANE_MODE` | R/W | 軟體定義模式旗標（硬體不直接解碼） |
 | `0x810` | `NUM_PORTS` | R | 固定 4（相容欄位） |
@@ -318,9 +318,10 @@ PLO 維護以下兩個 FIFO（均深度 `FIFO_DEPTH=16`）：
 
 | Bit | 名稱 | 說明 |
 |---:|---|---|
+| 0 | IDLE | 未在執行、AGU 都非 busy、未 done、無錯誤 |
 | 1 | BUSY | 至少一個 AGU busy |
 | 2 | DONE | W6：AGU 已執行且全部非 busy、內部佇列清空、PLO 寫入都已回應（見上） |
-| 3 | STALL | 本 cycle 發生 stall |
+| 3 | QUIESCED | 任一 AGU stall 後設起，reset 才清除（名稱沿用統一的控制介面） |
 | 4 | ERROR | `ERR_CODE != 0` |
 
 ---
@@ -329,7 +330,7 @@ PLO 維護以下兩個 FIFO（均深度 `FIFO_DEPTH=16`）：
 
 1. 設定 AGU bank（PS/PD/PLI/PLO）
 2. 設定 `PLANE_EN`（視情況設定 `PLANE_MODE`）
-3. 以 `HDDU_CTRL.bit1=1`（`CTRL_START`）啟動全部 AGU
+3. 以 `HDDU_CTRL.bit0=1`（`CTRL_START`）啟動全部 AGU
 4. 輪詢 `HDDU_STATUS` 與 counters，或等 `interrupt`
    - `bit2=1`：done；`bit4=1`：error
 5. 完成後讀取統計結果（`0x828~0x834`）
@@ -401,8 +402,8 @@ agu_wr(H, 3, 0x20, 0x1);
 hddu_wr(H, 0x808, 0xF);   // enable all planes (default is already 0xF)
 hddu_wr(H, 0x80C, 0x1);   // mode flag (conv2d, software-defined)
 
-// start all AGUs from global CTRL (bit1 = CTRL_START)
-hddu_wr(H, 0x800, (1u << 1));
+// start all AGUs from global CTRL (bit0 = CTRL_START)
+hddu_wr(H, 0x800, (1u << 0));
 
 while (true) {
     uint32_t st = hddu_rd(H, 0x804);
@@ -419,11 +420,11 @@ uint32_t stall    = hddu_rd(H, 0x834); // COUNTER_STALL
 ## 8.3 Stop/clear 範例
 
 ```cpp
-// stop all AGUs (bit2 = CTRL_STOP)
-hddu_wr(H, 0x800, (1u << 2));
+// stop all AGUs (bit1 = CTRL_STOP)
+hddu_wr(H, 0x800, (1u << 1));
 
-// soft-reset: clear FIFO & error info (bit0 = CTRL_RESET)
-hddu_wr(H, 0x800, (1u << 0));
+// soft-reset: clear FIFO & error info (bit2 = CTRL_SOFT_RESET)
+hddu_wr(H, 0x800, (1u << 2));
 ```
 
 ---
@@ -437,4 +438,4 @@ hddu_wr(H, 0x800, (1u << 0));
 5. FIFO 深度 `FIFO_DEPTH=16` 造成 backpressure 時 stall 計數正確累加
 6. `COUNTER_TX_PKT`（含 PLO NoC req）/ `TX_BYTE` / `RX_BYTE` / `STALL` 與 traffic 相符
 7. 多通道同時運作時互不阻塞（除共享 SPM/NoC backpressure 外）
-8. `HDDU_CTRL` bit0/1/2 分別觸發 reset/start/stop；`HDDU_STATUS` bit2/4 觸發中斷
+8. `HDDU_CTRL` bit0/1/2 分別觸發 start/stop/soft-reset；`HDDU_STATUS` bit2/4 觸發中斷

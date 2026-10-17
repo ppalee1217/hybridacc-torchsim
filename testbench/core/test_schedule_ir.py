@@ -169,6 +169,7 @@ def test_decoder_accepts_a_minimal_record(regmap):
     ("tags_backwards", "tags go backwards"),
     ("hddu_wait_before_start", "never started"),
     ("unknown_ctrl_bits", "unknown DMA_CTRL bits"),
+    ("start_with_stop", "together with other HDDU_CTRL bits"),
 ])
 def test_decoder_refuses(regmap, case, message):
     d = regmap.d
@@ -184,6 +185,8 @@ def test_decoder_refuses(regmap, case, message):
         "tags_backwards": [_w(regmap, "DMA_CMD_TAG", 5), submit, _w(regmap, "DMA_CMD_TAG", 4), submit],
         "hddu_wait_before_start": ["WAIT 3 1"],
         "unknown_ctrl_bits": [f"W {d['DMA_CTRL']} 2"],
+        "start_with_stop": _start(regmap)[:-1] + [
+            f"W {d['CLUSTER_BCAST_BASE'] + d['HDDU_BASE'] + d['HDDU_CTRL']} {d['HDDU_CTRL_START'] | d['HDDU_CTRL_STOP']}"],
     }[case]
     with pytest.raises(si.ScheduleIRError, match=message):
         si.decode(_lines(regmap, *body), regmap, PLATFORM)

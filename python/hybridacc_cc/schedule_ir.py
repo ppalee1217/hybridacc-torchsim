@@ -383,6 +383,10 @@ def decode(lines: list, regmap: RegisterMap, platform: dict) -> dict:
         addr, val = int(f[1]), int(f[2])
         space, target, reg = regmap.classify(addr)
         is_start = space == "cluster" and reg == "HDDU_CTRL" and val & d["HDDU_CTRL_START"]
+        # F2 ruling (2026-10-18): a START written together with STOP or SOFT_RESET is outside the
+        # measurement contract; no specification defines which one wins.
+        _require(not is_start or val == d["HDDU_CTRL_START"],
+                 f"line {n}: HDDU start written together with other HDDU_CTRL bits {val:#x}")
         _require(pending_wave is None or is_start, f"line {n}: wave marker not immediately before an HDDU start")
         if space == "dma":
             _require(reg not in RegisterMap.DMA_READ_ONLY, f"line {n}: write to read-only DMA register {reg}")
