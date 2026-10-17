@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "Cluster/AddressGenerateUnit.hpp"
+#include "Cluster/WaveLog.hpp"
 #include "Utils/utils.hpp"
 #include "Utils/FIFO.hpp"
 
@@ -366,6 +367,8 @@ public:
 
 		SC_CTHREAD(seq_process, clk.pos());
 		reset_signal_is(reset_n, false);
+		wave_obs_.id = hacc::next_wave_log_id();  // --wave-log (M21)
+		hacc::register_wave_observer(&wave_obs_);
 
 		SC_METHOD(trace_process);
 		sensitive << clk.pos();
@@ -781,6 +784,7 @@ private:
 	bool prev_any_busy_latched = false;
 	bool done_latched = false;
 	bool start_pending_ = false;  // plain C++ var for immediate BUSY visibility
+	hacc::WaveObserver wave_obs_;  // --wave-log (M21); read by nothing in the simulated hardware
 
 	// Internal FIFOs for each NoC channel
 	sc_vector<hybridacc::FIFO<noc_req_payload_t>> noc_req_fifo; // De-couple AGU request generation and NoC transmission for PS/PD/PLI planes
@@ -1233,12 +1237,64 @@ private:
 		}
 	}
 
+	// --wave-log (M21): record this edge for the open wave. Reads the same signal values
+	// seq_process acted on at this edge and writes only the observer and the file.
+	void observe_wave_edge(bool start_cmd, bool stop_cmd, bool reset_cmd, bool start_has_plane,
+	                       bool any_busy, bool done_pulse) {
+		hacc::WaveObserver& o = wave_obs_;
+		const uint64_t t = sc_time_stamp().value();
+		if (o.open) {
+			const bool hs[7] = {
+				noc_ps_out.valid_out.read() && noc_ps_out.ready_in.read(),
+				noc_pd_out.valid_out.read() && noc_pd_out.ready_in.read(),
+				noc_pli_out.valid_out.read() && noc_pli_out.ready_in.read(),
+				noc_plo_out.valid_out.read() && noc_plo_out.ready_in.read(),
+				noc_plo_in.valid_in.read() && noc_plo_in.ready_out.read(),
+				spm_req_valid[RECV_PLANE].read() && spm_req_ready[RECV_PLANE].read(),
+				spm_resp_valid[PLANE_PLO].read() && spm_resp_ready[PLANE_PLO].read(),
+			};
+			for (int i = 0; i < 7; ++i) if (hs[i]) ++o.n[i];
+			for (int i = 0; i < 3; ++i) if (hs[i]) o.last[i] = t;
+			if (hs[5]) { o.last[3] = t; ++o.plo_outstanding; }
+			if (hs[6]) --o.plo_outstanding;
+			if (any_busy) o.seen_busy = true;
+			if (o.seen_busy && !any_busy) {
+				if (o.agu_idle == o.NONE) o.agu_idle = t;
+				if (o.drained == o.NONE && internal_queues_empty()) o.drained = t;
+				if (o.drained != o.NONE && o.answered == o.NONE && o.plo_outstanding == 0) o.answered = t;
+			}
+			if (done_pulse && o.done == o.NONE) o.done = t;
+			if (stop_cmd && o.stop == o.NONE) o.stop = t;
+			if (err_code_reg.read() != 0 && o.error == o.NONE) o.error = t;
+		}
+		if (reset_cmd) o.new_epoch("soft_reset", t);
+		if (start_cmd) {
+			const bool err = err_code_reg.read() != 0;
+			if (start_has_plane && !stop_cmd && !reset_cmd && !err) {
+				const bool overlap = o.open && !(internal_queues_empty() && o.plo_outstanding == 0);
+				o.close("start", overlap, t);
+				o.open_wave(t);
+				std::fprintf(hacc::wave_log(), "S hddu=%u epoch=%llu seq=%llu g=%llu plane_en=%u plane_mode=%u t=%llu\n",
+				             o.id, static_cast<unsigned long long>(o.epoch), static_cast<unsigned long long>(o.seq),
+				             static_cast<unsigned long long>(o.global), plane_en_reg.read().to_uint(),
+				             plane_mode_reg.read().to_uint(), static_cast<unsigned long long>(t));
+			} else {
+				std::fprintf(hacc::wave_log(), "R hddu=%u epoch=%llu stop=%d soft_reset=%d error=%d no_plane=%d t=%llu\n",
+				             o.id, static_cast<unsigned long long>(o.epoch), stop_cmd ? 1 : 0, reset_cmd ? 1 : 0,
+				             err ? 1 : 0, start_has_plane ? 0 : 1, static_cast<unsigned long long>(t));
+			}
+		}
+	}
+
 	// Sequential process to handle the main data flow and state updates of the HDDU
 	void seq_process() {
 		reset_internal();
+		if (hacc::wave_log() && !wave_obs_.in_reset) wave_obs_.new_epoch("reset", sc_time_stamp().value());
+		wave_obs_.in_reset = true;
 		wait();
 
 		while (true) {
+			wave_obs_.in_reset = false;
 			for (int i = 0; i < NUM_AGU; ++i) {
 				agu_cfg_write_sig[i].write(false);
 				agu_start_sig[i].write(false);
@@ -1423,6 +1479,10 @@ private:
 					err_info1_reg.write(static_cast<uint32_t>(wr_addr));
 				}
 			}
+
+			if (hacc::wave_log())
+				observe_wave_edge(global_start_cmd, global_stop_cmd, global_reset_cmd,
+				                  global_start_has_enabled_plane, any_busy, done_pulse);
 
 			wait();
 		}

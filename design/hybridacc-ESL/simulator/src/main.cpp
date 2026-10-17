@@ -14,6 +14,7 @@
  *                 [--fast-boot]
  *                 [--trace file.json] [--trace-level N]
  *                 [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]
+ *                 [--wave-log file.txt]
  *                 <firmware.elf>
  */
 
@@ -30,6 +31,7 @@
 
 #include "Core/DramLog.hpp"
 #include "Cluster/SpmLog.hpp"
+#include "Cluster/WaveLog.hpp"
 #include "Core/MmioLog.hpp"
 #include "HybridAcc.hpp"
 #include "SimUtils.hpp"
@@ -84,6 +86,7 @@ static void print_usage(const char* prog) {
               << " [--core-debug] [--dma-check] [--fast-boot]"
               << " [--trace file.json] [--trace-level N]"
               << " [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]"
+              << " [--wave-log file.txt]"
               << " <firmware.elf>\n";
 }
 
@@ -339,6 +342,7 @@ int sc_main(int argc, char* argv[]) {
     std::string mmio_log_path;
     std::string dram_log_path;
     std::string spm_log_path;
+    std::string wave_log_path;
     uint32_t trace_level = 2;
 
     for (int i = 1; i < argc; ++i) {
@@ -371,6 +375,8 @@ int sc_main(int argc, char* argv[]) {
             dram_log_path = argv[++i];
         } else if (arg == "--spm-log" && i + 1 < argc) {
             spm_log_path = argv[++i];
+        } else if (arg == "--wave-log" && i + 1 < argc) {
+            wave_log_path = argv[++i];
         } else if (arg == "--trace-level" && i + 1 < argc) {
             if (!parse_trace_level(argv[++i], trace_level)) {
                 std::cerr << "[SIM] Invalid trace level: expected 1..4\n";
@@ -713,6 +719,13 @@ int sc_main(int argc, char* argv[]) {
             return 1;
         }
     }
+    if (!wave_log_path.empty()) {
+        hacc::wave_log() = std::fopen(wave_log_path.c_str(), "w");
+        if (!hacc::wave_log()) {
+            std::cerr << "[SIM] Cannot open wave log: " << wave_log_path << std::endl;
+            return 1;
+        }
+    }
 
     // Trace setup
     // ========================================================================
@@ -943,6 +956,11 @@ int sc_main(int argc, char* argv[]) {
     if (hacc::spm_log()) {
         std::fclose(hacc::spm_log());
         hacc::spm_log() = nullptr;
+    }
+    if (hacc::wave_log()) {
+        hacc::close_open_waves(sc_core::sc_time_stamp().value());
+        std::fclose(hacc::wave_log());
+        hacc::wave_log() = nullptr;
     }
     if (!trace_path.empty()) {
         PerfettoTrace::getInstance().close();
