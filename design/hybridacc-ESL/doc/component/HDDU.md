@@ -172,7 +172,7 @@ VRDIF<response_t<sc_biguint<DATA_BITS>>> noc_plo_in;
 | Offset | Name | RW | 說明 |
 |---:|---|---|---|
 | `0x800` | `HDDU_CTRL` | R/W | bit0: soft-reset（清 FIFO/錯誤）；bit1: start_all；bit2: stop_all |
-| `0x804` | `HDDU_STATUS` | R | bit1: any_busy；bit2: done（!any_busy）；bit3: 本 cycle stall；bit4: err |
+| `0x804` | `HDDU_STATUS` | R | bit1: any_busy；bit2: done（W6，見 §6.5）；bit3: 本 cycle stall；bit4: err |
 | `0x808` | `PLANE_EN` | R/W | bit0~3: PS/PD/PLI/PLO enable（預設全開 0xF） |
 | `0x80C` | `PLANE_MODE` | R/W | 軟體定義模式旗標（硬體不直接解碼） |
 | `0x810` | `NUM_PORTS` | R | 固定 4（相容欄位） |
@@ -311,14 +311,15 @@ PLO 維護以下兩個 FIFO（均深度 `FIFO_DEPTH=16`）：
 `interrupt = HDDU_STATUS.bit4 || HDDU_STATUS.bit2`
 
 - `bit4=1`：error 狀態（`err_code_reg != 0`）
-- `bit2=1`：所有 AGU 非 busy（`!any_busy`，視為 done 條件）
+- `bit2=1`：本 wave 完成（W6）：AGU 已執行過且全部非 busy、HDDU 內部的佇列都已清空，而且 SPM 已接受的 PLO 寫入都已回應。SPM 在決定寫入 bank 的那個 cycle 產生回應，HDDU 在 SRAM 寫入之後的 edge 才收到，所以回應數歸零表示本 wave 的 PLO 都已寫入 SRAM。START、STOP、soft-reset 會清除 done。
+- 舊定義是「所有 AGU 非 busy」（`!any_busy`），會早於本 wave 最後一筆 PLO 寫入 SRAM；2026-10 依 W6 的完成定義改正。
 
 完整 `HDDU_STATUS` bit 定義：
 
 | Bit | 名稱 | 說明 |
 |---:|---|---|
 | 1 | BUSY | 至少一個 AGU busy |
-| 2 | DONE | 所有 AGU 非 busy（`!any_busy`） |
+| 2 | DONE | W6：AGU 已執行且全部非 busy、內部佇列清空、PLO 寫入都已回應（見上） |
 | 3 | STALL | 本 cycle 發生 stall |
 | 4 | ERROR | `ERR_CODE != 0` |
 

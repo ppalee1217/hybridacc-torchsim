@@ -783,6 +783,13 @@ private:
 	bool run_active_latched = false;
 	bool prev_any_busy_latched = false;
 	bool done_latched = false;
+	// DONE is the W6 completion (ODR D-36): the AGUs have run and are idle, no queue
+	// inside HDDU holds data, and every PLO write the SPM accepted has been answered.
+	// The SPM answers a write in the cycle it decides to write the bank, and the HDDU
+	// takes the answer an edge after the SRAM write, so a zero count means every PLO
+	// write of the wave is in SRAM.
+	bool seen_busy_latched = false;
+	uint32_t plo_wr_outstanding_ = 0;
 	bool start_pending_ = false;  // plain C++ var for immediate BUSY visibility
 	hacc::WaveObserver wave_obs_;  // --wave-log (M21); read by nothing in the simulated hardware
 
@@ -851,6 +858,8 @@ private:
 		run_active_latched = false;
 		prev_any_busy_latched = false;
 		done_latched = false;
+		seen_busy_latched = false;
+		plo_wr_outstanding_ = 0;
 		start_pending_ = false;
 
 		for (int i = 0; i < NUM_SEND_PLANES; ++i) {
@@ -1326,22 +1335,31 @@ private:
 			const bool global_start_has_enabled_plane =
 				global_start_cmd && ((plane_en_reg.read().to_uint() & DEFAULT_PLANE_EN) != 0u);
 
+			// PLO writes the SPM has accepted but not yet answered (see seen_busy_latched).
+			if (spm_req_valid[RECV_PLANE].read() && spm_req_ready[RECV_PLANE].read()) ++plo_wr_outstanding_;
+			if (spm_resp_valid[PLANE_PLO].read() && spm_resp_ready[PLANE_PLO].read() && plo_wr_outstanding_ > 0)
+				--plo_wr_outstanding_;
+
 			if (global_reset_cmd) {
 				run_active_latched = false;
 				done_latched = false;
 				prev_any_busy_latched = false;
+				seen_busy_latched = false;
 			}
 			if (global_start_cmd) {
 				run_active_latched = global_start_has_enabled_plane;
 				done_latched = false;
 				prev_any_busy_latched = false;
+				seen_busy_latched = false;
 			}
 			if (global_stop_cmd) {
 				run_active_latched = false;
 				done_latched = false;
 			}
 
-			const bool done_pulse = run_active_latched && prev_any_busy_latched && !any_busy;
+			if (run_active_latched && any_busy) seen_busy_latched = true;
+			const bool w6 = seen_busy_latched && !any_busy && internal_queues_empty() && plo_wr_outstanding_ == 0;
+			const bool done_pulse = run_active_latched && w6;
 			if (done_pulse) {
 				done_latched = true;
 				run_active_latched = false;
