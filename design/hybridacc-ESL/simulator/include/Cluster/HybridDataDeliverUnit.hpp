@@ -120,6 +120,12 @@ public:
 		return global_status_reg.read()[(int)HdduStatusBit::BUSY];
 	}
 
+	/// --wave-log (M21): the cluster reports the conditions firmware waits poll (observation only).
+	void observe_cluster_conditions(bool pe_halted, bool cluster_quiesced) {
+		if (hacc::wave_log())
+			wave_obs_.cluster_conditions(pe_halted, cluster_quiesced, sc_time_stamp().value());
+	}
+
 	uint16_t agu_iteration_count(unsigned plane, unsigned dimension) const {
 		return plane < static_cast<unsigned>(NUM_AGU)
 			? agus[plane].iteration_count(dimension)

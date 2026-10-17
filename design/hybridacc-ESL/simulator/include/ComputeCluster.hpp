@@ -1103,6 +1103,9 @@ private:
 			}
 
 			sample_wave_compute_profile();
+			hddu.observe_cluster_conditions(
+				noc.all_active_pes_halted(),
+				(cluster_status_word() & cluster::bit_mask(cluster::UnifiedStatusBit::QUIESCED)) != 0u);
 
 			wait();
 		}

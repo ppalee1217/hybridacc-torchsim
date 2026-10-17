@@ -17,6 +17,11 @@
  *   E hddu= epoch= seq= g= start= agu_idle= drained= answered= done= stop= error= close=
  *     ps= pd= pli= plo_req= plo_resp= plo_spm= plo_ack= last_ps= last_pd= last_pli=
  *     last_plo_spm= overlap= t=                       one wave, written when it closes
+ *   C hddu= cond=pe_halted|cluster_quiesced value=0|1 t=
+ *                                                     the cluster condition a firmware wait
+ *                                                     polls changed (first line: its value at
+ *                                                     the first edge): NOC_STATUS all active PEs
+ *                                                     halted, CLUSTER_STATUS QUIESCED
  *
  * In E: agu_idle is the first edge after the wave was busy with every AGU idle
  * (the condition DONE used before the D-36 fix); drained adds "no queue inside
@@ -63,6 +68,7 @@ struct WaveObserver {
     uint64_t n[7] = {0, 0, 0, 0, 0, 0, 0};          // ps pd pli plo_req plo_resp plo_spm plo_ack
     uint64_t last[4] = {NONE, NONE, NONE, NONE};    // ps pd pli plo_spm
     int64_t plo_outstanding = 0;                     // plo_spm - plo_ack, for "answered"
+    int cond_value[2] = {-1, -1};                     // pe_halted, cluster_quiesced; -1 = not seen yet
 
     static void put(std::FILE* f, const char* key, uint64_t v) {
         if (v == NONE) std::fprintf(f, " %s=-", key);
@@ -91,6 +97,19 @@ struct WaveObserver {
         for (auto& x : n) x = 0;
         for (auto& x : last) x = NONE;
         plo_outstanding = 0;
+    }
+    /// Called by the cluster once per edge with the two conditions firmware waits poll.
+    void cluster_conditions(bool pe_halted, bool cluster_quiesced, uint64_t t) {
+        std::FILE* f = wave_log();
+        if (!f) return;
+        static const char* const names[2] = {"pe_halted", "cluster_quiesced"};
+        const int v[2] = {pe_halted ? 1 : 0, cluster_quiesced ? 1 : 0};
+        for (int i = 0; i < 2; ++i) {
+            if (v[i] == cond_value[i]) continue;
+            cond_value[i] = v[i];
+            std::fprintf(f, "C hddu=%u cond=%s value=%d t=%llu\n", id, names[i], v[i],
+                         static_cast<unsigned long long>(t));
+        }
     }
     void new_epoch(const char* cause, uint64_t t) {
         close(cause, false, t);
