@@ -29,7 +29,7 @@ import tempfile
 from pathlib import Path
 
 SCHEMA = "common-schedule-ir/v1"
-DECODER_VERSION = "2"
+DECODER_VERSION = "3"
 BEAT_BYTES_FIELD = "dma_beat_bytes"
 PLATFORM_FIELDS = ("clock_mhz", BEAT_BYTES_FIELD, "dma_cmd_fifo_depth")
 FIRMWARE_FILES = ("firmware_ops.c", "firmware_data.c", "firmware_hw.h", "firmware_payload.h", "firmware_main.c")
@@ -149,7 +149,7 @@ class RegisterMap:
                 "CLUSTER_BCAST_BASE", "CLUSTER_STRIDE", "HDDU_BASE", "AGU_BANK_STRIDE", "PLIC_BASE",
                 "DMA_CTRL_SUBMIT", "HDDU_CTRL_START", "HDDU_CTRL_STOP", "HDDU_CTRL_SOFT_RESET",
                 "CLUSTER_CTRL_START", "CLUSTER_CTRL_STOP", "CLUSTER_CTRL_SOFT_RESET",
-                "DMA_ENDPOINT_DRAM", "DMA_ENDPOINT_CLUSTER_SPM")
+                "DMA_ENDPOINT_DRAM", "DMA_ENDPOINT_CLUSTER_SPM", "DMA_XFORM_LOAD_PAD_EN_MASK")
         missing = [n for n in need if n not in d]
         _require(not missing, f"firmware_hw.h lacks register defines: {missing}")
         self.dma = {d[f"DMA_{r}"]: r for r in self.DMA_REGS}
@@ -249,6 +249,74 @@ def _dma_command(regs: dict, beat_bytes: int) -> dict:
     }
 
 
+def _int32(value: int) -> int:
+    return value - (1 << 32) if value & 0x80000000 else value
+
+
+def _agu_addresses(base: int, count: list, stride: list):
+    """ESL DmaEngine AGU: d0 fastest, a zero count is one, 32-bit address arithmetic."""
+    lim = [c if c else 1 for c in count]
+    for i3 in range(lim[3]):
+        for i2 in range(lim[2]):
+            for i1 in range(lim[1]):
+                for i0 in range(lim[0]):
+                    off = sum((i * s) & 0xFFFFFFFF for i, s in zip((i0, i1, i2, i3), stride))
+                    yield (base + off) & 0xFFFFFFFF
+
+
+def dram_beats(cmd: dict, beat_bytes: int, dram_kind: int, load_pad_bit: int):
+    """Yield ("R"|"W", address) for every DRAM beat of one DMA command, in ESL issue order.
+
+    Mirrors HybridAcc ESL ``DmaEngine.hpp`` (bb4be74): only the low 32 address bits are used;
+    every DRAM request is one beat. A load-pad read ignores the source strides and addresses a
+    dense [pad_src_h, pad_src_w, beats_per_pixel] image at the source address; beats outside
+    the image are synthesised and read nothing (``decode_load_pad_request``).
+    """
+    t = cmd["transform"]
+    if cmd["src_kind"] == dram_kind:
+        base = cmd["src_addr"] & 0xFFFFFFFF
+        if t["xform_ctrl"] & load_pad_bit:
+            row_beats = cmd["count"][0] or 1
+            bpp = t["beats_per_pixel"]
+            h0, w0 = _int32(t["pad_window_h0"]), _int32(t["pad_window_w0"])
+            for i in range(cmd["beats"]):
+                row, in_row = divmod(i, row_beats)
+                col, beat = divmod(in_row, bpp)
+                r, c = h0 + row, w0 + col
+                if 0 <= r < t["pad_src_h"] and 0 <= c < t["pad_src_w"]:
+                    yield "R", (base + ((r * t["pad_src_w"] + c) * bpp + beat) * beat_bytes) & 0xFFFFFFFF
+        else:
+            for a in _agu_addresses(base, cmd["count"], cmd["src_stride"]):
+                yield "R", a
+    if cmd["dst_kind"] == dram_kind:
+        for a in _agu_addresses(cmd["dst_addr"] & 0xFFFFFFFF, cmd["count"], cmd["dst_stride"]):
+            yield "W", a
+
+
+def _dram_side(cmd: dict, beat_bytes: int, d: dict) -> dict:
+    """DRAM-side amount and address segments of one command (M20 B2).
+
+    ``beats``/``bytes`` of a command are what the SPM side delivers or consumes; the DRAM side
+    differs for a load-pad read, whose out-of-window beats read nothing.
+    """
+    beats = list(dram_beats(cmd, beat_bytes, d["DMA_ENDPOINT_DRAM"], d["DMA_XFORM_LOAD_PAD_EN_MASK"]))
+    reads = sum(1 for kind, _ in beats if kind == "R")
+    return {"read_beats": reads, "write_beats": len(beats) - reads,
+            "read_bytes": reads * beat_bytes, "write_bytes": (len(beats) - reads) * beat_bytes,
+            "segments": dram_segments(beats, beat_bytes)}
+
+
+def dram_segments(beats, beat_bytes: int) -> list:
+    """Merge consecutive same-direction beats at consecutive addresses into [dir, start, bytes]."""
+    out = []
+    for kind, addr in beats:
+        if out and out[-1][0] == kind and out[-1][1] + out[-1][2] == addr:
+            out[-1][2] += beat_bytes
+        else:
+            out.append([kind, addr, beat_bytes])
+    return out
+
+
 def _tag_reached(done, tag):
     return ((done - tag) & 0xFFFFFFFF) < 0x80000000  # firmware: (int32_t)(done - tag) >= 0
 
@@ -322,6 +390,7 @@ def decode(lines: list, regmap: RegisterMap, platform: dict) -> dict:
                 _require(val & ~(d["DMA_CTRL_SUBMIT"] | 0x8) == 0, f"line {n}: unknown DMA_CTRL bits {val:#x}")
                 if val & d["DMA_CTRL_SUBMIT"]:
                     cmd = _dma_command(dma_shadow, beat_bytes)
+                    cmd["dram_side"] = _dram_side(cmd, beat_bytes, d)
                     if cur["dma"]:
                         prev = cur["dma"][-1]["tag"]
                         _require(_tag_reached(cmd["tag"], prev), f"line {n}: DMA tags go backwards")

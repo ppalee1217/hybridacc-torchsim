@@ -13,7 +13,7 @@
  *                 [--max-cycles N] [--core-debug] [--dma-check]
  *                 [--fast-boot]
  *                 [--trace file.json] [--trace-level N]
- *                 [--mmio-log file.txt]
+ *                 [--mmio-log file.txt] [--dram-log file.txt]
  *                 <firmware.elf>
  */
 
@@ -28,6 +28,7 @@
 #include <string>
 #include <vector>
 
+#include "Core/DramLog.hpp"
 #include "Core/MmioLog.hpp"
 #include "HybridAcc.hpp"
 #include "SimUtils.hpp"
@@ -81,7 +82,7 @@ static void print_usage(const char* prog) {
               << " [--clock-period ns]"
               << " [--core-debug] [--dma-check] [--fast-boot]"
               << " [--trace file.json] [--trace-level N]"
-              << " [--mmio-log file.txt]"
+              << " [--mmio-log file.txt] [--dram-log file.txt]"
               << " <firmware.elf>\n";
 }
 
@@ -335,6 +336,7 @@ int sc_main(int argc, char* argv[]) {
     bool fast_boot = false;
     std::string trace_path;
     std::string mmio_log_path;
+    std::string dram_log_path;
     uint32_t trace_level = 2;
 
     for (int i = 1; i < argc; ++i) {
@@ -363,6 +365,8 @@ int sc_main(int argc, char* argv[]) {
             trace_path = argv[++i];
         } else if (arg == "--mmio-log" && i + 1 < argc) {
             mmio_log_path = argv[++i];
+        } else if (arg == "--dram-log" && i + 1 < argc) {
+            dram_log_path = argv[++i];
         } else if (arg == "--trace-level" && i + 1 < argc) {
             if (!parse_trace_level(argv[++i], trace_level)) {
                 std::cerr << "[SIM] Invalid trace level: expected 1..4\n";
@@ -691,6 +695,13 @@ int sc_main(int argc, char* argv[]) {
             return 1;
         }
     }
+    if (!dram_log_path.empty()) {
+        hacc::dram_log() = std::fopen(dram_log_path.c_str(), "w");
+        if (!hacc::dram_log()) {
+            std::cerr << "[SIM] Cannot open DRAM log: " << dram_log_path << std::endl;
+            return 1;
+        }
+    }
 
     // Trace setup
     // ========================================================================
@@ -913,6 +924,10 @@ int sc_main(int argc, char* argv[]) {
     if (hacc::mmio_log()) {
         std::fclose(hacc::mmio_log());
         hacc::mmio_log() = nullptr;
+    }
+    if (hacc::dram_log()) {
+        std::fclose(hacc::dram_log());
+        hacc::dram_log() = nullptr;
     }
     if (!trace_path.empty()) {
         PerfettoTrace::getInstance().close();

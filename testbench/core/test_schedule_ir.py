@@ -40,11 +40,12 @@ def _gemm(m, k, n):
             [{"name": "gemm1", "type": "gemm", "inputs": ["A", "B"], "outputs": ["C"]}])
 
 
-def _conv(h, w, ci, co, k):
-    attrs = {"stride": 1} if k == 1 else {"stride": 1, "padding": 0}
+def _conv(h, w, ci, co, k, padding=0):
+    attrs = {"stride": 1} if k == 1 else {"stride": 1, "padding": padding}
     return ({"input": {"shape": [1, h, w, ci], "dtype": "fp16", "layout": "NHWC"},
              "weight": {"shape": [co, k, k, ci], "dtype": "fp16", "layout": "OIHW"},
-             "output": {"shape": [1, h - k + 1, w - k + 1, co], "dtype": "fp16", "layout": "NHWC"}},
+             "output": {"shape": [1, h - k + 1 + 2 * padding, w - k + 1 + 2 * padding, co], "dtype": "fp16",
+                        "layout": "NHWC"}},
             [{"name": "conv1", "type": f"conv2d_{k}x{k}", "inputs": ["input", "weight"], "outputs": ["output"],
               "attrs": attrs}])
 
@@ -65,6 +66,7 @@ CASES = {
     "gemm_resident_3bus": (_hardware(12, 3), _gemm(100, 74, 79)),
     "conv1x1": (_hardware(12, 3), _conv(10, 64, 52, 36, 1)),
     "conv3x3": (_hardware(12, 3), _conv(10, 60, 104, 120, 3)),
+    "conv3x3_padded": (_hardware(12, 3), _conv(6, 40, 4, 24, 3, padding=1)),
 }
 
 
@@ -88,6 +90,20 @@ def test_extracts_a_closed_schedule(tmp_path, name):
                 assert layer["dma"][wait["target_dma"]]["event"] < wait["id"]
         assert [e["id"] for e in events] == list(range(len(events)))
         assert all(c["bytes"] == c["beats"] * PLATFORM["dma_beat_bytes"] for c in layer["dma"])
+        # DRAM side (B2): equal to the SPM side except for load-pad reads, which skip out-of-image beats.
+        for c in layer["dma"]:
+            side, load_pad = c["dram_side"], c["transform"]["xform_ctrl"] & 1
+            assert sum(seg[2] for seg in side["segments"]) == side["read_bytes"] + side["write_bytes"]
+            assert side["write_beats"] == (c["beats"] if c["dst_kind"] == 0 else 0)
+            if c["src_kind"] != 0:
+                assert side["read_beats"] == 0
+            elif load_pad:
+                assert 0 < side["read_beats"] <= c["beats"]
+            else:
+                assert side["read_beats"] == c["beats"]
+        if name == "conv3x3_padded":
+            assert any(c["transform"]["xform_ctrl"] & 1 and c["dram_side"]["read_beats"] < c["beats"]
+                       for c in layer["dma"])
         assert not layer["dma_fifo_hazard"]
     assert ir["provenance"]["files_sha256"]["hardware_ir.json"] == si.sha256_file(d / "hardware_ir.json")
     # Structural overlap read off the issue order: every listed DMA sits between its wave's start and done-wait.
@@ -184,3 +200,38 @@ def test_build_refuses_missing_platform_field_and_wrong_grid(tmp_path):
     (d / "hardware_ir.json").write_text(json.dumps(bad))
     with pytest.raises(si.ScheduleIRError, match="exactly once"):
         si.build(d, PLATFORM, REF)
+
+
+def _cmd(**kw):
+    cmd = {"src_kind": 0, "dst_kind": 1, "src_addr": 0x80000000, "dst_addr": 0, "count": [1, 1, 1, 1],
+           "src_stride": [0, 0, 0, 0], "dst_stride": [0, 0, 0, 0], "beats": 1,
+           "transform": {"xform_ctrl": 0, "pad_window_h0": 0, "pad_window_w0": 0, "pad_src_h": 0, "pad_src_w": 0,
+                         "beats_per_pixel": 0}}
+    cmd.update(kw)
+    return cmd
+
+
+def test_dram_beats_follow_the_dma_address_generator():
+    # d0 fastest, a zero count is one, 32-bit wrap (ESL DmaEngine AGU): rows 1 and 2 wrap to 0x30, 0x70.
+    cmd = _cmd(src_addr=0xFFFFFFF0, count=[2, 3, 0, 0], src_stride=[8, 64, 0, 0], beats=6)
+    want = [(0xFFFFFFF0 + 8 * i0 + 64 * i1) & 0xFFFFFFFF for i1 in range(3) for i0 in range(2)]
+    assert want[2] == 0x30
+    assert list(si.dram_beats(cmd, 8, 0, 1)) == [("R", a) for a in want]
+    assert si.dram_segments(si.dram_beats(cmd, 8, 0, 1), 8) == [["R", a, 16] for a in want[::2]]
+    store = _cmd(src_kind=1, dst_kind=0, dst_addr=0x80001000, count=[4, 0, 0, 0], dst_stride=[8, 0, 0, 0], beats=4)
+    assert si.dram_segments(si.dram_beats(store, 8, 0, 1), 8) == [["W", 0x80001000, 32]]
+
+
+def test_load_pad_reads_only_the_window_inside_the_image():
+    # A 3x4-pixel window at (-1, -1) over a dense 2x2 image, one beat per pixel: the source
+    # strides are ignored and only the 4 in-image pixels are read, which are contiguous.
+    t = {"xform_ctrl": 1, "pad_window_h0": 0xFFFFFFFF, "pad_window_w0": 0xFFFFFFFF, "pad_src_h": 2,
+         "pad_src_w": 2, "beats_per_pixel": 1}
+    cmd = _cmd(count=[4, 3, 0, 0], src_stride=[999, 999, 0, 0], beats=12, transform=t)
+    base = 0x80000000
+    assert list(si.dram_beats(cmd, 8, 0, 1)) == [("R", base + 8 * p) for p in (0, 1, 2, 3)]
+    assert si.dram_segments(si.dram_beats(cmd, 8, 0, 1), 8) == [["R", base, 32]]
+    # A window narrower than the image reads one segment per image row.
+    t2 = dict(t, pad_window_h0=0, pad_window_w0=1, pad_src_w=3)
+    cmd2 = _cmd(count=[1, 2, 0, 0], beats=2, transform=t2)
+    assert si.dram_segments(si.dram_beats(cmd2, 8, 0, 1), 8) == [["R", base + 8, 8], ["R", base + 32, 8]]

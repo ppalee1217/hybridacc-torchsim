@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <deque>
 #include <cassert>
+#include "Core/DramLog.hpp"
 #include "Core/Types.hpp"
 #include "Utils/utils.hpp"
 
@@ -813,6 +814,12 @@ private:
                     dma_args += "}";
                     TRACE_EVENT("dma_transfer", "DMA", TRACE_BEGIN, 0, 1, dma_args);
                 }
+                if (hacc::dram_log()) {
+                    std::fprintf(hacc::dram_log(), "C %u %d %d %u %llu\n", active_cmd_reg.cmd_tag,
+                                 static_cast<int>(active_cmd_reg.src_kind), static_cast<int>(active_cmd_reg.dst_kind),
+                                 active_cmd_reg.total_beats(),
+                                 static_cast<unsigned long long>(sc_core::sc_time_stamp().value()));
+                }
                 reset_execution_state();
                 state_reg = DmaState::RUN;
                 mmio_status_reg = 0x2;
@@ -884,6 +891,14 @@ private:
         }
     }
 
+    // Optional DRAM beat log (--dram-log, see DramLog.hpp): observation only.
+    static void log_dram_beat(char kind, uint32_t addr) {
+        if (hacc::dram_log()) {
+            std::fprintf(hacc::dram_log(), "%c %u %llu\n", kind, addr,
+                         static_cast<unsigned long long>(sc_core::sc_time_stamp().value()));
+        }
+    }
+
     void run_src_issue_dram(bool allow_issue) {
         if (direct_load_pad_active()) {
             const bool ar_done = dram_ar_send_valid_reg && m_mem_axi_ar_ready_i.read();
@@ -916,6 +931,7 @@ private:
                         dram_rd_inflight_cnt_reg++;
                         beats_src_issued_reg++;
                         pmu_dram_rd_issue_cnt_reg++;
+                        log_dram_beat('R', next_addr);
                     }
                 }
             }
@@ -939,6 +955,7 @@ private:
             dram_rd_inflight_cnt_reg++;
             beats_src_issued_reg++;
             pmu_dram_rd_issue_cnt_reg++;
+            log_dram_beat('R', next_addr);
         }
         dram_ar_send_valid_reg = next_valid;
         dram_ar_send_addr_reg = next_addr;
@@ -1015,6 +1032,7 @@ private:
             dram_wr_inflight_cnt_reg++;
             beats_dst_issued_reg++;
             pmu_dram_wr_issue_cnt_reg++;
+            log_dram_beat('W', dram_aw_send_addr_reg);
         }
         m_mem_axi_aw_valid_o.write(dram_aw_send_valid_reg);
         m_mem_axi_aw_addr_o.write(dram_aw_send_addr_reg);
