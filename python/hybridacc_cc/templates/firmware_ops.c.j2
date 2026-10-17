@@ -332,15 +332,6 @@ static inline uint32_t min_u32(uint32_t a, uint32_t b) {
     return (a < b) ? a : b;
 }
 
-static inline uint32_t scale_stride_for_extent(uint32_t full_stride,
-                                               uint32_t full_extent,
-                                               uint32_t valid_extent) {
-    if ((full_extent == 0u) || (valid_extent >= full_extent)) {
-        return full_stride;
-    }
-    return (full_stride / full_extent) * valid_extent;
-}
-
 static inline uint32_t active_parallel_banks(uint32_t total_rows,
                                              uint32_t rows_per_bank) {
     if ((total_rows == 0u) || (rows_per_bank == 0u)) {
@@ -1784,6 +1775,9 @@ static inline uint32_t spatial_plane_row_extent(const TilingParams* t,
     return valid_rows;
 }
 
+/* A spatial tail wave walks only its valid rows and columns (ITER), but the rows stay at the full tile's
+ * pitch in SPM: the DMA loads and stores tail tiles with the full row pitch, so STRIDE1 keeps the layer's
+ * value. (Scaling it to the valid width read and wrote the wrong rows; M21, 2026-10-18.) */
 static inline void patch_wave_spatial_agus(const LayerConfig* cfg,
                                            const WaveRuntime* wave) {
     const TilingParams* t = &cfg->tiling;
@@ -1801,28 +1795,19 @@ static inline void patch_wave_spatial_agus(const LayerConfig* cfg,
                     (pd_rows << 16) | pd_iter0);
     bcast_agu_write(AGU_PD, AGU_REG_ITER23,
                     (pd_iter3 << 16) | wave->valid_w_in);
-    bcast_agu_write(AGU_PD, AGU_REG_STRIDE1,
-                    scale_stride_for_extent(cfg->agu_pd.regs[5],
-                                            t->tile_w_in,
-                                            wave->valid_w_in));
+    bcast_agu_write(AGU_PD, AGU_REG_STRIDE1, cfg->agu_pd.regs[5]);
 
     bcast_agu_write(AGU_PLI, AGU_REG_ITER01,
                     (pli_rows << 16) | pli_iter0);
     bcast_agu_write(AGU_PLI, AGU_REG_ITER23,
                     (pli_iter3 << 16) | wave->valid_w_out);
-    bcast_agu_write(AGU_PLI, AGU_REG_STRIDE1,
-                    scale_stride_for_extent(cfg->agu_pli.regs[5],
-                                            t->tile_w_out,
-                                            wave->valid_w_out));
+    bcast_agu_write(AGU_PLI, AGU_REG_STRIDE1, cfg->agu_pli.regs[5]);
 
     bcast_agu_write(AGU_PLO, AGU_REG_ITER01,
                     (plo_rows << 16) | plo_iter0);
     bcast_agu_write(AGU_PLO, AGU_REG_ITER23,
                     (plo_iter3 << 16) | wave->valid_w_out);
-    bcast_agu_write(AGU_PLO, AGU_REG_STRIDE1,
-                    scale_stride_for_extent(cfg->agu_plo.regs[5],
-                                            t->tile_w_out,
-                                            wave->valid_w_out));
+    bcast_agu_write(AGU_PLO, AGU_REG_STRIDE1, cfg->agu_plo.regs[5]);
 }
 
 /* ═══════════════════════════════════════════════════════
