@@ -147,19 +147,6 @@ public:
 			: 0u;
 	}
 
-	uint32_t stride(unsigned dimension) const {
-		return dimension < stride_reg.size()
-			? stride_reg[dimension].read().to_uint()
-			: 0u;
-	}
-
-	void configure_runtime_stride(unsigned dimension, bool enable, uint32_t value = 0u) {
-		if (dimension < runtime_stride_override_.size()) {
-			runtime_stride_override_[dimension] = value;
-			runtime_stride_override_en_[dimension] = enable;
-		}
-	}
-
 private:
 	static constexpr uint64_t DBG_REPORT_PERIOD = 256;
 
@@ -217,8 +204,6 @@ private:
 	sc_signal<sc_uint<32>> base_addr_h_reg;
 	std::array<sc_signal<sc_uint<16>>, 4> iter_reg;
 	std::array<sc_signal<sc_uint<32>>, 4> stride_reg;
-	std::array<uint32_t, 4> runtime_stride_override_{};
-	std::array<bool, 4> runtime_stride_override_en_{};
 
 	sc_signal<sc_uint<32>> ctrl_reg;
 	sc_signal<sc_uint<32>> lane_cfg_reg;
@@ -656,9 +641,7 @@ private:
 					issue_payload.idx = idx_reg;
 					issue_payload.base_addr = base_addr_reg.read();
 					for (size_t i = 0; i < issue_payload.stride.size(); ++i) {
-						issue_payload.stride[i] = runtime_stride_override_en_[i]
-							? runtime_stride_override_[i]
-							: stride_reg[i].read().to_uint();
+						issue_payload.stride[i] = stride_reg[i].read().to_uint();
 					}
 					issue_payload.tag_base = static_cast<sc_uint<6>>(tag_base_reg.read() & 0x3F);
 					issue_payload.tag_level = static_cast<sc_uint<2>>(tag_ctrl_reg.read() & 0x3);
