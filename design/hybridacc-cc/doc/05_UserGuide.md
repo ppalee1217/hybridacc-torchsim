@@ -102,7 +102,7 @@ ops:
       dtype: fp16
     attrs:
       stride: 1
-      padding: valid
+      padding: 0
 
   - name: conv2
     type: conv2d_1x1
@@ -117,7 +117,6 @@ ops:
       dtype: fp16
     attrs:
       stride: 1
-      padding: valid
 
   - name: fc1
     type: gemm
@@ -169,8 +168,10 @@ ops:
 
 | 欄位 | 型別 | 必填 | 說明 |
 |------|------|------|------|
-| `stride` | int | ✅ | 卷積步進 |
-| `padding` | string | ✅ | `valid`（無 padding） |
+| `stride` | int | 否（預設 1） | 卷積步進；目前只支援 1，其他值編譯時拒絕 |
+| `padding` | int | 否（預設 0） | 四邊各補幾格 0；只有 `conv2d_3x3` 可以設定 |
+
+`bias_from` 與輸出 epilogue 的屬性（`activation`、`epilogue`、`relu`、`fuse_relu`、`output_relu`）也可以使用；其他鍵（例如 `groups`、`dilation`）編譯時拒絕。
 
 #### GEMM attrs
 
@@ -278,7 +279,7 @@ ops:
       dtype: fp16
     attrs:
       stride: 1
-      padding: valid
+      padding: 0
 ```
 
 #### Step 2：編譯
@@ -344,14 +345,14 @@ ops:
     input:  { shape: [1, 14, 14, 16], dtype: fp16 }
     weight: { shape: [16, 3, 3, 16],  dtype: fp16 }
     output: { shape: [1, 12, 12, 16], dtype: fp16 }
-    attrs: { stride: 1, padding: valid }
+    attrs: { stride: 1, padding: 0 }
 
   - name: conv1x1_layer
     type: conv2d_1x1
     input:  { shape: [1, 12, 12, 12], dtype: fp16 }
     weight: { shape: [16, 1, 1, 12],  dtype: fp16 }
     output: { shape: [1, 12, 12, 16], dtype: fp16 }
-    attrs: { stride: 1, padding: valid }
+    attrs: { stride: 1 }
 
   - name: gemm_layer
     type: gemm
@@ -410,7 +411,7 @@ void main(void) {
       "input": {"shape": [1, 14, 14, 16], "dtype": "fp16"},
       "weight": {"shape": [16, 3, 3, 16], "dtype": "fp16"},
       "output": {"shape": [1, 12, 12, 16], "dtype": "fp16"},
-      "attrs": {"stride": 1, "padding": "valid"}
+      "attrs": {"stride": 1, "padding": 0}
     }
   ]
 }

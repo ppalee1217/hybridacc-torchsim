@@ -37,6 +37,16 @@ _GEMM_AUTO_SPLIT_K = 96
 _OUTPUT_EPILOGUE_ATTRS = (
     "activation", "epilogue", "relu", "fuse_relu", "output_relu",
 )
+# Op attrs the compiler reads (01_CompilationPipeline.md section 2.3).  Any
+# other key is rejected: an ignored attr such as groups or dilation would
+# silently compile a different operator.  conv2d_1x1 lists padding so that
+# _validate_conv2d keeps reporting its dedicated padding error.
+_CONV_ATTRS = frozenset({"stride", "padding", "bias_from", *_OUTPUT_EPILOGUE_ATTRS})
+_ALLOWED_ATTRS = {
+    "conv2d_3x3": _CONV_ATTRS,
+    "conv2d_1x1": _CONV_ATTRS,
+    "gemm": frozenset({"bias_from", *_OUTPUT_EPILOGUE_ATTRS}),
+}
 
 
 def _require(d: dict, key: str, path: str, expected_type: type | None = None) -> Any:
@@ -189,6 +199,23 @@ def _parse_op(raw: dict, idx: int,
                 "conflicts with attrs.bias_from",
             )
         attrs["bias_from"] = raw["bias_from"]
+    unknown = sorted(set(attrs) - _ALLOWED_ATTRS[op_type])
+    if unknown:
+        raise CompilationError(
+            "schema", f"{path}.attrs",
+            f"unsupported attr(s) for {op_type}: {', '.join(map(str, unknown))}; "
+            f"allowed: {', '.join(sorted(_ALLOWED_ATTRS[op_type]))}",
+        )
+    # conv2d_1x1 padding is left to _validate_conv2d, which rejects it outright.
+    int_minimums = {"conv2d_3x3": {"stride": 1, "padding": 0},
+                    "conv2d_1x1": {"stride": 1}}.get(op_type, {})
+    for key, minimum in int_minimums.items():
+        value = attrs.get(key, minimum)
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise CompilationError(
+                "schema", f"{path}.attrs.{key}",
+                f"must be an int >= {minimum}, got {value!r}",
+            )
     return OpDesc(op_type=op_type, name=name, inputs=inputs, outputs=outputs, attrs=attrs)
 
 
@@ -237,6 +264,17 @@ def _validate_conv2d(op: OpDesc, hw: HardwareDesc) -> None:
             "semantic",
             op.name,
             f"{op.op_type} does not support the padding attribute; only conv2d_3x3 may set padding",
+        )
+
+    # The attr contract allows stride >= 1, but the lowering implements only
+    # stride 1: input tiles are the output tile plus the kernel halo and the PE
+    # program is the stride-1 template.  Stride 2 and 3 used to compile and then
+    # never halted on ESL, so they are rejected until the lowering supports them.
+    if stride != 1:
+        raise CompilationError(
+            "semantic",
+            op.name,
+            f"{op.op_type} stride {stride} is not implemented; the lowering supports stride 1 only",
         )
 
     H_out_expected = (H_in + 2 * padding - KH) // stride + 1

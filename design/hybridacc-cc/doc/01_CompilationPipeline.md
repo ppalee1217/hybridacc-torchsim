@@ -169,12 +169,16 @@ ops:
 
 | 欄位 | 型別 | 必填 | 預設值 | 驗證規則 |
 |------|------|------|--------|---------|
-| `stride` | int | 否 | 1 | ≥ 1 |
-| `padding` | int | 否 | 0 | ≥ 0 |
+| `stride` | int | 否 | 1 | ≥ 1；目前 lowering 只實作 1，其他值以 `semantic` 錯誤拒絕 |
+| `padding` | int | 否 | 0 | ≥ 0；只有 conv2d_3x3 可以設定 |
 
 **gemm**：
 
 無額外必填屬性。
+
+**所有算子**：可另外帶 `bias_from` 與輸出 epilogue 的屬性（`activation`、`epilogue`、`relu`、`fuse_relu`、`output_relu`）。其他鍵（例如 `groups`、`dilation`）一律以 `schema` 錯誤拒絕，不會被忽略；conv 的 `stride`、`padding` 不是 int（含 bool）或小於下限時也以 `schema` 錯誤拒絕。
+
+stride > 1 未實作的原因：conv 的 tiling 把輸入 tile 定為輸出 tile 加上 kernel 的 halo，PE 程式是 stride 1 的範本（`conv1d_k3c4s1`）；stride 2、3 過去可以編譯，但 ESL 跑不到停機。lowering 支援 stride 之後再放寬。
 
 ### 2.4 語意驗證
 
