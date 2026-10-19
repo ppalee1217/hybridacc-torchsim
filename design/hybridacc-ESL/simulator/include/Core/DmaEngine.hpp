@@ -868,6 +868,7 @@ private:
                 TRACE_EVENT("dma_transfer", "DMA", TRACE_END, 0, 1,
                             std::string("{\"cmd_tag\":") + std::to_string(active_cmd_reg.cmd_tag) + "}");
                 mmio_done_tag_reg = active_cmd_reg.cmd_tag;
+                log_dram_done(false);
                 mmio_status_reg = 0x1;
                 if (mmio_irq_en_reg) dma_irq_o.write(true);
                 state_reg = DmaState::IDLE;
@@ -876,6 +877,7 @@ private:
             case DmaState::ERROR: {
                 TRACE_EVENT("dma_transfer", "DMA", TRACE_END, 0, 1, "{}");
                 mmio_done_tag_reg = active_cmd_reg.cmd_tag;
+                log_dram_done(true);
                 mmio_status_reg = 0x1;
                 if (mmio_irq_en_reg) dma_irq_o.write(true);
                 state_reg = DmaState::IDLE;
@@ -888,6 +890,15 @@ private:
                 prev_state = state_reg;
             }
             wait();
+        }
+    }
+
+    // --dram-log (M21, C-05 issue timing): the edge a command completes, i.e. DONE_TAG takes its tag and
+    // STATUS reads idle (a command that failed validation or errored completes the same way). Observation only.
+    void log_dram_done(bool error) const {
+        if (hacc::dram_log()) {
+            std::fprintf(hacc::dram_log(), "D %u %d %llu\n", active_cmd_reg.cmd_tag, error ? 1 : 0,
+                         static_cast<unsigned long long>(sc_core::sc_time_stamp().value()));
         }
     }
 
