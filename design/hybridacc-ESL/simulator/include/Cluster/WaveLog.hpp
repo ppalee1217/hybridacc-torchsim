@@ -22,6 +22,8 @@
  *                                                     polls changed (first line: its value at
  *                                                     the first edge): NOC_STATUS all active PEs
  *                                                     halted, CLUSTER_STATUS QUIESCED
+ *   M addr= data= t=                                  an MMIO read the MCU completed and the value
+ *                                                     it returned (finds a wait's successful poll)
  *
  * In E: agu_idle is the first edge after the wave was busy with every AGU idle
  * (the condition DONE used before the D-36 fix); drained adds "no queue inside

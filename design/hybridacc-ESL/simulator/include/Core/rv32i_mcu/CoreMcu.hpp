@@ -14,6 +14,7 @@
 #include <functional>
 #include "Core/Types.hpp"
 #include "Core/MmioLog.hpp"
+#include "Cluster/WaveLog.hpp"
 #include "Core/rv32i_mcu/PipelineTypes.hpp"
 #include "Core/rv32i_mcu/FetchStage.hpp"
 #include "Core/rv32i_mcu/DecodeStage.hpp"
@@ -188,6 +189,8 @@ SC_MODULE(CoreMcu) {
 	// Halted / retire tracking
 	sc_core::sc_signal<bool>           halted_reg_{"halted_reg"};
 	bool mmio_log_prev_active_ = false;  // --mmio-log edge detection only
+	bool mread_pending_ = false;   // --wave-log: a read waiting for its response
+	uint32_t mread_addr_ = 0;
 	sc_core::sc_signal<bool>           retire_valid_reg_{"retire_valid_reg"};
 	sc_core::sc_signal<sc_uint<32>>    retire_pc_reg_{"retire_pc_reg"};
 
@@ -570,6 +573,22 @@ SC_MODULE(CoreMcu) {
 				std::fprintf(hacc::mmio_log(), "%c %u %u %u %llu\n", wr ? 'W' : 'R', dm_addr,
 				             wr ? dm_DI_int_.read().to_uint() : 0u, dm_STRB_int_.read().to_uint(),
 				             static_cast<unsigned long long>(sc_core::sc_time_stamp().value()));
+			}
+			// --wave-log (M21): the value each MMIO read returned, so a firmware wait's successful poll
+			// can be found. The MCU takes a response combinationally and drops the request in that time
+			// step, so the read is remembered when it first appears and logged at the first later edge
+			// that still shows the response (the edge after the MCU took it). Observation only.
+			if (hacc::wave_log()) {
+				if (mread_pending_ && mmio_resp_valid_i.read()) {
+					std::fprintf(hacc::wave_log(), "M addr=%u data=%u t=%llu\n", mread_addr_,
+					             mmio_resp_rdata_i.read().to_uint(),
+					             static_cast<unsigned long long>(sc_core::sc_time_stamp().value()));
+					mread_pending_ = false;
+				}
+				if (mmio_active && !mmio_log_prev_active_ && dm_WEB_int_.read()) {
+					mread_pending_ = true;
+					mread_addr_ = dm_addr;
+				}
 			}
 			mmio_log_prev_active_ = mmio_active;
 
