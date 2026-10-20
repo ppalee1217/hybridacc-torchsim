@@ -20,9 +20,10 @@
   - [design/hybridacc-ESL/simulator/include/Core/CoreController.hpp](../../simulator/include/Core/CoreController.hpp#L1135)
 - utilization 的計算公式以 Python 報表邏輯為準，位置在 [python/hybridacc_cc/sweep_tools.py](../../../../python/hybridacc_cc/sweep_tools.py#L856)。
 - 趨勢擬合時，我直接使用 raw `sim.log`，來源目錄為：
-  - [output/analysis-wave-gap/conv1x1_ic_sweeps](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps)
-  - [output/analysis-wave-gap/conv3x3_ic_sweeps](../../../../output/analysis-wave-gap/conv3x3_ic_sweeps)
-  - [output/analysis-wave-gap/gemm_mn_sweeps](../../../../output/analysis-wave-gap/gemm_mn_sweeps)
+  - `output/analysis-wave-gap/conv1x1_ic_sweeps`
+  - `output/analysis-wave-gap/conv3x3_ic_sweeps`
+  - `output/analysis-wave-gap/gemm_mn_sweeps`
+- `output/` 是當時在本機產生的分析輸出，不在版控中（`doc/developer-manual/repo-cleanup-plan.md` 列為單次實驗類），本文的 `output/...` 路徑只供追溯，不是連結。
 - 我沒有直接把既有的 `sweep_metrics.csv` 當成絕對真值，因為至少有一部分目前 report 目錄裡的數值，和當前 raw `sim.log` 對不上。
 
 ## 資料品質註記
@@ -36,7 +37,7 @@
   - `[SIM] Cluster boot-up cycles: 26451`
   - `[SIM] Cluster boot-up detail: start_cycle=1 first_start_cycle=26451 cycles=26451 ...`
   - `[SIM] Cluster drain-out detail: last_stop_cycle=35897 end_cycle=49581 cycles=13685 ...`
-- 但 [output/analysis-wave-gap/conv1x1_ic_sweeps_report/sweep_metrics.csv](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps_report/sweep_metrics.csv) 記的是：
+- 但 `output/analysis-wave-gap/conv1x1_ic_sweeps_report/sweep_metrics.csv` 記的是：
   - `boot_up_cycles = 25678`
   - `steady_state_core_cycles = 10218`
 
@@ -282,13 +283,13 @@ $$
 
 ### `846` 的靜態 firmware 拆解
 
-先講最重要的結論：`846` 不能直接解讀成「boot-up 時段花了 846 cycles」。對這個實際 case 而言，boot-up 到第一個 START 的真實量測是 `26451` cycles、`7038` retired instructions，見 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/sim.log](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/sim.log#L57) 與 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/sim.log](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/sim.log#L61)。
+先講最重要的結論：`846` 不能直接解讀成「boot-up 時段花了 846 cycles」。對這個實際 case 而言，boot-up 到第一個 START 的真實量測是 `26451` cycles、`7038` retired instructions，見 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/sim.log#L57` 與 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/sim.log#L61`。
 
 對這個 generated firmware case，靜態設定如下：
 
-- [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c#L33) 到 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c#L36) 顯示 `num_oc_tiles=3`、`num_h_tiles=1`、`num_w_tiles=1`、`num_ic_tiles=2`。
-- [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c#L91) 顯示 `conv1x1_resident_oc_tiles=3`，因此這一層只有一個 OC wave group，整層實際上只跑兩個 waves：`ic=0` 與 `ic=1`。
-- [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c#L84) 顯示 `parallel_groups=0x0D`，因此第一個 wave 前會真的執行 `cluster_start_layer()`。
+- `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c#L33` 到 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c#L36` 顯示 `num_oc_tiles=3`、`num_h_tiles=1`、`num_w_tiles=1`、`num_ic_tiles=2`。
+- `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c#L91` 顯示 `conv1x1_resident_oc_tiles=3`，因此這一層只有一個 OC wave group，整層實際上只跑兩個 waves：`ic=0` 與 `ic=1`。
+- `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c#L84` 顯示 `parallel_groups=0x0D`，因此第一個 wave 前會真的執行 `cluster_start_layer()`。
 
 把 firmware 靜態攤開後，`846` 比較合理的解讀是：
 
@@ -300,7 +301,7 @@ $$
 
 ### 1. `773` cycles：缺掉的一個 inter-wave gap
 
-對這個 case，raw log 只量到一個 wave gap window，而且它正好就是 `773` cycles，見 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/sim.log](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/sim.log#L63)。
+對這個 case，raw log 只量到一個 wave gap window，而且它正好就是 `773` cycles，見 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/sim.log#L63`。
 
 這個數字會出現在 `846` 裡，是因為 affine slope 對每一個新增的 IC tile，實際上都在吸收「一個額外 wave body + 一個額外 gap」的成本；但對一個有 `N` 個 waves 的 layer，真正存在的 gap 數只有 `N-1` 個。也就是說，當我們把 steady-state 擬合成 affine 線後，截距裡天然會先留下「少掉的第一個 gap」。
 
@@ -318,28 +319,28 @@ $$
 
 第一類是不會隨新增 IC tile 重複支付的 layer bring-up：
 
-- [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L2622) 的 `prepare_layer_common()` 只做一次。
+- `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L2622` 的 `prepare_layer_common()` 只做一次。
 - 其中包含 `set_cluster_mask`、`cluster_set_mode`、`HDDU_CTRL_SOFT_RESET`、四個 AGU bank 的完整設定、HDDU 全域設定、NoC reset/init、scan chain 寫入、PE program patch/load。
-- 這個 case 的 payload 長度也能從 generated 檔直接看到：scan chain 長度是 `48`，PE template 長度是 `36`，patch entry 數是 `8`，見 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c#L24) 到 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c#L28)；其內容定義在 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_payload.h](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_payload.h)。
-- 光 AGU 設定就有 `4 x 15 = 60` 次 AGU register writes，因為 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_hw.h](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_hw.h#L146) 定義 `AGU_NUM_REGS = 15`，而 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L2622) 會對 PS/PD/PLI/PLO 四個 banks 都呼叫 `cfg_agu_bank()`。
+- 這個 case 的 payload 長度也能從 generated 檔直接看到：scan chain 長度是 `48`，PE template 長度是 `36`，patch entry 數是 `8`，見 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c#L24` 到 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_data.c#L28`；其內容定義在 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_payload.h`。
+- 光 AGU 設定就有 `4 x 15 = 60` 次 AGU register writes，因為 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_hw.h#L146` 定義 `AGU_NUM_REGS = 15`，而 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L2622` 會對 PS/PD/PLI/PLO 四個 banks 都呼叫 `cfg_agu_bank()`。
 
 第二類是只發生在第一個 wave 前的 cold-start path：
 
-- [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1688) 的 `run_loop_tiling_conv_1x1()` 在第一個 START 前一定會先做 `dma_init_linear()`，見 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1701)。
-- 因為 `parallel_groups != 0`，第一圈還會真的執行 `cluster_start_layer()`，不是 no-op，見 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1722) 到 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1730)。
-- 更重要的是，第一圈會走 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1523) 的 `wave_count == 0` 分支，不是後續 wave 的 `prefetch_wait_all()` 分支。
+- `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1688` 的 `run_loop_tiling_conv_1x1()` 在第一個 START 前一定會先做 `dma_init_linear()`，見 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1701`。
+- 因為 `parallel_groups != 0`，第一圈還會真的執行 `cluster_start_layer()`，不是 no-op，見 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1722` 到 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1730`。
+- 更重要的是，第一圈會走 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1523` 的 `wave_count == 0` 分支，不是後續 wave 的 `prefetch_wait_all()` 分支。
 
 這個 case 的第一個 wave 在 START 前，會同步發出下列 input staging：
 
-- bias load：`dma_load_bias_generic()` 會走 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1478) 到 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1492) 的 `dma_load_parallel_tiles_2d_sync()` 路徑。因為 `conv1x1_resident_oc_tiles=3`，這代表 3 個同步 DMA tile loads。
-- PS load：同一個 `wave_count == 0` 分支會走 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1531) 到 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1535) 的 `dma_load_parallel_tiles_sync()` 路徑，同樣是 3 個同步 DMA tile loads。
-- PD load：PD plane 不是 parallel path，因此最後會走 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1332) 到 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1394) 的 `dma_load_2d_sync()`，也就是 1 個同步 2D DMA load。
+- bias load：`dma_load_bias_generic()` 會走 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1478` 到 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1492` 的 `dma_load_parallel_tiles_2d_sync()` 路徑。因為 `conv1x1_resident_oc_tiles=3`，這代表 3 個同步 DMA tile loads。
+- PS load：同一個 `wave_count == 0` 分支會走 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1531` 到 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1535` 的 `dma_load_parallel_tiles_sync()` 路徑，同樣是 3 個同步 DMA tile loads。
+- PD load：PD plane 不是 parallel path，因此最後會走 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1332` 到 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1394` 的 `dma_load_2d_sync()`，也就是 1 個同步 2D DMA load。
 
-也就是說，第一個 START 之前至少有 `3 + 3 + 1 = 7` 個同步 DMA loads，而後續 wave 則改走 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1190) 的 prefetch path，並在下一圈以 `prefetch_wait_all()` 消化它們。
+也就是說，第一個 START 之前至少有 `3 + 3 + 1 = 7` 個同步 DMA loads，而後續 wave 則改走 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1190` 的 prefetch path，並在下一圈以 `prefetch_wait_all()` 消化它們。
 
 ### 2.5 機器碼佐證
 
-對 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware.elf](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware.elf) 做反組譯後，compiled binary 的控制流和上面的 C code 分析一致，而且足以支持「`73` 來自第一個 wave 的 cold path 殘差」這個說法。
+對 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware.elf` 做反組譯後，compiled binary 的控制流和上面的 C code 分析一致，而且足以支持「`73` 來自第一個 wave 的 cold path 殘差」這個說法。
 
 第一，one-time bring-up 在機器碼裡仍然是獨立存在的，不是被編譯器完全折疊掉。
 
@@ -478,7 +479,7 @@ $$
 
 ### 3. 哪些動作不應該算進 `846`
 
-- 最後一個 wave 的 writeback 在 [output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c](../../../../output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1757) 發生，但它是在 STOP 之後才執行，因此會落到 drain-out，不屬於 steady-state 的 `846`。
+- 最後一個 wave 的 writeback 在 `output/analysis-wave-gap/conv1x1_ic_sweeps/conv1x1_ic_oh16_ow64_ic24_oc48/firmware_ops.c#L1757` 發生，但它是在 STOP 之後才執行，因此會落到 drain-out，不屬於 steady-state 的 `846`。
 - 因此，`846` 的靜態 root cause 應該描述成「一個缺掉的第一個 inter-wave gap，加上第一個 wave 與 steady-state repeated block 的非穩態殘差」，而不是單純稱為 boot-up cycles。
 
 ### 4. 靜態分析的邊界
