@@ -421,6 +421,9 @@ private:
     }
 
     void clear_spatial_wave() {
+        if (std::FILE* f = hacc::pe_log())  // M21 WP-J: the override writes every PE's IF_ID directly
+            std::fprintf(f, "W cmd=clear h=- w=- rows=- loop_pc=- loop_end_pc=- t=%llu\n",
+                         static_cast<unsigned long long>(sc_core::sc_time_stamp().value()));
         spatial_active_rows.write(NUM_PES_PER_PORT);
         for (size_t bus = 0u; bus < NUM_PORTS; ++bus) {
             for (size_t row = 0u; row < NUM_PES_PER_PORT; ++row) {
@@ -520,6 +523,8 @@ private:
                 connect_vr_signals(pe_inst.ln_pli, ln_pli_plo[i][j]);
                 connect_vr_signals(pe_inst.ln_plo, ln_pli_plo[i+1][j]);
 
+                pe_inst.set_log_position(static_cast<int>(i), static_cast<int>(j));  // M21 WP-J --pe-log
+
             }
         }
     }
@@ -560,6 +565,12 @@ public:
         }
 
         const uint16_t active_rows = valid_height < full_rows ? valid_height : full_rows;
+        if (std::FILE* f = hacc::pe_log())  // M21 WP-J: the override writes every PE's IF_ID directly
+            std::fprintf(f, "W cmd=configure h=%u w=%u rows=%u loop_pc=%u loop_end_pc=%u t=%llu\n",
+                         static_cast<unsigned>(valid_height), static_cast<unsigned>(valid_width),
+                         static_cast<unsigned>(active_rows),
+                         static_cast<unsigned>(loop_pc), static_cast<unsigned>(loop_end_pc),
+                         static_cast<unsigned long long>(sc_core::sc_time_stamp().value()));
         spatial_active_rows.write(active_rows);
         for (size_t bus = 0u; bus < NUM_PORTS; ++bus) {
             for (size_t row = 0u; row < NUM_PES_PER_PORT; ++row) {

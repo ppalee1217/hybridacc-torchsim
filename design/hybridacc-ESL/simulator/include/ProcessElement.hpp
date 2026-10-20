@@ -7,6 +7,7 @@
 #include "PE/IF_ID_stage.hpp"
 #include "PE/EXE_M_stage.hpp"
 #include "PE/EXE_A_stage.hpp"
+#include "PE/PeLog.hpp"
 
 using namespace sc_core;  // Add this to use SystemC types without prefix
 
@@ -95,6 +96,11 @@ public:
 
         SC_METHOD(trace_process);
         sensitive << clk.pos();
+
+        // M21 WP-J --pe-log: observation only (PE/PeLog.hpp).
+        SC_METHOD(pe_log_process);
+        sensitive << clk.pos();
+        dont_initialize();
 
         bind();
     }
@@ -520,6 +526,59 @@ public:
         last_state = "IDLE";
     }
     int get_trace_num() const { return 1;}
+
+    // M21 WP-J --pe-log (PE/PeLog.hpp). NetworkOnChip sets the position; -1 = not logged.
+    int log_bus = -1;
+    int log_row = -1;
+    void set_log_position(int bus, int row) { log_bus = bus; log_row = row; }
+    int log_last_q[15] = {-2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2};
+
+    void pe_log_process() {
+        std::FILE* f = hacc::pe_log();
+        if (!f || log_bus < 0) return;
+        const unsigned long long t = sc_time_stamp().value();
+        auto req = [&](const char* port, VRDIF<noc_request_t>& p) {
+            if (!(p.valid_in.read() && p.ready_out.read())) return;
+            const noc_request_t r = p.data_in.read();
+            std::fprintf(f, "H b=%d r=%d p=%s d=%llx a=%x m=%llx s=- t=%llu\n", log_bus, log_row, port,
+                         static_cast<unsigned long long>(r.data), static_cast<unsigned>(r.addr),
+                         static_cast<unsigned long long>(r.mask), t);
+        };
+        req("ps", noc_ps_in);
+        req("pd", noc_pd_in);
+        req("pli", noc_pli_in);
+        if (noc_plo_in.valid_in.read() && noc_plo_in.ready_out.read())
+            std::fprintf(f, "H b=%d r=%d p=plo_req d=- a=%x m=- s=- t=%llu\n", log_bus, log_row,
+                         static_cast<unsigned>(noc_plo_in.data_in.read().addr), t);
+        if (noc_plo_out.valid_out.read() && noc_plo_out.ready_in.read()) {
+            const noc_response_t r = noc_plo_out.data_out.read();
+            std::fprintf(f, "H b=%d r=%d p=plo_resp d=%llx a=- m=- s=%d t=%llu\n", log_bus, log_row,
+                         static_cast<unsigned long long>(r.data), static_cast<int>(r.status), t);
+        }
+        if (ln_pli.valid_in.read() && ln_pli.ready_out.read())
+            std::fprintf(f, "H b=%d r=%d p=ln_in d=%llx a=- m=- s=- t=%llu\n", log_bus, log_row,
+                         static_cast<unsigned long long>(ln_pli.data_in.read()), t);
+        if (ln_plo.valid_out.read() && ln_plo.ready_in.read())
+            std::fprintf(f, "H b=%d r=%d p=ln_out d=%llx a=- m=- s=- t=%llu\n", log_bus, log_row,
+                         static_cast<unsigned long long>(ln_plo.data_out.read()), t);
+        const pe_decode_signals_t md = exe_m_stage.decode_signals_reg.read();
+        const bool mv = exe_m_stage.valid_reg.read();
+        const bool madv = exe_m_to_exe_a_valid.read() && exe_a_to_exe_m_ready.read();
+        const int q[15] = {
+            pe_running_reg.read() ? 1 : 0, router_enable.read() ? 1 : 0, static_cast<int>(router_mode.read()),
+            if_id_to_exe_m_valid.read() ? 1 : 0, exe_m_to_if_id_ready.read() ? 1 : 0, mv ? 1 : 0,
+            (mv && (md.vaddu_en || md.pli_plo_operation)) ? 1 : 0, madv ? 1 : 0,
+            exe_m_stall_dl.read() ? 1 : 0, exe_m_stall_ps.read() ? 1 : 0, exe_m_stall_pd.read() ? 1 : 0,
+            static_cast<int>(exe_a_stage.observed_state()), exe_a_to_exe_m_ready.read() ? 1 : 0,
+            is_halted() ? 1 : 0, 0};
+        bool same = true;
+        for (int i = 0; i < 14; ++i) same = same && q[i] == log_last_q[i];
+        if (same) return;
+        for (int i = 0; i < 14; ++i) log_last_q[i] = q[i];
+        std::fprintf(f, "Q b=%d r=%d run=%d en=%d mode=%d ifv=%d mrdy=%d mv=%d mar=%d madv=%d dl=%d ps=%d pd=%d "
+                        "as=%d ardy=%d halt=%d t=%llu\n", log_bus, log_row, q[0], q[1], q[2], q[3], q[4], q[5], q[6],
+                     q[7], q[8], q[9], q[10], q[11], q[12], q[13], t);
+    }
 
     void trace_process() {
         if (trace_id == -1) return;

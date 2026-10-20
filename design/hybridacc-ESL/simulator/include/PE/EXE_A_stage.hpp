@@ -172,6 +172,10 @@ public:
         bind_submodules();
     }
 
+public:
+    /// Observation only (M21 WP-J --pe-log): the state register as the sequential process sees it.
+    EXE_A_State observed_state() const { return state_reg.read(); }
+
 private:
     // ========================= Pipeline Registers =========================
     sc_signal<EXE_A_State> state_reg;
