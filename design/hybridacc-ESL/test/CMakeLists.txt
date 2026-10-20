@@ -95,6 +95,17 @@ target_link_libraries(test_pe_sim
     tb_utils
 )
 
+# M21 WP-J J2: replay a full-ESL run's PE inputs (--pe-log) into the ESL's own PEs (not a CTest: needs a run's logs)
+add_executable(test_pe_replay
+    test_pe_replay.cpp
+)
+target_link_libraries(test_pe_replay
+    pe_simulator
+    systemc
+    pthread
+    tb_utils
+)
+
 # NoC Unit Tests
 add_executable(test_noc_unit
     test_noc_unit.cpp
