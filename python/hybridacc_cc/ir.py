@@ -374,6 +374,35 @@ class GemmKWaveMetadata:
 
 
 @dataclass
+class WaveAxis:
+    """One axis of a layer's tile grid in operator coordinates (M21 WP-I wave map).
+
+    ``grid`` names the tile coordinate as hardware_ir's ``tiling_params`` and the schedule IR's ``covers``
+    do (``oc``, ``h``, ``w``, ``ic``); ``axis`` names the operator dimension it tiles.  ``segments[i]`` is
+    tile index ``i`` along ``grid``: ``[start, end, allocated]``, the valid half-open range in operator
+    elements and the extent the lowering sized the wave's SPM footprint for along this axis (padding
+    included).  Values come from the variables the lowering used, not a re-derivation.
+    """
+    grid: str
+    axis: str
+    size: int
+    reduction: bool
+    segments: List[List[int]]
+
+
+@dataclass
+class WaveGeometry:
+    """Operator coordinates of every tile of one layer (M21 WP-I; written to wave_map.json, not to
+    hardware_ir.json, so adding it leaves the firmware, hardware_ir and schedule IR bytes unchanged)."""
+    op_type: str
+    dtype: str
+    axes: List[WaveAxis]
+    kernel: List[int]
+    stride: int
+    padding: int
+
+
+@dataclass
 class LayerHwConfig:
     name: str
     op_type: str
@@ -412,6 +441,15 @@ class LayerHwConfig:
     # GEMM-only: the tile geometry cc committed to, exported for PyTorchSim's
     # MLIR codegen.  Left unset by other operators.
     codegen_tile: Optional[CodegenTile] = None
+
+    # Operator coordinates of every tile (M21 WP-I).  Excluded from
+    # hardware_ir.json (see HARDWARE_IR_EXCLUDED_FIELDS); exported as wave_map.json.
+    wave_geometry: Optional[WaveGeometry] = None
+
+
+# LayerHwConfig fields that hardware_ir.json leaves out: adding them must not change the bytes that the
+# firmware, the schedule IR and existing evidence bind.
+HARDWARE_IR_EXCLUDED_FIELDS = ("wave_geometry",)
 
 
 @dataclass

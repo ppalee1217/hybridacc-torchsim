@@ -16,18 +16,27 @@ from . import __version__
 from .frontend import parse_workload
 from .lowering import lower_workload
 from .codegen import generate_firmware, write_codegen_tiling_map
+from .ir import HARDWARE_IR_EXCLUDED_FIELDS, HardwareIR
+from .wave_map import write_wave_map
 from .elf_builder import DEFAULT_MARCH, build_gcc_command, compile_firmware, validate_elf
 from .provenance import write_toolchain_provenance
 from .visualize import dump_hardware_visualization
 
 
+def _ir_json(obj) -> str:
+    """Serialize a dataclass IR to JSON; hardware_ir.json leaves out HARDWARE_IR_EXCLUDED_FIELDS."""
+    data = dataclasses.asdict(obj)
+    if isinstance(obj, HardwareIR):
+        for layer in data["layers"]:
+            for name in HARDWARE_IR_EXCLUDED_FIELDS:
+                del layer[name]
+    return json.dumps(data, indent=2, default=str)
+
+
 def _dump_ir(obj, path: Path) -> None:
     """Serialize a dataclass IR to JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(dataclasses.asdict(obj), indent=2, default=str),
-        encoding="utf-8",
-    )
+    path.write_text(_ir_json(obj), encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -178,6 +187,11 @@ def main(argv: list[str] | None = None) -> int:
     tiling_map_path = write_codegen_tiling_map(hardware_ir, args.output)
     if args.verbose:
         print(f"  → {tiling_map_path}")
+
+    # Operator coordinates of every tile (M21 WP-I), bound to the hardware IR text.
+    wave_map_path = write_wave_map(hardware_ir, _ir_json(hardware_ir), args.output)
+    if args.verbose:
+        print(f"  → {wave_map_path}")
 
     # Stage 4: ELF Compilation (default unless --no-compile)
     do_compile = not args.no_compile

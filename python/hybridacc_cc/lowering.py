@@ -28,6 +28,8 @@ from .ir import (
     SpmPerGroupLayout,
     TilingParams,
     TilingResult,
+    WaveAxis,
+    WaveGeometry,
     WorkloadIR,
 )
 
@@ -600,6 +602,17 @@ def compute_cluster_mapping(
     )
 
 
+def _wave_axis(grid: str, axis: str, size: int, tile: int, count: int, allocated: int,
+               reduction: bool = False) -> WaveAxis:
+    """One tile-grid axis in operator coordinates (M21 WP-I): tile i covers [i*tile, min((i+1)*tile, size)).
+
+    Records only; wave_map.check verifies that the segments cover the axis exactly once, so a lowering
+    whose tiles are not contiguous chunks shows up there instead of changing what cc compiles.
+    """
+    segments = [[i * tile, min((i + 1) * tile, size), allocated] for i in range(count)]
+    return WaveAxis(grid=grid, axis=axis, size=size, reduction=reduction, segments=segments)
+
+
 # ===================================================================
 # Conv2D 3×3 Lowering
 # ===================================================================
@@ -969,6 +982,13 @@ def _lower_conv2d_3x3(op: OpDesc, hw: HardwareDesc,
         tiling=tiling,
         cluster_mapping=cluster_map,
         tiling_params=tiling_params,
+        wave_geometry=WaveGeometry(
+            op_type=op.op_type, dtype=out.dtype,
+            axes=[_wave_axis("oc", "oc", OC, tile_oc, num_oc_tiles, tile_oc),
+                  _wave_axis("h", "h_out", H_out, tile_h_out, num_h_tiles, tile_h_out),
+                  _wave_axis("w", "w_out", W_out, tile_w_out, num_w_tiles, tile_w_out),
+                  _wave_axis("ic", "ic", C_in, tile_ic, num_ic_tiles, tile_ic, reduction=True)],
+            kernel=[KH, KW], stride=stride, padding=padding),
     )
 
 
@@ -1365,6 +1385,13 @@ def _lower_conv2d_1x1(op: OpDesc, hw: HardwareDesc,
         scan_chain=scan_chain, pe_program=pe_prog,
         spm_layout=spm_layout, tiling=tiling,
         cluster_mapping=cluster_map, tiling_params=tiling_params,
+        wave_geometry=WaveGeometry(
+            op_type=op.op_type, dtype=out.dtype,
+            axes=[_wave_axis("oc", "oc", OC, tile_oc, num_oc_tiles, tile_oc),
+                  _wave_axis("h", "h_out", H_out, tile_h, num_h_tiles, tile_h),
+                  _wave_axis("w", "w_out", W_out, tile_w, num_w_tiles, tile_w),
+                  _wave_axis("ic", "ic", C_in, tile_ic, num_ic_tiles, tile_ic, reduction=True)],
+            kernel=[KH, KW], stride=stride_v, padding=padding),
     )
 
 
@@ -1889,6 +1916,14 @@ def _lower_gemm(op: OpDesc, hw: HardwareDesc,
             tile_m=PE_M, tile_n=PE_N, tile_k=min(K, PE_K),
             sub_tile_m=PE_M, sub_tile_n=PE_N, sub_tile_k=min(K, PE_K),
         ),
+        # Loop-bound mapping above: oc_tile <-> M waves, h_tile <-> N waves, ic_tile <-> K waves.
+        wave_geometry=WaveGeometry(
+            op_type=op.op_type, dtype=C.dtype,
+            axes=[_wave_axis("oc", "m", M, M_tile, num_m_tiles, M_tile),
+                  _wave_axis("h", "n", N, N_tile, num_n_tiles, N_tile),
+                  _wave_axis("w", "unit", 1, 1, 1, 1),
+                  _wave_axis("ic", "k", K, K_tile, num_k_tiles, K_tile_eff, reduction=True)],
+            kernel=[1, 1], stride=1, padding=0),
     )
 
 

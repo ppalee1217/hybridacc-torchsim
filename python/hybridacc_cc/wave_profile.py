@@ -1,6 +1,7 @@
 """Raw per-wave profile from an ESL run (M21; F2 measurement contract, 2026-10-18 token ruling).
 
     python -m hybridacc_cc.wave_profile CC_DIR IR.json WAVE_LOG -o PROFILE.json [--label TEXT]
+        [--schema v2 --simulator-sha256 HEX --platform PLATFORM.json [--from-v1 PROFILE.json]]
 
 Inputs: the cc output directory (its firmware_hw.h gives the register map), the Common Schedule IR built
 from it, and the ESL's --wave-log of a run of the same firmware.
@@ -18,6 +19,12 @@ also records, per token, the START, the poll success and the edge the hardware c
 (hddu_done: DONE set; agu_idle: AGUs idle; pe_halted / cluster_quiesced: the condition's last rise
 before the poll succeeded). These are raw observations (kind "raw"): they include waits for SPM, NoC
 and DMA that a TLS models itself, so a TLS run on them is not qualified (2026-10-18 ruling).
+
+Schema v2 (M21 WP-I, 2026-10-21 ruling): the same rows, plus each wave's tile coordinates (the IR's
+``covers``), the units, dtype and config fingerprint, and a ``provenance`` block that binds by sha256 the IR,
+the cc wave map (``wave_map.json``), ``hardware_ir.json``, the firmware ELF, the ESL binary, the platform
+file, cc's ``toolchain_provenance.json`` and this producer.  ``--from-v1`` rebuilds a sealed v1 profile's
+rows from the same wave log, requires them to be identical, and records the v1 file's sha256.
 """
 import argparse
 import hashlib
@@ -27,6 +34,9 @@ from pathlib import Path
 from .schedule_ir import RegisterMap, ScheduleIRError, _require
 
 SCHEMA = "hybridacc-wave-profile/v1"
+SCHEMA_V2 = "hybridacc-wave-profile/v2"
+UNITS = {"tokens": "cycles of clock_mhz, poll success edge minus the wave's START edge",
+         "observed": "picoseconds of simulated time; *_cycles fields in cycles of clock_mhz"}
 TOKEN_WAITS = ("hddu_done", "agu_idle", "pe_halted", "cluster_quiesced")
 CLUSTER_WAITS = ("hddu_done", "agu_idle", "pe_halted", "noc_quiesced", "cluster_idle", "cluster_quiesced")
 # hddu_wait_debug_probe(): read after a status read with QUIESCED set on every 256th spin.
@@ -200,6 +210,52 @@ def build(cc_dir: Path, ir: dict, ir_sha256: str, wave_log: str, label: str) -> 
             "waves": [rows[k] for k in sorted(rows)]}
 
 
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def to_v2(prof: dict, cc_dir: Path, ir: dict, simulator_sha256: str, platform: Path,
+          from_v1: Path = None) -> dict:
+    """Schema v2 of a v1 profile built by ``build`` from the same IR (see the module docstring)."""
+    _require(isinstance(simulator_sha256, str) and len(simulator_sha256) == 64
+             and all(ch in "0123456789abcdef" for ch in simulator_sha256), "simulator sha256 must be 64 hex digits")
+    wave_map = json.loads((cc_dir / "wave_map.json").read_text())
+    hw_sha = _sha256_file(cc_dir / "hardware_ir.json")
+    _require(wave_map.get("hardware_ir_sha256") == hw_sha, "wave_map.json was made for another hardware_ir.json")
+    _require(ir["provenance"]["files_sha256"]["hardware_ir.json"] == hw_sha,
+             "the IR was built from another hardware_ir.json")
+    _require(ir["provenance"]["platform"]["sha256"] == _sha256_file(platform),
+             "the IR was built with another platform file")
+    dtypes = {layer["dtype"] for layer in wave_map["layers"]}
+    _require(len(dtypes) == 1, f"layers have different dtypes {sorted(dtypes)}")
+    covers = {(L["index"], w["id"]): w["covers"] for L in ir["layers"] for w in L["execution_waves"]}
+    waves = []
+    for row in prof["waves"]:
+        key = (row["layer"], row["wave"])
+        waves.append({"layer": row["layer"], "wave": row["wave"], "covers": covers[key],
+                      "tokens": row["tokens"], "observed": row["observed"]})
+    out = {"schema": SCHEMA_V2, "kind": prof["kind"], "label": prof["label"], "ir_sha256": prof["ir_sha256"],
+           "clock_mhz": prof["clock_mhz"], "units": UNITS, "dtype": dtypes.pop(),
+           "config_fingerprint": ir["provenance"]["config_fingerprint"]["hash"], "note": prof["note"],
+           "provenance": {
+               "ir_sha256": prof["ir_sha256"],
+               "wave_map_sha256": _sha256_file(cc_dir / "wave_map.json"),
+               "hardware_ir_sha256": hw_sha,
+               "firmware_elf_sha256": _sha256_file(cc_dir / "firmware.elf"),
+               "simulator_sha256": simulator_sha256,
+               "platform_sha256": _sha256_file(platform),
+               "toolchain_provenance_sha256": _sha256_file(cc_dir / "toolchain_provenance.json"),
+               "producer_sha256": _sha256_file(Path(__file__)),
+           },
+           "waves": waves}
+    if from_v1 is not None:
+        old = json.loads(Path(from_v1).read_text())
+        _require(old.get("schema") == SCHEMA, f"{from_v1} is not a {SCHEMA} profile")
+        _require(old == prof, f"{from_v1} differs from the v1 rows rebuilt from the same wave log")
+        out["derived_from"] = {"profile_sha256": _sha256_file(from_v1), "schema": SCHEMA}
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("cc_dir", type=Path)
@@ -207,10 +263,19 @@ def main(argv=None):
     ap.add_argument("wave_log", type=Path)
     ap.add_argument("-o", "--output", type=Path, required=True)
     ap.add_argument("--label", default="raw ESL per-wave profile (M21)")
+    ap.add_argument("--schema", choices=("v1", "v2"), default="v1")
+    ap.add_argument("--simulator-sha256", help="v2: sha256 of the ESL binary that produced the wave log")
+    ap.add_argument("--platform", type=Path, help="v2: the platform file the IR was built with")
+    ap.add_argument("--from-v1", type=Path, help="v2: a v1 profile of the same run; its rows must match")
     a = ap.parse_args(argv)
     ir_bytes = a.ir.read_bytes()
     prof = build(a.cc_dir, json.loads(ir_bytes), hashlib.sha256(ir_bytes).hexdigest(),
                  a.wave_log.read_text(), a.label)
+    if a.schema == "v2":
+        _require(a.simulator_sha256 and a.platform, "--schema v2 needs --simulator-sha256 and --platform")
+        prof = to_v2(prof, a.cc_dir, json.loads(ir_bytes), a.simulator_sha256, a.platform, a.from_v1)
+    else:
+        _require(not (a.simulator_sha256 or a.platform or a.from_v1), "provenance options need --schema v2")
     a.output.write_text(json.dumps(prof, indent=1) + "\n")
     print(json.dumps({"out": str(a.output), "waves": len(prof["waves"])}))
 

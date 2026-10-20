@@ -123,3 +123,71 @@ def test_refuses(cc_dir, d, case, message):
         ir["layers"][0]["execution_waves"].append({"id": 1})
     with pytest.raises(si.ScheduleIRError, match=message):
         wp.build(cc_dir, ir, "x" * 64, log, "test")
+
+
+# ── schema v2 (M21 WP-I) ──────────────────────────────────────────────────────
+
+@pytest.fixture
+def v2_dir(cc_dir, tmp_path):
+    """The fixture's cc output plus what v2 binds: CLI-form hardware_ir.json, wave_map.json, an ELF, the
+    toolchain record and a platform file; and an IR stub whose provenance names them."""
+    import shutil
+    from hybridacc_cc import cli
+    from hybridacc_cc import wave_map as wm
+    out = tmp_path / "cc"
+    shutil.copytree(cc_dir, out)
+    hir = lower_workload(parse_workload(cc_dir.parent / "gemm.yaml"))
+    text = cli._ir_json(hir)
+    (out / "hardware_ir.json").write_text(text)
+    (out / "wave_map.json").write_text(json.dumps(wm.build(hir, text)))
+    (out / "firmware.elf").write_bytes(b"\x7fELF test")
+    (out / "toolchain_provenance.json").write_text("{}")
+    platform = tmp_path / "platform.json"
+    platform.write_text(json.dumps({"clock_mhz": 500}))
+    ir = _ir()
+    ir["provenance"] = {"files_sha256": {"hardware_ir.json": si.sha256_file(out / "hardware_ir.json")},
+                        "platform": {"sha256": si.sha256_file(platform)},
+                        "config_fingerprint": {"hash": "hac-v1-test"}}
+    ir["layers"][0]["execution_waves"][0]["covers"] = [[0, 0, 0, 0]]
+    return out, ir, platform
+
+
+def test_v2_keeps_the_rows_and_binds_the_provenance(v2_dir, d, tmp_path):
+    out, ir, platform = v2_dir
+    v1 = wp.build(out, ir, "x" * 64, _log(d), "test")
+    v1_path = tmp_path / "v1.json"
+    v1_path.write_text(json.dumps(v1))
+    v2 = wp.to_v2(v1, out, ir, "a" * 64, platform, from_v1=v1_path)
+    assert v2["schema"] == wp.SCHEMA_V2 and v2["dtype"] == "fp16" and v2["config_fingerprint"] == "hac-v1-test"
+    assert [r["tokens"] for r in v2["waves"]] == [r["tokens"] for r in v1["waves"]]
+    assert v2["waves"][0]["covers"] == [[0, 0, 0, 0]]
+    prov = v2["provenance"]
+    assert prov["wave_map_sha256"] == si.sha256_file(out / "wave_map.json")
+    assert prov["firmware_elf_sha256"] == si.sha256_file(out / "firmware.elf")
+    assert prov["simulator_sha256"] == "a" * 64 and prov["ir_sha256"] == "x" * 64
+    assert v2["derived_from"]["profile_sha256"] == si.sha256_file(v1_path)
+
+
+@pytest.mark.parametrize("case, message", [
+    ("v1_differs", "differs from the v1 rows"),
+    ("other_hardware_ir", "another hardware_ir.json"),
+    ("other_platform", "another platform"),
+    ("bad_simulator", "64 hex digits"),
+])
+def test_v2_refuses(v2_dir, d, tmp_path, case, message):
+    out, ir, platform = v2_dir
+    v1 = wp.build(out, ir, "x" * 64, _log(d), "test")
+    v1_path = tmp_path / "v1.json"
+    other = json.loads(json.dumps(v1))
+    if case == "v1_differs":
+        other["waves"][0]["tokens"]["hddu_done"] += 1
+    v1_path.write_text(json.dumps(other))
+    sim = "a" * 64
+    if case == "other_hardware_ir":
+        ir["provenance"]["files_sha256"]["hardware_ir.json"] = "0" * 64
+    if case == "other_platform":
+        platform.write_text("{}")
+    if case == "bad_simulator":
+        sim = "xyz"
+    with pytest.raises(si.ScheduleIRError, match=message):
+        wp.to_v2(v1, out, ir, sim, platform, from_v1=v1_path)
