@@ -1,4 +1,4 @@
-"""Raw firmware issue timing from ESL logs (hybridacc_cc.issue_timing, M21; C-05 contract v1)."""
+"""Raw firmware issue timing from ESL logs (hybridacc_cc.issue_timing; C-05 contracts v1 (M21) and v2 (M22))."""
 import pytest
 
 from hybridacc_cc import schedule_ir as si
@@ -18,7 +18,7 @@ def _ir():
                         "dma": [{"id": 0, "tag": 5, "event": 0}], "waits": waits}]}
 
 
-def _logs(d, done_at=140, extra_write=False, extra_read=None):
+def _logs(d, done_at=140, extra_write=False, extra_read=None, wave_done=186):
     """Writes: DMA submit (request 100), START (request 110, accepted 113), STOP (request 260).
     Reads: DONE_TAG polls at 120/130 (old tag), 150 (tag 5); HDDU_STATUS polls 200 (busy), 230 (done)."""
     u, b = d["CLUSTER_UNICAST_BASE"], d["CLUSTER_BCAST_BASE"]
@@ -38,15 +38,15 @@ def _logs(d, done_at=140, extra_write=False, extra_read=None):
     wave = ["T hddu=0 epoch=0 cause=reset t=0", f"S hddu=0 epoch=0 seq=1 g=1 plane_en=15 plane_mode=2 t={111 * C}"]
     wave += [f"M addr={a} data={v} t={t * C}" for a, v, t in reads]
     wave.append(f"E hddu=0 epoch=0 seq=1 g=1 start={111 * C} agu_idle={180 * C} drained={185 * C} "
-                f"answered={185 * C} done={186 * C} stop={258 * C} error=- close=end ps=1 pd=1 pli=1 plo_req=1 "
+                f"answered={185 * C} done={wave_done * C} stop={258 * C} error=- close=end ps=1 pd=1 pli=1 plo_req=1 "
                 f"plo_resp=1 plo_spm=1 plo_ack=1 last_ps=- last_pd=- last_pli=- last_plo_spm=- overlap=0 t={300 * C}")
     dram = f"C 5 0 1 8 {100 * C}\nR 2147483648 {101 * C}\nD 5 0 {done_at * C}\n"
     return "\n".join(wave) + "\n", mmio_log, dram
 
 
-def _build(cc_dir, d, **kw):
+def _build(cc_dir, d, contract="v1", **kw):
     w, m, dr = _logs(d, **kw)
-    return it.build(cc_dir, _ir(), "0" * 64, w, m, dr, "test")
+    return it.build(cc_dir, _ir(), "0" * 64, w, m, dr, "test", contract=contract)
 
 
 def test_contract_edges(cc_dir, d):
@@ -85,4 +85,29 @@ def test_refuses_what_the_ir_does_not_explain(cc_dir, d, kw, msg):
 def test_refuses_missing_completion(cc_dir, d):
     w, m, dr = _logs(d)
     with pytest.raises(si.ScheduleIRError, match="no completion logged|beyond the IR"):
-        it.build(cc_dir, _ir(), "0" * 64, w, m, dr.replace("D 5 0", "X 5 0"), "test")
+        it.build(cc_dir, _ir(), "0" * 64, w, m, dr.replace("D 5 0", "X 5 0"), "test", contract="v1")
+
+
+def test_contract_v2_releases_hddu_waits_at_the_hardware_edge(cc_dir, d):
+    """v2 (2026-10-21 ruling A): an HDDU wait releases at max(I, H); the poll's reaction moves to the next event."""
+    t = _build(cc_dir, d, contract="v2")
+    assert t["schema"] == "hybridacc-issue-timing/v2" and t["contract"].startswith("c05-v2")
+    ev = {e["event"]: e for e in t["events"]}
+    # DMA wait: unchanged from v1
+    assert ev[2]["release_edge"] == 140 - 98 and ev[2]["reaction_cycles"] == 10
+    # hddu_done: DONE at 186, first poll requested at 198, poll seen at 230 -> released at 198, reaction 32
+    assert ev[3]["hw_edge"] == 186 - 98 and ev[3]["release_edge"] == 198 - 98 and ev[3]["reaction_cycles"] == 32
+    # the STOP request at 258: v1 issue cycles 258 - 230 = 28 are v2 work cycles; v2 issue cycles add the reaction
+    assert ev[4]["issue_cycles"] == 258 - 198 and ev[4]["work_cycles"] == 28
+    v1 = {e["event"]: e for e in _build(cc_dir, d)["events"]}
+    assert v1[4]["issue_cycles"] == ev[4]["work_cycles"] and "reaction_cycles" not in v1[3]
+
+
+def test_contract_v2_condition_after_the_first_poll(cc_dir, d):
+    ev = {e["event"]: e for e in _build(cc_dir, d, contract="v2", wave_done=215)["events"]}
+    assert ev[3]["release_edge"] == 215 - 98 and ev[3]["reaction_cycles"] == 230 - 215
+
+
+def test_contract_is_required(cc_dir, d):
+    with pytest.raises(si.ScheduleIRError, match="unknown issue-timing contract"):
+        _build(cc_dir, d, contract="v3")

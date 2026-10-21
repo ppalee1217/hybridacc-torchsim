@@ -1,6 +1,6 @@
-"""Raw firmware issue timing from an ESL run (M21; Review C-05 (b), timing contract v1 of 2026-10-19).
+"""Raw firmware issue timing from an ESL run (M21; Review C-05 (b), timing contracts v1 of 2026-10-19 and v2 of 2026-10-21).
 
-    python -m hybridacc_cc.issue_timing CC_DIR IR.json --wave-log W --mmio-log M --dram-log D -o TIMING.json
+    python -m hybridacc_cc.issue_timing CC_DIR IR.json --wave-log W --mmio-log M --dram-log D --contract v2 -o TIMING.json
 
 Inputs: the cc output directory (firmware_hw.h gives the register map), the Common Schedule IR built from it, and
 the ESL's --wave-log, --mmio-log and --dram-log of one run of the same firmware (the dram log must carry the
@@ -11,20 +11,25 @@ hddu_start, hddu_ctrl, noc_command, spm_config_update, cluster_*) to the MMIO wr
 the reads its firmware helper polled (walked as wave_profile does). Per event, with the contract's edges:
   issue edge I   writes: the triggering MMIO request edge; hddu_start: the HDDU's accepted START (S);
                  waits: the request edge of the first read of the wait (not counting timer reads);
-  release edge R writes: I; HDDU waits (hddu_done, agu_idle, pe_halted, cluster_quiesced): P, the edge the
-                 successful poll's response is observed (the raw token's end); DMA waits (dma_tag, dma_idle):
-                 max(I, H), H being the completion edge ("D" line) that makes the condition true;
+  release edge R writes: I; DMA waits (dma_tag, dma_idle): max(I, H), H being the completion edge ("D" line)
+                 that makes the condition true; HDDU waits (hddu_done, agu_idle, pe_halted, cluster_quiesced):
+                 v1: P, the edge the successful poll's response is observed (the raw token's end);
+                 v2: max(I, H), H being the edge the hardware condition held, as for DMA waits;
   issue_cycles   I - R of the previous event (0 for the first event, which is the origin);
-  reaction       DMA waits only: P - R, the polling reaction, which TLS gets inside the next event's issue
-                 cycles (``work_cycles`` = issue_cycles minus the previous wait's reaction).
+  reaction       P - R, the polling reaction (v1: DMA waits only; v2: every wait), which TLS gets inside the next
+                 event's issue cycles (``work_cycles`` = issue_cycles minus the previous wait's reaction).
+v2 implements the researcher's 2026-10-21 composition ruling A (agent_run/261021-m22-composition/decision.md): a TLS
+times an HDDU wave by its hardware span (condition - START) and the firmware's polling by the issue model, so the
+wave's release must not include the poll. It pairs with hardware-span wave tokens; v1 pairs with raw (poll) tokens.
+Pairing a contract with the other token kind counts the poll twice or not at all.
 Also recorded: the boot prefix (simulation start to the first event), the terminal tail (last release to the end
 of simulation), each hddu_start's and dma_submit's accept latency (request to S / to the engine taking the
 command), and, for HDDU waits, the edge the hardware condition held. Times are 500 MHz cycles of simulation time
 (not the testbench's EBREAK counter). Anything the IR does not explain (an extra or missing write, a read outside a
 wait, a wait that never succeeds, reads left over, a DMA completion out of order) stops the producer.
 
-Output: schema hybridacc-issue-timing/v1, kind "raw": valid only for the same IR, firmware, binary, config and
-clock; a TLS run on it is a raw replay, not qualified (contract v1; 2026-10-18 token ruling).
+Output: schema hybridacc-issue-timing/v1 (contract v1) or /v2 (contract v2), kind "raw": valid only for the same IR,
+firmware, binary, config and clock; a TLS run on it is a raw replay, not qualified (2026-10-18 token ruling).
 """
 import argparse
 import hashlib
@@ -34,8 +39,10 @@ from pathlib import Path
 from .schedule_ir import RegisterMap, ScheduleIRError, _require
 from .wave_profile import CLUSTER_WAITS, Reads, last_rise, parse_wave_log, poll_success
 
-SCHEMA = "hybridacc-issue-timing/v1"
-CONTRACT = "c05-v1 (2026-10-19)"
+CONTRACTS = {  # contract -> (schema, contract name)
+    "v1": ("hybridacc-issue-timing/v1", "c05-v1 (2026-10-19)"),
+    "v2": ("hybridacc-issue-timing/v2", "c05-v2 (2026-10-21)"),
+}
 WRITE_EVENTS = ("dma_submit", "hddu_start", "hddu_ctrl", "noc_command", "spm_config_update",
                 "cluster_start", "cluster_stop", "cluster_soft_reset")
 HDDU_WAITS = ("hddu_done", "agu_idle", "pe_halted", "cluster_quiesced")
@@ -85,7 +92,9 @@ def parse_dram_log(text: str) -> tuple:
     return starts, done
 
 
-def build(cc_dir: Path, ir: dict, ir_sha256: str, wave_log: str, mmio_log: str, dram_log: str, label: str) -> dict:
+def build(cc_dir: Path, ir: dict, ir_sha256: str, wave_log: str, mmio_log: str, dram_log: str, label: str, *,
+          contract: str) -> dict:
+    _require(contract in CONTRACTS, f"unknown issue-timing contract {contract!r}")
     rm = RegisterMap((cc_dir / "firmware_hw.h").read_text())
     d = rm.d
     clock_mhz = ir.get("resource", {}).get("platform", {}).get("clock_mhz")
@@ -179,7 +188,6 @@ def build(cc_dir: Path, ir: dict, ir_sha256: str, wave_log: str, mmio_log: str, 
                     row["reaction_cycles"] = (p_edge - release) // ps
                 else:
                     _require(wkind in HDDU_WAITS, f"{here}: wait kind {wkind} is not in the contract")
-                    release = p_edge
                     if wkind == "hddu_done":
                         g = sum(len(L["execution_waves"]) for L in ir["layers"] if L["index"] < li) + w["target_wave"]
                         hw = int(E[g]["done"])
@@ -188,6 +196,13 @@ def build(cc_dir: Path, ir: dict, ir_sha256: str, wave_log: str, mmio_log: str, 
                     else:
                         hw = last_rise(changes, wkind, p_edge)
                     row["hw_edge"] = hw
+                    if contract == "v1":
+                        release = p_edge
+                    else:
+                        _require(hw is not None, f"{here}: no edge where the hardware condition held")
+                        release = max(issue, hw)
+                        _require(p_edge >= release, f"{here}: the poll succeeded before the condition held")
+                        row["reaction_cycles"] = (p_edge - release) // ps
                 _require(release >= issue, f"{here}: released before it was issued")
             else:
                 raise ScheduleIRError(f"{here}: event type not in the contract")
@@ -215,7 +230,8 @@ def build(cc_dir: Path, ir: dict, ir_sha256: str, wave_log: str, mmio_log: str, 
             if row.get(k) is not None:
                 row[k] = (row[k] - origin) // ps
     return {
-        "schema": SCHEMA, "kind": "raw", "contract": CONTRACT, "label": label, "ir_sha256": ir_sha256,
+        "schema": CONTRACTS[contract][0], "kind": "raw", "contract": CONTRACTS[contract][1], "label": label,
+        "ir_sha256": ir_sha256,
         "clock_mhz": clock_mhz, "origin_ps": origin, "boot_prefix_cycles": origin // ps,
         "terminal_tail_cycles": None if end is None else (end - prev_release) // ps,
         "note": ("raw ESL issue timing; valid only for this IR, firmware, binary, config and clock; "
@@ -232,11 +248,13 @@ def main(argv=None):
     ap.add_argument("--mmio-log", type=Path, required=True)
     ap.add_argument("--dram-log", type=Path, required=True)
     ap.add_argument("-o", "--output", type=Path, required=True)
-    ap.add_argument("--label", default="raw ESL issue timing (M21, C-05 contract v1)")
+    ap.add_argument("--contract", required=True, choices=sorted(CONTRACTS))
+    ap.add_argument("--label", help="default: raw ESL issue timing (C-05 contract <contract>)")
     a = ap.parse_args(argv)
     irb = a.ir.read_bytes()
     out = build(a.cc_dir, json.loads(irb), hashlib.sha256(irb).hexdigest(), a.wave_log.read_text(),
-                a.mmio_log.read_text(), a.dram_log.read_text(), a.label)
+                a.mmio_log.read_text(), a.dram_log.read_text(),
+                a.label or f"raw ESL issue timing (C-05 contract {a.contract})", contract=a.contract)
     a.output.write_text(json.dumps(out, indent=1) + "\n")
     print(f"{len(out['events'])} events, boot {out['boot_prefix_cycles']} cycles, "
           f"tail {out['terminal_tail_cycles']} cycles -> {a.output}")
