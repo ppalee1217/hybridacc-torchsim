@@ -7,10 +7,18 @@
  * NetworkOnChip (PE[b][r].ln_plo -> PE[b+1][r].ln_pli); NoC, MBUS, HDDU and SPM are replaced by replay sources
  * driven from the full run's --pe-log (H lines: every accepted handshake with payload) and --wave-log.
  *
- *   test_pe_replay PE_LOG WAVE_LOG NUM_BUS PES_PER_BUS PE_FIFO_DEPTH MODE OUT_PE_LOG [MAX_CYCLES [SETTLE]]
+ *   test_pe_replay PE_LOG WAVE_LOG NUM_BUS PES_PER_BUS PE_FIFO_DEPTH MODE OUT_PE_LOG
+ *                  [MAX_CYCLES [SETTLE [IN_FIFO_DEPTH [PERTURB]]]]
  *
  * PE_FIFO_DEPTH must be the full ESL's: HybridAcc builds each cluster's NoC with NetWorkOnChipConfig{4, 32}
  * (simulator/include/HybridAcc.hpp), i.e. 32-entry PE router FIFOs, not ProcessElement's default of 4.
+ * IN_FIFO_DEPTH (M21 WP-J J4, default 0 = PE_FIFO_DEPTH) sets only the PS, PD and PLI FIFOs, as the ESL's
+ * --pe-in-fifo-depth.
+ * PERTURB (M21 WP-J J4, ideal mode only; '-' = none) is an ESL --pe-perturb SPEC applied to the ideal offers with
+ * the ESL adapter's rules (NoC/PePortDelay.hpp, same PE index bus * rows + row): a selected data token cannot
+ * complete until its gap has passed since the previous handshake on that port, and the PLO request port is closed
+ * for the first plo_req_closed cycles of every 32. It measures the PEs' own response to input timing, without the
+ * NoC.
  *
  * MODE
  *   timed  every recorded input is offered so that it can complete on its recorded edge (valid from the edge
@@ -51,6 +59,7 @@
 
 #include "ProcessElement.hpp"
 #include "PE/PeLog.hpp"
+#include "NoC/PePortDelay.hpp"
 #include "Utils/utils.hpp"
 
 using namespace sc_core;
@@ -113,6 +122,8 @@ SC_MODULE(ReplayTB) {
     uint64_t settle = 0;                // ideal: cycles after a command before the next segment's inputs
     std::vector<std::vector<size_t>> data_total_upto, data_done_upto;  // [pe][seg] cumulative data tokens
     size_t spatial_idx = 0;
+    bool perturb = false;                               // ideal: PERTURB given
+    std::vector<uint64_t> data_n, last_fire;            // [pe * 3 + port] data tokens done, last handshake (ps)
     int released = 1;
     std::vector<uint64_t> release_t, phase_end, data_start;
     int n_phase = 0;
@@ -128,7 +139,7 @@ SC_MODULE(ReplayTB) {
 
     SC_HAS_PROCESS(ReplayTB);
     ReplayTB(sc_module_name name, int nb_, int nr_, size_t fifo_depth, bool ideal_, uint64_t max_cycles,
-             uint64_t settle_cycles)
+             uint64_t settle_cycles, size_t in_fifo_depth = 0)
         : sc_module(name), clk("clk", 2, SC_NS), reset_n("reset_n"), nb(nb_), nr(nr_), ideal(ideal_),
           max_t(max_cycles * C) {
         settle = settle_cycles;
@@ -138,7 +149,7 @@ SC_MODULE(ReplayTB) {
                 ln.emplace_back(new VRDSIG<uint64_t>(sc_gen_unique_name("ln")));
         for (int b = 0; b < nb; ++b) {
             for (int r = 0; r < nr; ++r) {
-                pes.emplace_back(new ProcessElement(sc_gen_unique_name("pe"), fifo_depth));
+                pes.emplace_back(new ProcessElement(sc_gen_unique_name("pe"), fifo_depth, in_fifo_depth));
                 en.emplace_back(new sc_signal<bool>(sc_gen_unique_name("en")));
                 mode.emplace_back(new sc_signal<PERouterMode>(sc_gen_unique_name("mode")));
                 busy.emplace_back(new sc_signal<bool>(sc_gen_unique_name("busy")));
@@ -276,6 +287,18 @@ SC_MODULE(ReplayTB) {
         return k.seg == 0 || now + C >= cmd_done_t[pe] + settle * C;
     }
 
+    /// PERTURB: whether input i of port q may be offered now (the ESL adapter's gap and gate rules).
+    bool perturb_ok(int pe, int q, const Tok& k, uint64_t now) const {
+        if (!perturb) return true;
+        if (q < 3) {
+            if (k.cmd) return true;
+            const unsigned need = hacc::pe_input_delay(pe, q, data_n[pe * 3 + q]);
+            return need == 0 || now >= last_fire[pe * 3 + q] + need * C;
+        }
+        const unsigned closed = hacc::pe_perturb().plo_req_closed;
+        return closed == 0 || ((now / C + 1) % 32) >= closed;
+    }
+
     void mark_done(int pe, const Tok& k) {
         if (k.cmd) { ++cmds_done[pe]; cmd_done_t[pe] = sc_time_stamp().value(); return; }
         for (size_t s = k.seg; s < data_done_upto[pe].size(); ++s) ++data_done_upto[pe][s];
@@ -355,6 +378,7 @@ SC_MODULE(ReplayTB) {
                                         : (ploreq[pe]->valid_sig.read() && ploreq[pe]->ready_sig.read());
                 if (!fire) continue;
                 const Tok& k = in[pe * NPORT + q][idx[pe * NPORT + q]++];
+                if (q < 3) { last_fire[pe * 3 + q] = now; if (!k.cmd) ++data_n[pe * 3 + q]; }
                 mark_done(pe, k);
                 phase_end[k.phase] = now;
             }
@@ -389,7 +413,7 @@ SC_MODULE(ReplayTB) {
                 const size_t i = idx[pe * NPORT + q];
                 const bool more = i < v.size();
                 all_done = all_done && !more;
-                const bool ok = more && eligible(pe, v[i], now);
+                const bool ok = more && eligible(pe, v[i], now) && perturb_ok(pe, q, v[i], now);
                 if (ok && !v[i].cmd && data_start[v[i].phase] == 0) data_start[v[i].phase] = now;
                 if (q < 3) {
                     noc_request_t r;
@@ -415,18 +439,30 @@ SC_MODULE(ReplayTB) {
 int sc_main(int argc, char* argv[]) {
     if (argc < 8) {
         std::fprintf(stderr, "usage: %s PE_LOG WAVE_LOG NUM_BUS PES_PER_BUS PE_FIFO_DEPTH timed|ideal OUT_PE_LOG "
-                             "[MAX_CYCLES [SETTLE]]\n", argv[0]);
+                             "[MAX_CYCLES [SETTLE [IN_FIFO_DEPTH [PERTURB]]]]\n", argv[0]);
         return 2;
     }
     const std::string mode = argv[6];
     if (mode != "timed" && mode != "ideal") { std::fprintf(stderr, "MODE must be timed or ideal\n"); return 2; }
     const uint64_t max_cycles = argc > 8 ? std::strtoull(argv[8], nullptr, 10) : 40000000ull;
     const uint64_t settle = argc > 9 ? std::strtoull(argv[9], nullptr, 10) : 2ull;
+    const size_t in_fifo_depth = argc > 10 ? std::strtoul(argv[10], nullptr, 10) : 0;
+    const std::string perturb = argc > 11 ? argv[11] : "-";
+    if (perturb != "-") {
+        if (mode != "ideal") { std::fprintf(stderr, "PERTURB needs ideal mode\n"); return 2; }
+        if (!hacc::parse_pe_perturb(perturb) || hacc::pe_perturb().plo_resp_closed) {
+            std::fprintf(stderr, "bad PERTURB %s\n", perturb.c_str());
+            return 2;
+        }
+    }
     hacc::pe_log() = std::fopen(argv[7], "w");
     if (!hacc::pe_log()) { std::fprintf(stderr, "cannot open %s\n", argv[7]); return 2; }
     ReplayTB tb("replay", std::atoi(argv[3]), std::atoi(argv[4]), std::strtoul(argv[5], nullptr, 10), mode == "ideal",
-                max_cycles, settle);
+                max_cycles, settle, in_fifo_depth);
     if (!tb.load(argv[1], argv[2])) return 2;
+    tb.perturb = perturb != "-";
+    tb.data_n.assign(static_cast<size_t>(tb.nb * tb.nr * 3), 0);
+    tb.last_fire.assign(static_cast<size_t>(tb.nb * tb.nr * 3), 0);
     tb.reset_n.write(false);
     sc_start(sc_time(10, SC_NS));  // five 2 ns periods, as the ESL main
     tb.reset_n.write(true);

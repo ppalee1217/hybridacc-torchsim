@@ -57,6 +57,13 @@ inline PePerturb& pe_perturb() {
     static PePerturb p;
     return p;
 }
+/// `--pe-in-fifo-depth N` (M21 WP-J J4, attribution; agent_run/261021-m21-decomposition/decide-attribution/decision.md):
+/// depth of every PE's PS, PD and PLI FIFOs; 0 (the default) keeps the NoC config's PE FIFO depth (32 in HybridAcc).
+/// The PLO FIFO is unchanged. An intervention, not a hardware option.
+inline size_t& pe_in_fifo_depth() {
+    static size_t depth = 0;
+    return depth;
+}
 /// Parse SPEC into pe_perturb(); false on an unknown key or a bad value.
 inline bool parse_pe_perturb(const std::string& spec) {
     PePerturb& p = pe_perturb();

@@ -330,7 +330,9 @@ SC_MODULE(HybridAcc) {
         // ---- Per-cluster wiring ----
         for (unsigned c = 0; c < NUM_CLUSTERS; ++c) {
             std::string cluster_name = "cluster_" + std::to_string(c);
-            cluster[c]    = std::make_unique<ComputeCluster<>>(cluster_name.c_str(), NetWorkOnChipConfig{4, 32});
+            NetWorkOnChipConfig noc_cfg{4, 32};
+            noc_cfg.pe_in_fifo_depth = hacc::pe_in_fifo_depth();  // M21 WP-J J4; 0 = unchanged
+            cluster[c]    = std::make_unique<ComputeCluster<>>(cluster_name.c_str(), noc_cfg);
 
             // Core → internal native cmd signals
             core_ctrl.cl_cmd_req_valid_o[c](sig_cl_cmd_req_valid[c]);

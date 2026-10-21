@@ -19,6 +19,7 @@ namespace hybridacc {
 struct NetWorkOnChipConfig {
     size_t noc_fifo_depth = 4;
     size_t pe_fifo_depth = 4;
+    size_t pe_in_fifo_depth = 0;  // PS/PD/PLI FIFOs; 0 = pe_fifo_depth (M21 WP-J J4, --pe-in-fifo-depth)
 
     NetWorkOnChipConfig() = default;
     NetWorkOnChipConfig(size_t noc_fifo_depth = 4, size_t pe_fifo_depth = 4)
@@ -143,7 +144,7 @@ public:
         // 初始化 PE 二維向量
         pes.init(NUM_PORTS, [this, config](const char* n, size_t i) {
             return new sc_vector<pe::ProcessElement>(n, scalar_mode() ? 0 : NUM_PES_PER_PORT, [config](const char* m, size_t j) {
-                return new pe::ProcessElement(m, config.pe_fifo_depth);
+                return new pe::ProcessElement(m, config.pe_fifo_depth, config.pe_in_fifo_depth);
             });
         });
         spes.init(NUM_PORTS, [](const char* n, size_t i) {

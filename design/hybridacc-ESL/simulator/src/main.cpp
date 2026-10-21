@@ -15,7 +15,7 @@
  *                 [--trace file.json] [--trace-level N]
  *                 [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]
  *                 [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]
- *                 [--scalar-pe FILE --scalar-rule bulk|linear]
+ *                 [--scalar-pe FILE --scalar-rule bulk|linear] [--pe-in-fifo-depth N]
  *                 <firmware.elf>
  */
 
@@ -91,7 +91,7 @@ static void print_usage(const char* prog) {
               << " [--trace file.json] [--trace-level N]"
               << " [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]"
               << " [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]"
-              << " [--scalar-pe FILE --scalar-rule bulk|linear]"
+              << " [--scalar-pe FILE --scalar-rule bulk|linear] [--pe-in-fifo-depth N]"
               << " <firmware.elf>\n";
 }
 
@@ -391,6 +391,15 @@ int sc_main(int argc, char* argv[]) {
             scalar_pe_path = argv[++i];  // M21 WP-J J3 (NoC/ScalarPe.hpp)
         } else if (arg == "--scalar-rule" && i + 1 < argc) {
             scalar_rule = argv[++i];
+        } else if (arg == "--pe-in-fifo-depth" && i + 1 < argc) {
+            // M21 WP-J J4 (NoC/PePortDelay.hpp): must be set before the NoC is built.
+            char* end = nullptr;
+            const unsigned long long d = std::strtoull(argv[++i], &end, 10);
+            if (!end || *end != '\0' || d == 0) {
+                std::cerr << "[SIM] Bad --pe-in-fifo-depth: " << argv[i] << std::endl;
+                return 1;
+            }
+            hacc::pe_in_fifo_depth() = static_cast<size_t>(d);
         } else if (arg == "--pe-perturb" && i + 1 < argc) {
             // M21 WP-J J3 (NoC/PePortDelay.hpp): must be parsed before the NoC is built.
             if (!hacc::parse_pe_perturb(argv[++i])) {

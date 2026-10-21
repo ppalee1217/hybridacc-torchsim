@@ -42,7 +42,7 @@ public:
 
     // Constructor
     SC_HAS_PROCESS(ProcessElement);
-    ProcessElement(sc_module_name name, size_t pe_fifo_depth = 4)
+    ProcessElement(sc_module_name name, size_t pe_fifo_depth = 4, size_t pe_in_fifo_depth = 0)
         : sc_module(name),
           clk("clk"),
           reset_n("reset_n"),
@@ -57,7 +57,7 @@ public:
           pe_halted("pe_halted"),
           ln_pli("ln_pli"),
           ln_plo("ln_plo"),
-          router("PE_Router", pe_fifo_depth),
+          router("PE_Router", pe_fifo_depth, pe_in_fifo_depth),
           if_id_stage("IF_ID_Stage"),
           exe_m_stage("EXE_M_Stage"),
           exe_a_stage("EXE_A_Stage"),

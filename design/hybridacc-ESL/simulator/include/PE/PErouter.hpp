@@ -94,7 +94,7 @@ public:
 
     // methods
     SC_HAS_PROCESS(PErouter);
-    PErouter(sc_module_name name, size_t pe_fifo_depth = 4)
+    PErouter(sc_module_name name, size_t pe_fifo_depth = 4, size_t pe_in_fifo_depth = 0)
         : sc_module(name),
           clk("clk"),
           reset_n("reset_n"),
@@ -118,9 +118,9 @@ public:
           pe_pd_set_out_if("pe_pd_set_out_if"),
           pe_pli_out_if("pe_pli_out_if"),
           pe_plo_in_if("pe_plo_in_if"),
-          ps_fifo("ps_fifo", pe_fifo_depth),
-          pd_fifo("pd_fifo", pe_fifo_depth),
-          pli_fifo("pli_fifo", pe_fifo_depth),
+          ps_fifo("ps_fifo", pe_in_fifo_depth ? pe_in_fifo_depth : pe_fifo_depth),
+          pd_fifo("pd_fifo", pe_in_fifo_depth ? pe_in_fifo_depth : pe_fifo_depth),
+          pli_fifo("pli_fifo", pe_in_fifo_depth ? pe_in_fifo_depth : pe_fifo_depth),
           plo_fifo("plo_fifo", pe_fifo_depth),
           pe_fifo_depth(pe_fifo_depth)
     {
