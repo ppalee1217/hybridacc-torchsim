@@ -15,7 +15,7 @@
  *                 [--trace file.json] [--trace-level N]
  *                 [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]
  *                 [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]
- *                 [--scalar-pe FILE --scalar-rule bulk|linear] [--pe-in-fifo-depth N]
+ *                 [--scalar-pe FILE --scalar-rule bulk|linear|shape|ps|psln] [--pe-in-fifo-depth N]
  *                 <firmware.elf>
  */
 
@@ -91,7 +91,7 @@ static void print_usage(const char* prog) {
               << " [--trace file.json] [--trace-level N]"
               << " [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]"
               << " [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]"
-              << " [--scalar-pe FILE --scalar-rule bulk|linear] [--pe-in-fifo-depth N]"
+              << " [--scalar-pe FILE --scalar-rule bulk|linear|shape|ps|psln] [--pe-in-fifo-depth N]"
               << " <firmware.elf>\n";
 }
 

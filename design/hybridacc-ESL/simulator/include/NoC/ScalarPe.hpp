@@ -18,7 +18,18 @@
  *           T0_k + F_k + (P_k - F_k) j / (n - 1) has passed (T0_k + P_k when n = 1);
  * T0_k is the edge of wave k's first data operand at any PE, N_k its data operands over all PEs, P_k and F_k (from
  * the ideal harness, J2) the cycles from the first data offered to the last input or PLO response, and to the
- * first PLO response. A PE is busy after a START and halted once the last wave of that START's invocation has all
+ * first PLO response.
+ * The J4b rules (M21 WP-J J4b; agent_run/261021-m21-decomposition/decide-attribution/decision.md) use the `ev`
+ * records: each PE's output events (PLO responses and local-network outputs) of wave k in the ideal replay's order,
+ * with OFF, the event's cycles after the ideal wave's first data offer; NPS and LPS, the PS data tokens this PE had
+ * received in wave k before the event and the cycles from the last of them to the event; NLN and LLN, the same for
+ * local-network inputs:
+ *   shape   output j when the linear rule's operand gate holds and T0_k + OFF has passed (the measured output
+ *           shape instead of the interpolation);
+ *   ps      event e of a PE at max(event e-1 + (OFF_e - OFF_e-1), PS token NPS of this wave + LPS), the first event
+ *           of a wave at no sooner than T0_k + OFF (an elastic chain paced by the PE's own PS arrivals);
+ *   psln    as ps, and no sooner than local-network input NLN + LLN, where the local-network inputs of PE (b, r)
+ *           are the local-network output events of PE (b-1, r), as the PE array chains them. A PE is busy after a START and halted once the last wave of that START's invocation has all
  * its outputs available; it reports queued work while any output of a started wave is not yet served.
  * Local-network ports are tied off (the chain is inside the replaced array). The spatial-tail override is
  * replayed from FILE (active rows per HDDU START), since there is no PE program to inspect.
@@ -29,8 +40,10 @@
  *   in B R K PS PD PLI              data tokens of PE (B, R) in wave K per port (absent = 0)
  *   out B R K N V0 V1 ...           the PE's PLO response values in wave K, in order (hex)
  *   start B R K                     a START on PE (B, R) begins an invocation whose first wave is K
+ *   ev B R K plo|ln OFF NPS LPS NLN LLN   output events of PE (B, R) in wave K, in order (rules shape, ps, psln)
  *   spatial ROWS|-                  one per HDDU START, in order: active rows, or '-' for a clear
  */
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -48,13 +61,19 @@
 namespace hacc {
 
 struct ScalarPeOracle {
-    bool linear = false;
+    enum Rule { BULK, LINEAR, SHAPE, PS, PSLN } rule = BULK;
+    struct Ev { bool plo; uint64_t off, nps, lps, nln, lln; };
     int waves = 0;
     std::vector<uint64_t> P, F, N;
     struct Pe {
         std::vector<std::array<uint64_t, 3>> in;      // [wave] ps, pd, pli
         std::vector<std::vector<uint64_t>> out;       // [wave] values
         std::vector<int> start_wave;                  // invocation i begins at wave start_wave[i]
+        std::vector<std::vector<Ev>> ev;              // [wave] output events, in order
+        std::vector<std::vector<size_t>> plo_ev;      // [wave] PLO response j -> its index in ev
+        // Runtime (event rules).
+        std::vector<std::vector<uint64_t>> ps_t, ln_t, rel;  // [wave] PS / local-network arrivals, event releases
+        std::vector<size_t> next_ev;                  // [wave] first unresolved event
     };
     std::map<std::pair<int, int>, Pe> pe;
     std::vector<int> spatial;                         // rows per configure call; -1 = clear
@@ -65,21 +84,62 @@ struct ScalarPeOracle {
 
     Pe& at(int b, int r) {
         Pe& p = pe[{b, r}];
-        if (p.in.size() < static_cast<size_t>(waves)) { p.in.resize(waves, {0, 0, 0}); p.out.resize(waves); }
+        if (p.in.size() < static_cast<size_t>(waves)) {
+            p.in.resize(waves, {0, 0, 0}); p.out.resize(waves); p.ev.resize(waves); p.plo_ev.resize(waves);
+            p.ps_t.resize(waves); p.ln_t.resize(waves); p.rel.resize(waves); p.next_ev.resize(waves, 0);
+        }
         return p;
     }
     void arrive(int k, uint64_t t) {
         if (!started[k]) { started[k] = true; T0[k] = t; }
         ++arrived[k];
     }
-    /// Whether output j of n in wave k is available at edge t (ps), by the selected rule.
-    bool available(int k, size_t j, size_t n, uint64_t t) const {
+    bool event_rule() const { return rule == PS || rule == PSLN; }
+    /// Whether output j of n in wave k of PE p is available at edge t (ps), by the selected rule.
+    bool available(int k, size_t j, size_t n, uint64_t t, const Pe& p) const {
         if (!started[k]) return false;
         const uint64_t C = 2000;
-        if (!linear) return arrived[k] >= N[k] && t >= T0[k] + P[k] * C;
+        if (rule == BULK) return arrived[k] >= N[k] && t >= T0[k] + P[k] * C;
+        if (event_rule()) {
+            const size_t e = p.plo_ev[k][j];
+            return e < p.next_ev[k] && t >= p.rel[k][e];
+        }
         const uint64_t need = ((j + 1) * N[k] + n - 1) / n;
-        const uint64_t at = n > 1 ? F[k] + (P[k] - F[k]) * j / (n - 1) : P[k];
+        const uint64_t at = rule == SHAPE ? p.ev[k][p.plo_ev[k][j]].off
+                                          : n > 1 ? F[k] + (P[k] - F[k]) * j / (n - 1) : P[k];
         return arrived[k] >= need && t >= T0[k] + at * C;
+    }
+    /// Event rules: resolve the events of wave k of PE (b, r) whose dependencies have arrived; a local-network
+    /// output event becomes a local-network input of PE (b + 1, r).
+    void resolve(int b, int r, int k) {
+        if (!started[k]) return;
+        const uint64_t C = 2000;
+        Pe& p = pe[{b, r}];
+        const auto& E = p.ev[k];
+        auto& R = p.rel[k];
+        size_t& e = p.next_ev[k];
+        while (e < E.size()) {
+            const Ev& v = E[e];
+            uint64_t at = e == 0 ? T0[k] + v.off * C : R[e - 1] + (v.off >= E[e - 1].off ? v.off - E[e - 1].off : 0) * C;
+            if (v.nps) {
+                if (p.ps_t[k].size() < v.nps) break;
+                at = std::max(at, p.ps_t[k][v.nps - 1] + v.lps * C);
+            }
+            if (rule == PSLN && v.nln) {
+                if (p.ln_t[k].size() < v.nln) break;
+                at = std::max(at, p.ln_t[k][v.nln - 1] + v.lln * C);
+            }
+            R.push_back(at);
+            if (!v.plo) {
+                const auto d = pe.find({b + 1, r});
+                if (d != pe.end()) d->second.ln_t[k].push_back(at);
+            }
+            ++e;
+        }
+    }
+    /// Event rules: every event of PE p in wave k resolved and released by edge t.
+    bool events_done(const Pe& p, int k, uint64_t t) const {
+        return p.next_ev[k] == p.ev[k].size() && (p.rel[k].empty() || t >= p.rel[k].back());
     }
     bool wave_done(int k, uint64_t t) const {  // every output of wave k available
         if (!started[k]) return false;
@@ -91,11 +151,14 @@ inline std::unique_ptr<ScalarPeOracle>& scalar_pe() {
     return p;
 }
 inline bool load_scalar_pe(const std::string& path, const std::string& rule, std::string& err) {
-    if (rule != "bulk" && rule != "linear") { err = "rule must be bulk or linear"; return false; }
+    static const char* const names[] = {"bulk", "linear", "shape", "ps", "psln"};
+    int rule_i = -1;
+    for (int i = 0; i < 5; ++i) if (rule == names[i]) rule_i = i;
+    if (rule_i < 0) { err = "rule must be bulk, linear, shape, ps or psln"; return false; }
     std::ifstream f(path);
     if (!f) { err = "cannot open " + path; return false; }
     auto o = std::make_unique<ScalarPeOracle>();
-    o->linear = rule == "linear";
+    o->rule = static_cast<ScalarPeOracle::Rule>(rule_i);
     std::string line;
     if (!std::getline(f, line) || line != "scalar-pe v1") { err = "not a scalar-pe v1 file"; return false; }
     while (std::getline(f, line)) {
@@ -124,6 +187,14 @@ inline bool load_scalar_pe(const std::string& path, const std::string& rule, std
             int b, r, k;
             in >> b >> r >> k;
             o->at(b, r).start_wave.push_back(k);
+        } else if (kind == "ev") {
+            int b, r, k; std::string what; ScalarPeOracle::Ev v{};
+            in >> b >> r >> k >> what >> v.off >> v.nps >> v.lps >> v.nln >> v.lln;
+            if (!in || k < 0 || k >= o->waves || (what != "plo" && what != "ln")) { err = "bad ev record"; return false; }
+            v.plo = what == "plo";
+            auto& p = o->at(b, r);
+            if (v.plo) p.plo_ev[k].push_back(p.ev[k].size());
+            p.ev[k].push_back(v);
         } else if (kind == "spatial") {
             std::string v;
             in >> v;
@@ -137,6 +208,11 @@ inline bool load_scalar_pe(const std::string& path, const std::string& rule, std
         for (auto& kv : o->pe) if (static_cast<size_t>(k) < kv.second.out.size()) outs += kv.second.out[k].size();
         if (o->N[k] == 0 && outs) { err = "a wave with outputs has no data operands"; return false; }
         if (o->F[k] > o->P[k]) { err = "F > P"; return false; }
+        if (o->rule >= ScalarPeOracle::SHAPE)
+            for (auto& kv : o->pe)
+                if (kv.second.plo_ev[k].size() != kv.second.out[k].size()) {
+                    err = "ev: PLO events differ from out values (rules shape, ps, psln need ev records)"; return false;
+                }
     }
     o->T0.assign(o->waves, 0);
     o->arrived.assign(o->waves, 0);
@@ -186,6 +262,7 @@ SC_MODULE(ScalarPe) {
     std::vector<std::pair<int, size_t>> outs;    // (wave, index) in serving order
     size_t served = 0;
     int invocation = -1;
+    int res_wave = 0;                            // event rules: first wave with unresolved events
 
     void set_position(int b, int r) {
         bus = b; row = r;
@@ -227,6 +304,7 @@ SC_MODULE(ScalarPe) {
         }
         ++in_wave[port];
         ++accepted[port];
+        if (port == 0) p.ps_t[k].push_back(t);
         o.arrive(k, t);
     }
 
@@ -268,12 +346,19 @@ SC_MODULE(ScalarPe) {
         }
         if (pending) wait_resp_reg.write(!consumed);
         else wait_resp_reg.write(false);
+        // Event rules: resolve the events whose dependencies have arrived, wave by wave.
+        if (o.event_rule()) {
+            for (int k = res_wave; k < o.waves && o.started[k]; ++k) {
+                o.resolve(bus, row, k);
+                if (k == res_wave && p.next_ev[k] == p.ev[k].size()) ++res_wave;
+            }
+        }
         // Whether the next output (after this edge's request, if any) is available in the next cycle; like
         // PErouter's FIFO, a request can be taken every cycle while the responses are taken.
         bool avail = false;
         if (served < outs.size()) {
             const auto& w = outs[served];
-            avail = o.available(w.first, w.second, p.out[w.first].size(), t);
+            avail = o.available(w.first, w.second, p.out[w.first].size(), t, p);
         }
         has_out_reg.write(avail);
         // Busy / halted for the current invocation.
@@ -282,7 +367,9 @@ SC_MODULE(ScalarPe) {
             const int first = invocation < static_cast<int>(p.start_wave.size()) ? p.start_wave[invocation] : o.waves;
             const int last_wave = invocation + 1 < static_cast<int>(p.start_wave.size()) ? p.start_wave[invocation + 1] - 1
                                                                                        : o.waves - 1;
-            if (first > last_wave || o.wave_done(last_wave, t)) {
+            const bool done = first > last_wave ||
+                (o.event_rule() && !p.ev[last_wave].empty() ? o.events_done(p, last_wave, t) : o.wave_done(last_wave, t));
+            if (done) {
                 busy_reg.write(false); halted_reg.write(true);
             }
         }
