@@ -6,6 +6,9 @@
 #include "Utils/utils.hpp"
 #include "NoC/MBUS.hpp"
 #include "NoC/NoCRouter.hpp"
+#include "NoC/PePortDelay.hpp"
+#include "NoC/ScalarPe.hpp"
+#include <memory>
 #include "ProcessElement.hpp"
 
 using namespace sc_core;
@@ -51,6 +54,9 @@ public:
     noc::NoCRouter<NUM_PORTS, PORT_WIDTH_BITS> router;
     sc_vector<noc::MBUS> mbus;
     sc_vector<sc_vector<pe::ProcessElement>> pes;
+    // M21 WP-J J3 --scalar-pe (NoC/ScalarPe.hpp): scalar endpoints instead of PEs; `pes` is then empty.
+    sc_vector<sc_vector<hacc::ScalarPe>> spes;
+    static bool scalar_mode() { return static_cast<bool>(hacc::scalar_pe()); }
 
     // Internal signals - NoC/MBus
     sc_vector<VRDSIG<noc_request_t>> noc_ps_to_bus_req;
@@ -80,6 +86,9 @@ public:
     //  Internal signals - PE/PE
     sc_vector<sc_vector<VRDSIG<uint64_t>>> ln_pli_plo;
 
+    // M21 WP-J J3 --pe-perturb (NoC/PePortDelay.hpp): adapters and their PE-side signals, only when enabled.
+    std::vector<std::unique_ptr<sc_core::sc_module>> perturb_objects;
+
     SC_HAS_PROCESS(NetworkOnChip);
     NetworkOnChip(sc_module_name name, NetWorkOnChipConfig config)
         : sc_module(name),
@@ -96,6 +105,7 @@ public:
           router("NoC_Router", NUM_PORTS, config.noc_fifo_depth),
           mbus("mbus"),
           pes("pes"),
+          spes("spes"),
           noc_ps_to_bus_req("noc_ps_to_bus_req", NUM_PORTS),
           noc_pd_to_bus_req("noc_pd_to_bus_req", NUM_PORTS),
           noc_pli_to_bus_req("noc_pli_to_bus_req", NUM_PORTS),
@@ -132,9 +142,12 @@ public:
 
         // 初始化 PE 二維向量
         pes.init(NUM_PORTS, [this, config](const char* n, size_t i) {
-            return new sc_vector<pe::ProcessElement>(n, NUM_PES_PER_PORT, [config](const char* m, size_t j) {
+            return new sc_vector<pe::ProcessElement>(n, scalar_mode() ? 0 : NUM_PES_PER_PORT, [config](const char* m, size_t j) {
                 return new pe::ProcessElement(m, config.pe_fifo_depth);
             });
+        });
+        spes.init(NUM_PORTS, [](const char* n, size_t i) {
+            return new sc_vector<hacc::ScalarPe>(n, scalar_mode() ? NUM_PES_PER_PORT : 0);
         });
 
         // 初始化內部信號二維向量
@@ -421,6 +434,7 @@ private:
     }
 
     void clear_spatial_wave() {
+        if (scalar_mode()) { spatial_active_rows.write(NUM_PES_PER_PORT); return; }
         if (std::FILE* f = hacc::pe_log())  // M21 WP-J: the override writes every PE's IF_ID directly
             std::fprintf(f, "W cmd=clear h=- w=- rows=- loop_pc=- loop_end_pc=- t=%llu\n",
                          static_cast<unsigned long long>(sc_core::sc_time_stamp().value()));
@@ -498,39 +512,110 @@ private:
         // PEs bindings
         for (size_t i = 0; i < NUM_PORTS; ++i) {
             for (size_t j = 0; j < NUM_PES_PER_PORT; ++j) {
-                pe::ProcessElement& pe_inst = pes[i][j];
-
-                // Connect clock and reset
-                pe_inst.clk(clk);
-                pe_inst.reset_n(reset_n);
-
-                // Router config ports
-                pe_inst.router_enable(router_enable[i][j]);
-                pe_inst.router_mode(router_mode[i][j]);
-
-                // NoC interface
-                connect_vr_signals(pe_inst.noc_ps_in, bus_to_pe_ps_req[i][j]);
-                connect_vr_signals(pe_inst.noc_pd_in, bus_to_pe_pd_req[i][j]);
-                connect_vr_signals(pe_inst.noc_pli_in, bus_to_pe_pli_req[i][j]);
-                connect_vr_signals(pe_inst.noc_plo_in, bus_to_pe_plo_req[i][j]);
-                connect_vr_signals(pe_inst.noc_plo_out, pe_to_bus_plo_resp[i][j]);
-
-                // PE busy signal
-                pe_inst.pe_busy(pe_busy[i][j]);
-                pe_inst.pe_halted(pe_halted[i][j]);
-
-                // Connect Local Network signals (PE-to-PE communication)
-                connect_vr_signals(pe_inst.ln_pli, ln_pli_plo[i][j]);
-                connect_vr_signals(pe_inst.ln_plo, ln_pli_plo[i+1][j]);
-
-                pe_inst.set_log_position(static_cast<int>(i), static_cast<int>(j));  // M21 WP-J --pe-log
+                if (scalar_mode()) {
+                    bind_pe_ports(spes[i][j], i, j);
+                    spes[i][j].set_position(static_cast<int>(i), static_cast<int>(j));
+                } else {
+                    bind_pe_ports(pes[i][j], i, j);
+                    pes[i][j].set_log_position(static_cast<int>(i), static_cast<int>(j));  // M21 WP-J --pe-log
+                }
 
             }
         }
     }
 
+    // PE (or M21 J3 scalar endpoint) port bindings; both have ProcessElement's ports.
+    template <typename PeType>
+    void bind_pe_ports(PeType& pe_inst, size_t i, size_t j) {
+
+        // Connect clock and reset
+        pe_inst.clk(clk);
+        pe_inst.reset_n(reset_n);
+
+        // Router config ports
+        pe_inst.router_enable(router_enable[i][j]);
+        pe_inst.router_mode(router_mode[i][j]);
+
+        // NoC interface (through the M21 J3 perturbation adapters when --pe-perturb is given)
+        if (hacc::pe_perturb().enabled) {
+            const int lin = static_cast<int>(i * NUM_PES_PER_PORT + j);
+            auto is_cmd = [](const noc_request_t& r) { return r.addr == PE_CMD_ADDRESS; };
+            bind_perturbed_input<noc_request_t>(pe_inst.noc_ps_in, bus_to_pe_ps_req[i][j], lin, 0, is_cmd);
+            bind_perturbed_input<noc_request_t>(pe_inst.noc_pd_in, bus_to_pe_pd_req[i][j], lin, 1, nullptr);
+            bind_perturbed_input<noc_request_t>(pe_inst.noc_pli_in, bus_to_pe_pli_req[i][j], lin, 2, nullptr);
+            bind_gated_input(pe_inst.noc_plo_in, bus_to_pe_plo_req[i][j], hacc::pe_perturb().plo_req_closed);
+            bind_gated_output(pe_inst.noc_plo_out, pe_to_bus_plo_resp[i][j], hacc::pe_perturb().plo_resp_closed);
+        } else {
+            connect_vr_signals(pe_inst.noc_ps_in, bus_to_pe_ps_req[i][j]);
+            connect_vr_signals(pe_inst.noc_pd_in, bus_to_pe_pd_req[i][j]);
+            connect_vr_signals(pe_inst.noc_pli_in, bus_to_pe_pli_req[i][j]);
+            connect_vr_signals(pe_inst.noc_plo_in, bus_to_pe_plo_req[i][j]);
+            connect_vr_signals(pe_inst.noc_plo_out, pe_to_bus_plo_resp[i][j]);
+        }
+
+        // PE busy signal
+        pe_inst.pe_busy(pe_busy[i][j]);
+        pe_inst.pe_halted(pe_halted[i][j]);
+
+        // Connect Local Network signals (PE-to-PE communication)
+        connect_vr_signals(pe_inst.ln_pli, ln_pli_plo[i][j]);
+        connect_vr_signals(pe_inst.ln_plo, ln_pli_plo[i+1][j]);
+
+    }
+
+    // M21 WP-J J3: bus signals -> PortDelay -> PE-side signals -> PE port (and back for the PLO response).
+    template <typename T>
+    hacc::PortDelay<T>& new_delay() {
+        auto* d = new hacc::PortDelay<T>(sc_core::sc_gen_unique_name("pe_perturb"));
+        perturb_objects.emplace_back(d);
+        d->clk(clk);
+        d->reset_n(reset_n);
+        return *d;
+    }
+    template <typename T>
+    VRDSIG<T>& new_side() {
+        auto* s = new VRDSIG<T>(sc_core::sc_gen_unique_name("pe_side"));
+        perturb_objects.emplace_back(s);
+        return *s;
+    }
+    template <typename T>
+    void bind_perturbed_input(VRDIF<T>& port, VRDSIG<T>& bus, int lin, int kind, std::function<bool(const T&)> is_cmd) {
+        hacc::PortDelay<T>& d = new_delay<T>();
+        VRDSIG<T>& side = new_side<T>();
+        d.up_data(bus.data_sig); d.up_valid(bus.valid_sig); d.up_ready(bus.ready_sig);
+        d.dn_data(side.data_sig); d.dn_valid(side.valid_sig); d.dn_ready(side.ready_sig);
+        d.delay_of = [lin, kind](uint64_t n) { return hacc::pe_input_delay(lin, kind, n); };
+        d.is_cmd = is_cmd;
+        connect_vr_signals(port, side);
+    }
+    template <typename T>
+    void bind_gated_input(VRDIF<T>& port, VRDSIG<T>& bus, unsigned closed) {
+        hacc::PortDelay<T>& d = new_delay<T>();
+        VRDSIG<T>& side = new_side<T>();
+        d.up_data(bus.data_sig); d.up_valid(bus.valid_sig); d.up_ready(bus.ready_sig);
+        d.dn_data(side.data_sig); d.dn_valid(side.valid_sig); d.dn_ready(side.ready_sig);
+        d.closed_cycles = closed;
+        connect_vr_signals(port, side);
+    }
+    template <typename T>
+    void bind_gated_output(VRDOF<T>& port, VRDSIG<T>& bus, unsigned closed) {
+        hacc::PortDelay<T>& d = new_delay<T>();
+        VRDSIG<T>& side = new_side<T>();
+        connect_vr_signals(port, side);
+        d.up_data(side.data_sig); d.up_valid(side.valid_sig); d.up_ready(side.ready_sig);
+        d.dn_data(bus.data_sig); d.dn_valid(bus.valid_sig); d.dn_ready(bus.ready_sig);
+        d.closed_cycles = closed;
+    }
+
 public:
     uint16_t configure_spatial_wave(uint16_t valid_height, uint16_t valid_width) {
+        if (scalar_mode()) {  // M21 J3: replay the recorded active rows; there is no PE program to inspect
+            hacc::ScalarPeOracle& o = *hacc::scalar_pe();
+            if (o.spatial_idx >= o.spatial.size()) SC_REPORT_FATAL("NetworkOnChip", "scalar-pe: more HDDU STARTs than recorded");
+            const int rows = o.spatial[o.spatial_idx++];
+            spatial_active_rows.write(rows < 0 ? NUM_PES_PER_PORT : static_cast<unsigned>(rows));
+            return 0u;
+        }
         uint16_t loop_pc = 0u;
         uint16_t loop_end_pc = 0u;
         uint16_t full_width = 0u;
@@ -612,7 +697,7 @@ public:
                 if (!router_enable[i][j].read()) {
                     continue;
                 }
-                if (pes[i][j].router.has_pending_quiesce()) {
+                if (scalar_mode() ? spes[i][j].pending_quiesce() : pes[i][j].router.has_pending_quiesce()) {
                     return true;
                 }
             }
@@ -626,7 +711,7 @@ public:
                 if (!router_enable[i][j].read()) {
                     continue;
                 }
-                if (pes[i][j].router.any_fifo_nonempty()) {
+                if (scalar_mode() ? spes[i][j].fifo_nonempty() : pes[i][j].router.any_fifo_nonempty()) {
                     return true;
                 }
             }
@@ -679,7 +764,7 @@ public:
         next_pid += 1;
 
 
-        for (size_t i = 0; i < NUM_PORTS; ++i) {
+        for (size_t i = 0; i < NUM_PORTS && !scalar_mode(); ++i) {
             for (size_t j = 0; j < NUM_PES_PER_PORT; ++j) {
                 pes[i][j].set_trace_context(next_pid, static_cast<int>(next_tid));
                 next_tid += static_cast<uint32_t>(pes[i][j].get_trace_num() + 1);

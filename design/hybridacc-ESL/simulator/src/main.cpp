@@ -14,7 +14,8 @@
  *                 [--fast-boot]
  *                 [--trace file.json] [--trace-level N]
  *                 [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]
- *                 [--wave-log file.txt] [--pe-log file.txt]
+ *                 [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]
+ *                 [--scalar-pe FILE --scalar-rule bulk|linear]
  *                 <firmware.elf>
  */
 
@@ -33,6 +34,8 @@
 #include "Cluster/SpmLog.hpp"
 #include "Cluster/WaveLog.hpp"
 #include "PE/PeLog.hpp"
+#include "NoC/PePortDelay.hpp"
+#include "NoC/ScalarPe.hpp"
 #include "Core/MmioLog.hpp"
 #include "HybridAcc.hpp"
 #include "SimUtils.hpp"
@@ -87,7 +90,8 @@ static void print_usage(const char* prog) {
               << " [--core-debug] [--dma-check] [--fast-boot]"
               << " [--trace file.json] [--trace-level N]"
               << " [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]"
-              << " [--wave-log file.txt] [--pe-log file.txt]"
+              << " [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]"
+              << " [--scalar-pe FILE --scalar-rule bulk|linear]"
               << " <firmware.elf>\n";
 }
 
@@ -345,6 +349,8 @@ int sc_main(int argc, char* argv[]) {
     std::string spm_log_path;
     std::string wave_log_path;
     std::string pe_log_path;
+    std::string scalar_pe_path;
+    std::string scalar_rule;
     uint32_t trace_level = 2;
 
     for (int i = 1; i < argc; ++i) {
@@ -381,6 +387,16 @@ int sc_main(int argc, char* argv[]) {
             wave_log_path = argv[++i];
         } else if (arg == "--pe-log" && i + 1 < argc) {
             pe_log_path = argv[++i];
+        } else if (arg == "--scalar-pe" && i + 1 < argc) {
+            scalar_pe_path = argv[++i];  // M21 WP-J J3 (NoC/ScalarPe.hpp)
+        } else if (arg == "--scalar-rule" && i + 1 < argc) {
+            scalar_rule = argv[++i];
+        } else if (arg == "--pe-perturb" && i + 1 < argc) {
+            // M21 WP-J J3 (NoC/PePortDelay.hpp): must be parsed before the NoC is built.
+            if (!hacc::parse_pe_perturb(argv[++i])) {
+                std::cerr << "[SIM] Bad --pe-perturb spec: " << argv[i] << std::endl;
+                return 1;
+            }
         } else if (arg == "--trace-level" && i + 1 < argc) {
             if (!parse_trace_level(argv[++i], trace_level)) {
                 std::cerr << "[SIM] Invalid trace level: expected 1..4\n";
@@ -471,6 +487,18 @@ int sc_main(int argc, char* argv[]) {
     sc_signal<sc_biguint<kMemAxiDataWidth>> mem_r_data;
     sc_signal<sc_uint<2>>   mem_r_resp;
     sc_signal<bool>         mem_r_last;
+
+    // M21 WP-J J3: the scalar endpoint must be loaded before the NoC is built.
+    if (!scalar_pe_path.empty()) {
+        std::string err;
+        if (!hacc::load_scalar_pe(scalar_pe_path, scalar_rule, err)) {
+            std::cerr << "[SIM] --scalar-pe: " << err << std::endl;
+            return 1;
+        }
+    } else if (!scalar_rule.empty()) {
+        std::cerr << "[SIM] --scalar-rule needs --scalar-pe" << std::endl;
+        return 1;
+    }
 
     // ========================================================================
     // DUT: HybridAcc<1>
