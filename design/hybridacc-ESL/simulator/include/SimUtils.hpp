@@ -121,6 +121,15 @@ inline bool load_elf(const std::string& path,
 // FakeDram — byte-addressable, services AXI4 read/write
 // ============================================================================
 
+namespace hacc {
+// M22 condition-1 counterfactual (--dram-extra-latency N): FakeDram sends every read response and write
+// acknowledgement N cycles later than it would; 0 (the default) is the unchanged model. Set before the run starts.
+inline unsigned& dram_extra_latency() {
+    static unsigned n = 0;
+    return n;
+}
+}  // namespace hacc
+
 class FakeDram : public sc_module {
 public:
     sc_in<bool> clk;
@@ -249,6 +258,7 @@ private:
     struct ReadReq {
         uint32_t addr = 0;
         unsigned len = 0;
+        uint64_t ready_at = 0;  // the loop iteration from which it may be served (--dram-extra-latency)
     };
 
     struct WriteReq {
@@ -279,8 +289,10 @@ private:
         r_resp.write(0);
         r_last.write(false);
         wait();
+        uint64_t cycle = 0;
 
         while (true) {
+            ++cycle;
             const bool r_done = r_send_valid_reg && r_ready.read();
             if (r_done) {
                 if (active_req_valid_reg && active_req_beat_reg < active_req_reg.len) {
@@ -295,7 +307,7 @@ private:
                 }
             }
 
-            if (!active_req_valid_reg && !read_req_fifo_reg.empty()) {
+            if (!active_req_valid_reg && !read_req_fifo_reg.empty() && read_req_fifo_reg.front().ready_at <= cycle) {
                 active_req_reg = read_req_fifo_reg.front();
                 read_req_fifo_reg.pop_front();
                 active_req_beat_reg = 0;
@@ -317,7 +329,7 @@ private:
                                   << " len=" << std::dec << len
                                   << " @ " << sc_time_stamp() << std::endl;
                 }
-                read_req_fifo_reg.push_back(ReadReq{addr, len});
+                read_req_fifo_reg.push_back(ReadReq{addr, len, cycle + hacc::dram_extra_latency()});
             }
             ar_prev_ready_reg = can_accept_ar;
 
@@ -351,8 +363,15 @@ private:
         b_valid.write(false);
         b_resp.write(0);
         wait();
+        uint64_t cycle = 0;
+        std::deque<uint64_t> b_ready_at;  // completed writes, acknowledged from this iteration (--dram-extra-latency)
 
         while (true) {
+            ++cycle;
+            while (!b_ready_at.empty() && b_ready_at.front() <= cycle) {
+                b_ready_at.pop_front();
+                ++b_pending_cnt_reg;
+            }
             // 1. B Channel Response Logic
             const bool b_done = b_prev_valid_reg && b_ready.read();
             if (b_done && b_pending_cnt_reg > 0) {
@@ -414,7 +433,7 @@ private:
                     ++active_aw_beat_reg;
                 } else {
                     active_aw_valid_reg = false;
-                    ++b_pending_cnt_reg;
+                    b_ready_at.push_back(cycle + 1 + hacc::dram_extra_latency());
                 }
             }
 

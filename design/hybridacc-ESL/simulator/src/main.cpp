@@ -16,6 +16,7 @@
  *                 [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]
  *                 [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]
  *                 [--scalar-pe FILE --scalar-rule bulk|linear|shape|ps|psln] [--pe-in-fifo-depth N]
+ *                 [--dram-extra-latency N]
  *                 <firmware.elf>
  */
 
@@ -91,7 +92,7 @@ static void print_usage(const char* prog) {
               << " [--trace file.json] [--trace-level N]"
               << " [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]"
               << " [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]"
-              << " [--scalar-pe FILE --scalar-rule bulk|linear|shape|ps|psln] [--pe-in-fifo-depth N]"
+              << " [--scalar-pe FILE --scalar-rule bulk|linear|shape|ps|psln] [--pe-in-fifo-depth N] [--dram-extra-latency N]"
               << " <firmware.elf>\n";
 }
 
@@ -391,6 +392,15 @@ int sc_main(int argc, char* argv[]) {
             scalar_pe_path = argv[++i];  // M21 WP-J J3 (NoC/ScalarPe.hpp)
         } else if (arg == "--scalar-rule" && i + 1 < argc) {
             scalar_rule = argv[++i];
+        } else if (arg == "--dram-extra-latency" && i + 1 < argc) {
+            // M22 condition 1 (SimUtils.hpp FakeDram): a counterfactual DRAM latency; 0 is the unchanged model.
+            char* end = nullptr;
+            const unsigned long long d = std::strtoull(argv[++i], &end, 10);
+            if (!end || *end != '\0' || d > 100000) {
+                std::cerr << "[SIM] Bad --dram-extra-latency: " << argv[i] << std::endl;
+                return 1;
+            }
+            hacc::dram_extra_latency() = static_cast<unsigned>(d);
         } else if (arg == "--pe-in-fifo-depth" && i + 1 < argc) {
             // M21 WP-J J4 (NoC/PePortDelay.hpp): must be set before the NoC is built.
             char* end = nullptr;
