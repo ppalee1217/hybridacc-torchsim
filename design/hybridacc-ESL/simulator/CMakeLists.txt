@@ -81,6 +81,21 @@ target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -O2)
 find_package(Threads REQUIRED)
 target_link_libraries(${PROJECT_NAME} Threads::Threads)
 
+# Optional Ramulator2 DRAM timing for FakeDram (M22, --dram-ramulator). HACC_RAMULATOR_DIR is a Ramulator2 source
+# tree with libramulator.so built in it, without TOGSim's wrapper. Ramulator2 needs C++20, so only the shim
+# (include/Utils/RamulatorShim.h) is built with it; the simulator stays C++17.
+set(HACC_RAMULATOR_DIR "" CACHE PATH "Ramulator2 source tree with libramulator.so (optional)")
+if(HACC_RAMULATOR_DIR)
+    add_library(hacc_ramulator_shim STATIC ramulator_shim/RamulatorShim.cc)
+    set_target_properties(hacc_ramulator_shim PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+    target_include_directories(hacc_ramulator_shim PRIVATE ${HACC_RAMULATOR_DIR}/src
+        ${HACC_RAMULATOR_DIR}/ext/yaml-cpp/include ${HACC_RAMULATOR_DIR}/ext/fmt/include)
+    target_link_libraries(hacc_ramulator_shim PUBLIC ${HACC_RAMULATOR_DIR}/libramulator.so)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE HACC_HAS_RAMULATOR)
+    target_link_libraries(${PROJECT_NAME} hacc_ramulator_shim)
+    message(STATUS "Ramulator2: ${HACC_RAMULATOR_DIR}")
+endif()
+
 # Set output name and directory
 set_target_properties(${PROJECT_NAME} PROPERTIES
     OUTPUT_NAME hybridacc-sim

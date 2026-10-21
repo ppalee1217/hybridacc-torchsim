@@ -16,7 +16,7 @@
  *                 [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]
  *                 [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]
  *                 [--scalar-pe FILE --scalar-rule bulk|linear|shape|ps|psln] [--pe-in-fifo-depth N]
- *                 [--dram-extra-latency N]
+ *                 [--dram-extra-latency N] [--dram-ramulator CONFIG.yaml [--dram-ramulator-stats FILE]]
  *                 <firmware.elf>
  */
 
@@ -93,6 +93,7 @@ static void print_usage(const char* prog) {
               << " [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]"
               << " [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]"
               << " [--scalar-pe FILE --scalar-rule bulk|linear|shape|ps|psln] [--pe-in-fifo-depth N] [--dram-extra-latency N]"
+              << " [--dram-ramulator CONFIG.yaml [--dram-ramulator-stats FILE]]"
               << " <firmware.elf>\n";
 }
 
@@ -352,6 +353,7 @@ int sc_main(int argc, char* argv[]) {
     std::string pe_log_path;
     std::string scalar_pe_path;
     std::string scalar_rule;
+    std::string dram_ramulator_stats;  // --dram-ramulator-stats
     uint32_t trace_level = 2;
 
     for (int i = 1; i < argc; ++i) {
@@ -401,6 +403,16 @@ int sc_main(int argc, char* argv[]) {
                 return 1;
             }
             hacc::dram_extra_latency() = static_cast<unsigned>(d);
+        } else if (arg == "--dram-ramulator" && i + 1 < argc) {
+            // M22 ESL Ramulator adapter (SimUtils.hpp FakeDram): Ramulator2 times DRAM reads and write acks (dev).
+#ifdef HACC_HAS_RAMULATOR
+            hacc::dram_ramulator_config() = argv[++i];
+#else
+            std::cerr << "[SIM] --dram-ramulator needs a build with -DHACC_RAMULATOR_DIR" << std::endl;
+            return 1;
+#endif
+        } else if (arg == "--dram-ramulator-stats" && i + 1 < argc) {
+            dram_ramulator_stats = argv[++i];
         } else if (arg == "--pe-in-fifo-depth" && i + 1 < argc) {
             // M21 WP-J J4 (NoC/PePortDelay.hpp): must be set before the NoC is built.
             char* end = nullptr;
@@ -437,6 +449,10 @@ int sc_main(int argc, char* argv[]) {
     if (elf_path.empty()) {
         std::cerr << "[SIM] Error: firmware ELF path required\n";
         print_usage(argv[0]);
+        return 1;
+    }
+    if (!hacc::dram_ramulator_config().empty() && hacc::dram_extra_latency() != 0) {
+        std::cerr << "[SIM] --dram-extra-latency is a FakeDram counterfactual; it does not combine with --dram-ramulator\n";
         return 1;
     }
 
@@ -999,6 +1015,7 @@ int sc_main(int argc, char* argv[]) {
               << dut.dma_dropped_command_count() << std::endl;
     std::cout << "[SIM] Simulation ended at " << sc_time_stamp() << std::endl;
     dram.print_oob_summary();
+    dram.finish_ramulator(dram_ramulator_stats.empty() ? nullptr : dram_ramulator_stats.c_str());
 
     // ========================================================================
     // Write trace file

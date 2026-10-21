@@ -13,6 +13,7 @@
 
 #define SC_INCLUDE_DYNAMIC_PROCESSES
 #include <systemc>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +26,11 @@
 #include <vector>
 
 #include "Core/CoreController.hpp"
+#ifdef HACC_HAS_RAMULATOR
+#include "Utils/RamulatorShim.h"
+#else
+struct hacc_ram;
+#endif
 
 using namespace sc_core;
 using namespace sc_dt;
@@ -128,6 +134,12 @@ inline unsigned& dram_extra_latency() {
     static unsigned n = 0;
     return n;
 }
+// M22 ESL Ramulator adapter (--dram-ramulator CONFIG, dev): Ramulator2 times FakeDram's read responses and write
+// acknowledgements; FakeDram keeps the data. Empty (the default) is the unchanged flat model. Set before the run.
+inline std::string& dram_ramulator_config() {
+    static std::string path;
+    return path;
+}
 }  // namespace hacc
 
 class FakeDram : public sc_module {
@@ -189,6 +201,32 @@ public:
 
         SC_CTHREAD(write_proc, clk.pos());
         reset_signal_is(reset_n, false);
+
+        if (!hacc::dram_ramulator_config().empty()) {
+#ifdef HACC_HAS_RAMULATOR
+            char err[512] = {0};
+            ram_ = hacc_ram_create(hacc::dram_ramulator_config().c_str(), err, sizeof err);
+            if (!ram_) {
+                std::cerr << "[DRAM] Ramulator2 " << hacc::dram_ramulator_config() << ": " << err << std::endl;
+                std::exit(1);
+            }
+            ram_tx_bytes_ = static_cast<uint64_t>(hacc_ram_tx_bytes(ram_));
+            // DRAM clock period in ps as TOGSim derives it (Dram.cc: MHz = round(1000 / tCK); Simulator.cc: 10^6 / MHz)
+            const long mhz = std::lround(1000.0 / hacc_ram_tck_ns(ram_));
+            ram_period_ps_ = 1000000u / static_cast<uint64_t>(mhz);
+            SC_CTHREAD(ram_proc, clk.pos());
+            reset_signal_is(reset_n, false);
+#endif
+        }
+    }
+
+    // Writes Ramulator2's statistics after the run (no-op without --dram-ramulator).
+    void finish_ramulator(const char* stats_path) {
+#ifdef HACC_HAS_RAMULATOR
+        if (ram_) hacc_ram_finish(ram_, stats_path);
+#else
+        (void)stats_path;
+#endif
     }
 
     bool check_range(uint64_t addr, uint64_t len, const char* caller) const {
@@ -259,7 +297,70 @@ private:
         uint32_t addr = 0;
         unsigned len = 0;
         uint64_t ready_at = 0;  // the loop iteration from which it may be served (--dram-extra-latency)
+        std::vector<uint64_t> ram_ids;  // one Ramulator2 access per beat (--dram-ramulator)
     };
+
+    // ---- Ramulator2 timing (--dram-ramulator), dev: one DRAM access per 8 B beat, at the access-size block that
+    // holds the beat; no merging (the M22 DRAM adapter rule is pending). Accesses queued at one clock edge are
+    // offered to the memory system at the next; an access completed at one edge may be used from the next.
+    struct RamAccess {
+        bool write = false;
+        uint64_t addr = 0;
+        uint64_t queued_ps = 0;
+        bool done = false;
+        uint64_t done_ps = 0;
+    };
+    hacc_ram* ram_ = nullptr;
+    uint64_t ram_tx_bytes_ = 0;
+    uint64_t ram_period_ps_ = 0;
+    uint64_t ram_next_tick_ps_ = 0;
+    uint64_t ram_next_id_ = 1;
+    std::map<uint64_t, RamAccess> ram_acc_;
+    std::deque<uint64_t> ram_to_send_;
+
+    static uint64_t now_ps() { return sc_time_stamp().value(); }
+
+    uint64_t ram_queue(bool write, uint64_t addr) {
+        const uint64_t id = ram_next_id_++;
+        RamAccess a;
+        a.write = write;
+        a.addr = (addr - dram_base_) & ~(ram_tx_bytes_ - 1);
+        a.queued_ps = now_ps();
+        ram_acc_[id] = a;
+        ram_to_send_.push_back(id);
+        return id;
+    }
+
+    bool ram_ready(uint64_t id) const {
+        const RamAccess& a = ram_acc_.at(id);
+        return a.done && a.done_ps < now_ps();
+    }
+
+    void ram_proc() {
+        wait();
+        while (true) {
+#ifdef HACC_HAS_RAMULATOR
+            const uint64_t now = now_ps();
+            while (!ram_to_send_.empty()) {
+                const uint64_t id = ram_to_send_.front();
+                const RamAccess& a = ram_acc_.at(id);
+                if (a.queued_ps >= now || !hacc_ram_send(ram_, a.write ? 1 : 0, a.addr, id)) break;
+                ram_to_send_.pop_front();
+            }
+            while (ram_next_tick_ps_ <= now) {  // DRAM clocks up to this edge (TOGSim ticks DRAM after the core)
+                hacc_ram_tick(ram_);
+                ram_next_tick_ps_ += ram_period_ps_;
+            }
+            uint64_t id = 0;
+            while (hacc_ram_pop_done(ram_, &id)) {
+                RamAccess& a = ram_acc_.at(id);
+                a.done = true;
+                a.done_ps = now;
+            }
+#endif
+            wait();
+        }
+    }
 
     struct WriteReq {
         uint32_t addr = 0;
@@ -282,6 +383,9 @@ private:
         sc_biguint<kMemAxiDataWidth> r_send_data_reg = 0;
         sc_uint<2> r_send_resp_reg = 0;
         bool r_send_last_reg = false;
+        bool beat_pending = false;  // the active request's next beat waits for its DRAM access
+        auto beat_ready = [this](const ReadReq& q, unsigned b) { return !ram_ || ram_ready(q.ram_ids[b]); };
+        auto beat_served = [this](const ReadReq& q, unsigned b) { if (ram_) ram_acc_.erase(q.ram_ids[b]); };
 
         ar_ready.write(false);
         r_valid.write(false);
@@ -297,19 +401,27 @@ private:
             if (r_done) {
                 if (active_req_valid_reg && active_req_beat_reg < active_req_reg.len) {
                     active_req_beat_reg++;
-                    r_send_data_reg = read_beat(active_req_reg.addr + active_req_beat_reg * kBeatBytes);
-                    r_send_resp_reg = 0;
-                    r_send_last_reg = (active_req_beat_reg == active_req_reg.len);
-                    r_send_valid_reg = true;
+                    r_send_valid_reg = false;
+                    beat_pending = true;
                 } else {
                     active_req_valid_reg = false;
                     r_send_valid_reg = false;
                 }
             }
+            if (active_req_valid_reg && beat_pending && beat_ready(active_req_reg, active_req_beat_reg)) {
+                beat_served(active_req_reg, active_req_beat_reg);
+                beat_pending = false;
+                r_send_data_reg = read_beat(active_req_reg.addr + active_req_beat_reg * kBeatBytes);
+                r_send_resp_reg = 0;
+                r_send_last_reg = (active_req_beat_reg == active_req_reg.len);
+                r_send_valid_reg = true;
+            }
 
-            if (!active_req_valid_reg && !read_req_fifo_reg.empty() && read_req_fifo_reg.front().ready_at <= cycle) {
+            if (!active_req_valid_reg && !read_req_fifo_reg.empty() && read_req_fifo_reg.front().ready_at <= cycle &&
+                beat_ready(read_req_fifo_reg.front(), 0)) {
                 active_req_reg = read_req_fifo_reg.front();
                 read_req_fifo_reg.pop_front();
+                beat_served(active_req_reg, 0);
                 active_req_beat_reg = 0;
                 active_req_valid_reg = true;
                 r_send_data_reg = read_beat(active_req_reg.addr);
@@ -329,7 +441,10 @@ private:
                                   << " len=" << std::dec << len
                                   << " @ " << sc_time_stamp() << std::endl;
                 }
-                read_req_fifo_reg.push_back(ReadReq{addr, len, cycle + hacc::dram_extra_latency()});
+                ReadReq q{addr, len, cycle + hacc::dram_extra_latency(), {}};
+                if (ram_)
+                    for (unsigned b = 0; b <= len; ++b) q.ram_ids.push_back(ram_queue(false, addr + b * kBeatBytes));
+                read_req_fifo_reg.push_back(q);
             }
             ar_prev_ready_reg = can_accept_ar;
 
@@ -365,11 +480,21 @@ private:
         wait();
         uint64_t cycle = 0;
         std::deque<uint64_t> b_ready_at;  // completed writes, acknowledged from this iteration (--dram-extra-latency)
+        std::deque<std::vector<uint64_t>> b_wait_ram;  // completed writes waiting for their DRAM accesses, in order
+        std::vector<uint64_t> active_ram_ids;
 
         while (true) {
             ++cycle;
             while (!b_ready_at.empty() && b_ready_at.front() <= cycle) {
                 b_ready_at.pop_front();
+                ++b_pending_cnt_reg;
+            }
+            while (!b_wait_ram.empty()) {
+                bool all = true;
+                for (uint64_t id : b_wait_ram.front()) all = all && ram_ready(id);
+                if (!all) break;
+                for (uint64_t id : b_wait_ram.front()) ram_acc_.erase(id);
+                b_wait_ram.pop_front();
                 ++b_pending_cnt_reg;
             }
             // 1. B Channel Response Logic
@@ -429,11 +554,17 @@ private:
                     }
                 }
 
+                if (ram_) active_ram_ids.push_back(ram_queue(true, beat_addr));
                 if (active_aw_beat_reg < active_aw_reg.len) {
                     ++active_aw_beat_reg;
                 } else {
                     active_aw_valid_reg = false;
-                    b_ready_at.push_back(cycle + 1 + hacc::dram_extra_latency());
+                    if (ram_) {
+                        b_wait_ram.push_back(active_ram_ids);
+                        active_ram_ids.clear();
+                    } else {
+                        b_ready_at.push_back(cycle + 1 + hacc::dram_extra_latency());
+                    }
                 }
             }
 
