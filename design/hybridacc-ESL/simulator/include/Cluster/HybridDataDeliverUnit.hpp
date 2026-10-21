@@ -1040,10 +1040,15 @@ private:
 
 		}
 
-		// For PLO plane (write response), accept response as long as plane is enabled
+		// For PLO plane (write response), accept response as long as plane is enabled.
+		// ODR D-46 (our fork, 2026-10-21): this used to also require a queued write address or SPM request
+		// (write_addr_fifo / spm_req_fifo not empty), but this method is not sensitive to those FIFOs, so the
+		// ready was whatever the last read-plane change left: a wave's last write response was taken only while
+		// that stale value happened to be 1, and the wave never completed when it was 0. With the FIFOs in the
+		// sensitivity list the condition would refuse every wave's last response, which arrives the cycle after
+		// its request left spm_req_fifo. A write response exists only for a write the SPM accepted.
 		const bool plane_on_plo = ((plane_en_reg.read().to_uint() >> PLANE_PLO) & 0x1u) != 0;
-		const bool waiting_for_wr_resp = !write_addr_fifo_empty_out.read() || !spm_req_fifo_empty_out.read();
-		spm_resp_ready[PLANE_PLO].write(plane_on_plo && waiting_for_wr_resp);
+		spm_resp_ready[PLANE_PLO].write(plane_on_plo);
 	}
 
 	// Combinational logic to combine the SPM response data with the corresponding tag from the wait FIFO to form the NoC request payload, for each plane if enabled
