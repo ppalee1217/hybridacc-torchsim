@@ -441,7 +441,7 @@ private:
                                   << " len=" << std::dec << len
                                   << " @ " << sc_time_stamp() << std::endl;
                 }
-                ReadReq q{addr, len, cycle + hacc::dram_extra_latency(), {}};
+                ReadReq q{addr, len, cycle + 1 + hacc::dram_extra_latency(), {}};  // served from the next iteration
                 if (ram_)
                     for (unsigned b = 0; b <= len; ++b) q.ram_ids.push_back(ram_queue(false, addr + b * kBeatBytes));
                 read_req_fifo_reg.push_back(q);
