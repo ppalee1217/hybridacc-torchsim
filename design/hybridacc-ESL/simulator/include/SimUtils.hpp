@@ -27,7 +27,10 @@
 
 #include "Core/CoreController.hpp"
 #ifdef HACC_HAS_RAMULATOR
-#include "Utils/RamulatorShim.h"
+#ifdef HACC_HAS_RAMULATOR
+#include <memory>
+#include "DramBridge.h"  // PyTorchSim TOGSim/src/hacc_bridge (HACC_BRIDGE_DIR)
+#endif
 #else
 struct hacc_ram;
 #endif
@@ -134,9 +137,14 @@ inline unsigned& dram_extra_latency() {
     static unsigned n = 0;
     return n;
 }
-// M22 ESL Ramulator adapter (--dram-ramulator CONFIG, dev): Ramulator2 times FakeDram's read responses and write
-// acknowledgements; FakeDram keeps the data. Empty (the default) is the unchanged flat model. Set before the run.
+// M22 DRAM bridge (--dram-ramulator CONFIG): Ramulator2 times the DMA's DRAM accesses through the bridge that
+// TOGSim shares (bridge contract v1); FakeDram keeps the data. Empty (the default) is the unchanged flat model.
 inline std::string& dram_ramulator_config() {
+    static std::string path;
+    return path;
+}
+// --dram-bridge-trace FILE: the bridge's per-access trace (one line per access; DramBridge.h). Empty = off.
+inline std::string& dram_bridge_trace() {
     static std::string path;
     return path;
 }
@@ -204,26 +212,30 @@ public:
 
         if (!hacc::dram_ramulator_config().empty()) {
 #ifdef HACC_HAS_RAMULATOR
-            char err[512] = {0};
-            ram_ = hacc_ram_create(hacc::dram_ramulator_config().c_str(), err, sizeof err);
-            if (!ram_) {
-                std::cerr << "[DRAM] Ramulator2 " << hacc::dram_ramulator_config() << ": " << err << std::endl;
+            try {
+                bridge_ = std::make_unique<hacc::DramBridge>(hacc::dram_ramulator_config(), dram_base_);
+            } catch (const std::exception& e) {
+                std::cerr << e.what() << std::endl;
                 std::exit(1);
             }
-            ram_tx_bytes_ = static_cast<uint64_t>(hacc_ram_tx_bytes(ram_));
-            // DRAM clock period in ps as TOGSim derives it (Dram.cc: MHz = round(1000 / tCK); Simulator.cc: 10^6 / MHz)
-            const long mhz = std::lround(1000.0 / hacc_ram_tck_ns(ram_));
-            ram_period_ps_ = 1000000u / static_cast<uint64_t>(mhz);
-            SC_CTHREAD(ram_proc, clk.pos());
-            reset_signal_is(reset_n, false);
+            if (!hacc::dram_bridge_trace().empty()) {
+                bridge_trace_ = std::fopen(hacc::dram_bridge_trace().c_str(), "w");
+                if (!bridge_trace_) {
+                    std::cerr << "[DRAM] cannot write " << hacc::dram_bridge_trace() << std::endl;
+                    std::exit(1);
+                }
+                bridge_->set_trace(bridge_trace_);
+            }
 #endif
         }
     }
 
-    // Writes Ramulator2's statistics after the run (no-op without --dram-ramulator).
+    // Prints the bridge's statistics and writes Ramulator2's (no-op without --dram-ramulator).
     void finish_ramulator(const char* stats_path) {
 #ifdef HACC_HAS_RAMULATOR
-        if (ram_) hacc_ram_finish(ram_, stats_path);
+        if (bridge_) bridge_->finish(stdout, stats_path);
+        if (bridge_trace_) std::fclose(bridge_trace_);
+        bridge_trace_ = nullptr;
 #else
         (void)stats_path;
 #endif
@@ -297,74 +309,38 @@ private:
         uint32_t addr = 0;
         unsigned len = 0;
         uint64_t ready_at = 0;  // the loop iteration from which it may be served (--dram-extra-latency)
-        std::vector<uint64_t> ram_ids;  // one Ramulator2 access per beat (--dram-ramulator)
+        bool bridged = false;   // the DMA's, timed by the DRAM bridge (--dram-ramulator); the loader's stay flat
+        uint64_t txn = 0;       // its bridge transaction
     };
 
-    // ---- Ramulator2 timing (--dram-ramulator), dev: one DRAM access per 8 B beat, at the access-size block that
-    // holds the beat; no merging (the M22 DRAM adapter rule is pending). Accesses queued at one clock edge are
-    // offered to the memory system at the next; an access completed at one edge may be used from the next.
-    struct RamAccess {
-        bool write = false;
-        uint64_t addr = 0;
-        uint64_t queued_ps = 0;
-        bool done = false;
-        uint64_t done_ps = 0;
-    };
-    hacc_ram* ram_ = nullptr;
-    uint64_t ram_tx_bytes_ = 0;
-    uint64_t ram_period_ps_ = 0;
-    uint64_t ram_next_tick_ps_ = 0;
-    uint64_t ram_next_id_ = 1;
-    std::map<uint64_t, RamAccess> ram_acc_;
-    std::deque<uint64_t> ram_to_send_;
+    // ---- DRAM bridge (--dram-ramulator; bridge contract v1, PyTorchSim TOGSim/src/hacc_bridge/DramBridge.h). Both
+    // processes advance it to the edge before any query or hand-over, so their SystemC order does not matter. A
+    // transaction is the DMA's when CoreController's mux gives it the port at its AR or AW (section 7).
+#ifdef HACC_HAS_RAMULATOR
+    std::unique_ptr<hacc::DramBridge> bridge_;
+    std::FILE* bridge_trace_ = nullptr;
+#endif
 
     static uint64_t now_ps() { return sc_time_stamp().value(); }
 
-    uint64_t ram_queue(bool write, uint64_t addr) {
-        const uint64_t id = ram_next_id_++;
-        RamAccess a;
-        a.write = write;
-        a.addr = (addr - dram_base_) & ~(ram_tx_bytes_ - 1);
-        a.queued_ps = now_ps();
-        ram_acc_[id] = a;
-        ram_to_send_.push_back(id);
-        return id;
-    }
-
-    bool ram_ready(uint64_t id) const {
-        const RamAccess& a = ram_acc_.at(id);
-        return a.done && a.done_ps < now_ps();
-    }
-
-    void ram_proc() {
-        wait();
-        while (true) {
+    bool bridge_on() const {
 #ifdef HACC_HAS_RAMULATOR
-            const uint64_t now = now_ps();
-            while (!ram_to_send_.empty()) {
-                const uint64_t id = ram_to_send_.front();
-                const RamAccess& a = ram_acc_.at(id);
-                if (a.queued_ps >= now || !hacc_ram_send(ram_, a.write ? 1 : 0, a.addr, id)) break;
-                ram_to_send_.pop_front();
-            }
-            while (ram_next_tick_ps_ <= now) {  // DRAM clocks up to this edge (TOGSim ticks DRAM after the core)
-                hacc_ram_tick(ram_);
-                ram_next_tick_ps_ += ram_period_ps_;
-            }
-            uint64_t id = 0;
-            while (hacc_ram_pop_done(ram_, &id)) {
-                RamAccess& a = ram_acc_.at(id);
-                a.done = true;
-                a.done_ps = now;
-            }
+        return bridge_ != nullptr;
+#else
+        return false;
 #endif
-            wait();
-        }
+    }
+    void bridge_advance() {
+#ifdef HACC_HAS_RAMULATOR
+        if (bridge_) bridge_->advance(now_ps());
+#endif
     }
 
     struct WriteReq {
         uint32_t addr = 0;
         unsigned len = 0;
+        bool bridged = false;
+        uint64_t txn = 0;
     };
 
     struct WBeat {
@@ -394,8 +370,20 @@ private:
         sc_uint<2> r_send_resp_reg = 0;
         bool r_send_last_reg = false;
         bool beat_pending = false;  // the active request's next beat waits for its DRAM access
-        auto beat_ready = [this](const ReadReq& q, unsigned b) { return !ram_ || ram_ready(q.ram_ids[b]); };
-        auto beat_served = [this](const ReadReq& q, unsigned b) { if (ram_) ram_acc_.erase(q.ram_ids[b]); };
+        // Section 6: a bridged beat goes out at an edge after the tick at which its access completed.
+        auto beat_ready = [this](const ReadReq& q, unsigned b) {
+#ifdef HACC_HAS_RAMULATOR
+            if (q.bridged) return bridge_->read_done_ps(q.txn, q.addr + b * kBeatBytes, kBeatBytes) < now_ps();
+#endif
+            (void)q; (void)b;
+            return true;
+        };
+        auto beat_served = [this](const ReadReq& q, unsigned b) {  // the read is forgotten at its last beat
+#ifdef HACC_HAS_RAMULATOR
+            if (q.bridged && b == q.len) bridge_->read_retire(q.txn);
+#endif
+            (void)q; (void)b;
+        };
 
         ar_ready.write(false);
         r_valid.write(false);
@@ -407,6 +395,7 @@ private:
 
         while (true) {
             ++cycle;
+            bridge_advance();
             const bool r_done = r_send_valid_reg && r_ready.read();
             if (r_done) {
                 if (active_req_valid_reg && active_req_beat_reg < active_req_reg.len) {
@@ -452,9 +441,13 @@ private:
                                   << " len=" << std::dec << len
                                   << " @ " << sc_time_stamp() << std::endl;
                 }
-                ReadReq q{addr, len, cycle + 1 + hacc::dram_extra_latency(), {}};  // served from the next iteration
-                if (ram_)
-                    for (unsigned b = 0; b <= len; ++b) q.ram_ids.push_back(ram_queue(false, addr + b * kBeatBytes));
+                ReadReq q{addr, len, cycle + 1 + hacc::dram_extra_latency(), false, 0};  // served from the next iteration
+#ifdef HACC_HAS_RAMULATOR
+                if (bridge_ && !hacc::dram_load_phase()) {
+                    q.bridged = true;
+                    q.txn = bridge_->read(addr, (uint64_t)(len + 1) * kBeatBytes, now_ps());
+                }
+#endif
                 read_req_fifo_reg.push_back(q);
             }
             ar_prev_ready_reg = can_accept_ar;
@@ -491,23 +484,23 @@ private:
         wait();
         uint64_t cycle = 0;
         std::deque<uint64_t> b_ready_at;  // completed writes, acknowledged from this iteration (--dram-extra-latency)
-        std::deque<std::vector<uint64_t>> b_wait_ram;  // completed writes waiting for their DRAM accesses, in order
-        std::vector<uint64_t> active_ram_ids;
+        std::deque<uint64_t> b_wait_bridge;  // bridged writes with all W beats in, waiting for their accesses, in order
 
         while (true) {
             ++cycle;
+            bridge_advance();
             while (!b_ready_at.empty() && b_ready_at.front() <= cycle) {
                 b_ready_at.pop_front();
                 ++b_pending_cnt_reg;
             }
-            while (!b_wait_ram.empty()) {
-                bool all = true;
-                for (uint64_t id : b_wait_ram.front()) all = all && ram_ready(id);
-                if (!all) break;
-                for (uint64_t id : b_wait_ram.front()) ram_acc_.erase(id);
-                b_wait_ram.pop_front();
+#ifdef HACC_HAS_RAMULATOR
+            // Section 6: a bridged write's B is counted at an edge after the tick at which its last access completed.
+            while (!b_wait_bridge.empty() && bridge_->write_done_ps(b_wait_bridge.front()) < now_ps()) {
+                bridge_->write_retire(b_wait_bridge.front());
+                b_wait_bridge.pop_front();
                 ++b_pending_cnt_reg;
             }
+#endif
             // 1. B Channel Response Logic
             const bool b_done = b_prev_valid_reg && b_ready.read();
             if (b_done && b_pending_cnt_reg > 0) {
@@ -533,7 +526,14 @@ private:
                                   << " len=" << std::dec << len
                                   << " @ " << sc_time_stamp() << std::endl;
                 }
-                aw_fifo_reg.push_back(WriteReq{addr, len});
+                WriteReq q{addr, len, false, 0};
+#ifdef HACC_HAS_RAMULATOR
+                if (bridge_ && !hacc::dram_load_phase()) {
+                    q.bridged = true;
+                    q.txn = bridge_->write(addr, (uint64_t)(len + 1) * kBeatBytes);
+                }
+#endif
+                aw_fifo_reg.push_back(q);
             }
             aw_prev_ready_reg = can_accept_aw;
 
@@ -573,14 +573,22 @@ private:
                     }
                 }
 
-                if (ram_) active_ram_ids.push_back(ram_queue(true, beat_addr));
+#ifdef HACC_HAS_RAMULATOR
+                if (active_aw_reg.bridged) {  // section 6: a block's access goes once its bytes here are all in
+                    if (beat.strb != sc_uint<kMemAxiDataWidth / 8>((1u << kBeatBytes) - 1)) {
+                        std::cerr << "[DRAM] FATAL: the DRAM bridge needs full-strobe W beats (addr=0x" << std::hex
+                                  << beat_addr << std::dec << ") @ " << sc_time_stamp() << std::endl;
+                        std::exit(1);
+                    }
+                    bridge_->write_data(active_aw_reg.txn, beat_addr, kBeatBytes, now_ps());
+                }
+#endif
                 if (active_aw_beat_reg < active_aw_reg.len) {
                     ++active_aw_beat_reg;
                 } else {
                     active_aw_valid_reg = false;
-                    if (ram_) {
-                        b_wait_ram.push_back(active_ram_ids);
-                        active_ram_ids.clear();
+                    if (active_aw_reg.bridged) {
+                        b_wait_bridge.push_back(active_aw_reg.txn);
                     } else {
                         b_ready_at.push_back(cycle + 1 + hacc::dram_extra_latency());
                     }

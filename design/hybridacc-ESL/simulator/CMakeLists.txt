@@ -81,19 +81,28 @@ target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -O2)
 find_package(Threads REQUIRED)
 target_link_libraries(${PROJECT_NAME} Threads::Threads)
 
-# Optional Ramulator2 DRAM timing for FakeDram (M22, --dram-ramulator). HACC_RAMULATOR_DIR is a Ramulator2 source
-# tree with libramulator.so built in it, without TOGSim's wrapper. Ramulator2 needs C++20, so only the shim
-# (include/Utils/RamulatorShim.h) is built with it; the simulator stays C++17.
+# Optional Ramulator2 DRAM timing for FakeDram (M22, --dram-ramulator), through the DRAM bridge that TOGSim shares
+# (bridge contract v1). HACC_RAMULATOR_DIR is a Ramulator2 source tree with libramulator.so built in it, without
+# TOGSim's wrapper; HACC_BRIDGE_DIR is PyTorchSim's TOGSim/src/hacc_bridge, at the PyTorchSim commit whose
+# TOGSim/extern/ramulator2 gave HACC_RAMULATOR_DIR. Ramulator2 needs C++20, so only RamulatorShim.cc is built with
+# it; the bridge and the simulator stay C++17.
 set(HACC_RAMULATOR_DIR "" CACHE PATH "Ramulator2 source tree with libramulator.so (optional)")
+set(HACC_BRIDGE_DIR "" CACHE PATH "PyTorchSim TOGSim/src/hacc_bridge (required with HACC_RAMULATOR_DIR)")
 if(HACC_RAMULATOR_DIR)
-    add_library(hacc_ramulator_shim STATIC ramulator_shim/RamulatorShim.cc)
+    if(NOT HACC_BRIDGE_DIR OR NOT EXISTS ${HACC_BRIDGE_DIR}/DramBridge.cc)
+        message(FATAL_ERROR "HACC_RAMULATOR_DIR needs HACC_BRIDGE_DIR (PyTorchSim TOGSim/src/hacc_bridge)")
+    endif()
+    add_library(hacc_ramulator_shim STATIC ${HACC_BRIDGE_DIR}/RamulatorShim.cc)
     set_target_properties(hacc_ramulator_shim PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
     target_include_directories(hacc_ramulator_shim PRIVATE ${HACC_RAMULATOR_DIR}/src
         ${HACC_RAMULATOR_DIR}/ext/yaml-cpp/include ${HACC_RAMULATOR_DIR}/ext/fmt/include)
     target_link_libraries(hacc_ramulator_shim PUBLIC ${HACC_RAMULATOR_DIR}/libramulator.so)
+    add_library(hacc_dram_bridge STATIC ${HACC_BRIDGE_DIR}/DramBridge.cc)
+    target_include_directories(hacc_dram_bridge PUBLIC ${HACC_BRIDGE_DIR})
+    target_link_libraries(hacc_dram_bridge PUBLIC hacc_ramulator_shim)
     target_compile_definitions(${PROJECT_NAME} PRIVATE HACC_HAS_RAMULATOR)
-    target_link_libraries(${PROJECT_NAME} hacc_ramulator_shim)
-    message(STATUS "Ramulator2: ${HACC_RAMULATOR_DIR}")
+    target_link_libraries(${PROJECT_NAME} hacc_dram_bridge)
+    message(STATUS "Ramulator2: ${HACC_RAMULATOR_DIR}; DRAM bridge: ${HACC_BRIDGE_DIR}")
 endif()
 
 # Set output name and directory

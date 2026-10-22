@@ -39,6 +39,15 @@
 #include "Core/DmaEngine.hpp"
 #include "Core/ClusterDataFabric.hpp"
 
+namespace hacc {
+// The DRAM AXI mux's selection (mux_mem_axi): true while the section loader owns the port. FakeDram latches it at
+// each AR and AW to keep the loader's traffic out of the DRAM bridge (M22 bridge contract v1, section 7).
+inline bool& dram_load_phase() {
+    static bool on = false;
+    return on;
+}
+}  // namespace hacc
+
 namespace hybridacc {
 namespace core {
 
@@ -1353,6 +1362,7 @@ private:
     // ========================================================================
 
     void mux_mem_axi() {
+        hacc::dram_load_phase() = sig_boot_load_phase.read();
         if (sig_boot_load_phase.read()) {
             // === Load phase: SectionLoader owns read channels ===
             // AR channel → loader

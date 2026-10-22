@@ -16,7 +16,8 @@
  *                 [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]
  *                 [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]
  *                 [--scalar-pe FILE --scalar-rule bulk|linear|shape|ps|psln] [--pe-in-fifo-depth N]
- *                 [--dram-extra-latency N] [--dram-ramulator CONFIG.yaml [--dram-ramulator-stats FILE]]
+ *                 [--dram-extra-latency N] [--dram-ramulator CONFIG.yaml [--dram-ramulator-stats FILE]
+ *                 [--dram-bridge-trace FILE]]
  *                 [--dram-burst-bytes S]
  *                 <firmware.elf>
  */
@@ -94,7 +95,8 @@ static void print_usage(const char* prog) {
               << " [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]"
               << " [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]"
               << " [--scalar-pe FILE --scalar-rule bulk|linear|shape|ps|psln] [--pe-in-fifo-depth N] [--dram-extra-latency N]"
-              << " [--dram-ramulator CONFIG.yaml [--dram-ramulator-stats FILE]] [--dram-burst-bytes S]"
+              << " [--dram-ramulator CONFIG.yaml [--dram-ramulator-stats FILE] [--dram-bridge-trace FILE]]"
+              << " [--dram-burst-bytes S]"
               << " <firmware.elf>\n";
 }
 
@@ -405,7 +407,7 @@ int sc_main(int argc, char* argv[]) {
             }
             hacc::dram_extra_latency() = static_cast<unsigned>(d);
         } else if (arg == "--dram-ramulator" && i + 1 < argc) {
-            // M22 ESL Ramulator adapter (SimUtils.hpp FakeDram): Ramulator2 times DRAM reads and write acks (dev).
+            // M22 DRAM bridge (SimUtils.hpp FakeDram; PyTorchSim hacc_bridge): Ramulator2 times the DMA's DRAM accesses.
 #ifdef HACC_HAS_RAMULATOR
             hacc::dram_ramulator_config() = argv[++i];
 #else
@@ -425,6 +427,8 @@ int sc_main(int argc, char* argv[]) {
             hacc::dram_burst_bytes() = static_cast<unsigned>(b);
         } else if (arg == "--dram-ramulator-stats" && i + 1 < argc) {
             dram_ramulator_stats = argv[++i];
+        } else if (arg == "--dram-bridge-trace" && i + 1 < argc) {
+            hacc::dram_bridge_trace() = argv[++i];  // the bridge's per-access trace (DramBridge.h)
         } else if (arg == "--pe-in-fifo-depth" && i + 1 < argc) {
             // M21 WP-J J4 (NoC/PePortDelay.hpp): must be set before the NoC is built.
             char* end = nullptr;
@@ -461,6 +465,10 @@ int sc_main(int argc, char* argv[]) {
     if (elf_path.empty()) {
         std::cerr << "[SIM] Error: firmware ELF path required\n";
         print_usage(argv[0]);
+        return 1;
+    }
+    if (!hacc::dram_bridge_trace().empty() && hacc::dram_ramulator_config().empty()) {
+        std::cerr << "[SIM] --dram-bridge-trace needs --dram-ramulator\n";
         return 1;
     }
     if (!hacc::dram_ramulator_config().empty() && hacc::dram_extra_latency() != 0) {
