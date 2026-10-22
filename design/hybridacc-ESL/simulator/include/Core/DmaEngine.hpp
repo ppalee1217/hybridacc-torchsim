@@ -3,13 +3,15 @@
 /**
  * @file DmaEngine.hpp
  * @brief cc_dma_engine — 4D strided DMA with bounded-outstanding AXI-Lite
- *        cluster interface and single-beat DRAM AXI master.
+ *        cluster interface and a DRAM AXI4 master that sends INCR bursts of up to
+ *        hacc::dram_burst_bytes() bytes (Core/DramBurst.hpp; 8 is single-beat).
  */
 
 #include <systemc>
 #include <cstdint>
 #include <deque>
 #include <cassert>
+#include "Core/DramBurst.hpp"
 #include "Core/DramLog.hpp"
 #include "Core/Types.hpp"
 #include "Utils/utils.hpp"
@@ -252,6 +254,19 @@ private:
     uint8_t  dram_w_send_strb_reg = 0;
     bool     dram_ar_send_valid_reg = false;
     uint32_t dram_ar_send_addr_reg = 0;
+    uint8_t  dram_ar_send_len_reg = 0;
+    uint8_t  dram_aw_send_len_reg = 0;
+    bool     dram_w_send_last_reg = false;
+
+    // DRAM bursts (DramBurst.hpp). A burst is issued at its first beat's address; the AGU FIFO entries of its other
+    // beats are skipped. Reads count beats in flight (dram_rd_inflight_cnt_reg, which reserves the transfer buffer)
+    // apart from bursts in flight (transaction credits); a read burst retires at RLAST, a write burst at its B.
+    uint32_t src_skip_reg = 0;
+    uint32_t dst_skip_reg = 0;
+    std::deque<unsigned> dram_rd_txn_reg;  // beats of each read burst in flight, oldest first
+    unsigned dram_rd_txn_beat_reg = 0;     // R beats of the oldest read burst received so far
+    std::deque<unsigned> dram_wr_txn_reg;  // beats of each write burst awaiting its B, oldest first
+    unsigned dram_w_beats_left_reg = 0;    // W beats of the current write burst not yet driven
 
     uint32_t mmio_src_kind_reg = 0;
     uint32_t mmio_dst_kind_reg = 0;
@@ -392,6 +407,15 @@ private:
         dram_aw_send_valid_reg = false;
         dram_w_send_valid_reg = false;
         dram_ar_send_valid_reg = false;
+        dram_ar_send_len_reg = 0;
+        dram_aw_send_len_reg = 0;
+        dram_w_send_last_reg = false;
+        src_skip_reg = 0;
+        dst_skip_reg = 0;
+        dram_rd_txn_reg.clear();
+        dram_rd_txn_beat_reg = 0;
+        dram_wr_txn_reg.clear();
+        dram_w_beats_left_reg = 0;
         dram_ar_prev_valid_reg = false;
         dram_aw_prev_valid_reg = false;
         dram_w_prev_valid_reg  = false;
@@ -541,6 +565,45 @@ private:
         dram_addr = active_cmd_reg.src_addr_lo + static_cast<uint32_t>(byte_offset);
     }
 
+    // Address of beat i of a 4D AGU walk: what the AGU pipeline produces for the same beat.
+    uint32_t agu_beat_addr(uint32_t base, const uint32_t* stride, uint32_t i) const {
+        uint32_t addr = base;
+        for (int d = 0; d < 4; ++d) {
+            const uint32_t lim = effective_count(active_cmd_reg.count[d]);
+            addr += (i % lim) * stride[d];
+            i /= lim;
+        }
+        return addr;
+    }
+
+    // Beats of the DRAM burst that starts at beat `first`, address `addr`: the following beats while their addresses
+    // continue it, up to the next S-aligned address and the command's last beat. beat_addr(i, a) sets beat i's DRAM
+    // address and returns false for a beat that reads no DRAM (a load-pad fill).
+    template <typename BeatAddr>
+    unsigned dram_burst_beats(uint32_t first, uint32_t addr, BeatAddr beat_addr) const {
+        constexpr unsigned kBeat = kMemAxiDataWidth / 8;
+        const unsigned limit = (hacc::dram_burst_bytes() - addr % hacc::dram_burst_bytes()) / kBeat;
+        const uint32_t total = active_cmd_reg.total_beats();
+        unsigned n = 1;
+        uint32_t a = 0;
+        while (n < limit && first + n < total && beat_addr(first + n, a) && a == addr + n * kBeat) ++n;
+        return n;
+    }
+
+    static void dram_axi_fatal(const char* what) {
+        std::cerr << "[DmaEngine] FATAL: DRAM AXI " << what << " @ " << sc_core::sc_time_stamp() << std::endl;
+        std::exit(1);
+    }
+
+public:
+    /// DRAM burst sizes this engine supports (DramBurst.hpp): a power of two from one beat to 256 beats whose
+    /// beats fit the transfer buffer.
+    static bool dram_burst_bytes_supported(unsigned s) {
+        constexpr unsigned kBeat = kMemAxiDataWidth / 8;
+        return s >= kBeat && s <= 256 * kBeat && (s & (s - 1)) == 0 && s / kBeat <= kDataBufferDepth;
+    }
+
+private:
     DataBeat apply_store_epilogue(DataBeat beat) const {
         if (!store_relu_enabled(active_cmd_reg)) {
             return beat;
@@ -842,6 +905,7 @@ private:
                     dram_rd_inflight_cnt_reg == 0 && dram_wr_inflight_cnt_reg == 0 &&
                     cl_rd_inflight_cnt_reg == 0 && cl_wr_inflight_cnt_reg == 0 &&
                     data_buffer_reg.empty() && src_addr_fifo.empty() && dst_addr_fifo.empty() &&
+                    src_skip_reg == 0 && dst_skip_reg == 0 && dram_w_beats_left_reg == 0 &&
                     !src_agu_pipe_reg.s1.valid && !src_agu_pipe_reg.s2.valid && !src_agu_pipe_reg.s3.valid &&
                     !dst_agu_pipe_reg.s1.valid && !dst_agu_pipe_reg.s2.valid && !dst_agu_pipe_reg.s3.valid &&
                     dram_rd_resp_fifo_reg.empty() && cl_rd_resp_fifo_reg.empty()) {
@@ -910,16 +974,32 @@ private:
         }
     }
 
+    // A DRAM read burst of n beats at addr: reserves transfer-buffer space for all its beats and one transaction
+    // credit (the caller checked both). Every beat gets its own dram-log line, at the burst's AR time.
+    void issue_dram_read(uint32_t addr, unsigned n, bool& next_valid, uint32_t& next_addr, uint8_t& next_len) {
+        next_valid = true;
+        next_addr = addr;
+        next_len = static_cast<uint8_t>(n - 1);
+        dram_rd_inflight_cnt_reg += n;
+        dram_rd_txn_reg.push_back(n);
+        beats_src_issued_reg += n;
+        pmu_dram_rd_issue_cnt_reg++;
+        for (unsigned k = 0; k < n; ++k) log_dram_beat('R', addr + k * (kMemAxiDataWidth / 8));
+    }
+
+    bool can_issue_dram_read(unsigned n) const {
+        return data_buffer_reg.size() + dram_rd_inflight_cnt_reg + n <= kDataBufferDepth &&
+               dram_rd_txn_reg.size() < kDmaMaxOutstanding;
+    }
+
     void run_src_issue_dram(bool allow_issue) {
         if (direct_load_pad_active()) {
             const bool ar_done = dram_ar_send_valid_reg && m_mem_axi_ar_ready_i.read();
             bool next_valid = dram_ar_send_valid_reg && !ar_done;
             uint32_t next_addr = dram_ar_send_addr_reg;
+            uint8_t next_len = dram_ar_send_len_reg;
 
             if (allow_issue && !next_valid) {
-                const bool can_issue_read =
-                    (data_buffer_reg.size() + dram_rd_inflight_cnt_reg < kDataBufferDepth) &&
-                    (dram_rd_inflight_cnt_reg < kDmaMaxOutstanding);
                 const bool can_issue_fill =
                     data_buffer_reg.size() < kDataBufferDepth &&
                     dram_rd_inflight_cnt_reg == 0 &&
@@ -936,43 +1016,49 @@ private:
                             beats_src_issued_reg++;
                             beats_src_retired_reg++;
                         }
-                    } else if (can_issue_read) {
-                        next_valid = true;
-                        next_addr = read_addr;
-                        dram_rd_inflight_cnt_reg++;
-                        beats_src_issued_reg++;
-                        pmu_dram_rd_issue_cnt_reg++;
-                        log_dram_beat('R', next_addr);
+                    } else {
+                        const unsigned n = dram_burst_beats(beats_src_issued_reg, read_addr,
+                            [this](uint32_t i, uint32_t& a) { bool fill = false; decode_load_pad_request(i, a, fill); return !fill; });
+                        if (can_issue_dram_read(n)) issue_dram_read(read_addr, n, next_valid, next_addr, next_len);
                     }
                 }
             }
 
             dram_ar_send_valid_reg = next_valid;
             dram_ar_send_addr_reg = next_addr;
+            dram_ar_send_len_reg = next_len;
             m_mem_axi_ar_valid_o.write(next_valid);
             m_mem_axi_ar_addr_o.write(next_addr);
-            m_mem_axi_ar_len_o.write(0);
+            m_mem_axi_ar_len_o.write(next_len);
             return;
         }
 
+        while (src_skip_reg > 0 && !src_addr_fifo.empty()) {  // beats an issued burst already covers
+            src_addr_fifo.pop_front();
+            --src_skip_reg;
+        }
         const bool ar_done = dram_ar_send_valid_reg && m_mem_axi_ar_ready_i.read();
         bool next_valid = dram_ar_send_valid_reg && !ar_done;
         uint32_t next_addr = dram_ar_send_addr_reg;
-        if (allow_issue && !next_valid && (data_buffer_reg.size() + dram_rd_inflight_cnt_reg < kDataBufferDepth) &&
-            dram_rd_inflight_cnt_reg < kDmaMaxOutstanding && !src_addr_fifo.empty()) {
-            next_valid = true;
-            next_addr = src_addr_fifo.front();
-            src_addr_fifo.pop_front();
-            dram_rd_inflight_cnt_reg++;
-            beats_src_issued_reg++;
-            pmu_dram_rd_issue_cnt_reg++;
-            log_dram_beat('R', next_addr);
+        uint8_t next_len = dram_ar_send_len_reg;
+        if (allow_issue && !next_valid && src_skip_reg == 0 && !src_addr_fifo.empty()) {
+            const uint32_t addr = src_addr_fifo.front();
+            const unsigned n = dram_burst_beats(beats_src_issued_reg, addr, [this](uint32_t i, uint32_t& a) {
+                a = agu_beat_addr(active_cmd_reg.src_addr_lo, active_cmd_reg.src_stride, i);
+                return true;
+            });
+            if (can_issue_dram_read(n)) {
+                src_addr_fifo.pop_front();
+                src_skip_reg = n - 1;
+                issue_dram_read(addr, n, next_valid, next_addr, next_len);
+            }
         }
         dram_ar_send_valid_reg = next_valid;
         dram_ar_send_addr_reg = next_addr;
+        dram_ar_send_len_reg = next_len;
         m_mem_axi_ar_valid_o.write(next_valid);
         m_mem_axi_ar_addr_o.write(next_addr);
-        m_mem_axi_ar_len_o.write(0);
+        m_mem_axi_ar_len_o.write(next_len);
     }
 
     void run_src_issue_cluster(bool allow_issue) {
@@ -998,6 +1084,15 @@ private:
         if (can_accept) m_mem_axi_r_ready_o.write(true);
         if (m_mem_axi_r_valid_i.read() && dram_r_prev_ready_reg) {
             DramRdResp resp; resp.data = m_mem_axi_r_data_i.read(); resp.resp = m_mem_axi_r_resp_i.read().to_uint();
+            if (dram_rd_txn_reg.empty()) dram_axi_fatal("R beat without a read burst in flight");
+            if (resp.resp != 0) dram_axi_fatal("R error response (DMA_ERR_DRAM_AXI is not modelled)");
+            const bool last = ++dram_rd_txn_beat_reg == dram_rd_txn_reg.front();
+            if (m_mem_axi_r_last_i.read() != last) dram_axi_fatal(last ? "RLAST missing on a burst's last beat"
+                                                                      : "RLAST before a burst's last beat");
+            if (last) {
+                dram_rd_txn_reg.pop_front();
+                dram_rd_txn_beat_reg = 0;
+            }
             dram_rd_resp_fifo_reg.push_back(resp);
             dram_rd_inflight_cnt_reg--;
         }
@@ -1029,29 +1124,55 @@ private:
         }
     }
 
+    // Drive the next W beat of the current write burst from the transfer buffer.
+    void load_dram_w_beat(bool last) {
+        auto beat = apply_store_epilogue(data_buffer_reg.front()); data_buffer_reg.pop_front();
+        dram_w_send_valid_reg = true;
+        dram_w_send_data_reg = sc_biguint<kMemAxiDataWidth>(beat.data.to_uint64());
+        dram_w_send_strb_reg = beat.strb;
+        dram_w_send_last_reg = last;
+    }
+
+    // A write burst starts when the transfer buffer holds all its beats: AW and the first W beat in the same cycle,
+    // then one W beat a cycle (AW and W handshake separately), WLAST on the last; it retires at its B.
     void run_dst_issue_dram() {
+        while (dst_skip_reg > 0 && !dst_addr_fifo.empty()) {  // beats an issued burst already covers
+            dst_addr_fifo.pop_front();
+            --dst_skip_reg;
+        }
         if (dram_aw_send_valid_reg && m_mem_axi_aw_ready_i.read()) dram_aw_send_valid_reg = false;
         if (dram_w_send_valid_reg && m_mem_axi_w_ready_i.read()) dram_w_send_valid_reg = false;
-        if (!dram_aw_send_valid_reg && !dram_w_send_valid_reg && (beats_dst_issued_reg < active_cmd_reg.total_beats()) &&
-            dram_wr_inflight_cnt_reg < kDmaMaxOutstanding && !data_buffer_reg.empty() && !dst_addr_fifo.empty()) {
-            dram_aw_send_addr_reg = dst_addr_fifo.front(); dst_addr_fifo.pop_front();
-            auto beat = apply_store_epilogue(data_buffer_reg.front()); data_buffer_reg.pop_front();
-            dram_aw_send_valid_reg = true;
-            dram_w_send_valid_reg = true;
-            dram_w_send_data_reg = sc_biguint<kMemAxiDataWidth>(beat.data.to_uint64());
-            dram_w_send_strb_reg = beat.strb;
-            dram_wr_inflight_cnt_reg++;
-            beats_dst_issued_reg++;
-            pmu_dram_wr_issue_cnt_reg++;
-            log_dram_beat('W', dram_aw_send_addr_reg);
+        if (!dram_w_send_valid_reg && dram_w_beats_left_reg > 0) load_dram_w_beat(--dram_w_beats_left_reg == 0);
+        if (!dram_aw_send_valid_reg && !dram_w_send_valid_reg && dram_w_beats_left_reg == 0 &&
+            (beats_dst_issued_reg < active_cmd_reg.total_beats()) && dram_wr_inflight_cnt_reg < kDmaMaxOutstanding &&
+            dst_skip_reg == 0 && !dst_addr_fifo.empty()) {
+            const uint32_t addr = dst_addr_fifo.front();
+            const unsigned n = dram_burst_beats(beats_dst_issued_reg, addr, [this](uint32_t i, uint32_t& a) {
+                a = agu_beat_addr(active_cmd_reg.dst_addr_lo, active_cmd_reg.dst_stride, i);
+                return true;
+            });
+            if (data_buffer_reg.size() >= n) {
+                dst_addr_fifo.pop_front();
+                dst_skip_reg = n - 1;
+                dram_aw_send_addr_reg = addr;
+                dram_aw_send_len_reg = static_cast<uint8_t>(n - 1);
+                dram_aw_send_valid_reg = true;
+                dram_w_beats_left_reg = n - 1;
+                load_dram_w_beat(n == 1);
+                dram_wr_inflight_cnt_reg++;
+                dram_wr_txn_reg.push_back(n);
+                beats_dst_issued_reg += n;
+                pmu_dram_wr_issue_cnt_reg++;
+                for (unsigned k = 0; k < n; ++k) log_dram_beat('W', addr + k * (kMemAxiDataWidth / 8));
+            }
         }
         m_mem_axi_aw_valid_o.write(dram_aw_send_valid_reg);
         m_mem_axi_aw_addr_o.write(dram_aw_send_addr_reg);
-        m_mem_axi_aw_len_o.write(0);
+        m_mem_axi_aw_len_o.write(dram_aw_send_len_reg);
         m_mem_axi_w_valid_o.write(dram_w_send_valid_reg);
         m_mem_axi_w_data_o.write(dram_w_send_data_reg);
         m_mem_axi_w_strb_o.write(dram_w_send_strb_reg);
-        m_mem_axi_w_last_o.write(dram_w_send_valid_reg);
+        m_mem_axi_w_last_o.write(dram_w_send_valid_reg && dram_w_send_last_reg);
     }
 
     void run_dst_issue_cluster(bool allow_refill) {
@@ -1088,8 +1209,11 @@ private:
         bool can_accept = (dram_wr_inflight_cnt_reg > 0);
         if (can_accept) m_mem_axi_b_ready_o.write(true);
         if (m_mem_axi_b_valid_i.read() && dram_b_prev_ready_reg) {
+            if (dram_wr_txn_reg.empty()) dram_axi_fatal("B without a write burst in flight");
+            if (m_mem_axi_b_resp_i.read().to_uint() != 0) dram_axi_fatal("B error response (DMA_ERR_DRAM_AXI is not modelled)");
             dram_wr_inflight_cnt_reg--;
-            beats_dst_retired_reg++;
+            beats_dst_retired_reg += dram_wr_txn_reg.front();
+            dram_wr_txn_reg.pop_front();
         }
         dram_b_prev_ready_reg = can_accept;
     }
@@ -1110,7 +1234,7 @@ private:
         if (dram_aw_send_valid_reg) {
             m_mem_axi_aw_valid_o.write(true);
             m_mem_axi_aw_addr_o.write(dram_aw_send_addr_reg);
-            m_mem_axi_aw_len_o.write(0);
+            m_mem_axi_aw_len_o.write(dram_aw_send_len_reg);
         }
         dram_aw_prev_valid_reg = dram_aw_send_valid_reg;
         if (dram_w_prev_valid_reg && m_mem_axi_w_ready_i.read()) dram_w_send_valid_reg = false;
@@ -1118,7 +1242,7 @@ private:
             m_mem_axi_w_valid_o.write(true);
             m_mem_axi_w_data_o.write(dram_w_send_data_reg);
             m_mem_axi_w_strb_o.write(dram_w_send_strb_reg);
-            m_mem_axi_w_last_o.write(true);
+            m_mem_axi_w_last_o.write(dram_w_send_last_reg);
         }
         dram_w_prev_valid_reg = dram_w_send_valid_reg;
     }

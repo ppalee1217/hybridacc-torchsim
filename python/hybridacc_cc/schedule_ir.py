@@ -267,8 +267,9 @@ def _agu_addresses(base: int, count: list, stride: list):
 def dram_beats(cmd: dict, beat_bytes: int, dram_kind: int, load_pad_bit: int):
     """Yield ("R"|"W", address) for every DRAM beat of one DMA command, in ESL issue order.
 
-    Mirrors HybridAcc ESL ``DmaEngine.hpp`` (bb4be74): only the low 32 address bits are used;
-    every DRAM request is one beat. A load-pad read ignores the source strides and addresses a
+    Mirrors HybridAcc ESL ``DmaEngine.hpp`` (bb4be74): only the low 32 address bits are used.
+    Every beat is listed; the engine groups consecutive beats into DRAM bursts
+    (``Core/DramBurst.hpp``), which changes neither the beats nor their order. A load-pad read ignores the source strides and addresses a
     dense [pad_src_h, pad_src_w, beats_per_pixel] image at the source address; beats outside
     the image are synthesised and read nothing (``decode_load_pad_request``).
     """

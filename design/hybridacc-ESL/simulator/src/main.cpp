@@ -17,6 +17,7 @@
  *                 [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]
  *                 [--scalar-pe FILE --scalar-rule bulk|linear|shape|ps|psln] [--pe-in-fifo-depth N]
  *                 [--dram-extra-latency N] [--dram-ramulator CONFIG.yaml [--dram-ramulator-stats FILE]]
+ *                 [--dram-burst-bytes S]
  *                 <firmware.elf>
  */
 
@@ -93,7 +94,7 @@ static void print_usage(const char* prog) {
               << " [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]"
               << " [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]"
               << " [--scalar-pe FILE --scalar-rule bulk|linear|shape|ps|psln] [--pe-in-fifo-depth N] [--dram-extra-latency N]"
-              << " [--dram-ramulator CONFIG.yaml [--dram-ramulator-stats FILE]]"
+              << " [--dram-ramulator CONFIG.yaml [--dram-ramulator-stats FILE]] [--dram-burst-bytes S]"
               << " <firmware.elf>\n";
 }
 
@@ -411,6 +412,17 @@ int sc_main(int argc, char* argv[]) {
             std::cerr << "[SIM] --dram-ramulator needs a build with -DHACC_RAMULATOR_DIR" << std::endl;
             return 1;
 #endif
+        } else if (arg == "--dram-burst-bytes" && i + 1 < argc) {
+            // M22 ruling 2026-10-22 (Core/DramBurst.hpp): the DMA's DRAM-side burst size; 8 is single-beat.
+            char* end = nullptr;
+            const unsigned long long b = std::strtoull(argv[++i], &end, 10);
+            if (!end || *end != '\0' || b > 4096 ||
+                !hybridacc::core::DmaEngine::dram_burst_bytes_supported(static_cast<unsigned>(b))) {
+                std::cerr << "[SIM] Bad --dram-burst-bytes: " << argv[i] << " (a power of two from 8 bytes, at most "
+                          << hybridacc::core::DmaEngine::kDataBufferDepth << " beats)" << std::endl;
+                return 1;
+            }
+            hacc::dram_burst_bytes() = static_cast<unsigned>(b);
         } else if (arg == "--dram-ramulator-stats" && i + 1 < argc) {
             dram_ramulator_stats = argv[++i];
         } else if (arg == "--pe-in-fifo-depth" && i + 1 < argc) {
@@ -458,6 +470,7 @@ int sc_main(int argc, char* argv[]) {
 
     std::cout << "[SIM] === HybridAcc SoC Simulator ===" << std::endl;
     std::cout << "[SIM] DRAM size: " << (dram_size / 1024) << " KB" << std::endl;
+    std::cout << "[SIM] DMA DRAM burst: " << hacc::dram_burst_bytes() << " B" << std::endl;
     std::cout << "[SIM] Max cycles: " << max_cycles << std::endl;
     std::cout << "[SIM] Clock period: " << std::fixed << std::setprecision(3)
               << clock_period_ns << " ns" << std::endl;

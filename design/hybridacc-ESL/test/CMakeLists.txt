@@ -539,6 +539,13 @@ set_tests_properties(Build_Firmware_test_dma PROPERTIES FIXTURES_SETUP firmware_
 add_test(NAME HACC_Core_DMA_Simulation
     COMMAND test_core_sim ${CMAKE_CURRENT_SOURCE_DIR}/firmware/test_dma/test_dma.elf 2000000 --dma-check)
 set_tests_properties(HACC_Core_DMA_Simulation PROPERTIES FIXTURES_REQUIRED firmware_test_dma)
+# M22: the same transfers with single-beat (S = 8, the engine before DRAM bursts) and 16-byte DRAM bursts.
+foreach(burst_bytes 8 16)
+    add_test(NAME HACC_Core_DMA_Simulation_Burst${burst_bytes}
+        COMMAND test_core_sim ${CMAKE_CURRENT_SOURCE_DIR}/firmware/test_dma/test_dma.elf 2000000 --dma-check
+                --dram-burst-bytes ${burst_bytes})
+    set_tests_properties(HACC_Core_DMA_Simulation_Burst${burst_bytes} PROPERTIES FIXTURES_REQUIRED firmware_test_dma)
+endforeach()
 
 # D-35: exercise both temporal M and N waves in normal mode, including
 # multiple spatial M tiles so PLO needs a nonzero M tag stride.

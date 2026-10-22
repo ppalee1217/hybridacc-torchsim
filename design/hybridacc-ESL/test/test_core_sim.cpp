@@ -15,7 +15,7 @@
  * Post-sim verifies DRAM at 0x80030000 for test 2 and DSRAM for results.
  *
  * Usage:
- *   ./test_core_sim <path-to-rv32-elf> [max_cycles] [--core-debug]
+ *   ./test_core_sim <path-to-rv32-elf> [max_cycles] [--core-debug] [--dma-check] [--dram-burst-bytes S]
  */
 
 #include "core_tb_utils.hpp"
@@ -51,6 +51,14 @@ int sc_main(int argc, char* argv[]) {
             core_debug = true;
         } else if (arg == "--dma-check") {
             dma_check = true;
+        } else if (arg == "--dram-burst-bytes" && i + 1 < argc) {
+            // The DMA's DRAM-side burst size (Core/DramBurst.hpp); the default is the simulator's.
+            const unsigned s = static_cast<unsigned>(std::atoi(argv[++i]));
+            if (!hybridacc::core::DmaEngine::dram_burst_bytes_supported(s)) {
+                std::cerr << "Error: unsupported --dram-burst-bytes " << s << std::endl;
+                return 1;
+            }
+            hacc::dram_burst_bytes() = s;
         } else if (elf_path.empty()) {
             elf_path = arg;
         } else {

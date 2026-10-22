@@ -373,6 +373,16 @@ private:
         bool last;
     };
 
+    // AXI4 rule for the INCR bursts DmaEngine sends (Core/DramBurst.hpp): a burst never crosses a 4 KB boundary.
+    static void check_burst(const char* channel, uint32_t addr, unsigned len) {
+        const uint64_t last_byte = (uint64_t)addr + (uint64_t)(len + 1) * kBeatBytes - 1;
+        if ((addr >> 12) != (last_byte >> 12)) {
+            std::cerr << "[DRAM] FATAL: AXI " << channel << " burst addr=0x" << std::hex << addr << std::dec
+                      << " len=" << len << " crosses a 4 KB boundary @ " << sc_time_stamp() << std::endl;
+            std::exit(1);
+        }
+    }
+
     void read_proc() {
         std::deque<ReadReq> read_req_fifo_reg;
         ReadReq active_req_reg{};
@@ -435,6 +445,7 @@ private:
             if (ar_valid.read() && ar_prev_ready_reg) {
                 const uint32_t addr = ar_addr.read().to_uint();
                 const unsigned len = ar_len.read().to_uint();
+                check_burst("AR", addr, len);
                 if (dram_size_ && ((uint64_t)addr < dram_base_ || (uint64_t)addr + (uint64_t)(len + 1) * kBeatBytes > dram_base_ + dram_size_)) {
                     if (oob_read_count_++ < 10)
                         std::cerr << "[DRAM] OOB AXI READ  addr=0x" << std::hex << addr
@@ -514,6 +525,7 @@ private:
             if (aw_valid.read() && aw_prev_ready_reg) {
                 const uint32_t addr = aw_addr.read().to_uint();
                 const unsigned len = aw_len.read().to_uint();
+                check_burst("AW", addr, len);
                 if (dram_size_ && ((uint64_t)addr < dram_base_ ||
                     (uint64_t)addr + (uint64_t)(len + 1) * kBeatBytes > dram_base_ + dram_size_)) {
                     if (oob_write_count_++ < 10)
@@ -544,6 +556,13 @@ private:
             if (active_aw_valid_reg && !w_fifo_reg.empty()) {
                 WBeat beat = w_fifo_reg.front();
                 w_fifo_reg.pop_front();
+                if (beat.last != (active_aw_beat_reg == active_aw_reg.len)) {
+                    std::cerr << "[DRAM] FATAL: AXI WLAST " << (beat.last ? "before" : "missing on")
+                              << " a burst's last beat (addr=0x" << std::hex << active_aw_reg.addr << std::dec
+                              << " len=" << active_aw_reg.len << " beat=" << active_aw_beat_reg << ") @ "
+                              << sc_time_stamp() << std::endl;
+                    std::exit(1);
+                }
 
                 uint32_t beat_addr = active_aw_reg.addr + active_aw_beat_reg * kBeatBytes;
                 for (unsigned b = 0; b < kBeatBytes; ++b) {
