@@ -11,13 +11,17 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-CONFIG_FINGERPRINT_VERSION = "hac-v1"
+# hac-v2 (2026-10-22) adds dram_burst_bytes, the DMA's DRAM-side burst size S (ESL --dram-burst-bytes,
+# Core/DramBurst.hpp): it changes every DRAM transfer's timing. hac-v1 records were made with the single-beat
+# DMA, i.e. S = 8.
+CONFIG_FINGERPRINT_VERSION = "hac-v2"
 CONFIG_FINGERPRINT_FIELDS = (
     "num_clusters",
     "num_pes",
     "num_bus",
     "spm_banks_per_group",
     "spm_bank_depth",
+    "dram_burst_bytes",
 )
 CONFIG_FINGERPRINT_EXCLUDED_FIELDS = ("dram_base",)
 
@@ -52,6 +56,7 @@ class HardwareDesc:
     spm_banks_per_group: int  # (default 3)
     spm_bank_depth: int  # words per bank, each word = 8 bytes (default 8192)
     dram_base: int  # external DRAM base (default 0x80000000)
+    dram_burst_bytes: int = 64  # DMA DRAM-side burst size S in bytes (default 64; 8 = single beat)
 
     @property
     def group_capacity(self) -> int:

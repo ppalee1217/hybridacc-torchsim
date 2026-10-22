@@ -355,6 +355,7 @@ class HardwareDesc:
     spm_banks_per_group: int  # SPM banks per group（參照 SPM.md）
     spm_bank_depth: int       # words per bank（每 word = 8 bytes）
     dram_base: int       # external DRAM base
+    dram_burst_bytes: int = 64  # DMA DRAM-side burst size S（config fingerprint 欄位）
 
     @property
     def group_capacity(self) -> int:

@@ -49,3 +49,18 @@ def test_invalid_hardware_is_rejected_before_workload_parsing(tmp_path):
     }))
     with pytest.raises(CompilationError, match="num_bus and spm_banks_per_group must match"):
         parse_workload(workload)
+
+
+def test_dram_burst_bytes_defaults_to_64_and_enters_the_fingerprint():
+    hw = _parse_hardware({"num_clusters": 1})
+    record = hw.config_fingerprint_record()
+    assert hw.dram_burst_bytes == 64
+    assert record["version"] == "hac-v2" and record["fields"]["dram_burst_bytes"] == 64
+    single_beat = _parse_hardware({"num_clusters": 1, "dram_burst_bytes": 8})
+    assert single_beat.config_fingerprint() != hw.config_fingerprint()
+
+
+@pytest.mark.parametrize("burst_bytes", [0, 4, 12, 48, 256])
+def test_unsupported_dram_burst_bytes_is_rejected(burst_bytes):
+    with pytest.raises(CompilationError, match="dram_burst_bytes must be a power of 2 in"):
+        _parse_hardware({"num_clusters": 1, "dram_burst_bytes": burst_bytes})

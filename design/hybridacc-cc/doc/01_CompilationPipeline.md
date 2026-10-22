@@ -143,6 +143,7 @@ ops:
 | `spm_banks_per_group` | int | 否 | 3 | 1 ≤ n ≤ 8，SPM 每 Group 的 bank 數（參照 SPM.md） |
 | `spm_bank_depth` | int | 否 | 8192 | ≥ 1024，必須為 2 的冪，每 bank 的 word 數 |
 | `dram_base` | int | 否 | 0x80000000 | 4KB 對齊 |
+| `dram_burst_bytes` | int | 否 | 64 | 2 的冪，8 ≤ S ≤ 128；DMA 在 DRAM 端的 burst 上限，ESL 以 `--dram-burst-bytes` 取同一值；只進 config fingerprint |
 
 #### 每個 `ops[]` 項目
 

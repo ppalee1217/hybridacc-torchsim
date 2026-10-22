@@ -118,6 +118,12 @@ def _parse_hardware(raw: dict) -> HardwareDesc:
     if dram_base & 0xFFF:
         raise CompilationError("schema", path, "dram_base must be 4KB aligned")
 
+    # The DMA's DRAM-side burst size (ESL --dram-burst-bytes, Core/DramBurst.hpp): a power of two from one
+    # 8-byte beat to the 16-beat transfer buffer. cc emits it into the config identity only.
+    dram_burst_bytes = _get(raw, "dram_burst_bytes", 64, int)
+    if not (8 <= dram_burst_bytes <= 128) or (dram_burst_bytes & (dram_burst_bytes - 1)):
+        raise CompilationError("schema", path, "dram_burst_bytes must be a power of 2 in [8, 128]")
+
     return HardwareDesc(
         num_clusters=num_clusters,
         num_pes=num_pes,
@@ -125,6 +131,7 @@ def _parse_hardware(raw: dict) -> HardwareDesc:
         spm_banks_per_group=spm_banks_per_group,
         spm_bank_depth=spm_bank_depth,
         dram_base=dram_base,
+        dram_burst_bytes=dram_burst_bytes,
     )
 
 

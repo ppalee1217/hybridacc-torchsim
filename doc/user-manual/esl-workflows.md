@@ -93,6 +93,7 @@ YAML 至少要能正確描述以下內容：
 | `spm_banks_per_group` | 1-8 | SPM bank 群組大小 |
 | `spm_bank_depth` | 至少 1024 且為 2 的冪 | 每個 bank 的深度 |
 | `dram_base` | 4KB 對齊 | DRAM 起始位址 |
+| `dram_burst_bytes` | 8–128，2 的冪，預設 64 | DMA 在 DRAM 端每筆 burst 的上限 S（ESL 的 `--dram-burst-bytes` 要用同一值）；寫進 config fingerprint |
 
 ### 5.2 compile 常用選項
 
