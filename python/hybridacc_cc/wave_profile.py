@@ -1,7 +1,7 @@
 """Raw per-wave profile from an ESL run (M21; F2 measurement contract, 2026-10-18 token ruling).
 
     python -m hybridacc_cc.wave_profile CC_DIR IR.json WAVE_LOG -o PROFILE.json [--label TEXT]
-        [--schema v2 --simulator-sha256 HEX --platform PLATFORM.json [--from-v1 PROFILE.json]]
+        [--schema v2 --simulator-sha256 HEX --platform PLATFORM.json [--from-v1 PROFILE.json]] [--spm-log SPM_LOG]
 
 Inputs: the cc output directory (its firmware_hw.h gives the register map), the Common Schedule IR built
 from it, and the ESL's --wave-log of a run of the same firmware.
@@ -25,6 +25,15 @@ Schema v2 (M21 WP-I, 2026-10-21 ruling): the same rows, plus each wave's tile co
 the cc wave map (``wave_map.json``), ``hardware_ir.json``, the firmware ELF, the ESL binary, the platform
 file, cc's ``toolchain_provenance.json`` and this producer.  ``--from-v1`` rebuilds a sealed v1 profile's
 rows from the same wave log, requires them to be identical, and records the v1 file's sha256.
+
+SPM claims (M22 condition 1b, ruling A of 2026-10-22): with ``--spm-log`` (the ESL's --spm-log of the same run)
+each wave row also gets ``spm_claims``, the cycles in which the wave's NoC ports held SPM resources that a DMA
+request waits for in the ESL's bank arbiter (ScratchpadMemory.hpp comb_bank_req_arb: NoC ports before DMA
+writes before DMA reads): the bank a port accessed (every bank of the group for a parallel-view access) and,
+for a NoC read, the group's read-metadata slot. Rows are run-length [cycle after START, cycles, bank mask,
+read-group mask]; cycles with no claim are left out. Every NoC access must fall after the START of the wave it
+follows and no later than that wave's DONE; one cluster only. A TLS uses the claims only to delay DMA outside
+the wave; the wave's own time stays its measured span.
 """
 import argparse
 import hashlib
@@ -37,6 +46,8 @@ SCHEMA = "hybridacc-wave-profile/v1"
 SCHEMA_V2 = "hybridacc-wave-profile/v2"
 UNITS = {"tokens": "cycles of clock_mhz, poll success edge minus the wave's START edge",
          "observed": "picoseconds of simulated time; *_cycles fields in cycles of clock_mhz"}
+SPM_CLAIMS = {"source": "ESL --spm-log of the same run", "row": "[cycle after START, cycles, bank mask, read-group mask]",
+              "bank_bit": "group * spm_banks_per_group + bank", "read_group_bit": "group"}
 TOKEN_WAITS = ("hddu_done", "agu_idle", "pe_halted", "cluster_quiesced")
 CLUSTER_WAITS = ("hddu_done", "agu_idle", "pe_halted", "noc_quiesced", "cluster_idle", "cluster_quiesced")
 # hddu_wait_debug_probe(): read after a status read with QUIESCED set on every 256th spin.
@@ -159,7 +170,51 @@ def last_rise(changes, cond, t):
     return best
 
 
-def build(cc_dir: Path, ir: dict, ir_sha256: str, wave_log: str, label: str) -> dict:
+def spm_claims(ir: dict, log: dict, spm_log: str, ps_per_cycle: int) -> dict:
+    """Per (layer, wave): run-length NoC claims (see the module docstring) from the ESL's --spm-log."""
+    hw = ir.get("resource", {}).get("hardware", {})
+    banks, depth = hw.get("spm_banks_per_group"), hw.get("spm_bank_depth")
+    _require(isinstance(banks, int) and isinstance(depth, int) and banks > 0 and depth > 0,
+             "IR resource lacks spm_banks_per_group / spm_bank_depth")
+    _require(hw.get("num_clusters") == 1, "SPM claims are recorded for one cluster only")
+    irw = [(L["index"], w["id"]) for L in ir["layers"] for w in L["execution_waves"]]
+    starts = [int(s["t"]) for s in log["S"]]
+    dones = [int(e["done"]) if e.get("done") not in (None, "-") else None for e in log["E"]]
+    per_cycle = [dict() for _ in starts]  # wave index -> {cycle after START: [bank mask, read-group mask]}
+    i = -1
+    for n, line in enumerate(spm_log.splitlines(), 1):
+        f = line.split()
+        if not f or f[0] != "P":
+            continue
+        _require(len(f) == 7, f"spm log line {n}: a P record has 7 fields")
+        cluster, group, wen, laddr, t = int(f[1]), int(f[3]), f[4], int(f[5]), int(f[6])
+        _require(cluster == 0, f"spm log line {n}: cluster {cluster}")
+        while i + 1 < len(starts) and starts[i + 1] <= t:
+            i += 1
+        _require(i >= 0 and t > starts[i], f"spm log line {n}: NoC access at {t} ps before or at a wave's START")
+        _require(dones[i] is not None and t <= dones[i], f"spm log line {n}: NoC access at {t} ps after its wave's DONE")
+        _require((t - starts[i]) % ps_per_cycle == 0, f"spm log line {n}: not on a clock edge")
+        m = per_cycle[i].setdefault((t - starts[i]) // ps_per_cycle, [0, 0])
+        if laddr >= banks * depth:  # parallel view: the whole group
+            m[0] |= ((1 << banks) - 1) << (group * banks)
+        else:
+            m[0] |= 1 << (group * banks + laddr // depth)
+        if wen == "0":
+            m[1] |= 1 << group
+    out = {}
+    for key, cycles in zip(irw, per_cycle):
+        runs = []
+        for c in sorted(cycles):
+            b, g = cycles[c]
+            if runs and runs[-1][0] + runs[-1][1] == c and runs[-1][2:] == [b, g]:
+                runs[-1][1] += 1
+            else:
+                runs.append([c, 1, b, g])
+        out[key] = runs
+    return out
+
+
+def build(cc_dir: Path, ir: dict, ir_sha256: str, wave_log: str, label: str, spm_log: str = None) -> dict:
     regmap = RegisterMap((cc_dir / "firmware_hw.h").read_text())
     d = regmap.d
     clock_mhz = ir.get("resource", {}).get("platform", {}).get("clock_mhz")
@@ -205,9 +260,18 @@ def build(cc_dir: Path, ir: dict, ir_sha256: str, wave_log: str, label: str) -> 
                 "condition_ps": pred,
                 "condition_minus_start_cycles": None if pred is None else (pred - s) // ps_per_cycle}
     _require(reads.pos == len(reads.rows), f"{len(reads.rows) - reads.pos} ESL reads after the last wait")
-    return {"schema": SCHEMA, "kind": "raw", "label": label, "ir_sha256": ir_sha256, "clock_mhz": clock_mhz,
-            "note": "raw ESL observation; includes waits a TLS models itself; TLS runs on it are not qualified",
-            "waves": [rows[k] for k in sorted(rows)]}
+    if spm_log is not None:
+        claims = spm_claims(ir, log, spm_log, ps_per_cycle)
+        for key, runs in claims.items():
+            _require(key in rows or not runs, f"layer {key[0]} wave {key[1]} has SPM claims but no profile row")
+            if key in rows:
+                rows[key]["spm_claims"] = runs
+    out = {"schema": SCHEMA, "kind": "raw", "label": label, "ir_sha256": ir_sha256, "clock_mhz": clock_mhz,
+           "note": "raw ESL observation; includes waits a TLS models itself; TLS runs on it are not qualified",
+           "waves": [rows[k] for k in sorted(rows)]}
+    if spm_log is not None:
+        out["spm_claims"] = SPM_CLAIMS
+    return out
 
 
 def _sha256_file(path: Path) -> str:
@@ -234,6 +298,8 @@ def to_v2(prof: dict, cc_dir: Path, ir: dict, simulator_sha256: str, platform: P
         key = (row["layer"], row["wave"])
         waves.append({"layer": row["layer"], "wave": row["wave"], "covers": covers[key],
                       "tokens": row["tokens"], "observed": row["observed"]})
+        if "spm_claims" in row:
+            waves[-1]["spm_claims"] = row["spm_claims"]
     out = {"schema": SCHEMA_V2, "kind": prof["kind"], "label": prof["label"], "ir_sha256": prof["ir_sha256"],
            "clock_mhz": prof["clock_mhz"], "units": UNITS, "dtype": dtypes.pop(),
            "config_fingerprint": ir["provenance"]["config_fingerprint"]["hash"], "note": prof["note"],
@@ -248,6 +314,8 @@ def to_v2(prof: dict, cc_dir: Path, ir: dict, simulator_sha256: str, platform: P
                "producer_sha256": _sha256_file(Path(__file__)),
            },
            "waves": waves}
+    if "spm_claims" in prof:
+        out["spm_claims"] = prof["spm_claims"]
     if from_v1 is not None:
         old = json.loads(Path(from_v1).read_text())
         _require(old.get("schema") == SCHEMA, f"{from_v1} is not a {SCHEMA} profile")
@@ -267,10 +335,13 @@ def main(argv=None):
     ap.add_argument("--simulator-sha256", help="v2: sha256 of the ESL binary that produced the wave log")
     ap.add_argument("--platform", type=Path, help="v2: the platform file the IR was built with")
     ap.add_argument("--from-v1", type=Path, help="v2: a v1 profile of the same run; its rows must match")
+    ap.add_argument("--spm-log", type=Path, help="the ESL's --spm-log of the same run: add each wave's SPM claims")
     a = ap.parse_args(argv)
     ir_bytes = a.ir.read_bytes()
     prof = build(a.cc_dir, json.loads(ir_bytes), hashlib.sha256(ir_bytes).hexdigest(),
-                 a.wave_log.read_text(), a.label)
+                 a.wave_log.read_text(), a.label, None if a.spm_log is None else a.spm_log.read_text())
+    if a.spm_log is not None:
+        prof["spm_claims"] = dict(prof["spm_claims"], spm_log_sha256=_sha256_file(a.spm_log))
     if a.schema == "v2":
         _require(a.simulator_sha256 and a.platform, "--schema v2 needs --simulator-sha256 and --platform")
         prof = to_v2(prof, a.cc_dir, json.loads(ir_bytes), a.simulator_sha256, a.platform, a.from_v1)

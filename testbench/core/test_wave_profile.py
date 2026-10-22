@@ -191,3 +191,37 @@ def test_v2_refuses(v2_dir, d, tmp_path, case, message):
         sim = "xyz"
     with pytest.raises(si.ScheduleIRError, match=message):
         wp.to_v2(v1, out, ir, sim, platform, from_v1=v1_path)
+
+
+# ── SPM claims (M22 condition 1b) ─────────────────────────────────────────────
+
+def _claims_ir():
+    ir = _ir()
+    ir["resource"]["hardware"] = {"num_clusters": 1, "spm_banks_per_group": 3, "spm_bank_depth": 8192}
+    return ir
+
+
+def _spm(*lines):
+    # A DMA record (D) is not a claim and is skipped.
+    return "\n".join(["D 0 1 393216 255 %d" % (102 * C)] + list(lines)) + "\n"
+
+
+def test_spm_claims_are_run_length_bank_and_read_group_masks(cc_dir, d):
+    spm = _spm(f"P 0 0 0 1 0 {103 * C}", f"P 0 0 0 1 8 {104 * C}", f"P 0 1 1 0 8192 {104 * C}",
+               f"P 0 2 2 1 24576 {106 * C}", f"P 0 2 2 1 24576 {107 * C}")
+    prof = wp.build(cc_dir, _claims_ir(), "x" * 64, _log(d), "test", spm)
+    # cycle 3: bank 0 written; cycle 4: bank 0 and group 1's bank 1 (a read, so group 1's read slot);
+    # cycles 6-7: a parallel-view write claims all of group 2 (banks 6-8).
+    assert prof["waves"][0]["spm_claims"] == [[3, 1, 0b1, 0], [4, 1, 0b10001, 0b10], [6, 2, 0b111000000, 0]]
+    assert prof["spm_claims"]["row"].startswith("[cycle after START")
+    assert "spm_claims" not in wp.build(cc_dir, _claims_ir(), "x" * 64, _log(d), "test")["waves"][0]
+
+
+@pytest.mark.parametrize("line, message", [
+    (f"P 0 0 0 1 0 {100 * C}", "before or at a wave's START"),
+    (f"P 0 0 0 1 0 {217 * C}", "after its wave's DONE"),
+    (f"P 1 0 0 1 0 {103 * C}", "cluster 1"),
+])
+def test_spm_claims_refuse(cc_dir, d, line, message):
+    with pytest.raises(si.ScheduleIRError, match=message):
+        wp.build(cc_dir, _claims_ir(), "x" * 64, _log(d), "test", _spm(line))
