@@ -13,6 +13,7 @@
 #include "Cluster/ClusterControlUnit.hpp"
 #include "Cluster/ScratchpadMemory.hpp"
 #include "Cluster/HybridDataDeliverUnit.hpp"
+#include "Cluster/QuiesceLog.hpp"
 #include "NetworkOnChip.hpp"
 
 using namespace sc_core;
@@ -563,6 +564,7 @@ private:
 	sc_uint<32> noc_last_cmd_reg{};
 	bool hddu_start_pending_ = false;  // AHB pipeline race fix: set on CTRL_START write, cleared when STATUS shows BUSY
 	cluster::ClusterControlUnit cluster_ctrl_;
+	hacc::QuiesceObserver quiesce_obs_{hacc::next_quiesce_log_id()};  // --quiesce-log (M22); read by nothing simulated
 	/// Advance the per-wave profile state machine by one cycle.
 	///
 	/// A wave opens when HDDU goes busy and closes in stages: the AGU-idle
@@ -1106,6 +1108,11 @@ private:
 			hddu.observe_cluster_conditions(
 				noc.all_active_pes_halted(),
 				(cluster_status_word() & cluster::bit_mask(cluster::UnifiedStatusBit::QUIESCED)) != 0u);
+			if (hacc::quiesce_log())  // --quiesce-log (M22): the parts of QUIESCED, read at the same edge
+				quiesce_obs_.observe(cluster_ctrl_.busy(), noc_is_quiesced(), spm.spm_noc_side_quiesced(),
+				                     spm.spm_dma_side_quiesced(),
+				                     (cluster_status_word() & cluster::bit_mask(cluster::UnifiedStatusBit::QUIESCED)) != 0u,
+				                     sc_time_stamp().value());
 
 			wait();
 		}

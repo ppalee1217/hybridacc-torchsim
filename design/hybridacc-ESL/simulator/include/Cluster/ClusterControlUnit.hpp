@@ -147,6 +147,8 @@ public:
 	}
 
 	// ── Status word ─────────────────────────────────────────────────
+	bool busy() const { return layer_active_ || stop_pending_ || soft_reset_pending_; }  // status_word's BUSY
+
 	uint32_t status_word(bool noc_quiesced, bool spm_quiesced) const {
 		const bool busy     = layer_active_ || stop_pending_ || soft_reset_pending_;
 		const bool quiesced = !busy && noc_quiesced && spm_quiesced;

@@ -366,7 +366,10 @@ SC_MODULE(ScratchpadMemory) {
     // Unified status helpers
     // =========================================================================
     /** All internal FIFOs empty, no pending DMA, no skid buffered requests. */
-    bool spm_quiesced() const {
+    bool spm_quiesced() const { return spm_noc_side_quiesced() && spm_dma_side_quiesced(); }
+
+    /** The NoC side of spm_quiesced(): no skid buffered request, port response or group read-metadata FIFO data. */
+    bool spm_noc_side_quiesced() const {
         for (unsigned p = 0; p < NUM_NOC_PORTS; ++p) {
             if (skid_valid_reg[p].read()) return false;
             if (!port_resp_fifo_empty[p].read()) return false;
@@ -374,6 +377,11 @@ SC_MODULE(ScratchpadMemory) {
         for (unsigned g = 0; g < NUM_GROUPS; ++g) {
             if (!group_meta_fifo_empty[g].read()) return false;
         }
+        return true;
+    }
+
+    /** The DMA side of spm_quiesced(): its FIFOs empty, no pending B, no read in flight. */
+    bool spm_dma_side_quiesced() const {
         if (!dma_aw_fifo_empty.read())        return false;
         if (!dma_w_data_fifo_empty.read())    return false;
         if (!dma_w_strb_fifo_empty.read())    return false;

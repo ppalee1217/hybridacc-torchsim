@@ -14,7 +14,7 @@
  *                 [--fast-boot]
  *                 [--trace file.json] [--trace-level N]
  *                 [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]
- *                 [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]
+ *                 [--wave-log file.txt] [--quiesce-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]
  *                 [--scalar-pe FILE --scalar-rule bulk|linear|shape|ps|psln] [--pe-in-fifo-depth N]
  *                 [--dram-extra-latency N] [--dram-ramulator CONFIG.yaml [--dram-ramulator-stats FILE]
  *                 [--dram-bridge-trace FILE]]
@@ -93,7 +93,7 @@ static void print_usage(const char* prog) {
               << " [--core-debug] [--dma-check] [--fast-boot]"
               << " [--trace file.json] [--trace-level N]"
               << " [--mmio-log file.txt] [--dram-log file.txt] [--spm-log file.txt]"
-              << " [--wave-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]"
+              << " [--wave-log file.txt] [--quiesce-log file.txt] [--pe-log file.txt] [--pe-perturb SPEC]"
               << " [--scalar-pe FILE --scalar-rule bulk|linear|shape|ps|psln] [--pe-in-fifo-depth N] [--dram-extra-latency N]"
               << " [--dram-ramulator CONFIG.yaml [--dram-ramulator-stats FILE] [--dram-bridge-trace FILE]]"
               << " [--dram-burst-bytes S]"
@@ -353,6 +353,7 @@ int sc_main(int argc, char* argv[]) {
     std::string dram_log_path;
     std::string spm_log_path;
     std::string wave_log_path;
+    std::string quiesce_log_path;  // --quiesce-log
     std::string pe_log_path;
     std::string scalar_pe_path;
     std::string scalar_rule;
@@ -391,6 +392,8 @@ int sc_main(int argc, char* argv[]) {
             spm_log_path = argv[++i];
         } else if (arg == "--wave-log" && i + 1 < argc) {
             wave_log_path = argv[++i];
+        } else if (arg == "--quiesce-log" && i + 1 < argc) {
+            quiesce_log_path = argv[++i];  // M22: the parts of CLUSTER_STATUS QUIESCED (Cluster/QuiesceLog.hpp)
         } else if (arg == "--pe-log" && i + 1 < argc) {
             pe_log_path = argv[++i];
         } else if (arg == "--scalar-pe" && i + 1 < argc) {
@@ -807,6 +810,13 @@ int sc_main(int argc, char* argv[]) {
             return 1;
         }
     }
+    if (!quiesce_log_path.empty()) {
+        hacc::quiesce_log() = std::fopen(quiesce_log_path.c_str(), "w");
+        if (!hacc::quiesce_log()) {
+            std::cerr << "[SIM] Cannot open quiesce log: " << quiesce_log_path << std::endl;
+            return 1;
+        }
+    }
     if (!wave_log_path.empty()) {
         hacc::wave_log() = std::fopen(wave_log_path.c_str(), "w");
         if (!hacc::wave_log()) {
@@ -1052,6 +1062,10 @@ int sc_main(int argc, char* argv[]) {
     if (hacc::spm_log()) {
         std::fclose(hacc::spm_log());
         hacc::spm_log() = nullptr;
+    }
+    if (hacc::quiesce_log()) {
+        std::fclose(hacc::quiesce_log());
+        hacc::quiesce_log() = nullptr;
     }
     if (hacc::wave_log()) {
         hacc::close_open_waves(sc_core::sc_time_stamp().value());
