@@ -1,7 +1,7 @@
 """Which waves of one schedule share a measured wave profile (M22 condition 3).
 
     python -m hybridacc_cc.wave_reuse table WAVE_MAP.json SCHEDULE_IR.json -o TABLE.json
-    python -m hybridacc_cc.wave_reuse reduce PROFILE.json TABLE.json -o REDUCED.json
+    python -m hybridacc_cc.wave_reuse reduce PROFILE.json TABLE.json -o REDUCED.json [--simulator-sha256 SHA]
     python -m hybridacc_cc.wave_reuse check PROFILE.json TABLE.json [-o REPORT.json]
 
 Ruling 2026-10-24 (personal-research agent_run/261022-m22-reuse-chain/decide-chain/decision.md): within one schedule,
@@ -16,6 +16,9 @@ The key (``wave-reuse/v1``) is read from the schedule IR and cc's ``wave_map.jso
   3. every AGU's SPM base address (the wave's ping/pong buffers) and
   4. the wave's ``spm_config_map``: the SPM claims' bank and group masks follow these two (dev: the claims' times are
      the same within a group, their masks are not without them).
+A representative's record is valid only for the same IR (which binds the firmware sources, hardware IR and config
+fingerprint), wave map and ESL binary: the table binds the first two; ``reduce --simulator-sha256`` pins the ESL
+binary the profile must come from (a v2 profile's provenance), so a profile of another build is refused.
 ``check`` compares a full profile against a table: every wave's hardware conditions (hddu_done, agu_idle,
 pe_halted, cycles after START) and SPM claims must equal its representative's. cluster_quiesced is the cluster's
 state (it includes the DMA) and the raw tokens include the firmware's polls; neither is shared: a TOG made from a
@@ -107,10 +110,16 @@ def _bind(profile: dict, tab: dict):
                  "the profile was made with another wave map than the table")
 
 
-def reduce(profile: dict, tab: dict, table_sha256: str) -> dict:
-    """The profile with the representatives' rows only, bound to the table."""
+def reduce(profile: dict, tab: dict, table_sha256: str, simulator_sha256: str = None) -> dict:
+    """The profile with the representatives' rows only, bound to the table; with ``simulator_sha256`` the profile must
+    be a v2 profile of that ESL binary."""
     reps = _reps(tab)
     _bind(profile, tab)
+    if simulator_sha256 is not None:
+        prov = profile.get("provenance")
+        _require(prov is not None, "--simulator-sha256 needs a v2 profile (its provenance names the ESL binary)")
+        _require(prov.get("simulator_sha256") == simulator_sha256,
+                 "the profile was measured with another ESL binary than --simulator-sha256")
     rows = {(w["layer"], w["wave"]): w for w in profile["waves"]}
     _require(set(rows) == set(reps), "the profile's waves differ from the table's")
     keep = sorted(set(reps.values()))
@@ -149,6 +158,7 @@ def main(argv=None):
     t.add_argument("-o", "--output", type=Path, required=True)
     r = sub.add_parser("reduce"); r.add_argument("profile", type=Path); r.add_argument("table", type=Path)
     r.add_argument("-o", "--output", type=Path, required=True)
+    r.add_argument("--simulator-sha256", help="the ESL binary the profile must come from (v2 profiles)")
     c = sub.add_parser("check"); c.add_argument("profile", type=Path); c.add_argument("table", type=Path)
     c.add_argument("-o", "--output", type=Path)
     a = ap.parse_args(argv)
@@ -159,7 +169,8 @@ def main(argv=None):
             a.output.write_text(json.dumps(out, indent=1) + "\n")
             print(json.dumps({"waves": len(out["waves"]), "groups": out["groups"]}))
         elif a.cmd == "reduce":
-            out = reduce(json.loads(a.profile.read_text()), json.loads(a.table.read_text()), _sha256_file(a.table))
+            out = reduce(json.loads(a.profile.read_text()), json.loads(a.table.read_text()), _sha256_file(a.table),
+                         a.simulator_sha256)
             a.output.write_text(json.dumps(out, indent=1) + "\n")
             print(json.dumps({"waves": len(out["waves"])}))
         else:

@@ -116,3 +116,12 @@ def test_cli_check_exit_codes(tmp_path, tab):
     assert wr.main(["check", str(tmp_path / "p.json"), str(tmp_path / "t.json")]) == 1
     (tmp_path / "p.json").write_text(json.dumps(_profile(rows, ir_sha="f" * 64)))
     assert wr.main(["reduce", str(tmp_path / "p.json"), str(tmp_path / "t.json"), "-o", str(tmp_path / "r.json")]) == 2
+
+
+def test_reduce_pins_the_esl_binary(tab):
+    full = _profile([_row(w) for w in range(4)], provenance={"wave_map_sha256": "b" * 64, "simulator_sha256": "d" * 64})
+    assert wr.reduce(full, tab, "c" * 64, simulator_sha256="d" * 64)["provenance"]["simulator_sha256"] == "d" * 64
+    with pytest.raises(wr.WaveReuseError, match="another ESL binary"):
+        wr.reduce(full, tab, "c" * 64, simulator_sha256="e" * 64)
+    with pytest.raises(wr.WaveReuseError, match="needs a v2 profile"):
+        wr.reduce(_profile([_row(w) for w in range(4)]), tab, "c" * 64, simulator_sha256="d" * 64)
